@@ -33,6 +33,11 @@ parser.add_argument(
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
 )
+parser.add_argument(
+    "--use_pretrained_checkpoint_local",
+    action="store_true",
+    help="Use the pre-trained checkpoint from local directory",
+)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -58,7 +63,7 @@ import os
 import time
 import torch
 
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -71,13 +76,110 @@ from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx, export_policy_as_jit_parkour, export_policy_as_onnx_parkour
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # PLACEHOLDER: Extension template (do not remove this comment)
+
+import numpy as np
+import pandas as pd
+
+def save_obs_data_to_csv(obs_history, save_path, num_obs):
+    """
+    Saves observation buffer history to a CSV file.
+
+    Parameters:
+        obs_history (list of np.array): List of 1D arrays, each representing observations at a time step.
+        save_path (str): Full path to save the CSV file.
+        num_obs (int): The number of observations.
+    """
+    if not obs_history:
+        print("Warning: Observation history is empty. Skipping CSV generation.")
+        return
+
+    obs_data = np.array(obs_history)
+
+    if obs_data.size == 0:
+        print("Warning: Observation data is effectively empty. Skipping CSV generation.")
+        return
+    # print(obs_data)
+
+    num_timesteps, num_observations = obs_data.shape
+
+    if num_observations != num_obs:
+        print(f"Warning: Mismatch in CSV generation between num_observations in data ({num_observations}) and expected num_obs ({num_obs}).")
+        num_obs = num_observations
+
+    column_names = [f"obs_{i}" for i in range(num_obs)]
+    data_dict = {"Time_Step": np.arange(num_timesteps)}
+    for i, col_name in enumerate(column_names):
+        data_dict[col_name] = obs_data[:, i]
+    
+    df = pd.DataFrame(data_dict)
+    df.to_csv(save_path, index=False)
+    print(f"Saved observation data to {save_path}")
+
+
+def save_actions_to_csv(actions, save_path):
+    """
+    Saves a single timestep of actions to CSV.
+
+    Parameters:
+        actions (np.array): Action array with shape (num_envs, action_dim) or (action_dim,).
+        save_path (str): Full path to save the CSV file.
+    """
+    if actions is None:
+        print("Warning: Actions are None. Skipping CSV generation.")
+        return
+
+    actions_np = np.asarray(actions)
+    if actions_np.ndim == 1:
+        actions_np = actions_np[None, :]
+    if actions_np.ndim != 2:
+        print(f"Warning: Unexpected action array shape {actions_np.shape}. Skipping CSV generation.")
+        return
+
+    num_envs, action_dim = actions_np.shape
+    records = []
+    for env_id in range(num_envs):
+        row = {"env_id": env_id}
+        for i in range(action_dim):
+            row[f"action_{i}"] = actions_np[env_id, i]
+        records.append(row)
+
+    pd.DataFrame(records).to_csv(save_path, index=False)
+    print(f"Saved action data to {save_path}")
+
+
+def print_action_joint_mapping(env):
+    """Prints action index -> joint name mapping for environments with an articulation robot."""
+    base_env = getattr(env, "unwrapped", env)
+    robot = getattr(base_env, "_robot", None)
+    if robot is None or not hasattr(robot, "data"):
+        print("[WARN] Could not find robot instance to infer action mapping.")
+        return
+
+    joint_names = getattr(robot.data, "joint_names", None)
+    if joint_names is None:
+        print("[WARN] Robot joint names are unavailable; skipping action mapping print.")
+        return
+
+    action_dim = None
+    if hasattr(base_env, "single_action_space"):
+        action_dim = gym.spaces.flatdim(base_env.single_action_space)
+
+    print("[INFO] Action index -> joint name mapping (Articulation joint order):")
+    for idx, name in enumerate(joint_names):
+        print(f"  {idx:02d}: {name}")
+
+    if action_dim is not None and action_dim != len(joint_names):
+        print(
+            f"[WARN] Action dimension ({action_dim}) does not match number of joints ({len(joint_names)}). "
+            "Actions still follow the listed articulation joint order."
+        )
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -105,11 +207,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if not resume_path:
             print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
             return
+    # elif args_cli.use_pretrained_checkpoint_local:
+    #     resume_path = f"logs/motion_jig_flat_direct"
     elif args_cli.checkpoint:
         resume_path = retrieve_file_path(args_cli.checkpoint)
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-
+    print(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
     log_dir = os.path.dirname(resume_path)
 
     # set the log directory for the environment (works for all environment types)
@@ -134,13 +238,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
+    # Print action index -> joint name mapping for debugging (e.g., MotionJig).
+    print_action_joint_mapping(env)
+
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    print(agent_cfg.class_name)
     # load previously trained model
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerParkour":
+        runner = OnPolicyRunnerParkour(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
@@ -149,6 +259,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
+    print(policy)
 
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.
@@ -162,6 +273,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # extract the normalizer
     if hasattr(policy_nn, "actor_obs_normalizer"):
         normalizer = policy_nn.actor_obs_normalizer
+
     elif hasattr(policy_nn, "student_obs_normalizer"):
         normalizer = policy_nn.student_obs_normalizer
     else:
@@ -169,21 +281,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    if agent_cfg.class_name == "OnPolicyRunnerParkour":
+        export_policy_as_jit_parkour(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+        export_policy_as_onnx_parkour(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    else:
+        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+        export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
 
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    obs_history = []
+    action_history = []
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
+            env.unwrapped._commands[:, 0] = 0.5
+            env.unwrapped._commands[:, 1] = 0.
+            env.unwrapped._commands[:, 2] = 0.
             actions = policy(obs)
+            obs_history.append(obs["policy"].cpu().numpy().squeeze())
+            action_history.append(actions.detach().cpu().numpy().squeeze())
+
+            # Save policy actions at timestep 499
+            try:
+                if timestep == 499:
+                    save_obs_data_to_csv(obs_history, 'sim_obs_data.csv', env.unwrapped.cfg.num_prio_obs)
+                    save_actions_to_csv(action_history, 'sim_action_data.csv')
+            except:
+                break
+            # print(obs["policy"])
             # env stepping
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated

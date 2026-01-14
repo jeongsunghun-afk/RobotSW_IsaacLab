@@ -386,6 +386,8 @@ class DirectRLEnv(gym.Env):
         # -- update env counters (used for curriculum generation)
         self.episode_length_buf += 1  # step in current episode (per env)
         self.common_step_counter += 1  # total step (common for all envs)
+        
+        self._post_physics_step()
 
         self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
         self.reset_buf = self.reset_terminated | self.reset_time_outs
@@ -641,7 +643,18 @@ class DirectRLEnv(gym.Env):
         any explicit scene setup, the function can be left empty.
         """
         pass
+    @abstractmethod
+    def _post_physics_step(self):
+        """Pre-process actions after stepping through the physics.
 
+        This function is responsible for pre-processing the actions after stepping through the physics.
+        It is called after the physics stepping (which is decimated).
+
+        Args:
+            actions: The actions to apply on the environment. Shape is (num_envs, action_dim).
+        """
+        raise NotImplementedError(f"Please implement the '_post_physics_step' method for {self.__class__.__name__}.")
+    
     @abstractmethod
     def _pre_physics_step(self, actions: torch.Tensor):
         """Pre-process actions before stepping through the physics.

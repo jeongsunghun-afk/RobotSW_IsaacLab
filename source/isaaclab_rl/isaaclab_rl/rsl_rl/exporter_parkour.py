@@ -8,7 +8,7 @@ import os
 import torch
 
 
-def export_policy_as_jit(policy: object, normalizer: object | None, path: str, filename="policy.pt"):
+def export_policy_as_jit_parkour(policy: object, normalizer: object | None, path: str, filename="policy.pt"):
     """Export policy into a Torch JIT file.
 
     Args:
@@ -21,7 +21,7 @@ def export_policy_as_jit(policy: object, normalizer: object | None, path: str, f
     policy_exporter.export(path, filename)
 
 
-def export_policy_as_onnx(
+def export_policy_as_onnx_parkour(
     policy: object, path: str, normalizer: object | None = None, filename="policy.onnx", verbose=False
 ):
     """Export policy into a Torch ONNX file.
@@ -53,6 +53,7 @@ class _TorchPolicyExporter(torch.nn.Module):
         # copy policy parameters
         if hasattr(policy, "actor"):
             self.actor = copy.deepcopy(policy.actor)
+            self.history_encoder = copy.deepcopy(policy.history_encoder)
             if self.is_recurrent:
                 self.rnn = copy.deepcopy(policy.memory_a.rnn)
         elif hasattr(policy, "student"):
@@ -78,15 +79,9 @@ class _TorchPolicyExporter(torch.nn.Module):
         # copy normalizer if exists
         if normalizer:
             self.normalizer = copy.deepcopy(normalizer)
+            self.history_normalizer = copy.deepcopy(policy.history_obs_normalizer)
         else:
             self.normalizer = torch.nn.Identity()
-
-        # self.history_encoder=None
-        # self.history = False
-        # if hasattr(policy, "history_encoder"):
-        #     self.history = True
-        #     self.history_encoder = copy.deepcopy(policy.history_encoder)
-        #     print(self.history_encoder)
 
     def forward_lstm(self, x):
         x = self.normalizer(x)
@@ -103,12 +98,9 @@ class _TorchPolicyExporter(torch.nn.Module):
         x = x.squeeze(0)
         return self.actor(x)
 
-    def forward(self, x):
-        # if self.history:
-        #     latent = self.history_encoder(y)
-        #     return self.actor(self.normalizer(torch.cat([x, latent], dim=-1)))
-        # else:
-        return self.actor(self.normalizer(x))
+    def forward(self, x, y):
+        latent = self.history_encoder(self.history_normalizer(y))
+        return self.actor(self.normalizer(torch.cat([x, latent], dim=-1)))
 
     @torch.jit.export
     def reset(self):
