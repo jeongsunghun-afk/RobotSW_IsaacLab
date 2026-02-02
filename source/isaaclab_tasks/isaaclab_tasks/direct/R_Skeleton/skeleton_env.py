@@ -13,15 +13,15 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, RayCaster
 
-from .go2_env_cfg import Go2FlatEnvCfg, Go2RoughEnvCfg
+from .skeleton_env_cfg import SkeletonEnvCfg, SkeletonHistoryEnvCfg, SkeletonRoughEnvCfg
 
 def torch_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
 
-class Go2Env(DirectRLEnv):
-    cfg: Go2FlatEnvCfg | Go2RoughEnvCfg
+class SkeletonEnv(DirectRLEnv):
+    cfg: SkeletonEnvCfg | SkeletonHistoryEnvCfg | SkeletonRoughEnvCfg
 
-    def __init__(self, cfg: Go2FlatEnvCfg | Go2RoughEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: SkeletonEnvCfg | SkeletonHistoryEnvCfg | SkeletonRoughEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -42,8 +42,9 @@ class Go2Env(DirectRLEnv):
             self.curriculum_threshold = self.cfg.curriculum_threshold
             self.max_lin_vel_x = self.cfg.command_cfg["lin_vel_x_range"][1]
             self.max_ang_vel = self.cfg.command_cfg["ang_vel_range"][1]
-            
 
+        if self.cfg.history_observation:
+            self.obs_history_buf = torch.zeros(self.num_envs, self.cfg.history_len, self.cfg.num_prio_obs, device=self.device, dtype=torch.float)
 
         # Logging
         self._episode_sums = {
@@ -65,15 +66,16 @@ class Go2Env(DirectRLEnv):
         }
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
+        self._neck_ids, _ = self._contact_sensor.find_bodies([".*neck_p", ".*neck_r", ".*neck_y"])
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*toe")
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_contact_link_names)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
-        if isinstance(self.cfg, Go2RoughEnvCfg):
+        if isinstance(self.cfg, SkeletonRoughEnvCfg):
             # we add a height scanner for perceptive locomotion
             self._height_scanner = RayCaster(self.cfg.height_scanner)
             self.scene.sensors["height_scanner"] = self._height_scanner
@@ -92,36 +94,89 @@ class Go2Env(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone()
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        # self._processed_actions = torch.zeros_like(self._actions)
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
+        # print(self._robot.joint_names)
         self._previous_actions = self._actions.clone()
+        if self.cfg.history_observation:
+            obs = torch.cat(
+                [
+                    tensor
+                    for tensor in (
+                        # self._robot.data.root_lin_vel_b,
+                        # self._robot.data.root_ang_vel_b,
+                        self._robot.data.projected_gravity_b,
+                        self._commands,
+                        self._robot.data.joint_pos - self._robot.data.default_joint_pos,
+                        self._robot.data.joint_vel,
+                        # height_data,
+                        self._actions,
+                    )
+                    if tensor is not None
+                ],
+                dim=-1,
+            )
+        else:
+            obs = torch.cat(
+                [
+                    tensor
+                    for tensor in (
+                        self._robot.data.root_lin_vel_b,
+                        self._robot.data.root_ang_vel_b,
+                        self._robot.data.projected_gravity_b,
+                        self._commands,
+                        self._robot.data.joint_pos - self._robot.data.default_joint_pos,
+                        self._robot.data.joint_vel,
+                        # height_data,
+                        self._actions,
+                    )
+                    if tensor is not None
+                ],
+                dim=-1,
+            )
+        # 관측치 구성 요소별 세부 체크
+        observations = {"policy": obs}
+        
         height_data = None
-        if isinstance(self.cfg, Go2RoughEnvCfg):
+        if isinstance(self.cfg, SkeletonRoughEnvCfg):
             height_data = (
                 self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5
             ).clip(-1.0, 1.0)
-        obs = torch.cat(
-            [
-                tensor
-                for tensor in (
-                    self._robot.data.root_lin_vel_b,
-                    self._robot.data.root_ang_vel_b,
-                    self._robot.data.projected_gravity_b,
-                    self._commands,
-                    self._robot.data.joint_pos - self._robot.data.default_joint_pos,
-                    self._robot.data.joint_vel,
-                    height_data,
-                    self._actions,
-                )
-                if tensor is not None
-            ],
-            dim=-1,
-        )
-        observations = {"policy": obs}
+
+        if height_data is not None:
+            observations["scan"] = height_data
         
+        if self.cfg.history_observation:
+            self.obs_history_buf = torch.where(
+                (self.episode_length_buf <= 1)[:, None, None], 
+                torch.stack([obs] * self.cfg.history_len, dim=1),
+                torch.cat([
+                    self.obs_history_buf[:, 1:],
+                    obs.unsqueeze(1)
+                ], dim=1)
+            )
+            observations["history"] = self.obs_history_buf
+        
+        if self.cfg.priv_latent:
+            priv_obs = torch.cat(
+                [
+                    tensor
+                    for tensor in (
+                        self._robot.data.root_lin_vel_b,
+                        self._robot.data.root_ang_vel_b,
+                        torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device),
+                        torch.tensor(self._robot.root_physx_view.get_material_properties().reshape(self.num_envs, -1), device=self.device)
+                    )
+                    if tensor is not None
+                ],
+                dim=-1,
+            )
+            observations["priv"] = priv_obs
+
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -184,10 +239,16 @@ class Go2Env(DirectRLEnv):
             self._episode_sums[key] += value
         return reward
 
+    def _post_physics_step(self):
+        pass
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         died = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        died |= torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._neck_ids], dim=-1), dim=1)[0] > 1.0, dim=1)
+        # Base roll/pitch termination (if projected gravity Z > -0.5, means angle > 60 degrees)
+        died |= self._robot.data.projected_gravity_b[:, 2] > -0.5
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -200,6 +261,8 @@ class Go2Env(DirectRLEnv):
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
+        if self.cfg.history_observation:
+            self.obs_history_buf[env_ids, :, :] = 0.0
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]

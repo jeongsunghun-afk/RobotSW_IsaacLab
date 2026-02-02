@@ -9,13 +9,14 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 
 @configclass
-class Go2FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class SkeletonFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 50000
     save_interval = 100
-    experiment_name = "go2_flat_direct"
+    experiment_name = "skeleton_flat_direct"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
+        noise_std_type="log",
         actor_obs_normalization=False,
         critic_obs_normalization=False,
         actor_hidden_dims=[128, 128, 128],
@@ -38,11 +39,12 @@ class Go2FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
 @configclass
-class Go2WTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class SkeletonParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 50000
     save_interval = 100
-    experiment_name = "go2_wtw_direct"
+    experiment_name = "skeleton_history_direct"
+    clip_actions = 1.0
     class_name = "OnPolicyRunnerParkour"
     obs_groups = {
             "policy": ["policy"],
@@ -54,6 +56,7 @@ class Go2WTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
         init_noise_std=1.0,
+        # noise_std_type="log",
         actor_obs_normalization=False,
         critic_obs_normalization=False,
         actor_hidden_dims=[512, 256, 128],
@@ -64,10 +67,10 @@ class Go2WTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1.0e-3,
+        learning_rate=1.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
@@ -77,13 +80,14 @@ class Go2WTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
 @configclass
-class Go2RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class SkeletonRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 1500
     save_interval = 50
-    experiment_name = "go2_rough_direct"
+    experiment_name = "skeleton_rough_direct"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
+        noise_std_type="log",
         actor_obs_normalization=False,
         critic_obs_normalization=False,
         actor_hidden_dims=[512, 256, 128],

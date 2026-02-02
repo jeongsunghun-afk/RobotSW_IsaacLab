@@ -38,7 +38,18 @@ class WTWEnv(DirectRLEnv):
         self._previous_actions = torch.zeros(
             self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
         )
-
+        self._previous_previous_actions = torch.zeros(
+            self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
+        )
+        self._processed_actions = torch.zeros(
+            self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
+        )
+        self._last_processed_actions= torch.zeros(
+            self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
+        )
+        self._last_last_jrocessed_actions = torch.zeros(
+            self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
+        )
         # X/Y linear velocity and yaw angular velocity commands
         self.num_commands = self.cfg.num_commands
         self._commands = torch.zeros(self.num_envs, self.num_commands, device=self.device)
@@ -91,13 +102,24 @@ class WTWEnv(DirectRLEnv):
                 "tracking_contacts_shaped_vel",
                 "dof_vel_l2",
                 "jump",
+                "action_smoothness1",
+                "action_smoothness2",
             ]
         }
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
+        # # Explicitly order feet to ensure [FL, FR, RL, RR] correspondence
+        # self._feet_contact_ids = []
+        # self._feet_ids = []
+        # for name in ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]:
+        #     sensor_ids, _ = self._contact_sensor.find_bodies(name)
+        #     robot_ids, _ = self._robot.find_bodies(name)
+        #     self._feet_contact_ids.append(sensor_ids[0])
+        #     self._feet_ids.append(robot_ids[0])
         self._feet_contact_ids, _ = self._contact_sensor.find_bodies(".*foot")
         self._feet_ids, _ = self._robot.find_bodies(".*foot")
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalzied_body_names)
+
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
         self.set_debug_vis(getattr(self.cfg, "debug_vis", True))
 
     def _setup_scene(self):
@@ -122,13 +144,19 @@ class WTWEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        self._actions = torch.clip(actions.clone(), -self.cfg.clip_actions, self.cfg.clip_actions).to(self.device)
+        actions = self._actions.clone()
+        if self.cfg.hip_scale_reduction:
+            actions[:, :4] *= 0.5
+        self._processed_actions = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _post_physics_step(self):
+        sample_interval = int(self.cfg.resampling_time / self.dt)
+        env_ids = (self.episode_length_buf % sample_interval == 0).nonzero(as_tuple=False).flatten()
+        self._resample_commands(env_ids)
         self._contact_target_step()
         
     def _contact_target_step(self):
@@ -205,11 +233,17 @@ class WTWEnv(DirectRLEnv):
             self.desired_contact_states[:, 2] = smoothing_multiplier_RL
             self.desired_contact_states[:, 3] = smoothing_multiplier_RR
 
+
         if self.num_commands > 9:
             self.desired_footswing_height = self._commands[:, 9]
 
     def _get_observations(self) -> dict:
+        self._previous_previous_actions = self._previous_actions.clone()
         self._previous_actions = self._actions.clone()
+
+        self._last_last_jrocessed_actions = self._last_processed_actions.clone()
+        self._last_processed_actions = self._processed_actions.clone()
+        
         height_data = None
         if isinstance(self.cfg, Go2RoughEnvCfg):
             height_data = (
@@ -286,9 +320,16 @@ class WTWEnv(DirectRLEnv):
         torques = getattr(self, "torques", self._robot.data.applied_torque)
         actions = getattr(self, "actions", self._actions)
         previous_actions = getattr(self, "previous_actions", self._previous_actions)
+        previous_previous_actions = getattr(self, "previous_previous_actions", self._previous_previous_actions)
+
+        processed_actions = self._processed_actions
+        last_processed_actions = self._last_processed_actions
+        last_last_processed_actions = self._last_last_jrocessed_actions
+        
 
         foot_positions = self._robot.data.body_link_pos_w[:, self._feet_ids, :]
-        # print(self._robot.data.body_com_pos_w[:, self._feet_body_ids, :])
+        
+        # print(self._robot.data.body_com_pos_w[:, self._feet_ids, :])
         # print(self._contact_sensor.find_bodies(".*foot"))
 
         foot_velocities = self._robot.data.body_link_lin_vel_w[:, self._feet_ids, :]
@@ -296,6 +337,9 @@ class WTWEnv(DirectRLEnv):
 
         low_lin_vel = self._commands[:, 0] == 0.
         low_ang_vel = self._commands[:, 2] == 0.
+        # Use thresholds consistent with _resample_commands and use abs for safety
+        low_lin_vel = torch.abs(self._commands[:, 0]) < 0.1
+        low_ang_vel = torch.abs(self._commands[:, 2]) < 0.05
         both_low = low_lin_vel & low_ang_vel
 
         def _scale(name: str, default: float = 1.0) -> float:
@@ -332,7 +376,7 @@ class WTWEnv(DirectRLEnv):
 
         # Similar to default
         similar_to_default = torch.sum(torch.abs(dof_pos - default_dof_pos), dim=1)
-        similar_to_default[~both_low] = 0.
+        # similar_to_default[~both_low] = 0.
 
         # base height
         base_height = torch.square(base_pos[:, 2] - self._robot.data.default_root_state[:, 2])
@@ -352,13 +396,21 @@ class WTWEnv(DirectRLEnv):
         # torque magnitude penalty (optionally weighted)
         torques_l2_weighted = torch.sum(torch.square(torques), dim=1)
 
+        #action_smoothness1
+        diff1 = torch.square(processed_actions - last_processed_actions)
+        action_smoothness1 = torch.sum(diff1 * (self._previous_actions != 0), dim=1)
+
+        diff2 = torch.square(processed_actions - 2 * last_processed_actions + last_last_processed_actions)
+        diff2 = diff2 * (self._previous_actions != 0)
+        action_smoothness2 = torch.sum(diff2 * (self._previous_previous_actions != 0), dim=1)
+
         # penalize clearance error against command
         phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
         foot_height = (foot_positions[:, :, 2]).view(self.num_envs, -1)
         target_height = commands[:, 9].unsqueeze(1) * phases + 0.02
         feet_clearance_cmd_linear = torch.square(target_height - foot_height) * (1 - self.desired_contact_states)
         feet_clearance_cmd_linear = torch.sum(feet_clearance_cmd_linear, dim=1)
-        feet_clearance_cmd_linear[both_low] = 0.
+        # feet_clearance_cmd_linear[both_low] = 0.
 
         # orientation control tracking from commands
         roll_pitch_commands = commands[:, 10:12]
@@ -376,6 +428,7 @@ class WTWEnv(DirectRLEnv):
 
         # raibert heuristic foot placement error
         cur_footsteps_translated = foot_positions - base_pos.unsqueeze(1)
+        # print(cur_footsteps_translated[0])
         footsteps_in_body_frame = torch.zeros(self.num_envs, 4, 3, device=self.device)
         for i in range(4):
             footsteps_in_body_frame[:, i, :] = quat_apply_yaw(inv_quat(base_quat), cur_footsteps_translated[:, i, :])
@@ -387,10 +440,10 @@ class WTWEnv(DirectRLEnv):
             desired_stance_width = commands[:, 12:13]
             desired_ys_nom = torch.cat(
                 [
-                    -desired_stance_width / 2,
                     desired_stance_width / 2,
                     -desired_stance_width / 2,
                     desired_stance_width / 2,
+                    -desired_stance_width / 2,
                 ],
                 dim=1,
             )
@@ -447,8 +500,12 @@ class WTWEnv(DirectRLEnv):
         err_raibert_heuristic = torch.abs(desired_footsteps_body_frame - footsteps_in_body_frame[:, :, 0:2])
         raibert_heuristic = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
 
+        self._visualize_desired_footsteps()
+
         # contact shaping (force)
-        foot_forces = torch.norm(net_contact_forces[:, 0, self._feet_ids], dim=-1)
+        
+        foot_forces = torch.mean(torch.norm(net_contact_forces[:, :, self._feet_contact_ids], dim=-1), dim=1)
+
         desired_contact = self.desired_contact_states
         tracking_contacts_shaped_force = 0
         for i in range(4):
@@ -457,7 +514,7 @@ class WTWEnv(DirectRLEnv):
                 * (1 - torch.exp(-1 * foot_forces[:, i] ** 2 / self.cfg.gait_force_sigma))
             )
         tracking_contacts_shaped_force = tracking_contacts_shaped_force / 4
-        tracking_contacts_shaped_force[both_low] = 0.
+        # tracking_contacts_shaped_force[both_low] = 0.
 
         # contact shaping (velocity)
         foot_velocities = torch.norm(foot_velocities, dim=2).view(self.num_envs, -1)
@@ -468,7 +525,7 @@ class WTWEnv(DirectRLEnv):
                 * (1 - torch.exp(-1 * foot_velocities[:, i] ** 2 / self.cfg.gait_vel_sigma))
             )
         tracking_contacts_shaped_vel = tracking_contacts_shaped_vel / 4
-        tracking_contacts_shaped_vel[both_low] = 0.
+        # tracking_contacts_shaped_vel[both_low] = 0.
 
         # dof velocity penalty
         dof_vel_penalty = dof_vel[:]
@@ -489,7 +546,7 @@ class WTWEnv(DirectRLEnv):
             "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
             "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
             "undesired_contacts": contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
-            "similar_to_default": similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
+            # "similar_to_default": similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
             "feet_clearance_cmd_linear": feet_clearance_cmd_linear * _scale("feet_clearance_cmd_linear") * self.step_dt,
             "orientation_control": orientation_control * _scale("orientation_control") * self.step_dt,
             "raibert_heuristic": raibert_heuristic * _scale("raibert_heuristic") * self.step_dt,
@@ -497,6 +554,8 @@ class WTWEnv(DirectRLEnv):
             "tracking_contacts_shaped_vel": tracking_contacts_shaped_vel * _scale("tracking_contacts_shaped_vel") * self.step_dt,
             "dof_vel_l2": dof_vel_l2 * self.cfg.dof_vel_reward_scale * self.step_dt,
             "jump": jump * _scale("jump") * self.step_dt,
+            "action_smoothness1": action_smoothness1 * _scale("action_smoothness1") * self.step_dt,
+            "action_smoothness2": action_smoothness2 * _scale("action_smoothness2") * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -530,6 +589,7 @@ class WTWEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
+        self._previous_previous_actions[env_ids] = 0.0
         if self.cfg.history_observation:
             self.obs_history_buf[env_ids, :, :] = 0.0
         self.gait_indices[env_ids] = 0.0
@@ -570,6 +630,10 @@ class WTWEnv(DirectRLEnv):
         # Sample new commands
         self._resample_commands(env_ids)
 
+    def _visualize_desired_footsteps(self):
+        if hasattr(self, "footsteps_visualizer"):
+            self.footsteps_visualizer.visualize(self.desired_footsteps_world_frame.flatten(0, 1))
+
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
             if not hasattr(self, "link_pos_visualizer"):
@@ -578,17 +642,25 @@ class WTWEnv(DirectRLEnv):
                 marker_cfg.prim_path = "/Visuals/Debug/link_positions"
                 self.link_pos_visualizer = VisualizationMarkers(marker_cfg)
             self.link_pos_visualizer.set_visibility(True)
+            if not hasattr(self, "footsteps_visualizer"):
+                marker_cfg = SPHERE_MARKER_CFG.copy()
+                marker_cfg.markers["sphere"].radius = 0.02
+                marker_cfg.markers["sphere"].visual_material.diffuse_color = (0.0, 1.0, 0.0)
+                marker_cfg.prim_path = "/Visuals/Debug/footsteps"
+                self.footsteps_visualizer = VisualizationMarkers(marker_cfg)
+            self.footsteps_visualizer.set_visibility(True)
         else:
             if hasattr(self, "link_pos_visualizer"):
                 self.link_pos_visualizer.set_visibility(False)
+            if hasattr(self, "footsteps_visualizer"):
+                self.footsteps_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):
-        link_positions = self._robot.data.body_link_pos_w[:, self._feet_body_ids, :].reshape(-1, 3)
+        link_positions = self._robot.data.body_link_pos_w[:, self._feet_ids, :].reshape(-1, 3)
         self.link_pos_visualizer.visualize(link_positions)
 
     def _resample_commands(self, env_ids: torch.Tensor):
-        if self.command_curriculum:
-            command_keys_in_order = [
+        command_keys_in_order = [
             "lin_vel_x_range",
             "lin_vel_y_range",
             "ang_vel_range",
@@ -603,7 +675,8 @@ class WTWEnv(DirectRLEnv):
             "body_roll_range",
             "stance_width_range",
             "stance_length_range",
-            ]
+        ]
+        if self.command_curriculum:
             for i in range(self.cfg.num_commands):
                 if i < len(command_keys_in_order):
                     key = command_keys_in_order[i]
@@ -613,7 +686,7 @@ class WTWEnv(DirectRLEnv):
                             curr = self.curriculum_lin_vel_x[env_ids]
                             use_curriculum = curr < upper
                             low = torch.where(use_curriculum, curr - self.curriculum_step, torch.full_like(curr, lower))
-                            high = torch.where(use_curriculum, curr, torch.full_like(curr, upper))
+                            high = torch.where(use_curriculum, curr + self.curriculum_step, torch.full_like(curr, upper))
                             self._commands[env_ids, i] = torch.lerp(low, high, torch.rand(len(env_ids), device=self.device))
                         elif i == 1 or i ==2:  # ang_vel에 curriculum 적용
                             curr = self.curriculum_ang_vel[env_ids]
@@ -625,51 +698,56 @@ class WTWEnv(DirectRLEnv):
                             high = torch.where(use_curriculum, signed_curr, torch.full_like(curr, upper))
                             self._commands[env_ids, i] = torch.lerp(low, high, torch.rand(len(env_ids), device=self.device))
                         else:
-                            self._commands[env_ids, i] = torch_rand_float(lower, upper, (len(env_ids),), self.device)
-        
-            env_chunks = torch.chunk(env_ids, chunks=5)
-            if self.num_commands > 5:
-                if len(env_chunks) > 0 and env_chunks[0].numel() > 0:
-                    group1_idx = env_chunks[0]
-                    self._commands[group1_idx, 5] = (self._commands[group1_idx, 5] / 2.0 - 0.25) % 1.0
-                    self._commands[group1_idx, 6] = (self._commands[group1_idx, 6] / 2.0 - 0.25) % 1.0
-                    self._commands[group1_idx, 7] = (self._commands[group1_idx, 7] / 2.0 - 0.25) % 1.0
+                            self._commands[env_ids, i] = torch_rand_float(lower, upper, (len(env_ids),), self.device)            
+            # low_lin_vel = torch.abs(self._commands[env_ids, 0]) < 0.1
+            # low_ang_vel = torch.abs(self._commands[env_ids, 2]) < 0.05
+            # both_low = low_lin_vel & low_ang_vel
 
-                # Strategy 2
-                if len(env_chunks) > 1 and env_chunks[1].numel() > 0:
-                    group2_idx = env_chunks[1]
-                    self._commands[group2_idx, 5] = self._commands[group2_idx, 5] / 2.0 + 0.25
-                    self._commands[group2_idx, 6] = 0.0
-                    self._commands[group2_idx, 7] = 0.0
-                
-                # Strategy 3
-                if len(env_chunks) > 2 and env_chunks[2].numel() > 0:
-                    group3_idx = env_chunks[2]
-                    self._commands[group3_idx, 5] = 0.0
-                    self._commands[group3_idx, 6] = self._commands[group3_idx, 6] / 2.0 + 0.25
-                    self._commands[group3_idx, 7] = 0.0
-
-                # Strategy 4
-                if len(env_chunks) > 3 and env_chunks[3].numel() > 0:
-                    group4_idx = env_chunks[3]
-                    self._commands[group4_idx, 5] = 0.0
-                    self._commands[group4_idx, 6] = 0.0
-                    self._commands[group4_idx, 7] = self._commands[group4_idx, 7] / 2.0 + 0.25
-                
-                if len(env_chunks) > 4 and env_chunks[4].numel() > 0:
-                    group4_idx = env_chunks[4]
-                    self._commands[group4_idx, 5] = self._commands[group4_idx, 5] / 2.0 + 0.25
-                    self._commands[group4_idx, 6] = self._commands[group4_idx, 6] / 2.0 + 0.25
-                    self._commands[group4_idx, 7] = self._commands[group4_idx, 7] / 2.0 + 0.25
-            
-            low_lin_vel = self._commands[env_ids, 0] < 0.1
-            low_ang_vel = self._commands[env_ids, 2] < 0.05
-            both_low = low_lin_vel & low_ang_vel
-
-            self._commands[env_ids[both_low], 0] = 0.0
-            self._commands[env_ids[both_low], 2] = 0.0
+            # self._commands[env_ids[both_low], 0] = 0.0
+            # self._commands[env_ids[both_low], 2] = 0.0
 
         else:
-            self._commands[env_ids, 0] = torch_rand_float(*self.cfg.command_cfg["lin_vel_x_range"], (len(env_ids)), self.device)
-            self._commands[env_ids, 1] = torch_rand_float(*self.cfg.command_cfg["lin_vel_y_range"], (len(env_ids)), self.device)
-            self._commands[env_ids, 2] = torch_rand_float(*self.cfg.command_cfg["ang_vel_range"], (len(env_ids)), self.device)
+            for i in range(self.cfg.num_commands):
+                if i < len(command_keys_in_order):
+                    key = command_keys_in_order[i]
+                    if key in self.cfg.command_cfg:
+                        lower, upper = self.cfg.command_cfg[key]
+                        self._commands[env_ids, i] = torch_rand_float(lower, upper, (len(env_ids),), self.device)   
+        
+        if self.num_commands > 5:
+            strategy_indices = torch.randint(0, 5, (len(env_ids),), device=self.device)
+
+            # Strategy 1
+            idx = env_ids[strategy_indices == 0]
+            if len(idx) > 0:
+                self._commands[idx, 5] = (self._commands[idx, 5] / 2.0 - 0.25) % 1.0
+                self._commands[idx, 6] = (self._commands[idx, 6] / 2.0 - 0.25) % 1.0
+                self._commands[idx, 7] = (self._commands[idx, 7] / 2.0 - 0.25) % 1.0
+
+            # Strategy 2
+            idx = env_ids[strategy_indices == 1]
+            if len(idx) > 0:
+                self._commands[idx, 5] = self._commands[idx, 5] / 2.0 + 0.25
+                self._commands[idx, 6] = 0.0
+                self._commands[idx, 7] = 0.0
+            
+            # Strategy 3
+            idx = env_ids[strategy_indices == 2]
+            if len(idx) > 0:
+                self._commands[idx, 5] = 0.0
+                self._commands[idx, 6] = self._commands[idx, 6] / 2.0 + 0.25
+                self._commands[idx, 7] = 0.0
+
+            # Strategy 4
+            idx = env_ids[strategy_indices == 3]
+            if len(idx) > 0:
+                self._commands[idx, 5] = 0.0
+                self._commands[idx, 6] = 0.0
+                self._commands[idx, 7] = self._commands[idx, 7] / 2.0 + 0.25
+            
+            # Strategy 5
+            idx = env_ids[strategy_indices == 4]
+            if len(idx) > 0:
+                self._commands[idx, 5] = self._commands[idx, 5] / 2.0 + 0.25
+                self._commands[idx, 6] = self._commands[idx, 6] / 2.0 + 0.25
+                self._commands[idx, 7] = self._commands[idx, 7] / 2.0 + 0.25

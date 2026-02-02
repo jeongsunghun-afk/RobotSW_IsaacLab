@@ -296,15 +296,51 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs_history = []
     action_history = []
 
+    gaits = {"pronking": [0, 0, 0],
+             "trotting": [0.5, 0, 0],
+             "bounding": [0, 0.5, 0],
+             "pacing": [0, 0, 0.5],
+             "galloping": [0.25, 0., 0.],
+             "walking": [0., 0.25, 0.5],
+             "ambling": [0., 0.25, 0.5],
+             "cantering": [0.0, 0.3, 0.3],
+             "half-bounding": [0., 0.25, 0.],
+             "gallop_rot":[0.4646, 0.0, 0.7677]}
+    
+    if args_cli.task == 'Go2WTW':
+        x_vel_cmd, y_vel_cmd,yaw_vel_cmd = 1.0, 0.0, 0.0
+        step_frequency_cmd = 2.0
+        body_height_cmd = 0.0
+        gait = torch.tensor(gaits["trotting"])
+        footswing_height_cmd = 0.2
+        pitch_cmd = 0.0
+        roll_cmd = 0.0
+        duration = 0.5
+        stance_width_cmd = 0.25
+        stance_length_cmd = 0.45
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
-            # agent stepping
-            env.unwrapped._commands[:, 0] = 0.5
-            env.unwrapped._commands[:, 1] = 0.
-            env.unwrapped._commands[:, 2] = 0.
+            if args_cli.task == 'Go2WTW':
+                env.unwrapped._commands[:, 0] = x_vel_cmd
+                env.unwrapped._commands[:, 1] = y_vel_cmd
+                env.unwrapped._commands[:, 2] = yaw_vel_cmd
+                env.unwrapped._commands[:, 3] = body_height_cmd
+                env.unwrapped._commands[:, 4] = step_frequency_cmd
+                env.unwrapped._commands[:, 5:8] = gait
+                env.unwrapped._commands[:, 8] = duration
+                env.unwrapped._commands[:, 9] = footswing_height_cmd
+                env.unwrapped._commands[:, 10] = pitch_cmd
+                env.unwrapped._commands[:, 11] = roll_cmd
+                env.unwrapped._commands[:, 12] = stance_width_cmd
+                env.unwrapped._commands[:, 13] = stance_length_cmd
+            else:
+                # agent stepping
+                env.unwrapped._commands[:, 0] = 0.5
+                env.unwrapped._commands[:, 1] = 0.
+                env.unwrapped._commands[:, 2] = 0.
             actions = policy(obs)
             obs_history.append(obs["policy"].cpu().numpy().squeeze())
             action_history.append(actions.detach().cpu().numpy().squeeze())
