@@ -22,7 +22,7 @@ from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg, GaussianNoiseCfg
 # from isaaclab_assets.robots.rga import MOTION_JIG_CFG  # isort: skip
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
-
+from isaaclab_assets.robots.rga import RGA_GO2_CFG
 
 @configclass
 class EventCfg:
@@ -258,3 +258,24 @@ class Go2RoughEnvCfg(Go2FlatEnvCfg):
 
     # reward scales (override from flat config)
     flat_orientation_reward_scale = 0.0
+
+
+@configclass
+class Go2NeckFlatEnvCfg(Go2FlatEnvCfg):
+    # env
+    action_space = 19 # 12 (legs) + 7 (neck)
+    
+    # observation
+    # num_prio_obs = 3 (lin_vel) + 14 (projected_gravity + commands) + 19 (joint_pos) + 19 (joint_vel) + 19 (actions)
+    num_prio_obs = 3 + 14 + action_space * 3 # 74
+    history_len = 20
+
+    observation_space = num_prio_obs + (num_prio_obs * history_len) # 74 + 74 * 20 = 1554
+    
+    # robot
+    robot = RGA_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    
+    # update penalized body names to include neck if necessary
+    penalized_body_names = ['base', '.*thigh', '.*calf', '.*hip', '.*neck_p', '.*neck_r', '.*neck_y']
+    # neck action smoothness
+    neck_alpha = 0.1

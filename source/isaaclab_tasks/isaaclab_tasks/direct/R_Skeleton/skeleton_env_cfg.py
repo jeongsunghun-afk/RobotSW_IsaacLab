@@ -32,34 +32,34 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.8, 0.8),
-            "dynamic_friction_range": (0.6, 0.6),
-            "restitution_range": (0.0, 0.0),
+            "static_friction_range": (5.0, 5.0),
+            "dynamic_friction_range": (2.0, 2.0),
+            "restitution_range": (0.1, 0.1),
             "num_buckets": 64,
         },
     )
 
-    add_base_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_distribution_params": (-1.0, 3.0),
-            "operation": "add",
-        },
-    )
+    # add_base_mass = EventTerm(
+    #     func=mdp.randomize_rigid_body_mass,
+    #     mode="startup",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+    #         "mass_distribution_params": (-1.0, 3.0),
+    #         "operation": "add",
+    #     },
+    # )
 
-    robot_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
-        mode="reset",
-        params={
-          "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-          "stiffness_distribution_params": (0.75, 1.5),
-          "damping_distribution_params": (0.3, 3.0),
-          "operation": "scale",
-          "distribution": "log_uniform",
-        },
-    )
+    # robot_joint_stiffness_and_damping = EventTerm(
+    #     func=mdp.randomize_actuator_gains,
+    #     mode="reset",
+    #     params={
+    #       "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+    #       "stiffness_distribution_params": (0.75, 1.5),
+    #       "damping_distribution_params": (0.3, 3.0),
+    #       "operation": "scale",
+    #       "distribution": "log_uniform",
+    #     },
+    # )
 
 
 @configclass
@@ -69,7 +69,7 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
     decimation = 4
     action_scale = 0.25
     action_space = 26
-    
+
     priv_explicit = False
     priv_latent = False
     ang_vel = False
@@ -85,7 +85,6 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
         num_prio_obs += 1
     if clock_inputs:
         num_prio_obs += 4
-    
     num_heights = 0
 
     num_priv = 3 if priv_explicit else 0
@@ -97,12 +96,32 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
 
     state_space = 0
 
-    penalzied_body_names = ['base',
-        'FL_link_1', 'FL_link_2', 'FL_link_3', 'FL_link_4', 'FL_link_5', 'FL_link_6',
-        'FR_link_1', 'FR_link_2', 'FR_link_3', 'FR_link_4', 'FR_link_5', 'FR_link_6',
-        'HL_link_1', 'HL_link_2', 'HL_link_3', 'HL_link_4', 'HL_link_5',
-        'HR_link_1','HR_link_2', 'HR_link_3', 'HR_link_4', 'HR_link_5']
-    
+    penalzied_body_names = [
+        "base",
+        "FL_link_1",
+        "FL_link_2",
+        "FL_link_3",
+        "FL_link_4",
+        "FL_link_5",
+        "FL_link_6",
+        "FR_link_1",
+        "FR_link_2",
+        "FR_link_3",
+        "FR_link_4",
+        "FR_link_5",
+        "FR_link_6",
+        "HL_link_1",
+        "HL_link_2",
+        "HL_link_3",
+        "HL_link_4",
+        "HL_link_5",
+        "HR_link_1",
+        "HR_link_2",
+        "HR_link_3",
+        "HR_link_4",
+        "HR_link_5",
+    ]
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -155,18 +174,16 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
 
-
-
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
     )
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
     )
 
     # Command Definition
@@ -183,6 +200,7 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
     lin_vel_y_range = [-0.0, 0.0]
     ang_vel_range = [-0.5, 0.5]
 
+
 @configclass
 class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
     # env
@@ -190,7 +208,7 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
     decimation = 4
     action_scale = 0.25
     action_space = 38
-    
+
     priv_explicit = False
     priv_latent = True
     ang_vel = False
@@ -206,7 +224,7 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
         num_prio_obs += 1
     if clock_inputs:
         num_prio_obs += 4
-    
+
     num_heights = 0
 
     num_priv = 3 if priv_explicit else 0
@@ -219,13 +237,27 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
 
     state_space = 0
 
-    penalized_contact_link_names = [".*_shoulder_y", ".*_shoulder_r", ".*_shoulder_p",
-                                    ".*_thigh_y", ".*_thigh_r", ".*_thigh_p", 
-                                    ".*_elbow_p", ".*_knee_p",
-                                    ".*_ankle_p", ".*_ankle_r", ".*_wrist_p", ".*_wrist_r",
-                                    ".*_neck_p", ".*_neck_r", ".*_neck_y",
-                                    ".*_waist_p", ".*_waist_r", ".*_waist_y"]
-                                    
+    penalized_contact_link_names = [
+        ".*_shoulder_y",
+        ".*_shoulder_r",
+        ".*_shoulder_p",
+        ".*_thigh_y",
+        ".*_thigh_r",
+        ".*_thigh_p",
+        ".*_elbow_p",
+        ".*_knee_p",
+        ".*_ankle_p",
+        ".*_ankle_r",
+        ".*_wrist_p",
+        ".*_wrist_r",
+        ".*_neck_p",
+        ".*_neck_r",
+        ".*_neck_y",
+        ".*_waist_p",
+        ".*_waist_r",
+        ".*_waist_y",
+    ]
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -278,18 +310,16 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
 
-
-
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
     )
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
     )
 
     # Command Definition

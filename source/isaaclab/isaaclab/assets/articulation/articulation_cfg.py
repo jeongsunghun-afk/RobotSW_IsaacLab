@@ -63,7 +63,7 @@ class ArticulationCfg(AssetBaseCfg):
     The soft joint position limits are accessible through the :attr:`ArticulationData.soft_joint_pos_limits` attribute.
     """
 
-    actuators: dict[str, ActuatorBaseCfg] = MISSING
+    actuators: dict[str, ActuatorBaseCfg] = MISSING # type: ignore
     """Actuators for the robot with corresponding joint names."""
 
     actuator_value_resolution_debug_print = False

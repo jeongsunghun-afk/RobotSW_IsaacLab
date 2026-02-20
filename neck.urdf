@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="URDF_neck_v3">
+  <link
+    name="base_n">
+    <inertial>
+      <origin
+        xyz="0.0301765569789322 -1.70726372883338E-05 0.0885167059179499"
+        rpy="0 0 0" />
+      <mass
+        value="0.29998546624522" />
+      <inertia
+        ixx="0.000603892011674674"
+        ixy="1.72280931068991E-19"
+        ixz="4.37174615098354E-07"
+        iyy="0.00378547622618681"
+        iyz="1.54819524189639E-16"
+        izz="0.00438762929977001" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/base_n.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.866666666666667 0.909803921568627 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/base_n.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.0438119087478659 -1.7117547689935E-05 0.0899754247464594"
+        rpy="0 0 0" />
+      <mass
+        value="0.337918352463087" />
+      <inertia
+        ixx="0.000638286979410598"
+        ixy="-2.79675878666308E-14"
+        ixz="3.50656749257021E-06"
+        iyy="0.003799315075711"
+        iyz="1.36596757975966E-14"
+        izz="0.00442983209437552" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.894117647058823 0.894117647058823 0.894117647058823 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="base_joint"
+    type="fixed">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_n" />
+    <child
+      link="base_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="N_link1_neck_y">
+    <inertial>
+      <origin
+        xyz="-0.0190416609600023 -8.05525480226252E-05 -0.0190418300954644"
+        rpy="0 0 0" />
+      <mass
+        value="0.127728055669149" />
+      <inertia
+        ixx="8.31248472826075E-05"
+        ixy="1.78020762077986E-12"
+        ixz="6.71994755609334E-07"
+        iyy="0.000157895438542346"
+        iyz="-5.28372821767424E-13"
+        izz="8.31248527823087E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link1_neck_y.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.894117647058823 0.894117647058823 0.894117647058823 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link1_neck_y.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="N_joint1_neck_y"
+    type="revolute">
+    <origin
+      xyz="0.192795024692513 -1.70726372640392E-05 0.194737361817406"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="N_link1_neck_y" />
+    <axis
+      xyz="0.707106781186548 0 0.707106781186548" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="10"
+      velocity="50" />
+  </joint>
+  <link
+    name="N_link2_neck_p">
+    <inertial>
+      <origin
+        xyz="5.82867087928207E-16 0.000183712458866005 -0.00285780816350256"
+        rpy="0 0 0" />
+      <mass
+        value="0.0901428130246815" />
+      <inertia
+        ixx="5.46950086160286E-05"
+        ixy="1.53841831385735E-10"
+        ixz="1.09540133484368E-13"
+        iyy="0.00010307814422106"
+        iyz="-8.81425399442457E-09"
+        izz="5.52243841085731E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link2_neck_p.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.894117647058823 0.894117647058823 0.894117647058823 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link2_neck_p.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="N_joint2_neck_p"
+    type="revolute">
+    <origin
+      xyz="0 -9.99999999988594E-05 0"
+      rpy="0 0 0" />
+    <parent
+      link="N_link1_neck_y" />
+    <child
+      link="N_link2_neck_p" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="40"
+      velocity="25" />
+  </joint>
+  <link
+    name="N_link3_neck_y">
+    <inertial>
+      <origin
+        xyz="-0.0207452099156261 7.90616374495255E-06 0.0823076858560388"
+        rpy="0 0 0" />
+      <mass
+        value="0.199995873295738" />
+      <inertia
+        ixx="0.000129201303180939"
+        ixy="-6.77467506008755E-08"
+        ixz="1.89934172228234E-08"
+        iyy="8.16621674695068E-05"
+        iyz="-3.61073657541016E-07"
+        izz="8.93619062335413E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link3_neck_y.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.894117647058823 0.894117647058823 0.894117647058823 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link3_neck_y.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="N_joint3_neck_y"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="N_link2_neck_p" />
+    <child
+      link="N_link3_neck_y" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="40"
+      velocity="25" />
+  </joint>
+  <link
+    name="N_link4_neck_r">
+    <inertial>
+      <origin
+        xyz="-0.0160824939507368 3.43966653093162E-09 0.0238090019336627"
+        rpy="0 0 0" />
+      <mass
+        value="0.0805433693200387" />
+      <inertia
+        ixx="5.15823036954522E-05"
+        ixy="-2.41269014302459E-13"
+        ixz="-3.39755680234193E-07"
+        iyy="4.19375211227692E-05"
+        iyz="-8.09305194006304E-12"
+        izz="3.45509969867296E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link4_neck_r.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.894117647058823 0.894117647058823 0.894117647058823 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link4_neck_r.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="N_joint4_neck_r"
+    type="revolute">
+    <origin
+      xyz="0.0395000000002701 0 0.0914999999999998"
+      rpy="0 0 0" />
+    <parent
+      link="N_link3_neck_y" />
+    <child
+      link="N_link4_neck_r" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="10"
+      velocity="50" />
+  </joint>
+  <link
+    name="N_link5_neck_y">
+    <inertial>
+      <origin
+        xyz="8.88697307232511E-05 0.000190449842923905 0.000244167578197119"
+        rpy="0 0 0" />
+      <mass
+        value="0.0344448269255667" />
+      <inertia
+        ixx="1.50377595941017E-05"
+        ixy="8.95092334900287E-19"
+        ixz="3.7740942995231E-06"
+        iyy="1.49914051140054E-05"
+        iyz="2.16324470494692E-18"
+        izz="2.40333404745937E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link5_neck_y.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.894117647058823 0.894117647058823 0.894117647058823 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link5_neck_y.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="N_joint5_neck_y"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0770000000000003"
+      rpy="0 0 0" />
+    <parent
+      link="N_link4_neck_r" />
+    <child
+      link="N_link5_neck_y" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="8.2"
+      velocity="40" />
+  </joint>
+  <link
+    name="N_link6_neck_p">
+    <inertial>
+      <origin
+        xyz="0.00808688973491368 -3.06360030611166E-07 0.018196186644262"
+        rpy="0 0 0" />
+      <mass
+        value="0.0602357531856892" />
+      <inertia
+        ixx="2.94669372064141E-05"
+        ixy="5.97385956181394E-12"
+        ixz="1.14331076667575E-05"
+        iyy="5.34598406961114E-05"
+        iyz="-2.17498741924026E-12"
+        izz="5.05269310974006E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link6_neck_p.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.894117647058823 0.894117647058823 0.894117647058823 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link6_neck_p.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="N_joint6_neck_p"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="N_link5_neck_y" />
+    <child
+      link="N_link6_neck_p" />
+    <axis
+      xyz="0.939692620785909 0 -0.342020143325668" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="8.2"
+      velocity="40" />
+  </joint>
+  <link
+    name="N_link7_neck_y">
+    <inertial>
+      <origin
+        xyz="0.14533444827451 -1.68893976382053E-06 0.0571386757483993"
+        rpy="0 0 0" />
+      <mass
+        value="1.40694175894645" />
+      <inertia
+        ixx="0.00501655580437695"
+        ixy="1.23789612214305E-07"
+        ixz="0.00290907097094723"
+        iyy="0.0110267251166121"
+        iyz="7.26074593600579E-08"
+        izz="0.0092345370284244" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link7_neck_y.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://URDF_neck_v3/meshes/N_link7_neck_y.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="N_joint7_neck_y"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="N_link6_neck_p" />
+    <child
+      link="N_link7_neck_y" />
+    <axis
+      xyz="0.342020143325668 0 0.939692620785908" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="4.1"
+      velocity="40" />
+  </joint>
+</robot>

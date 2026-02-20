@@ -8,20 +8,31 @@ from __future__ import annotations
 import gymnasium as gym
 import torch
 
-import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.assets import Articulation
+import isaaclab.sim as sim_utils
 from isaaclab.sensors import ContactSensor, RayCaster
+from isaaclab.markers import VisualizationMarkers
+from isaaclab.markers.config import RED_ARROW_X_MARKER_CFG
+import socket
+import json
 
 from .skeleton_env_cfg import SkeletonEnvCfg, SkeletonHistoryEnvCfg, SkeletonRoughEnvCfg
+
 
 def torch_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
 
+
 class SkeletonEnv(DirectRLEnv):
     cfg: SkeletonEnvCfg | SkeletonHistoryEnvCfg | SkeletonRoughEnvCfg
 
-    def __init__(self, cfg: SkeletonEnvCfg | SkeletonHistoryEnvCfg | SkeletonRoughEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(
+        self,
+        cfg: SkeletonEnvCfg | SkeletonHistoryEnvCfg | SkeletonRoughEnvCfg,
+        render_mode: str | None = None,
+        **kwargs,
+    ):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -44,7 +55,9 @@ class SkeletonEnv(DirectRLEnv):
             self.max_ang_vel = self.cfg.command_cfg["ang_vel_range"][1]
 
         if self.cfg.history_observation:
-            self.obs_history_buf = torch.zeros(self.num_envs, self.cfg.history_len, self.cfg.num_prio_obs, device=self.device, dtype=torch.float)
+            self.obs_history_buf = torch.zeros(
+                self.num_envs, self.cfg.history_len, self.cfg.num_prio_obs, device=self.device, dtype=torch.float
+            )
 
         # Logging
         self._episode_sums = {
@@ -61,14 +74,25 @@ class SkeletonEnv(DirectRLEnv):
                 "undesired_contacts",
                 "flat_orientation_l2",
                 "similar_to_default",
-                "base_height"
+                "base_height",
             ]
         }
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._neck_ids, _ = self._contact_sensor.find_bodies([".*neck_p", ".*neck_r", ".*neck_y"])
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*toe")
+        self._feet_body_ids, _ = self._robot.find_bodies(".*toe")
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_contact_link_names)
+
+        # Debug Visualization
+        marker_cfg = RED_ARROW_X_MARKER_CFG.copy()
+        marker_cfg.prim_path = "/Visuals/ContactForces"
+        marker_cfg.markers["arrow"].scale = (0.2, 0.02, 0.02)
+        self._contact_forces_visualizer = VisualizationMarkers(marker_cfg)
+
+        # UDP Socket for Debugging
+        self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._udp_addr = ("127.0.0.1", 5005)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -94,7 +118,7 @@ class SkeletonEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone()
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
-        # self._processed_actions = torch.zeros_like(self._actions)
+        self._processed_actions = torch.zeros_like(self._actions)
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
@@ -140,7 +164,7 @@ class SkeletonEnv(DirectRLEnv):
             )
         # 관측치 구성 요소별 세부 체크
         observations = {"policy": obs}
-        
+
         height_data = None
         if isinstance(self.cfg, SkeletonRoughEnvCfg):
             height_data = (
@@ -149,18 +173,15 @@ class SkeletonEnv(DirectRLEnv):
 
         if height_data is not None:
             observations["scan"] = height_data
-        
+
         if self.cfg.history_observation:
             self.obs_history_buf = torch.where(
-                (self.episode_length_buf <= 1)[:, None, None], 
+                (self.episode_length_buf <= 1)[:, None, None],
                 torch.stack([obs] * self.cfg.history_len, dim=1),
-                torch.cat([
-                    self.obs_history_buf[:, 1:],
-                    obs.unsqueeze(1)
-                ], dim=1)
+                torch.cat([self.obs_history_buf[:, 1:], obs.unsqueeze(1)], dim=1),
             )
             observations["history"] = self.obs_history_buf
-        
+
         if self.cfg.priv_latent:
             priv_obs = torch.cat(
                 [
@@ -169,7 +190,10 @@ class SkeletonEnv(DirectRLEnv):
                         self._robot.data.root_lin_vel_b,
                         self._robot.data.root_ang_vel_b,
                         torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device),
-                        torch.tensor(self._robot.root_physx_view.get_material_properties().reshape(self.num_envs, -1), device=self.device)
+                        torch.tensor(
+                            self._robot.root_physx_view.get_material_properties().reshape(self.num_envs, -1),
+                            device=self.device,
+                        ),
                     )
                     if tensor is not None
                 ],
@@ -212,11 +236,12 @@ class SkeletonEnv(DirectRLEnv):
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
 
         # Similar to default
-        similar_to_default = torch.sum(torch.abs(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1)
+        similar_to_default = torch.sum(
+            torch.abs(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1
+        )
 
         # base height
         base_height = torch.square(self._robot.data.root_link_pos_w[:, 2] - self._robot.data.default_root_state[:, 2])
-
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -240,13 +265,117 @@ class SkeletonEnv(DirectRLEnv):
         return reward
 
     def _post_physics_step(self):
-        pass
+        self._visualize_contact_forces()
+
+        # --- Debug Start ---
+        # 1. 가장 높은 토크를 받는 관절 출력
+        torques = self._robot.data.applied_torque[0]  # env 0
+        max_torque_val, max_torque_idx = torch.max(torch.abs(torques), dim=0)
+        joint_names = self._robot.data.joint_names
+
+        # 2. 가장 큰 외부 힘(Contact Force)을 받는 링크 출력
+        # net_contact_forces_w: [num_envs, num_bodies, 3]
+        net_contact_forces = self._contact_sensor.data.net_forces_w[0]  # env 0
+        force_norms = torch.norm(net_contact_forces, dim=-1)
+        max_force_val, max_force_idx = torch.max(force_norms, dim=0)
+        # sensor_body_names = self._contact_sensor.body_names
+
+        # print(f"[Debug] Max Torque: {max_torque_val.item():.2f} Nm at {joint_names[max_torque_idx]} | "
+        #       f"Max Force: {max_force_val.item():.2f} N at {sensor_body_names[max_force_idx]}")
+        # --- Debug End ---
+
+        # Send Debug Data via UDP (only for env 0 to avoid flooding)
+        if self._udp_sock:
+            try:
+                # Send data for ALL joints
+                # joint_names is a list of strings
+                joint_names = self._robot.data.joint_names
+
+                # Convert tensors to lists
+                ref_list = self._processed_actions[0, :].tolist()
+                pos_list = self._robot.data.joint_pos[0, :].tolist()
+                vel_list = self._robot.data.joint_vel[0, :].tolist()
+                trq_list = self._robot.data.applied_torque[0, :].tolist()
+
+                data = {
+                    "t": self.common_step_counter,
+                    "names": joint_names,
+                    "ref": ref_list,
+                    "pos": pos_list,
+                    "vel": vel_list,
+                    "trq": trq_list,
+                }
+
+                # Use a larger buffer size on receiver side, or compress if needed.
+                # JSON serialization might increase size, but for ~38 joints it should be fine (< MTU usually, or fragmented by IP)
+                # 38 joints * 4 floats * ~10 bytes + names... might exceed 1 packet if names are long.
+                # But localhost handles large packets usually.
+
+                msg = json.dumps(data).encode()
+                self._udp_sock.sendto(msg, self._udp_addr)
+            except Exception:
+                # print(f"UDP Error: {e}")
+                pass
+
+    def _visualize_contact_forces(self):
+        # Create mapping if not exists
+        if not hasattr(self, "_sensor_to_robot_body_map"):
+            sensor_body_names = self._contact_sensor.body_names
+            robot_body_names = self._robot.data.body_names
+
+            # Map sensor body index to robot body index
+            # This assumes sensor bodies are a subset of robot bodies
+            mapping = []
+            for name in sensor_body_names:
+                try:
+                    idx = robot_body_names.index(name)
+                    mapping.append(idx)
+                except ValueError:
+                    # print(f"[Warning] Body {name} found in sensor but not in robot data.")
+                    mapping.append(-1)
+
+            self._sensor_to_robot_body_map = torch.tensor(mapping, device=self.device, dtype=torch.long)
+
+        # Get contact forces from sensor
+        # net_contact_forces_w: [num_envs, num_bodies, 3]
+        net_contact_forces = self._contact_sensor.data.net_forces_w
+
+        # Visualize only for env 0
+        forces = net_contact_forces[0]  # [num_sensor_bodies, 3]
+
+        # Filter: only show markers if force magnitude > 1.0
+        force_mags = torch.norm(forces, dim=-1)
+        contact_mask = force_mags > 1.0
+
+        # Get active sensor indices
+        active_sensor_indices = torch.nonzero(contact_mask).squeeze(-1)
+
+        if len(active_sensor_indices) > 0:
+            # Map to robot body indices to get positions
+            active_robot_indices = self._sensor_to_robot_body_map[active_sensor_indices]
+
+            # Filter out invalid mappings (-1)
+            valid_mask = active_robot_indices >= 0
+            valid_robot_indices = active_robot_indices[valid_mask]
+
+            if len(valid_robot_indices) > 0:
+                # Get positions of contacting bodies
+                positions = self._robot.data.body_link_pos_w[0, valid_robot_indices, :]
+
+                self._contact_forces_visualizer.set_visibility(True)
+                self._contact_forces_visualizer.visualize(positions)
+                return
+
+        # If no valid contacts or no contacts at all
+        self._contact_forces_visualizer.set_visibility(False)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         died = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
-        died |= torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._neck_ids], dim=-1), dim=1)[0] > 1.0, dim=1)
+        died |= torch.any(
+            torch.max(torch.norm(net_contact_forces[:, :, self._neck_ids], dim=-1), dim=1)[0] > 1.0, dim=1
+        )
         # Base roll/pitch termination (if projected gravity Z > -0.5, means angle > 60 degrees)
         died |= self._robot.data.projected_gravity_b[:, 2] > -0.5
         return died, time_out
@@ -302,9 +431,9 @@ class SkeletonEnv(DirectRLEnv):
     def _resample_commands(self, env_ids: torch.Tensor):
         if self.command_curriculum:
             command_keys_in_order = [
-            "lin_vel_x_range",
-            "lin_vel_y_range",
-            "ang_vel_range",
+                "lin_vel_x_range",
+                "lin_vel_y_range",
+                "ang_vel_range",
             ]
             for i in range(self.cfg.num_commands):
                 if i < len(command_keys_in_order):
@@ -316,17 +445,29 @@ class SkeletonEnv(DirectRLEnv):
                             use_curriculum = curr < upper
                             low = torch.where(use_curriculum, curr - self.curriculum_step, torch.full_like(curr, lower))
                             high = torch.where(use_curriculum, curr, torch.full_like(curr, upper))
-                            self._commands[env_ids, i] = torch.lerp(low, high, torch.rand(len(env_ids), device=self.device))
-                        elif i == 1 or i ==2:  # ang_vel에 curriculum 적용
+                            self._commands[env_ids, i] = torch.lerp(
+                                low, high, torch.rand(len(env_ids), device=self.device)
+                            )
+                        elif i == 1 or i == 2:  # ang_vel에 curriculum 적용
                             curr = self.curriculum_ang_vel[env_ids]
                             use_curriculum = curr < upper
                             # random sign 선택
                             direction = torch.randint(0, 2, (len(env_ids),), device=self.device) * 2 - 1  # {-1, +1}
                             signed_curr = curr * direction.float()
-                            low = torch.where(use_curriculum, signed_curr - self.curriculum_step, torch.full_like(curr, lower))
+                            low = torch.where(
+                                use_curriculum, signed_curr - self.curriculum_step, torch.full_like(curr, lower)
+                            )
                             high = torch.where(use_curriculum, signed_curr, torch.full_like(curr, upper))
-                            self._commands[env_ids, i] = torch.lerp(low, high, torch.rand(len(env_ids), device=self.device))
+                            self._commands[env_ids, i] = torch.lerp(
+                                low, high, torch.rand(len(env_ids), device=self.device)
+                            )
         else:
-            self._commands[env_ids, 0] = torch_rand_float(*self.cfg.command_cfg["lin_vel_x_range"], (len(env_ids),), self.device)
-            self._commands[env_ids, 1] = torch_rand_float(*self.cfg.command_cfg["lin_vel_y_range"], (len(env_ids),), self.device)
-            self._commands[env_ids, 2] = torch_rand_float(*self.cfg.command_cfg["ang_vel_range"], (len(env_ids),), self.device)
+            self._commands[env_ids, 0] = torch_rand_float(
+                *self.cfg.command_cfg["lin_vel_x_range"], (len(env_ids),), self.device
+            )
+            self._commands[env_ids, 1] = torch_rand_float(
+                *self.cfg.command_cfg["lin_vel_y_range"], (len(env_ids),), self.device
+            )
+            self._commands[env_ids, 2] = torch_rand_float(
+                *self.cfg.command_cfg["ang_vel_range"], (len(env_ids),), self.device
+            )

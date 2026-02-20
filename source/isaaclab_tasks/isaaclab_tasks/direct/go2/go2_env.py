@@ -13,15 +13,15 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, RayCaster
 
-from .go2_env_cfg import Go2FlatEnvCfg, Go2RoughEnvCfg
+from .go2_env_cfg import Go2FlatEnvCfg, Go2RoughEnvCfg, Go2NeckFlatEnvCfg
 
 def torch_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
 
 class Go2Env(DirectRLEnv):
-    cfg: Go2FlatEnvCfg | Go2RoughEnvCfg
+    cfg: Go2FlatEnvCfg | Go2RoughEnvCfg | Go2NeckFlatEnvCfg
 
-    def __init__(self, cfg: Go2FlatEnvCfg | Go2RoughEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: Go2FlatEnvCfg | Go2RoughEnvCfg | Go2NeckFlatEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -42,8 +42,6 @@ class Go2Env(DirectRLEnv):
             self.curriculum_threshold = self.cfg.curriculum_threshold
             self.max_lin_vel_x = self.cfg.command_cfg["lin_vel_x_range"][1]
             self.max_ang_vel = self.cfg.command_cfg["ang_vel_range"][1]
-            
-
 
         # Logging
         self._episode_sums = {
@@ -65,7 +63,8 @@ class Go2Env(DirectRLEnv):
         }
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
-        self._feet_ids, _ = self._contact_sensor.find_bodies(".*toe")
+        self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
+        print(self.cfg)
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
 
     def _setup_scene(self):

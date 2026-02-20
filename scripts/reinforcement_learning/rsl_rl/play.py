@@ -76,7 +76,14 @@ from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx, export_policy_as_jit_parkour, export_policy_as_onnx_parkour
+from isaaclab_rl.rsl_rl import (
+    RslRlBaseRunnerCfg,
+    RslRlVecEnvWrapper,
+    export_policy_as_jit,
+    export_policy_as_onnx,
+    export_policy_as_jit_parkour,
+    export_policy_as_onnx_parkour,
+)
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
@@ -86,6 +93,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import numpy as np
 import pandas as pd
+
 
 def save_obs_data_to_csv(obs_history, save_path, num_obs):
     """
@@ -110,14 +118,16 @@ def save_obs_data_to_csv(obs_history, save_path, num_obs):
     num_timesteps, num_observations = obs_data.shape
 
     if num_observations != num_obs:
-        print(f"Warning: Mismatch in CSV generation between num_observations in data ({num_observations}) and expected num_obs ({num_obs}).")
+        print(
+            f"Warning: Mismatch in CSV generation between num_observations in data ({num_observations}) and expected num_obs ({num_obs})."
+        )
         num_obs = num_observations
 
     column_names = [f"obs_{i}" for i in range(num_obs)]
     data_dict = {"Time_Step": np.arange(num_timesteps)}
     for i, col_name in enumerate(column_names):
         data_dict[col_name] = obs_data[:, i]
-    
+
     df = pd.DataFrame(data_dict)
     df.to_csv(save_path, index=False)
     print(f"Saved observation data to {save_path}")
@@ -296,19 +306,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs_history = []
     action_history = []
 
-    gaits = {"pronking": [0, 0, 0],
-             "trotting": [0.5, 0, 0],
-             "bounding": [0, 0.5, 0],
-             "pacing": [0, 0, 0.5],
-             "galloping": [0.25, 0., 0.],
-             "walking": [0., 0.25, 0.5],
-             "ambling": [0., 0.25, 0.5],
-             "cantering": [0.0, 0.3, 0.3],
-             "half-bounding": [0., 0.25, 0.],
-             "gallop_rot":[0.4646, 0.0, 0.7677]}
-    
-    if args_cli.task == 'Go2WTW':
-        x_vel_cmd, y_vel_cmd,yaw_vel_cmd = 1.0, 0.0, 0.0
+    gaits = {
+        "pronking": [0, 0, 0],
+        "trotting": [0.5, 0, 0],
+        "bounding": [0, 0.5, 0],
+        "pacing": [0, 0, 0.5],
+        "galloping": [0.25, 0.0, 0.0],
+        "walking": [0.0, 0.25, 0.5],
+        "ambling": [0.0, 0.25, 0.5],
+        "cantering": [0.0, 0.3, 0.3],
+        "half-bounding": [0.0, 0.25, 0.0],
+        "gallop_rot": [0.4646, 0.0, 0.7677],
+    }
+
+    if args_cli.task == "Go2WTW" or args_cli.task == "Go2Neck":
+        x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
         step_frequency_cmd = 2.0
         body_height_cmd = 0.0
         gait = torch.tensor(gaits["trotting"])
@@ -323,7 +335,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
-            if args_cli.task == 'Go2WTW':
+            if args_cli.task == "Go2WTW" or args_cli.task == "Go2Neck":
                 env.unwrapped._commands[:, 0] = x_vel_cmd
                 env.unwrapped._commands[:, 1] = y_vel_cmd
                 env.unwrapped._commands[:, 2] = yaw_vel_cmd
@@ -339,19 +351,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 # agent stepping
                 env.unwrapped._commands[:, 0] = 0.5
-                env.unwrapped._commands[:, 1] = 0.
-                env.unwrapped._commands[:, 2] = 0.
+                env.unwrapped._commands[:, 1] = 0.0
+                env.unwrapped._commands[:, 2] = 0.0
+
             actions = policy(obs)
             obs_history.append(obs["policy"].cpu().numpy().squeeze())
             action_history.append(actions.detach().cpu().numpy().squeeze())
 
             # Save policy actions at timestep 499
-            try:
-                if timestep == 499:
-                    save_obs_data_to_csv(obs_history, 'sim_obs_data.csv', env.unwrapped.cfg.num_prio_obs)
-                    save_actions_to_csv(action_history, 'sim_action_data.csv')
-            except:
-                break
+            if timestep == 499:
+                save_obs_data_to_csv(obs_history, "sim_obs_data.csv", env.unwrapped.cfg.num_prio_obs)
+                save_actions_to_csv(action_history, "sim_action_data.csv")
+
             # print(obs["policy"])
             # env stepping
             obs, _, dones, _ = env.step(actions)
