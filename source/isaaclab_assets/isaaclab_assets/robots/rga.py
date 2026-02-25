@@ -65,22 +65,22 @@ THIGH_TORQUE = 22.0
 THIGH_P_VEL = 25
 THIGH_P_TORQUE = 53.0
 THIGH_KP = 300.0
-THIGH_KD = 1.0
+THIGH_KD = 5.0
 
 KNEE_VEL = 25.0
 KNEE_TORQUE = 53.0
 KNEE_KP = 100.0
-KNEE_KD = 1.0
+KNEE_KD = 5.0
 
 ANKLE_VEL = 51.0
 ANKLE_TORQUE = 48.0  # 18.0
-ANKLE_KP = 1000.0
-ANKLE_KD = 1.0
+ANKLE_KP = 100.0
+ANKLE_KD = 5.0
 
 WAIST_VEL = 25.0
 WAIST_TORQUE = 106.0
 WAIST_KP = 100.0
-WAIST_KD = 1.0
+WAIST_KD = 5.0
 
 NECK_VEL = 16.0
 NECK_TORQUE = 7.0
@@ -88,12 +88,15 @@ NECK_VEL2 = 51.0
 NECK_TORQUE2 = 9.0
 NECK_TORQUE3 = 18.0
 NECK_KP = 100.0
-NECK_KD = 1.0
+NECK_KD = 5.0
 
 
 R_SKELETON_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R.Skeleton/R_skeleton.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R.Skeleton/R_skeleton.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R.SkeletonFixed2/R_skeleton.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R.SkeletonFixed2/R_Skeleton.usd",
+        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Light/R_Skeleton.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -102,11 +105,17 @@ R_SKELETON_CFG = ArticulationCfg(
             max_depenetration_velocity=5.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=8
+            enabled_self_collisions=False, solver_position_iteration_count=16, solver_velocity_iteration_count=16
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.609),
+        joint_pos={
+            ".*shoulder_p": 0.03,
+            ".*elbow_p": -0.03,
+            ".*knee_p": 0.09,
+            # ".*toe": 0.0,
+        },
     ),
     actuator_value_resolution_debug_print=True, # type: ignore
     soft_joint_pos_limit_factor=0.9,
@@ -190,13 +199,13 @@ R_SKELETON_CFG = ArticulationCfg(
                 ".*_wrist_r": ANKLE_KD,
             },
         ),
-        "toe": ImplicitActuatorCfg(
-            joint_names_expr=[".*toe"],
-            velocity_limit_sim=0.0,
-            effort_limit_sim=0.0,
-            stiffness=100.0,
-            damping=10.0,
-        ),
+        # "toe": ImplicitActuatorCfg(
+        #     joint_names_expr=[".*toe"],
+        #     velocity_limit_sim=0.0,
+        #     effort_limit_sim=0.0,
+        #     stiffness=0.0,
+        #     damping=0.0,
+        # ),
         "neck": ImplicitActuatorCfg(
             joint_names_expr=[".*_neck_p", ".*_neck_r", ".*_neck_y"],
             velocity_limit_sim={
@@ -265,7 +274,8 @@ R_SKELETON_CFG = ArticulationCfg(
 
 RGA_GO2_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Go2Neck/go2_neck.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Go2Neck/go2_neck.usd",
+        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Go2Neck2/go2_neck.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

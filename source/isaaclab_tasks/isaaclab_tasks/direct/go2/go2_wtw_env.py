@@ -126,6 +126,12 @@ class WTWEnv(DirectRLEnv):
         self._feet_contact_ids, _ = self._contact_sensor.find_bodies(".*foot")
         self._feet_ids, _ = self._robot.find_bodies(".*foot")
 
+        all_joint_names = self._robot.data.joint_names
+        self._hip_joint_ids = torch.tensor(
+            [i for i, n in enumerate(all_joint_names) if "hip" in n],
+            dtype=torch.long, device=self.device
+        )
+
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
         self.set_debug_vis(getattr(self.cfg, "debug_vis", True))
 
@@ -154,7 +160,7 @@ class WTWEnv(DirectRLEnv):
         self._actions = torch.clip(actions.clone(), -self.cfg.clip_actions, self.cfg.clip_actions).to(self.device)
         actions = self._actions.clone()
         if self.cfg.hip_scale_reduction:
-            actions[:, :4] *= 0.5
+            actions[:, self._hip_joint_ids] *= 0.5
         self._processed_actions = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
 
     def _apply_action(self):
@@ -341,9 +347,9 @@ class WTWEnv(DirectRLEnv):
         foot_velocities = self._robot.data.body_link_lin_vel_w[:, self._feet_ids, :]
         base_quat = self._robot.data.root_com_quat_w
 
-        # low_lin_vel = torch.abs(self._commands[:, 0]) < 0.1
-        # low_ang_vel = torch.abs(self._commands[:, 2]) < 0.05
-        # both_low = low_lin_vel & low_ang_vel
+        low_lin_vel = torch.norm(self._commands[:, :2], dim=1) < 0.1
+        low_ang_vel = torch.abs(self._commands[:, 2]) < 0.05
+        both_low = low_lin_vel & low_ang_vel
 
         def _scale(name: str, default: float = 1.0) -> float:
             return getattr(self.cfg, f"{name}_reward_scale", default)
@@ -413,7 +419,7 @@ class WTWEnv(DirectRLEnv):
         target_height = commands[:, 9].unsqueeze(1) * phases + 0.02
         feet_clearance_cmd_linear = torch.square(target_height - foot_height) * (1 - self.desired_contact_states)
         feet_clearance_cmd_linear = torch.sum(feet_clearance_cmd_linear, dim=1)
-        # feet_clearance_cmd_linear[both_low] = 0.
+        feet_clearance_cmd_linear[both_low] = 0.
 
         # orientation control tracking from commands
         roll_pitch_commands = commands[:, 10:12]
@@ -526,7 +532,7 @@ class WTWEnv(DirectRLEnv):
                 (1 - desired_contact[:, i]) * (1 - torch.exp(-1 * foot_forces[:, i] ** 2 / self.cfg.gait_force_sigma))
             )
         tracking_contacts_shaped_force = tracking_contacts_shaped_force / 4
-        # tracking_contacts_shaped_force[both_low] = 0.
+        tracking_contacts_shaped_force[both_low] = 0.
 
         # contact shaping (velocity)
         foot_velocities = torch.norm(foot_velocities, dim=2).view(self.num_envs, -1)
@@ -536,7 +542,7 @@ class WTWEnv(DirectRLEnv):
                 desired_contact[:, i] * (1 - torch.exp(-1 * foot_velocities[:, i] ** 2 / self.cfg.gait_vel_sigma))
             )
         tracking_contacts_shaped_vel = tracking_contacts_shaped_vel / 4
-        # tracking_contacts_shaped_vel[both_low] = 0.
+        tracking_contacts_shaped_vel[both_low] = 0.
 
         # dof velocity penalty
         dof_vel_penalty = dof_vel[:]
@@ -721,12 +727,13 @@ class WTWEnv(DirectRLEnv):
                             )
                         else:
                             self._commands[env_ids, i] = torch_rand_float(lower, upper, (len(env_ids),), self.device)
-            # low_lin_vel = torch.abs(self._commands[env_ids, 0]) < 0.1
-            # low_ang_vel = torch.abs(self._commands[env_ids, 2]) < 0.05
-            # both_low = low_lin_vel & low_ang_vel
+            low_lin_vel = torch.norm(self._commands[env_ids, :2], dim=1) < 0.1
+            low_ang_vel = torch.abs(self._commands[env_ids, 2]) < 0.05
+            both_low = low_lin_vel & low_ang_vel
 
-            # self._commands[env_ids[both_low], 0] = 0.0
-            # self._commands[env_ids[both_low], 2] = 0.0
+            self._commands[env_ids[both_low], 0] = 0.0
+            self._commands[env_ids[both_low], 1] = 0.0
+            self._commands[env_ids[both_low], 2] = 0.0
 
         else:
             for i in range(self.cfg.num_commands):

@@ -11,13 +11,13 @@ import torch
 from isaaclab.envs import DirectRLEnv
 from isaaclab.assets import Articulation
 import isaaclab.sim as sim_utils
-from isaaclab.sensors import ContactSensor, RayCaster
+from isaaclab.sensors import ContactSensor, RayCaster, FrameTransformer
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import RED_ARROW_X_MARKER_CFG
 import socket
 import json
 
-from .skeleton_env_cfg import SkeletonEnvCfg, SkeletonHistoryEnvCfg, SkeletonRoughEnvCfg
+from .skeleton_env_cfg import SkeletonEnvCfg, SkeletonHistoryEnvCfg, SkeletonRoughEnvCfg, SkeletonHistoryFixedEnvCfg
 
 
 def torch_rand_float(lower, upper, shape, device):
@@ -25,7 +25,7 @@ def torch_rand_float(lower, upper, shape, device):
 
 
 class SkeletonEnv(DirectRLEnv):
-    cfg: SkeletonEnvCfg | SkeletonHistoryEnvCfg | SkeletonRoughEnvCfg
+    cfg: SkeletonEnvCfg | SkeletonHistoryEnvCfg | SkeletonRoughEnvCfg | SkeletonHistoryFixedEnvCfg
 
     def __init__(
         self,
@@ -58,7 +58,8 @@ class SkeletonEnv(DirectRLEnv):
             self.obs_history_buf = torch.zeros(
                 self.num_envs, self.cfg.history_len, self.cfg.num_prio_obs, device=self.device, dtype=torch.float
             )
-
+        self.rew_buf_pos = torch.zeros((self.num_envs,), device=self.device)
+        self.rew_buf_neg = torch.zeros((self.num_envs,), device=self.device)
         # Logging
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -82,6 +83,8 @@ class SkeletonEnv(DirectRLEnv):
         self._neck_ids, _ = self._contact_sensor.find_bodies([".*neck_p", ".*neck_r", ".*neck_y"])
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*toe")
         self._feet_body_ids, _ = self._robot.find_bodies(".*toe")
+        # self._feet_ids, _ = self._contact_sensor.find_bodies(".*ankle_r")
+        # self._feet_body_ids, _ = self._robot.find_bodies(".*ankle_r")
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_contact_link_names)
 
         # Debug Visualization
@@ -99,6 +102,12 @@ class SkeletonEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
+        # FrameTransformer: SkeletonHistoryFixedEnvCfg처럼 foot_frame이 설정된 경우에만 초기화
+        if hasattr(self.cfg, "foot_frame"):
+            self._foot_frame_sensor = FrameTransformer(self.cfg.foot_frame)
+            self.scene.sensors["foot_frame"] = self._foot_frame_sensor
+        else:
+            self._foot_frame_sensor = None
         if isinstance(self.cfg, SkeletonRoughEnvCfg):
             # we add a height scanner for perceptive locomotion
             self._height_scanner = RayCaster(self.cfg.height_scanner)
@@ -115,10 +124,42 @@ class SkeletonEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+    @property
+    def foot_pos_w(self) -> torch.Tensor:
+        """발끝의 월드 좌표 위치를 반환합니다. shape: (num_envs, 4, 3) [FL, FR, HL, HR 순서].
+
+        FrameTransformerSensor가 설정된 경우(Fixed joint USD) 사용합니다.
+        미설정 시 ankle_r / wrist_r 링크 위치로 폴백합니다.
+
+        Returns:
+            Tensor of shape (num_envs, 4, 3): 각 발끝의 월드 좌표 (x, y, z).
+        """
+        if self._foot_frame_sensor is not None:
+            # FrameTransformerSensor 사용 (Fixed joint 환경)
+            # target_pos_w: (num_envs, num_targets, 3) — FL, FR, HL, HR 순서
+            return self._foot_frame_sensor.data.target_pos_w
+        else:
+            # 폴백: ankle_r / wrist_r 링크 위치 반환
+            return self._robot.data.body_pos_w[:, self._feet_body_ids, :]
+
+    @property
+    def foot_pos_b(self) -> torch.Tensor:
+        """발끝의 로봇 기준 좌표(base frame) 위치를 반환합니다. shape: (num_envs, 4, 3).
+
+        Returns:
+            Tensor of shape (num_envs, 4, 3): 각 발끝의 base frame 좌표 (x, y, z).
+        """
+        if self._foot_frame_sensor is not None:
+            return self._foot_frame_sensor.data.target_pos_source
+        else:
+            # 폴백: body_pos_w를 base frame으로 변환
+            base_pos = self._robot.data.root_pos_w[:, :3].unsqueeze(1)
+            return self._robot.data.body_pos_w[:, self._feet_body_ids, :] - base_pos
+
     def _pre_physics_step(self, actions: torch.Tensor):
+
         self._actions = actions.clone()
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
-        self._processed_actions = torch.zeros_like(self._actions)
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
@@ -258,10 +299,18 @@ class SkeletonEnv(DirectRLEnv):
             "base_height": base_height * self.cfg.base_height_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-        self.curriculum_rew_buf += reward
         # Logging
+        self.rew_buf_pos[:] = 0.0
+        self.rew_buf_neg[:] = 0.0
         for key, value in rewards.items():
             self._episode_sums[key] += value
+            if torch.sum(value) >= 0:
+                self.rew_buf_pos += value
+            elif torch.sum(value) <= 0:
+                self.rew_buf_neg += value
+
+        reward = self.rew_buf_pos[:] * torch.exp(self.rew_buf_neg[:] / self.cfg.sigma_rew_neg)
+        self.curriculum_rew_buf += reward
         return reward
 
     def _post_physics_step(self):
@@ -372,12 +421,19 @@ class SkeletonEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        died = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
-        died |= torch.any(
+        died_base = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        died_neck = torch.any(
             torch.max(torch.norm(net_contact_forces[:, :, self._neck_ids], dim=-1), dim=1)[0] > 1.0, dim=1
         )
         # Base roll/pitch termination (if projected gravity Z > -0.5, means angle > 60 degrees)
-        died |= self._robot.data.projected_gravity_b[:, 2] > -0.5
+        died_ang = self._robot.data.projected_gravity_b[:, 2] > -0.5
+        
+        died = died_base | died_neck | died_ang
+        
+        # # Debugging death condition for env 0
+        # if died[0] and not time_out[0]:
+        #     print(f"[DEBUG] Env 0 Died. Base: {died_base[0].item()}, Neck: {died_neck[0].item()}, Ang: {died_ang[0].item()}")
+        
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):

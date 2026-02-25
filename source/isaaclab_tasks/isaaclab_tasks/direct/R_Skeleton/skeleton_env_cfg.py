@@ -10,7 +10,8 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns, FrameTransformerCfg
+from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
@@ -171,7 +172,7 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
     feet_air_time_reward_scale = 0.5
     undesired_contact_reward_scale = -1.0
     flat_orientation_reward_scale = -1.0
-    similar_to_default_reward_scale = -0.1
+    similar_to_default_reward_scale = -1.0
     base_height_reward_scale = -10.0
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
@@ -333,6 +334,167 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
         "ang_vel_range": [-0.0, 0.0],
     }
 
+@configclass
+class SkeletonHistoryFixedEnvCfg(SkeletonHistoryEnvCfg):
+    episode_length_s = 20.0
+    decimation = 4
+    action_scale = 0.25
+    action_space = 34
+
+    priv_explicit = False
+    priv_latent = True
+    ang_vel = False
+    friction_terrain = False
+    timing_parameter = False
+    clock_inputs = False
+    prev_actions = False
+    history_observation = True
+
+    num_prio_obs = 3 + 3 + action_space * 3
+
+    if timing_parameter:
+        num_prio_obs += 1
+    if clock_inputs:
+        num_prio_obs += 4
+
+    num_heights = 0
+
+    num_priv = 3 if priv_explicit else 0
+    num_friction = 1 if friction_terrain else 31
+    num_priv_latent = 4 + num_friction if priv_latent else 0
+    history_len = 10
+
+    # observation_space = num_prio_obs + num_heights + num_priv + num_priv_latent + num_prio_obs * history_len
+    observation_space = num_prio_obs
+
+    state_space = 0
+
+    penalized_contact_link_names = [
+        ".*_shoulder_y",
+        ".*_shoulder_r",
+        ".*_shoulder_p",
+        ".*_thigh_y",
+        ".*_thigh_r",
+        ".*_thigh_p",
+        ".*_elbow_p",
+        ".*_knee_p",
+        ".*_ankle_p",
+        ".*_ankle_r",
+        ".*_wrist_p",
+        ".*_wrist_r",
+        ".*_neck_p",
+        ".*_neck_r",
+        ".*_neck_y",
+        ".*_waist_p",
+        ".*_waist_r",
+        ".*_waist_y",
+    ]
+
+    # simulation
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 200,
+        render_interval=decimation,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+    )
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )
+
+    # scene
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
+
+    # events
+    events: EventCfg = EventCfg()
+
+    # robot
+    robot: ArticulationCfg = R_SKELETON_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    contact_sensor: ContactSensorCfg = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.005, track_air_time=True
+    )
+    # FrameTransformer: Fixed joint으로 병합된 발끝(toe) 위치를 각 발의 마지막 링크 기준으로 추적합니다.
+    # 오프셋은 원본 USD에서 시뮬레이션 측정한 값입니다.
+    # 앞다리(FL/FR): wrist_r → toe, 뒷다리(HL/HR): ankle_r → toe
+    foot_frame: FrameTransformerCfg = FrameTransformerCfg(
+        prim_path="/World/envs/env_.*/Robot/base",
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(
+                prim_path="/World/envs/env_.*/Robot/FL_link6_wrist_r",
+                name="FL_toe",
+                offset=OffsetCfg(pos=(-0.0382, 0.0, -0.0993)),
+            ),
+            FrameTransformerCfg.FrameCfg(
+                prim_path="/World/envs/env_.*/Robot/FR_link6_wrist_r",
+                name="FR_toe",
+                offset=OffsetCfg(pos=(0.0382, 0.0, -0.0993)),
+            ),
+            FrameTransformerCfg.FrameCfg(
+                prim_path="/World/envs/env_.*/Robot/HL_link6_ankle_r",
+                name="HL_toe",
+                offset=OffsetCfg(pos=(-0.0142, 0.0, -0.1488)),
+            ),
+            FrameTransformerCfg.FrameCfg(
+                prim_path="/World/envs/env_.*/Robot/HR_link6_ankle_r",
+                name="HR_toe",
+                offset=OffsetCfg(pos=(0.0127, 0.0, -0.1489)),
+            ),
+        ],
+    )
+
+
+    # reward scales
+    lin_vel_reward_scale = 1.0
+    yaw_rate_reward_scale = 0.5
+    z_vel_reward_scale = -0.5
+    ang_vel_reward_scale = -0.01
+    joint_torque_reward_scale = -0.00001
+    joint_accel_reward_scale = -2.5e-8
+    action_rate_reward_scale = -0.001
+    feet_air_time_reward_scale = 0.5
+    undesired_contact_reward_scale = -10.0
+    flat_orientation_reward_scale = -1.0
+    similar_to_default_reward_scale = -0.1
+    base_height_reward_scale = -10.0
+
+    sigma_rew_neg = 0.02
+
+    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
+    action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
+    )
+
+    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
+    observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
+    )
+
+    # Command Definition
+    num_commands = 3
+    command_curriculum = False
+    curriculum_threshold = 10.0
+    curriculum_step = 0.05
+    command_cfg = {
+        "lin_vel_x_range": [0.0, 0.0],
+        "lin_vel_y_range": [-0.0, 0.0],
+        "ang_vel_range": [-0.0, 0.0],
+    }
 
 @configclass
 class SkeletonRoughEnvCfg(SkeletonEnvCfg):

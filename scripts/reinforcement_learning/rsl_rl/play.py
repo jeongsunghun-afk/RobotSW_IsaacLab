@@ -230,7 +230,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.log_dir = log_dir
 
     # create isaac environment
+    env_cfg.debug_vis = True
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env.unwrapped.set_debug_vis(getattr(env_cfg, "debug_vis", True))
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -324,7 +326,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         step_frequency_cmd = 2.0
         body_height_cmd = 0.0
         gait = torch.tensor(gaits["trotting"])
-        footswing_height_cmd = 0.2
+        footswing_height_cmd = 0.15
         pitch_cmd = 0.0
         roll_cmd = 0.0
         duration = 0.5
@@ -354,7 +356,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env.unwrapped._commands[:, 1] = 0.0
                 env.unwrapped._commands[:, 2] = 0.0
 
-            actions = policy(obs)
+            if args_cli.task[:10] == "R_Skeleton":
+                actions = torch.zeros(env.action_space.shape, device=env.device)
+                print("here?")
+            else:
+                actions = policy(obs)
             obs_history.append(obs["policy"].cpu().numpy().squeeze())
             action_history.append(actions.detach().cpu().numpy().squeeze())
 
