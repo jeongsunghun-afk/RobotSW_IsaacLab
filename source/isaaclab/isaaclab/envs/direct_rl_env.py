@@ -654,7 +654,9 @@ class DirectRLEnv(gym.Env):
         Args:
             actions: The actions to apply on the environment. Shape is (num_envs, action_dim).
         """
-        raise NotImplementedError(f"Please implement the '_post_physics_step' method for {self.__class__.__name__}.")
+        # Not always need
+        pass
+        # raise NotImplementedError(f"Please implement the '_post_physics_step' method for {self.__class__.__name__}.")
     
     @abstractmethod
     def _pre_physics_step(self, actions: torch.Tensor):

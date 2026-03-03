@@ -27,9 +27,9 @@ MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_sa
 class SkeletonAmpEnvCfg(DirectRLEnvCfg):
     """R_Skeleton AMP imitation 학습 환경 설정.
 
-    AMP 관측 벡터 구성 (amp_observation_space = 105):
+    AMP 관측 벡터 구성 (amp_observation_space = 99):
         dof_pos(34) + dof_vel(34) + root_height(1) +
-        tangent_normal(6) + lin_vel(3) + ang_vel(3) + 
+        lin_vel(3) + ang_vel(3) + 
         key_body_pos(12) + key_body_lin_vel(12)
     """
 
@@ -38,11 +38,11 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
     decimation = 4
 
     # 공간
-    observation_space = 108      # AMP obs(105) + commands(3) = 108
+    observation_space = 108      
     action_space = 34            # R_Skeleton DOF 수
     state_space = 0
     num_amp_observations = 2
-    amp_observation_space = 105
+    amp_observation_space = 99
     
     # History & Privileged
     history_observation = True

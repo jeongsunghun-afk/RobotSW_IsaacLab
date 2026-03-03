@@ -32,8 +32,14 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             "rl", self.env.num_envs, self.cfg["num_steps_per_env"], obs, [self.env.num_actions], self.device
         )
 
+        amp_cfg = self.cfg.get("amp", {})
+        if hasattr(self.env, "unwrapped") and hasattr(self.env.unwrapped, "amp_observation_space"):
+            amp_cfg["amp_observation_space"] = self.env.unwrapped.amp_observation_space.shape[0]
+        elif hasattr(self.env, "amp_observation_space"):
+            amp_cfg["amp_observation_space"] = self.env.amp_observation_space.shape[0]
+
         alg = PPOAMP(
-            actor_critic, storage, device=self.device, amp_cfg=self.cfg.get("amp", {}),
+            actor_critic, storage, device=self.device, amp_cfg=amp_cfg,
             **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
         return alg
@@ -75,7 +81,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
                     # AMP: Extract discriminator rewards & append buffer
                     if "amp_obs" in extras:
                         agent_amp_obs = extras["amp_obs"].to(self.device)
-                        amp_obs_buffer.append(agent_amp_obs)
+                        amp_obs_buffer.append(agent_amp_obs.detach())
                         
                         amp_reward = self.alg.discriminator.compute_amp_reward(agent_amp_obs)
                         # 로깅 버퍼 합산
@@ -116,6 +122,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
                 # Fetch expert reference motion samples from env (or dataset)
                 # Env should provide a method to sample experts -> e.g., get_amp_observations(num_samples)
                 num_samples = policy_amp_obs_batch.shape[0]
+
                 expert_amp_obs_batch = self.env.get_amp_observations(num_samples).to(self.device)
                 
                 # Unfrozen/Update discriminator
@@ -130,6 +137,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
                     param.requires_grad = False
             else:
                 amp_loss_dict = {}
+            
 
             # Update Policy & Critic
             loss_dict = self.alg.update()

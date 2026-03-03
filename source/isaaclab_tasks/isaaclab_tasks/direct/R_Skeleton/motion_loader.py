@@ -31,6 +31,10 @@ class SkeletonMotionLoader:
     """
 
     # txt 프레임 인덱스 상수
+    # 실제 파일 포맷 (113개 값):
+    #   root_pos(3) + root_rot(4) + joint_pos(38) + toe_pos(12) +
+    #   lin_vel(3) + ang_vel(3) + joint_vel(38) + toe_vel(12)
+    # rskeleton_retarget_motion.py가 curr_pose_full로 저장하는 순서
     ROOT_POS_START = 0
     ROOT_POS_END = 3
     ROOT_ROT_START = 3
@@ -152,7 +156,7 @@ class SkeletonMotionLoader:
                     f"모션 파일 간 FrameDuration 불일치: {total_dt} vs {frame_duration} ({path})"
                 )
 
-            # --- 슬라이싱 ---
+            # --- 슬라이싱 (113개 포맷) ---
             root_pos = frames[:, self.ROOT_POS_START : self.ROOT_POS_END]   # (N,3)
             root_rot_xyzw = frames[:, self.ROOT_ROT_START : self.ROOT_ROT_END]  # (N,4) xyzw
             joint_pos = frames[:, self.JOINT_POS_START : self.JOINT_POS_END]   # (N,38)
@@ -168,8 +172,14 @@ class SkeletonMotionLoader:
             )  # (N,4)
 
             # 발끝 (N,12) → (N,4,3)
-            toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)
-            toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)
+            # rskeleton_retarget_motion.py의 SIM_TOE_JOINT_IDS = [20, 37, 13, 30]
+            # 저장 순서: [FR(20), HR(37), FL(13), HL(30)]
+            # BODY_NAMES 기대 순서: [FL, FR, HL, HR]
+            # → [FR→idx1, HR→idx3, FL→idx0, HL→idx2]
+            # 원본: [0=FR, 1=HR, 2=FL, 3=HL]
+            # 재정렬 목표: [FL(2), FR(0), HL(3), HR(1)]
+            toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)[:, [2, 0, 3, 1], :]
+            toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)[:, [2, 0, 3, 1], :]
 
             all_root_pos.append(root_pos)
             all_root_rot_wxyz.append(root_rot_wxyz)
@@ -408,6 +418,10 @@ class SkeletonMotionLoader:
             else:
                 idx = 0
             indexes.append(idx)
+        # [7, 14, 0, 21, 8, 15, 1, 22, 9, 16, 2, 23, 10, 17, 3, 24, 31, 11, 18, 4, 25, 32, 12, 19, 5, 26, 33, 6, 27, 34, 28, 35, 29, 36]
+        # ['FL_joint1_shoulder_y', 'FR_joint1_shoulder_y', 'N_joint1_neck_y', 'W_joint1_waist_p', 'FL_joint2_shoulder_r', 'FR_joint2_shoulder_r', 'N_joint2_neck_p', 'W_joint2_waist_y', 'FL_joint3_shoulder_p', 'FR_joint3_shoulder_p', 'N_joint3_neck_y', 'W_joint3_waist_r', 'FL_joint4_elbow_p', 'FR_joint4_elbow_p', 'N_joint
+        # 4_neck_r', 'HL_joint1_thigh_y', 'HR_joint1_thigh_y', 'FL_joint5_wrist_p', 'FR_joint5_wrist_p', 'N_joint5_neck_y', 'HL_joint2_thigh_r', 'HR_joint2_thigh_r', 'FL_joint6_wrist_r', 'FR_joint6_wrist_r', 'N_joint6_neck_p', 'HL_joint3_thigh_p', 'HR_joint3_thigh_p', 'N_joint7_neck_y', 'HL_joint4_knee_p', 'HR_joint4_kne
+        # e_p', 'HL_joint5_ankle_p', 'HR_joint5_ankle_p', 'HL_joint6_ankle_r', 'HR_joint6_ankle_r'] 
         return indexes
 
     def get_body_index(self, body_names: list[str]) -> list[int]:

@@ -142,6 +142,7 @@ class Go2InteractionEnv(DirectRLEnv):
                 "base_height",
                 "base_pitch",
                 "feet_contact",
+                "stand_penalty",
                 "dof_acc",
                 "action_rate",
                 "delta_torques",
@@ -363,10 +364,9 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         if "hip" in self._target_world_positions:
             target_hip = self._target_world_positions["hip"]  # [N, 4, 3]
-            hip_pos_error = torch.sum(
-                torch.norm(hip_positions - target_hip, dim=2), dim=1
-            )
-            rew_hip = torch.exp(-hip_pos_error / self.cfg.reward_sigma)
+            hip_pos_error = torch.norm(hip_positions - target_hip, dim=2) # [N, 4]
+            # Calculate exp reward for each hip, then take mean
+            rew_hip = torch.mean(torch.exp(-hip_pos_error / self.cfg.reward_sigma), dim=1)
             rew_hip[mask_default] = 0.0
         else:
             rew_hip = torch.zeros(self.num_envs, device=self.device)
@@ -376,10 +376,9 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         if "foot" in self._target_world_positions:
             target_foot = self._target_world_positions["foot"]  # [N, 4, 3]
-            foot_pos_error = torch.sum(
-                torch.norm(foot_positions - target_foot, dim=2), dim=1
-            )
-            rew_foot = torch.exp(-foot_pos_error / self.cfg.reward_sigma)
+            foot_pos_error = torch.norm(foot_positions - target_foot, dim=2) # [N, 4]
+            # Calculate exp reward for each foot, then take mean
+            rew_foot = torch.mean(torch.exp(-foot_pos_error / self.cfg.reward_sigma), dim=1)
             rew_foot[mask_default] = 0.0
         else:
             rew_foot = torch.zeros(self.num_envs, device=self.device)
@@ -429,8 +428,23 @@ class Go2InteractionEnv(DirectRLEnv):
             torch.ones_like(fl_target, dtype=torch.bool),  # RL 항상 접촉
             torch.ones_like(fl_target, dtype=torch.bool),  # RR 항상 접촉
         ], dim=1)  # [N, 4]
+        
+        # Smooth contact reward: 0.25 per correct foot
         correct_contacts = torch.where(contact_mask, in_contact, ~in_contact)
-        rew_contact = torch.all(correct_contacts, dim=1).float()
+        rew_contact = torch.sum(correct_contacts.float(), dim=1) * 0.25
+
+        # ------------------------------------------------------------------ #
+        # 6. Stand-up 특정 강한 페널티 (앞발 접촉 시)
+        # ------------------------------------------------------------------ #
+        rew_stand_penalty = torch.zeros(self.num_envs, device=self.device)
+        mask_stand = (cmd == 3)
+        # 앞발(0, 1) 중 하나라도 닿아있으면 강력한 음수 보상 부여
+        front_contact = in_contact[:, 0] | in_contact[:, 1]
+        rew_stand_penalty[mask_stand & front_contact] = -2.0  # 강한 페널티
+
+        # Stand-up 시 목표 자세(높이, 기울기)에 대한 추가 가중치 동적 부여
+        rew_height[mask_stand] *= 2.0
+        rew_pitch[mask_stand] *= 2.0
 
         # ------------------------------------------------------------------ #
         # 정규화 보상들
@@ -479,6 +493,7 @@ class Go2InteractionEnv(DirectRLEnv):
             "base_height":      rew_height          * self.cfg.base_height_reward_scale      * self.step_dt,
             "base_pitch":       rew_pitch           * self.cfg.base_pitch_reward_scale       * self.step_dt,
             "feet_contact":     rew_contact         * self.cfg.feet_contact_reward_scale     * self.step_dt,
+            "stand_penalty":    rew_stand_penalty   * self.cfg.stand_penalty_reward_scale    * self.step_dt,
             "dof_acc":          rew_dof_acc         * self.cfg.dof_acc_reward_scale          * self.step_dt,
             "action_rate":      rew_action_rate     * self.cfg.action_rate_reward_scale      * self.step_dt,
             "delta_torques":    rew_delta_torques   * self.cfg.delta_torques_reward_scale    * self.step_dt,

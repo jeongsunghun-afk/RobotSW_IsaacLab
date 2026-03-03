@@ -54,15 +54,15 @@ class PPOAMP(PPOParkour):
         policy_loss = nn.BCEWithLogitsLoss()(policy_logits, torch.zeros_like(policy_logits))
 
         # Gradient Penalty 연산 (WGAN-GP 변형 기법: expert 동작 부근에서 판별자 굴곡을 완만하게)
-        expert_batch.requires_grad = True
-        expert_logits_gp = self.discriminator.get_logits(expert_batch)
+        expert_batch_gp = expert_batch.detach().requires_grad_(True)
+        expert_logits_gp = self.discriminator.get_logits(expert_batch_gp)
         grad_outputs = torch.ones_like(expert_logits_gp)
         gradients = torch.autograd.grad(
             outputs=expert_logits_gp,
-            inputs=expert_batch,
+            inputs=expert_batch_gp,
             grad_outputs=grad_outputs,
             create_graph=True,
-            retain_graph=True,
+            retain_graph=True,  # backward 후에도 penalty grad 계산 위해 필요
             only_inputs=True,
         )[0]
         grad_penalty = torch.sum(torch.square(gradients), dim=-1).mean()
@@ -72,11 +72,20 @@ class PPOAMP(PPOParkour):
         total_loss.backward()
         self.disc_optimizer.step()
         
+        # 명시적 메모리 해제 (VRAM 누수 방지)
+        expert_loss_val = expert_loss.item()
+        policy_loss_val = policy_loss.item()
+        grad_penalty_val = grad_penalty.item()
+        total_loss_val = total_loss.item()
+        
+        del expert_batch_gp, expert_logits_gp, grad_outputs, gradients
+        del expert_logits, policy_logits, expert_loss, policy_loss, grad_penalty, total_loss
+        
         return {
-            "disc_total_loss": total_loss.item(),
-            "disc_expert_loss": expert_loss.item(),
-            "disc_policy_loss": policy_loss.item(),
-            "disc_grad_penalty": grad_penalty.item()
+            "disc_total_loss": total_loss_val,
+            "disc_expert_loss": expert_loss_val,
+            "disc_policy_loss": policy_loss_val,
+            "disc_grad_penalty": grad_penalty_val
         }
         
     def broadcast_parameters(self) -> None:

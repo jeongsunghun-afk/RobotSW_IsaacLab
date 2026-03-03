@@ -230,6 +230,7 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     base_height_reward_scale: float = 1.5
     base_pitch_reward_scale: float = 1.5
     feet_contact_reward_scale: float = 0.5
+    stand_penalty_reward_scale: float = 1.0
 
     # 정규화(패널티) 보상
     dof_acc_reward_scale: float = -2.5e-7

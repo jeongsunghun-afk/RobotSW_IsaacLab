@@ -84,24 +84,12 @@ class SkeletonAmpEnv(DirectRLEnv):
             print("[SkeletonAmpEnv] DOF 이름 불일치 — 순서대로 1:1 매핑 사용")
             self.motion_dof_indexes = list(range(min(len(robot_joint_names), self._motion_loader.num_dofs)))
 
-        if self._motion_loader.body_positions.shape[1] == 5:
-            # 강제로 [toe1, toe2, toe3, toe4, root] 인덱스 매핑
-            self.motion_ref_body_index = 4
-            self.motion_key_body_indexes = [0, 1, 2, 3]
-        else:
-            try:
-                self.motion_ref_body_index = self._motion_loader.get_body_index(
-                    [self.cfg.reference_body]
-                )[0]
-            except AssertionError:
-                # 참조 body가 모션 body 이름 목록에 없으면 마지막 body(base) 사용
-                self.motion_ref_body_index = self._motion_loader.num_bodies - 1
-
-            try:
-                self.motion_key_body_indexes = self._motion_loader.get_body_index(self.KEY_BODY_NAMES)
-            except AssertionError:
-                # key body가 없으면 처음 4개 body 사용
-                self.motion_key_body_indexes = list(range(4))
+        # motion_loader.BODY_NAMES = ["FL_link7_toe", "FR_link7_toe", "HL_link7_toe", "HR_link7_toe", "base"]
+        # stmr.py가 [FL, HL, FR, HR] 순서로 저장하지만 motion_loader 로딩 시 [0,2,1,3] 재정렬로
+        # [FL(0), FR(1), HL(2), HR(3), base(4)] 순서로 맞춰져 있음.
+        # KEY_BODY_NAMES = [FL, FR, HL, HR] 와 완전히 대응됨.
+        self.motion_ref_body_index = 4          # base = index 4
+        self.motion_key_body_indexes = [0, 1, 2, 3]  # FL, FR, HL, HR
 
         # AMP 관측 버퍼
         self.amp_observation_size = self.cfg.num_amp_observations * self.cfg.amp_observation_space
@@ -177,6 +165,10 @@ class SkeletonAmpEnv(DirectRLEnv):
         root_pos_w = self.robot.data.body_pos_w[:, self.ref_body_index]
         root_quat_w = self.robot.data.body_quat_w[:, self.ref_body_index]
         root_lin_vel_w = self.robot.data.body_lin_vel_w[:, self.ref_body_index]
+        root_ang_vel_w = self.robot.data.body_ang_vel_w[:, self.ref_body_index]
+        
+        root_lin_vel_b = self.robot.data.root_lin_vel_b
+        root_ang_vel_b = self.robot.data.root_ang_vel_b
         
         # 월드 기준 상대 거리/속도
         rel_pos = self.robot.data.body_pos_w[:, self.key_body_indexes] - root_pos_w.unsqueeze(1)
@@ -201,9 +193,8 @@ class SkeletonAmpEnv(DirectRLEnv):
             self.robot.data.joint_pos,
             self.robot.data.joint_vel,
             root_pos_w,
-            root_quat_w,
-            root_lin_vel_w,
-            self.robot.data.body_ang_vel_w[:, self.ref_body_index],
+            root_lin_vel_b,
+            root_ang_vel_b,
             local_key_body_pos,
             local_key_body_vel,
         )
@@ -430,13 +421,20 @@ class SkeletonAmpEnv(DirectRLEnv):
             dof_positions[:, self.motion_dof_indexes],
             dof_velocities[:, self.motion_dof_indexes],
             body_positions[:, self.motion_ref_body_index],
-            body_rotations[:, self.motion_ref_body_index],
             body_linear_velocities[:, self.motion_ref_body_index],
             body_angular_velocities[:, self.motion_ref_body_index],
             body_positions[:, self.motion_key_body_indexes],
             body_linear_velocities[:, self.motion_key_body_indexes],
         )
         return amp_obs.view(-1, self.amp_observation_size)
+
+    def get_amp_observations(self, num_samples: int) -> torch.Tensor:
+        """RSL-RL Runner가 Discriminator 업데이트 시 호출하는 Expert 관측 샘플러.
+
+        on_policy_runner_amp.py가 hasattr(env, 'get_amp_observations') 로 존재 여부를 확인합니다.
+        내부적으로 collect_reference_motions를 호출합니다.
+        """
+        return self.collect_reference_motions(num_samples)
 
     def _resample_commands(self, env_ids: torch.Tensor):
         if self.cfg.command_curriculum:
@@ -532,7 +530,6 @@ def compute_obs(
     dof_positions: torch.Tensor,
     dof_velocities: torch.Tensor,
     root_positions: torch.Tensor,
-    root_rotations: torch.Tensor,
     root_linear_velocities: torch.Tensor,
     root_angular_velocities: torch.Tensor,
     local_key_body_positions: torch.Tensor,
@@ -540,7 +537,7 @@ def compute_obs(
 ) -> torch.Tensor:
     """AMP 관측 벡터 계산.
 
-    출력 크기: 34+34+1+6+3+3+12+12 = 105
+    출력 크기: 34+34+1+3+3+12+12 = 99
     (key_body_positions 가 4개라면 12차원)
     """
     obs = torch.cat(
@@ -548,7 +545,6 @@ def compute_obs(
             dof_positions,               # 34
             dof_velocities,              # 34
             root_positions[:, 2:3],      # 1 (root 높이)
-            quaternion_to_tangent_and_normal(root_rotations),  # 6
             root_linear_velocities,      # 3
             root_angular_velocities,     # 3
             # key body 상대 위치 (root 기준)

@@ -194,6 +194,5 @@ class SkeletonAmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         discriminator_learning_rate=1e-4,
         gradient_penalty_coef=10.0,
         reward_coef=2.0,
-        amp_observation_space=210,
         discriminator_hidden_dims=[1024, 512]
     )

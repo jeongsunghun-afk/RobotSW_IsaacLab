@@ -323,7 +323,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     }
 
     if args_cli.task == "Go2WTW" or args_cli.task == "Go2Neck":
-        x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
+        x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 1.5, 0.0, 0.0
         step_frequency_cmd = 2.0
         body_height_cmd = 0.0
         gait = torch.tensor(gaits["trotting"])
