@@ -93,7 +93,7 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         # 커맨드 버퍼 (lin_vel_x, lin_vel_y, ang_vel)
         # ------------------------------------------------------------------ #
-        self._commands = torch.zeros(self.num_envs, 3, device=self.device)
+        # self._commands = torch.zeros(self.num_envs, 3, device=self.device)  # 삭제
 
         # ------------------------------------------------------------------ #
         # Interaction 커맨드: 모션 ID (0~3)
@@ -354,43 +354,51 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         # 참조 위치 업데이트
         # ------------------------------------------------------------------ #
-        self._calculate_world_positions()
+        self._calculate_reference_positions()
 
         cmd = self._interaction_command.squeeze(-1)  # [N]
         mask_default = (cmd == 0)
 
         # ------------------------------------------------------------------ #
-        # 1. Hip 위치 추적 보상
+        # 1. Hip/Foot 위치 추적 보상 (기준 좌표계 선택)
         # ------------------------------------------------------------------ #
-        if "hip" in self._target_world_positions:
-            target_hip = self._target_world_positions["hip"]  # [N, 4, 3]
-            hip_pos_error = torch.norm(hip_positions - target_hip, dim=2) # [N, 4]
-            # Calculate exp reward for each hip, then take mean
-            rew_hip = torch.mean(torch.exp(-hip_pos_error / self.cfg.reward_sigma), dim=1)
-            rew_hip[mask_default] = 0.0
-        else:
-            rew_hip = torch.zeros(self.num_envs, device=self.device)
+        if self.cfg.reward_frame == "base":
+            # [Base Frame] 현재 로봇 부위를 Base로 변환하여 로컬 타겟과 비교
+            root_pos = self._robot.data.root_link_pos_w.unsqueeze(1)  # [N, 1, 3]
+            root_quat = self._robot.data.root_link_quat_w             # [N, 4]
+            
+            # Hip (Base Frame Error)
+            cur_hip_local = quat_apply_inverse(root_quat.unsqueeze(1).repeat(1, 4, 1), hip_positions - root_pos)
+            target_hip_local = self._target_reference_positions["hip_local"]
+            hip_pos_error = torch.norm(cur_hip_local - target_hip_local, dim=2)
 
-        # ------------------------------------------------------------------ #
-        # 2. Foot 위치 추적 보상
-        # ------------------------------------------------------------------ #
-        if "foot" in self._target_world_positions:
-            target_foot = self._target_world_positions["foot"]  # [N, 4, 3]
-            foot_pos_error = torch.norm(foot_positions - target_foot, dim=2) # [N, 4]
-            # Calculate exp reward for each foot, then take mean
-            rew_foot = torch.mean(torch.exp(-foot_pos_error / self.cfg.reward_sigma), dim=1)
-            rew_foot[mask_default] = 0.0
+            # Foot (Base Frame Error)
+            cur_foot_local = quat_apply_inverse(root_quat.unsqueeze(1).repeat(1, 4, 1), foot_positions - root_pos)
+            target_foot_local = self._target_reference_positions["foot_local"]
+            foot_pos_error = torch.norm(cur_foot_local - target_foot_local, dim=2)
         else:
-            rew_foot = torch.zeros(self.num_envs, device=self.device)
+            # [World Frame] 기존 방식
+            target_hip = self._target_reference_positions["hip"]
+            hip_pos_error = torch.norm(hip_positions - target_hip, dim=2)
+
+            target_foot = self._target_reference_positions["foot"]
+            foot_pos_error = torch.norm(foot_positions - target_foot, dim=2)
+
+        # 공통 보상 계산
+        rew_hip = torch.mean(torch.exp(-hip_pos_error / self.cfg.reward_sigma), dim=1)
+        rew_hip[mask_default] = 0.0
+
+        rew_foot = torch.mean(torch.exp(-foot_pos_error / self.cfg.reward_sigma), dim=1)
+        rew_foot[mask_default] = 0.0
 
         # ------------------------------------------------------------------ #
         # 3. Base height 추적 보상
         # ------------------------------------------------------------------ #
-        if "base_height" in self._target_world_positions:
+        if "base_height" in self._target_reference_positions:
             current_h = self._robot.data.root_link_pos_w[:, 2]
             # interaction_command == 2 (눕기)인 환경은 목표 높이를 0.05로 고정
             mask_lay = cmd == 2
-            target_h = self._target_world_positions["base_height"].clone()
+            target_h = self._target_reference_positions["base_height"].clone()
             target_h[mask_lay] = 0.05
             height_diff = torch.abs(target_h - current_h)
             rew_height = torch.exp(-height_diff / self.cfg.reward_sigma)
@@ -401,9 +409,9 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         # 4. Base pitch 추적 보상
         # ------------------------------------------------------------------ #
-        if "base_rotation" in self._target_world_positions:
+        if "base_rotation" in self._target_reference_positions:
             current_pitch = base_euler[:, 1]
-            target_pitch = self._target_world_positions["base_rotation"][:, 1]
+            target_pitch = self._target_reference_positions["base_rotation"][:, 1]
             pitch_diff = torch.abs(current_pitch - target_pitch)
             rew_pitch = torch.exp(-pitch_diff / self.cfg.reward_sigma)
             rew_pitch[mask_default] = 0.0
@@ -599,17 +607,9 @@ class Go2InteractionEnv(DirectRLEnv):
     # ---------------------------------------------------------------------- #
 
     def _resample_commands(self, env_ids: torch.Tensor):
-        """속도 커맨드와 interaction 모션 ID를 새로 샘플링합니다."""
+        """interaction 모션 ID를 새로 샘플링합니다."""
         n = len(env_ids)
-        self._commands[env_ids, 0] = torch_rand_float(
-            *self.cfg.command_cfg["lin_vel_x_range"], (n,), self.device
-        )
-        self._commands[env_ids, 1] = torch_rand_float(
-            *self.cfg.command_cfg["lin_vel_y_range"], (n,), self.device
-        )
-        self._commands[env_ids, 2] = torch_rand_float(
-            *self.cfg.command_cfg["ang_vel_range"], (n,), self.device
-        )
+        # 속도 커맨드 샘플링 삭제
 
         # 모션 ID 랜덤 샘플링
         num_motions = len(self.all_preprocessed_data)
@@ -663,7 +663,7 @@ class Go2InteractionEnv(DirectRLEnv):
             if not row.empty:
                 hind_foot_x.append(float(row["base_rel_x"].values[0]) * self.cfg.size_prop + self.cfg.x_offset)
         
-        target_default_hind_x = -0.295  # default.csv의 뒷발 평균
+        target_default_hind_x = self.cfg.target_default_hind_x
         if len(hind_foot_x) > 0:
             current_hind_x = sum(hind_foot_x) / len(hind_foot_x)
             x_shift = target_default_hind_x - current_hind_x
@@ -761,16 +761,20 @@ class Go2InteractionEnv(DirectRLEnv):
         return {
             "hip_positions":  hip_pos_world,
             "foot_positions": foot_pos_world,
+            "hip_positions_local":  hip_pos_local,
+            "foot_positions_local": foot_pos_local,
             "base_rotation":  base_rot,
             "base_height":    base_height,
         }
 
-    def _calculate_world_positions(self):
-        """참조 월드 위치를 계산하고 내부 버퍼에 저장합니다."""
+    def _calculate_reference_positions(self):
+        """참조 위치(월드 및 로컬)를 계산하고 내부 버퍼에 저장합니다."""
         ref = self._get_target_reference_data()
-        self._target_world_positions = {
+        self._target_reference_positions = {
             "hip":           ref["hip_positions"],
             "foot":          ref["foot_positions"],
+            "hip_local":     ref["hip_positions_local"],
+            "foot_local":    ref["foot_positions_local"],
             "base_rotation": ref["base_rotation"],
             "base_height":   ref["base_height"],
         }

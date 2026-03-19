@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from rsl_rl.networks import MLP
+from rsl_rl.networks import MLP, EmpiricalNormalization
 
 
 class AMPDiscriminator(nn.Module):
@@ -16,11 +16,18 @@ class AMPDiscriminator(nn.Module):
         self.input_dim = input_dim
 
         # AMP loss parameter
-        self.amp_reward_coef = 2.0  # AMP style 보상 스케일
+        self.amp_reward_coef = 1.5 * (1.0 / 6.0) # AMP style 보상 스케일
+        
+        # Empirical Normalizer (input_dim 수치만큼 정규화)
+        self.amp_obs_normalizer = EmpiricalNormalization(input_dim).to(self.device)
         
         # discriminator network (input -> hidden_dims -> 1)
         self.trunk = MLP(input_dim, 1, hidden_dims, activation)
         self.trunk.to(self.device)
+
+    def update_normalization(self, amp_obs: torch.Tensor) -> None:
+        """Update the empirical normalizer statistics using real simulation observations."""
+        self.amp_obs_normalizer.update(amp_obs)
 
     def compute_amp_reward(self, amp_obs):
         """판별자(Discriminator)를 통해 AMP 보상을 계산합니다.
@@ -31,8 +38,10 @@ class AMPDiscriminator(nn.Module):
             torch.Tensor: 에이전트의 모션이 전문가 모션과 얼마나 유사한지에 대한 스칼라 보상 (0 ~ 1.0)
         """
         amp_obs = amp_obs.to(self.device)
-        # 판별자 출력 (logits)
-        disc_logits = self.trunk(amp_obs)
+        
+        # 정규화 거친 뒤 판별자 통과
+        norm_obs = self.amp_obs_normalizer(amp_obs)
+        disc_logits = self.trunk(norm_obs)
         
         # 논문 수식 및 일반적 구현에 따른 보상 계산: r_s = exp(-c * max(0, 1 - D)) 또는 -log(1 - sigmoid(D))
         # 간단히 skrl 구현체와 유사하게 최소-최대 clip 등의 연산을 사용할 수 있습니다.
@@ -45,4 +54,6 @@ class AMPDiscriminator(nn.Module):
         return reward.squeeze(-1) * self.amp_reward_coef
 
     def get_logits(self, amp_obs):
-        return self.trunk(amp_obs.to(self.device))
+        amp_obs = amp_obs.to(self.device)
+        norm_obs = self.amp_obs_normalizer(amp_obs)
+        return self.trunk(norm_obs)

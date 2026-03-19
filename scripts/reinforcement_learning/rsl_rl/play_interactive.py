@@ -49,6 +49,7 @@ parser.add_argument(
     help="Nucleus에서 사전학습 체크포인트 사용.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="실시간 평가 모드.")
+parser.add_argument("--wbc", action="store_true", default=False, help="Enable whole body control (19 DoF instead of 12 DoF).")
 
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
@@ -149,6 +150,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
+    # Process WBC flag
+    if hasattr(args_cli, "wbc") and hasattr(env_cfg, "whole_body_control"):
+        env_cfg.whole_body_control = args_cli.wbc
+        if hasattr(env_cfg, "__post_init__"):
+            env_cfg.__post_init__()
+
     # ── 체크포인트 경로 ──────────────────────────────────────────────
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
     print(f"[INFO] 실험 디렉토리 로드: {log_root_path}")
@@ -175,10 +182,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
+    video_state = {"record_video_now": True, "last_video_step": 0}
+
     if args_cli.video:
+        def custom_step_trigger(step):
+            if video_state.get("record_video_now", False):
+                video_state["record_video_now"] = False
+                video_state["last_video_step"] = step
+                return True
+            return False
+
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", "play"),
-            "step_trigger": lambda step: step == 0,
+            "step_trigger": custom_step_trigger,
             "video_length": args_cli.video_length,
             "disable_logger": True,
         }
@@ -335,6 +351,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # ── 커맨드 변경 시 환경 리셋 ────────────────────────────
             if command_state["reset_requested"]:
                 data_recorder.reset()
+                video_state["record_video_now"] = True
+                
                 all_env_ids = torch.arange(env.unwrapped.num_envs, device=env.unwrapped.device)
                 env.unwrapped._reset_idx(all_env_ids)
                 # 리셋 이후에도 커맨드 재적용 (resampling 덮어쓰기)
@@ -365,7 +383,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     joint_names = env.unwrapped._robot.data.joint_names
                     video_src = None
                     if args_cli.video:
-                        video_src = os.path.join(log_dir, "videos", "play", "rl-video-step-0.mp4")
+                        video_step = video_state["last_video_step"]
+                        video_src = os.path.join(log_dir, "videos", "play", f"rl-video-step-{video_step}.mp4")
                     data_recorder.save(
                         command_label=command_state.get("cmd_str", "default"),
                         joint_names=joint_names,
@@ -393,10 +412,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         cur_icmd, dtype=torch.long, device=env.unwrapped.device
                     )
 
-        if args_cli.video:
-            timestep += 1
-            if timestep == args_cli.video_length:
-                break
+        timestep += 1
 
         # 실시간 모드 슬립
         sleep_time = dt - (time.time() - start_time)

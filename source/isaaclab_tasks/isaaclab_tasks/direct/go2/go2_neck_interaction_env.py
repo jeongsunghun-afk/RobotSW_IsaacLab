@@ -112,12 +112,19 @@ class Go2NeckInteractionEnv(Go2InteractionEnv):
         self._current_neck_q = (1.0 - alpha) * self._current_neck_q + alpha * target_neck_q
 
         # action vector에 반영
-        neck_default = self._robot.data.default_joint_pos[:, self._neck_joint_ids]
-        neck_action = (self._current_neck_q - neck_default) / self.cfg.action_scale
-        self._actions[:, self._action_neck_ids] = neck_action
+        applied_actions = torch.zeros(self.num_envs, 19, device=self.device)
+        
+        if self.cfg.whole_body_control:
+            applied_actions = self._actions.clone()
+        else:
+            applied_actions[:, self._non_neck_ids] = self._actions.clone()
+            
+            neck_default = self._robot.data.default_joint_pos[:, self._neck_joint_ids]
+            neck_action = (self._current_neck_q - neck_default) / self.cfg.action_scale
+            applied_actions[:, self._action_neck_ids] = neck_action
 
         # 상호작용 행동 스케일 적용
-        self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        self._processed_actions = self.cfg.action_scale * applied_actions + self._robot.data.default_joint_pos
 
         self._update_neck_target_vis(root_pos_w, root_quat_w)
 

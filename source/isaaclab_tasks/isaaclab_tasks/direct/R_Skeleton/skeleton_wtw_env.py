@@ -23,7 +23,7 @@ from isaaclab.utils.math import (
     quat_apply_inverse,
 )
 
-from .go2_env_cfg import Go2FlatEnvCfg, Go2RoughEnvCfg
+from .skeleton_wtw_env_cfg import SkeletonWtwEnvCfg, SkeletonWtwRoughEnvCfg
 
 
 def torch_rand_float(lower, upper, shape, device):
@@ -36,10 +36,10 @@ transform_by_quat = quat_apply
 inv_quat = quat_inv
 
 
-class WTWEnv(DirectRLEnv):
-    cfg: Go2FlatEnvCfg | Go2RoughEnvCfg
+class SkeletonWtwEnv(DirectRLEnv):
+    cfg: SkeletonWtwEnvCfg | SkeletonWtwRoughEnvCfg
 
-    def __init__(self, cfg: Go2FlatEnvCfg | Go2RoughEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: SkeletonWtwEnvCfg | SkeletonWtwRoughEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -76,8 +76,6 @@ class WTWEnv(DirectRLEnv):
             self.obs_history_buf = torch.zeros(
                 self.num_envs, self.cfg.history_len, self.cfg.num_prio_obs, device=self.device, dtype=torch.float
             )
-            print(self.cfg)
-            print(self.cfg.num_prio_obs)
 
         self.rew_buf_pos = torch.zeros((self.num_envs,), device=self.device)
         self.rew_buf_neg = torch.zeros((self.num_envs,), device=self.device)
@@ -117,14 +115,16 @@ class WTWEnv(DirectRLEnv):
         }
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
-        # Robustly order feet to ensure [FL, FR, RL, RR] correspondence
+        self._neck_ids, _ = self._contact_sensor.find_bodies([".*neck_p", ".*neck_r", ".*neck_y"])
+        
+        # Robustly order feet to ensure [FL, FR, HL, HR] correspondence
         self._feet_contact_ids = []
         self._feet_ids = []
         
-        all_foot_sensor_ids, all_foot_sensor_names = self._contact_sensor.find_bodies(".*foot")
-        all_foot_robot_ids, all_foot_robot_names = self._robot.find_bodies(".*foot")
+        all_foot_sensor_ids, all_foot_sensor_names = self._contact_sensor.find_bodies(".*toe")
+        all_foot_robot_ids, all_foot_robot_names = self._robot.find_bodies(".*toe")
         
-        ordered_prefixes = ["FL", "FR", "RL", "RR"]
+        ordered_prefixes = ["FL", "FR", "HL", "HR"]
         for prefix in ordered_prefixes:
             for s_id, s_name in zip(all_foot_sensor_ids, all_foot_sensor_names):
                 if prefix in s_name:
@@ -137,13 +137,13 @@ class WTWEnv(DirectRLEnv):
                     
         # Fallback if explicit search failed 
         if len(self._feet_ids) != 4 or len(self._feet_contact_ids) != 4:
-            print("[WTWEnv] WARNING: Explicit foot prefix match failed, falling back to raw find_bodies order!")
+            print("[SkeletonWtwEnv] WARNING: Explicit foot prefix match failed, falling back to raw find_bodies order!")
             self._feet_contact_ids = all_foot_sensor_ids
             self._feet_ids = all_foot_robot_ids
 
         all_joint_names = self._robot.data.joint_names
         self._hip_joint_ids = torch.tensor(
-            [i for i, n in enumerate(all_joint_names) if "hip" in n],
+            [i for i, n in enumerate(all_joint_names) if "hip" in n or "_y" in n or "shoulder" in n],
             dtype=torch.long, device=self.device
         )
 
@@ -155,7 +155,7 @@ class WTWEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
-        if isinstance(self.cfg, Go2RoughEnvCfg):
+        if isinstance(self.cfg, SkeletonWtwRoughEnvCfg):
             # we add a height scanner for perceptive locomotion
             self._height_scanner = RayCaster(self.cfg.height_scanner)
             self.scene.sensors["height_scanner"] = self._height_scanner
@@ -203,8 +203,6 @@ class WTWEnv(DirectRLEnv):
                 self.gait_indices + phases,
             ]
 
-            # self.foot_indices = torch.remainder(torch.cat([foot_indices[i].unsqueeze(1) for i in range(4)], dim=1), 1.0)
-
             for idxs in foot_indices:
                 stance_idxs = torch.remainder(idxs, 1) < durations
                 swing_idxs = torch.remainder(idxs, 1) >= durations
@@ -215,7 +213,6 @@ class WTWEnv(DirectRLEnv):
                 )
 
             self.foot_indices = torch.remainder(torch.cat([foot_indices[i].unsqueeze(1) for i in range(4)], dim=1), 1.0)
-            # if self.cfg.commands.durations_warp_clock_inputs:
 
             self.clock_inputs[:, 0] = torch.sin(2 * np.pi * foot_indices[0])
             self.clock_inputs[:, 1] = torch.sin(2 * np.pi * foot_indices[1])
@@ -236,7 +233,7 @@ class WTWEnv(DirectRLEnv):
             kappa = 0.07
             smoothing_cdf_start = torch.distributions.normal.Normal(
                 0, kappa
-            ).cdf  # (x) + torch.distributions.normal.Normal(1, kappa).cdf(x)) / 2
+            ).cdf
 
             smoothing_multiplier_FL = smoothing_cdf_start(torch.remainder(foot_indices[0], 1.0)) * (
                 1 - smoothing_cdf_start(torch.remainder(foot_indices[0], 1.0) - 0.5)
@@ -275,7 +272,7 @@ class WTWEnv(DirectRLEnv):
         self._last_processed_actions = self._processed_actions.clone()
 
         height_data = None
-        if isinstance(self.cfg, Go2RoughEnvCfg):
+        if isinstance(self.cfg, SkeletonWtwRoughEnvCfg):
             height_data = (
                 self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5
             ).clip(-1.0, 1.0)
@@ -342,21 +339,13 @@ class WTWEnv(DirectRLEnv):
         base_ang_vel = getattr(self, "base_ang_vel", self._robot.data.root_ang_vel_b)
         base_pos = getattr(self, "base_pos", self._robot.data.root_link_pos_w)
         projected_gravity = getattr(self, "projected_gravity", self._robot.data.projected_gravity_b)
-        # dof_pos = getattr(self, "dof_pos", self._robot.data.joint_pos)
-        # default_dof_pos = getattr(self, "default_dof_pos", self._robot.data.default_joint_pos)
         dof_vel = getattr(self, "dof_vel", self._robot.data.joint_vel)
-        # torques = getattr(self, "torques", self._robot.data.applied_torque)
-        # actions = getattr(self, "actions", self._actions)
-        # previous_actions = getattr(self, "previous_actions", self._previous_actions)
 
         processed_actions = self._processed_actions
         last_processed_actions = self._last_processed_actions
         last_last_processed_actions = self._last_last_jrocessed_actions
 
         foot_positions = self._robot.data.body_link_pos_w[:, self._feet_ids, :]
-
-        # print(self._robot.data.body_com_pos_w[:, self._feet_ids, :])
-        # print(self._contact_sensor.find_bodies(".*foot"))
 
         foot_velocities = self._robot.data.body_link_lin_vel_w[:, self._feet_ids, :]
         base_quat = self._robot.data.root_com_quat_w
@@ -384,40 +373,13 @@ class WTWEnv(DirectRLEnv):
         joint_accel = torch.sum(torch.square(self._robot.data.joint_acc), dim=1)
         # action rate
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
-        # feet air time
-        # first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._feet_contact_ids]
-        # last_air_time = self._contact_sensor.data.last_air_time[:, self._feet_contact_ids]
-        # air_time = torch.sum((last_air_time - 0.5) * first_contact, dim=1) * (torch.norm(commands[:, :2], dim=1) > 0.1)
+        
         # undesired contacts
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         is_contact = (
             torch.max(torch.norm(net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=1)[0] > 1.0
         )
         contacts = torch.sum(is_contact, dim=1)
-        # flat orientation
-        # flat_orientation = torch.sum(torch.square(projected_gravity[:, :2]), dim=1)
-
-        # # Similar to default
-        # similar_to_default = torch.sum(torch.abs(dof_pos - default_dof_pos), dim=1)
-        # # similar_to_default[~both_low] = 0.
-
-        # # base height
-        # base_height = torch.square(base_pos[:, 2] - self._robot.data.default_root_state[:, 2])
-
-        # # dof acceleration penalty
-        # last_dof_vel = getattr(self, "last_dof_vel", dof_vel)
-        # dt = getattr(self, "dt", self.step_dt)
-        # dof_acc = torch.sum(torch.square((last_dof_vel - dof_vel) / dt), dim=1)
-
-        # # action rate penalty (alt)
-        # action_rate_alt = torch.norm(getattr(self, "previous_actions", previous_actions) - actions, dim=1)
-
-        # # torque change penalty
-        # last_torques = getattr(self, "last_torques", torques)
-        # delta_torques = torch.sum(torch.square(torques - last_torques), dim=1)
-
-        # # torque magnitude penalty (optionally weighted)
-        # torques_l2_weighted = torch.sum(torch.square(torques), dim=1)
 
         # action_smoothness1
         diff1 = torch.square(processed_actions - last_processed_actions)
@@ -451,7 +413,6 @@ class WTWEnv(DirectRLEnv):
 
         # raibert heuristic foot placement error
         cur_footsteps_translated = foot_positions - base_pos.unsqueeze(1)
-        # print(cur_footsteps_translated[0])
         footsteps_in_body_frame = torch.zeros(self.num_envs, 4, 3, device=self.device)
         for i in range(4):
             footsteps_in_body_frame[:, i, :] = quat_apply_yaw(inv_quat(base_quat), cur_footsteps_translated[:, i, :])
@@ -576,7 +537,6 @@ class WTWEnv(DirectRLEnv):
             "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
             "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
             "undesired_contacts": contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
-            # "similar_to_default": similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
             "feet_clearance_cmd_linear": feet_clearance_cmd_linear * _scale("feet_clearance_cmd_linear") * self.step_dt,
             "orientation_control": orientation_control * _scale("orientation_control") * self.step_dt,
             "raibert_heuristic": raibert_heuristic * _scale("raibert_heuristic") * self.step_dt,
@@ -609,7 +569,14 @@ class WTWEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        died = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        died_base = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        died_neck = torch.any(
+            torch.max(torch.norm(net_contact_forces[:, :, self._neck_ids], dim=-1), dim=1)[0] > 1.0, dim=1
+        )
+        # Base roll/pitch termination (if projected gravity Z > -0.5, means angle > 60 degrees)
+        died_ang = self._robot.data.projected_gravity_b[:, 2] > -0.5
+        
+        died = died_base | died_neck | died_ang
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -716,7 +683,7 @@ class WTWEnv(DirectRLEnv):
                     key = command_keys_in_order[i]
                     if key in self.cfg.command_cfg:
                         lower, upper = self.cfg.command_cfg[key]
-                        if i == 0:  # lin_vel_x에 curriculum 적용
+                        if i == 0:  # lin_vel_x
                             curr = self.curriculum_lin_vel_x[env_ids]
                             use_curriculum = curr < upper
                             low = torch.where(use_curriculum, curr - self.curriculum_step, torch.full_like(curr, lower))
@@ -726,10 +693,9 @@ class WTWEnv(DirectRLEnv):
                             self._commands[env_ids, i] = torch.lerp(
                                 low, high, torch.rand(len(env_ids), device=self.device)
                             )
-                        elif i == 1 or i == 2:  # ang_vel에 curriculum 적용
+                        elif i == 1 or i == 2:  # ang_vel
                             curr = self.curriculum_ang_vel[env_ids]
                             use_curriculum = curr < upper
-                            # random sign 선택
                             direction = torch.randint(0, 2, (len(env_ids),), device=self.device) * 2 - 1  # {-1, +1}
                             signed_curr = curr * direction.float()
                             low = torch.where(

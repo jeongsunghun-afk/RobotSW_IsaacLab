@@ -106,14 +106,21 @@ class Go2NeckEnv(WTWEnv):
         # _robot이 초기화된 후 사용 가능
         self._neck_joint_default = self._robot.data.default_joint_pos[:, self._neck_joint_ids].clone()
 
+        # --- Initialize processed actions to size 19 regardless of action_space ---
+        self._processed_actions = torch.zeros(self.num_envs, 19, device=self.device)
+        self._last_processed_actions = torch.zeros(self.num_envs, 19, device=self.device)
+        self._last_last_jrocessed_actions = torch.zeros(self.num_envs, 19, device=self.device)
+
         print("[Go2NeckEnv] Initialized with IsaacLab DifferentialIKController (DLS, position mode)")
 
     # -----------------------------------------------------------------------
     # Pre-physics step: IsaacLab IK 컨트롤러 기반 목 제어
     # -----------------------------------------------------------------------
+    # ... rest ...
+
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self._actions = actions.clone()
+        self._actions = torch.clip(actions.clone(), -self.cfg.clip_actions, self.cfg.clip_actions).to(self.device)
 
         # === 1. 타겟 재선정 타이머 관리 ===
         self._ik_target_timer -= 1
@@ -177,16 +184,26 @@ class Go2NeckEnv(WTWEnv):
         self._current_neck_q = (1.0 - alpha) * self._current_neck_q + alpha * target_neck_q
 
         # === 8. action vector에 반영 ===
-        # processed_actions = action_scale * actions + default_joint_pos
-        # → neck_action = (target_q - default_joint_pos) / action_scale
+        # RL에서 넘겨받은 원본 액션은 self._actions (관측용)에 그대로 유지
+        applied_actions = torch.zeros(self.num_envs, 19, device=self.device)
+        
+        if self.cfg.whole_body_control:
+            applied_actions = self._actions.clone()
+        else:
+            # 12-DOF 다리 제어 배정
+            applied_actions[:, self._non_neck_ids] = self._actions.clone()
+            
+        # 7-DOF 목 제어 역운동학(IK) 타겟으로 덮어쓰기
         neck_default = self._robot.data.default_joint_pos[:, self._neck_joint_ids]  # (N, 7)
         neck_action = (self._current_neck_q - neck_default) / self.cfg.action_scale
-        self._actions[:, self._action_neck_ids] = neck_action
+        applied_actions[:, self._action_neck_ids] = neck_action
+        # applied_actions[:, self._action_neck_ids] = 0.0
 
-        actions = self._actions.clone()
+
         if self.cfg.hip_scale_reduction:
-            actions[:, self._non_neck_ids[:4]] *= 0.5
-        self._processed_actions = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
+            applied_actions[:, self._hip_joint_ids] *= 0.5
+            
+        self._processed_actions = self.cfg.action_scale * applied_actions + self._robot.data.default_joint_pos
 
         # === 9. 타겟 위치 시각화 ===
         self._update_neck_target_vis(root_pos_w, root_quat_w)
@@ -199,16 +216,15 @@ class Go2NeckEnv(WTWEnv):
         """root_frame(base_frame) 기준으로 새 IK 타겟 위치를 샘플링합니다.
 
         head가 도달할 수 있는 범위는 neck chain 총 링크 길이(≈0.265m)를 고려합니다.
-        root_frame의 원점은 로봇 base의 COM이므로, neck이 유체 앞쪽에 있음을 고려한 오프셋 적용.
+        다리와의 충돌을 방지하기 위해 앞쪽 위로 타겟 범위를 제한합니다.
+        (x가 너무 작거나 z가 너무 낮으면 앞다리와 간섭 발생 가성 높음)
         """
         n = len(env_ids)
 
-        # root_frame 기준 타겟 위치 샘플링
-        # neck root가 base 앞쪽 약 0.2m, 위쪽 약 0.05m에 위치
-        # head가 neck root에서 약 0.25m 반경 내에 도달 가능
-        x = torch_rand_float(0.15, 0.40, (n,), self.device)  # 앞 방향 (base 기준)
-        y = torch_rand_float(-0.20, 0.20, (n,), self.device)  # 좌우
-        z = torch_rand_float(0.00, 0.25, (n,), self.device)  # 상하 (base 기준, 위가 양수)
+        # 앞쪽 (x) 최소값을 높이고, 높이 (z) 최소값을 높여서 다리와의 충돌 방지
+        x = torch_rand_float(0.20, 0.40, (n,), self.device)  # 앞 방향 (base 기준, 0.15->0.20)
+        y = torch_rand_float(-0.15, 0.15, (n,), self.device)  # 좌우 (너무 양옆으로 가면 다리와 겹침, +-0.20 -> +-0.15)
+        z = torch_rand_float(0.15, 0.30, (n,), self.device)  # 상하 (base 기준 위쪽 한정, 0.0->0.10)
 
         self._ik_target_pos_b[env_ids, 0] = x
         self._ik_target_pos_b[env_ids, 1] = y
@@ -281,6 +297,49 @@ class Go2NeckEnv(WTWEnv):
     # -----------------------------------------------------------------------
 
     def _get_rewards(self) -> torch.Tensor:
+        if not self.cfg.whole_body_control:
+            # WTWEnv._get_rewards uses `self._previous_actions` (size 12) as a mask for `diff1` (size 19)
+            # To prevent broadcasting errors, temporarily pad the historical actions to 19.
+            orig_actions = self._actions
+            orig_prev = self._previous_actions
+            orig_prev_prev = self._previous_previous_actions
+
+            padded_actions = torch.zeros(self.num_envs, 19, device=self.device)
+            padded_actions[:, self._non_neck_ids] = orig_actions
+            padded_prev = torch.zeros(self.num_envs, 19, device=self.device)
+            padded_prev[:, self._non_neck_ids] = orig_prev
+            padded_prev_prev = torch.zeros(self.num_envs, 19, device=self.device)
+            padded_prev_prev[:, self._non_neck_ids] = orig_prev_prev
+
+            self._actions = padded_actions
+            self._previous_actions = padded_prev
+            self._previous_previous_actions = padded_prev_prev
+            
+            # 목 제어가 아닌 다리 제어 정책의 경우
+            # _get_rewards 내부에서 도출되는 dof_acc_l2, dof_torques_l2, dof_vel_l2 등의 패널티가
+            # 목(Neck)에서 발생하는 수치 때문에 정책 학습에 방해가 되지 않도록 마스킹 처리합니다.
+            orig_joint_vel = self._robot.data.joint_vel.clone()
+            orig_joint_acc = self._robot.data.joint_acc.clone()
+            orig_applied_torque = self._robot.data.applied_torque.clone()
+
+            # 목 부분 상태값을 임시로 0.0 으로 덮어쓰기
+            self._robot.data.joint_vel[:, self._neck_joint_ids] = 0.0
+            self._robot.data.joint_acc[:, self._neck_joint_ids] = 0.0
+            self._robot.data.applied_torque[:, self._neck_joint_ids] = 0.0
+
+            try:
+                ret = super()._get_rewards()
+            finally:
+                self._actions = orig_actions
+                self._previous_actions = orig_prev
+                self._previous_previous_actions = orig_prev_prev
+                
+                # 목 부분 상태값 원상 복구 (Property Setter 오류 방지를 위해 In-place 복구)
+                self._robot.data.joint_vel[:, self._neck_joint_ids] = orig_joint_vel[:, self._neck_joint_ids]
+                self._robot.data.joint_acc[:, self._neck_joint_ids] = orig_joint_acc[:, self._neck_joint_ids]
+                self._robot.data.applied_torque[:, self._neck_joint_ids] = orig_applied_torque[:, self._neck_joint_ids]
+            return ret
+
         return super()._get_rewards()
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:

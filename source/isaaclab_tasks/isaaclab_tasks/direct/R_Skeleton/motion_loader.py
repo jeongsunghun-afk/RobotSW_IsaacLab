@@ -176,10 +176,16 @@ class SkeletonMotionLoader:
             # 저장 순서: [FR(20), HR(37), FL(13), HL(30)]
             # BODY_NAMES 기대 순서: [FL, FR, HL, HR]
             # → [FR→idx1, HR→idx3, FL→idx0, HL→idx2]
+            # Pybullet
             # 원본: [0=FR, 1=HR, 2=FL, 3=HL]
             # 재정렬 목표: [FL(2), FR(0), HL(3), HR(1)]
-            toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)[:, [2, 0, 3, 1], :]
-            toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)[:, [2, 0, 3, 1], :]
+            # toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)[:, [2, 0, 3, 1], :]
+            # toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)[:, [2, 0, 3, 1], :]
+            # Mujoco
+            # 원본: [0=FL, 1=HL, 2=FR, 3=HR]
+            # 재정렬 목표: [FL(0), FR(2), HL(1), HR(3)]
+            toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
+            toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
 
             all_root_pos.append(root_pos)
             all_root_rot_wxyz.append(root_rot_wxyz)

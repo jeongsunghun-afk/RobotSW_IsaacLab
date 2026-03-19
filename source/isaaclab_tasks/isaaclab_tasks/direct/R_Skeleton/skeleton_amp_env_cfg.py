@@ -20,7 +20,9 @@ from isaaclab_assets.robots.rga import R_SKELETON_CFG  # isort: skip
 
 # 모션 파일 디렉토리 (이 파일 기준으로 상대 경로)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_sample")
+# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_sample")
+MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_stmr")
+# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_sample2")
 
 
 @configclass
@@ -53,15 +55,17 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
     # 조기 종료
     early_termination = True
     termination_height = 0.3     # base 높이가 이 값 이하이면 넘어짐으로 판정
+    action_scale = 0.25
 
     # 모션
     motion_file: str = MOTION_FILES_DIR
     reference_body = "base"
-    reset_strategy = "random"    # {"default", "random", "random-start"}
+    reset_strategy = "default"    # {"default", "random", "random-start"}
 
+    # 시뮬레이션 (200 Hz physics, 50 Hz policy)
     # 시뮬레이션 (240 Hz physics, 60 Hz policy)
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 240,
+        dt=1 / 200,
         render_interval=decimation,
         physx=PhysxCfg(
             gpu_found_lost_pairs_capacity=2**23,
@@ -75,7 +79,11 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
     )
 
     # 로봇
-    robot: ArticulationCfg = R_SKELETON_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = R_SKELETON_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot",
+    )
+    # 자기 충돌 활성화 (상대적으로 계산량이 많으므로 환경 클래스에서 필터링 예정)
+    # robot.spawn.articulation_props.enabled_self_collisions = True
 
     # 접촉 센서
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
@@ -90,12 +98,12 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
     curriculum_threshold = 10.0
     curriculum_step = 0.05
     command_cfg = {
-        "lin_vel_x_range": [0.0, 1.0],
+        "lin_vel_x_range": [0.0, 2.0],
         "lin_vel_y_range": [-0.0, 0.0],
         "ang_vel_range": [-0.5, 0.5],
     }
 
     # Tracking 보상
     tracking_sigma = 0.25
-    lin_vel_reward_scale = 1.5
-    yaw_rate_reward_scale = 0.5
+    lin_vel_reward_scale = 1.0 * 1. / (.02 * 6)
+    yaw_rate_reward_scale = 0.5 * 1. / (.02 * 6)

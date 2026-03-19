@@ -273,7 +273,8 @@ class ActorCriticRMA(nn.Module):
     
     def get_hist_latent(self, obs: TensorDict) -> torch.Tensor:
         obs_history = self.get_history_obs(obs)
-        return self.history_encoder(self.history_obs_normalizer(obs_history))
+        obs_history_flat = obs_history.reshape(obs_history.shape[0], -1)
+        return self.history_encoder(self.history_obs_normalizer(obs_history_flat))
 
     def get_priv_latent(self, obs: TensorDict) -> torch.Tensor:
         obs_priv = self.get_priv_obs(obs)
@@ -312,7 +313,7 @@ class ActorCriticRMA(nn.Module):
             actor_obs = self.get_actor_obs(obs)
             self.actor_obs_normalizer.update(actor_obs)
             history_obs = self.get_history_obs(obs)
-            self.history_obs_normalizer.update(history_obs)
+            self.history_obs_normalizer.update(history_obs.reshape(history_obs.shape[0], -1))
             priv_obs = self.get_priv_obs(obs)
             self.priv_obs_normalizer.update(priv_obs)
             if self.scandot_encoder is not None:

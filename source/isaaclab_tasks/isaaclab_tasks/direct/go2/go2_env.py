@@ -170,11 +170,11 @@ class Go2Env(DirectRLEnv):
             "dof_torques_l2": joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
             "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
             "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
-            "feet_air_time": air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
+            # "feet_air_time": air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
             "undesired_contacts": contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
-            "flat_orientation_l2": flat_orientation * self.cfg.flat_orientation_reward_scale * self.step_dt,
-            "similar_to_default": similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
-            "base_height": base_height * self.cfg.base_height_reward_scale * self.step_dt,
+            # "flat_orientation_l2": flat_orientation * self.cfg.flat_orientation_reward_scale * self.step_dt,
+            # "similar_to_default": similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
+            # "base_height": base_height * self.cfg.base_height_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         self.curriculum_rew_buf += reward

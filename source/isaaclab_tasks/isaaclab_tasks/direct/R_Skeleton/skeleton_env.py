@@ -157,8 +157,7 @@ class SkeletonEnv(DirectRLEnv):
             return self._robot.data.body_pos_w[:, self._feet_body_ids, :] - base_pos
 
     def _pre_physics_step(self, actions: torch.Tensor):
-
-        self._actions = actions.clone()
+        self._actions = torch.clip(actions.clone(), -self.cfg.clip_actions, self.cfg.clip_actions).to(self.device)
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
 
     def _apply_action(self):
@@ -284,6 +283,7 @@ class SkeletonEnv(DirectRLEnv):
         # base height
         base_height = torch.square(self._robot.data.root_link_pos_w[:, 2] - self._robot.data.default_root_state[:, 2])
 
+
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
             "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
@@ -304,12 +304,19 @@ class SkeletonEnv(DirectRLEnv):
         self.rew_buf_neg[:] = 0.0
         for key, value in rewards.items():
             self._episode_sums[key] += value
-            if torch.sum(value) >= 0:
-                self.rew_buf_pos += value
-            elif torch.sum(value) <= 0:
-                self.rew_buf_neg += value
+            # Extract positive and negative components explicitly
+            pos_val = torch.clamp(value, min=0.0)
+            neg_val = torch.clamp(value, max=0.0)
+            self.rew_buf_pos += pos_val
+            self.rew_buf_neg += neg_val
 
-        reward = self.rew_buf_pos[:] * torch.exp(self.rew_buf_neg[:] / self.cfg.sigma_rew_neg)
+        # Linear combination + Survival Bonus
+
+        
+        # Scale down penalties severely for initial learning (can be tuned later)
+        penalty_scale = 0.1 
+        
+        reward = self.rew_buf_pos + (self.rew_buf_neg * penalty_scale)
         self.curriculum_rew_buf += reward
         return reward
 

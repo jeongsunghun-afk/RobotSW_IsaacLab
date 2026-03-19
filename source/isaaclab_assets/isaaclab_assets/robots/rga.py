@@ -69,7 +69,7 @@ THIGH_KD = 5.0
 
 KNEE_VEL = 25.0
 KNEE_TORQUE = 53.0
-KNEE_KP = 100.0
+KNEE_KP = 300.0
 KNEE_KD = 5.0
 
 ANKLE_VEL = 51.0
@@ -96,7 +96,8 @@ R_SKELETON_CFG = ArticulationCfg(
         # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R.Skeleton/R_skeleton.usd",
         # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R.SkeletonFixed2/R_skeleton.usd",
         # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R.SkeletonFixed2/R_Skeleton.usd",
-        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Light/R_Skeleton.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Light/R_Skeleton.usd",
+        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Collision/R_skeleton.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -105,17 +106,11 @@ R_SKELETON_CFG = ArticulationCfg(
             max_depenetration_velocity=5.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, solver_position_iteration_count=16, solver_velocity_iteration_count=16
+            enabled_self_collisions=True, solver_position_iteration_count=16, solver_velocity_iteration_count=16
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.609),
-        joint_pos={
-            ".*shoulder_p": 0.03,
-            ".*elbow_p": -0.03,
-            ".*knee_p": 0.09,
-            # ".*toe": 0.0,
-        },
     ),
     actuator_value_resolution_debug_print=True, # type: ignore
     soft_joint_pos_limit_factor=0.9,

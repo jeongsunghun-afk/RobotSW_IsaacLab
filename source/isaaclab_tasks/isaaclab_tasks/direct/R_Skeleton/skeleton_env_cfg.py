@@ -70,6 +70,7 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
     decimation = 4
     action_scale = 0.25
     action_space = 26
+    clip_actions = 6.28
 
     priv_explicit = False
     priv_latent = False
@@ -168,7 +169,7 @@ class SkeletonEnvCfg(DirectRLEnvCfg):
     ang_vel_reward_scale = -0.01
     joint_torque_reward_scale = -0.0002
     joint_accel_reward_scale = -2.5e-7
-    action_rate_reward_scale = -0.001
+    action_rate_reward_scale = -0.01
     feet_air_time_reward_scale = 0.5
     undesired_contact_reward_scale = -1.0
     flat_orientation_reward_scale = -1.0
@@ -209,6 +210,7 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
     decimation = 4
     action_scale = 0.25
     action_space = 38
+    clip_actions = 6.28
 
     priv_explicit = False
     priv_latent = True
@@ -302,13 +304,13 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
     yaw_rate_reward_scale = 0.5
     z_vel_reward_scale = -0.5
     ang_vel_reward_scale = -0.01
-    joint_torque_reward_scale = -0.00001
-    joint_accel_reward_scale = -2.5e-8
-    action_rate_reward_scale = -0.001
+    joint_torque_reward_scale = -0.0002
+    joint_accel_reward_scale = -2.5e-7
+    action_rate_reward_scale = -0.01
     feet_air_time_reward_scale = 0.5
     undesired_contact_reward_scale = -10.0
     flat_orientation_reward_scale = -1.0
-    similar_to_default_reward_scale = -0.1
+    similar_to_default_reward_scale = -0.01
     base_height_reward_scale = -10.0
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
@@ -340,6 +342,7 @@ class SkeletonHistoryFixedEnvCfg(SkeletonHistoryEnvCfg):
     decimation = 4
     action_scale = 0.25
     action_space = 34
+    clip_actions = 6.28
 
     priv_explicit = False
     priv_latent = True
@@ -462,14 +465,14 @@ class SkeletonHistoryFixedEnvCfg(SkeletonHistoryEnvCfg):
     yaw_rate_reward_scale = 0.5
     z_vel_reward_scale = -0.5
     ang_vel_reward_scale = -0.01
-    joint_torque_reward_scale = -0.00001
+    joint_torque_reward_scale = -0.0002
     joint_accel_reward_scale = -2.5e-8
-    action_rate_reward_scale = -0.001
-    feet_air_time_reward_scale = 0.5
+    action_rate_reward_scale = -0.01
+    # feet_air_time_reward_scale = 0.5
     undesired_contact_reward_scale = -10.0
     flat_orientation_reward_scale = -1.0
-    similar_to_default_reward_scale = -0.1
-    base_height_reward_scale = -10.0
+    similar_to_default_reward_scale = -0.01
+    # base_height_reward_scale = -10.0
 
     sigma_rew_neg = 0.02
 
@@ -491,9 +494,9 @@ class SkeletonHistoryFixedEnvCfg(SkeletonHistoryEnvCfg):
     curriculum_threshold = 10.0
     curriculum_step = 0.05
     command_cfg = {
-        "lin_vel_x_range": [0.0, 0.0],
+        "lin_vel_x_range": [0.0, 2.0],
         "lin_vel_y_range": [-0.0, 0.0],
-        "ang_vel_range": [-0.0, 0.0],
+        "ang_vel_range": [-0.5, 0.5],
     }
 
 @configclass

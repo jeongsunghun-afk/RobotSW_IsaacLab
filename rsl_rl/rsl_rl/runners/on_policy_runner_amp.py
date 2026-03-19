@@ -133,8 +133,8 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
                 amp_loss_dict = self.alg.update_amp(expert_amp_obs_batch, policy_amp_obs_batch)
                 
                 # Freeze Discriminator for Actor-Critic Update
-                for param in self.alg.discriminator.parameters():
-                    param.requires_grad = False
+                # for param in self.alg.discriminator.parameters():
+                #     param.requires_grad = False
             else:
                 amp_loss_dict = {}
             

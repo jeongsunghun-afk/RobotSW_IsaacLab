@@ -177,10 +177,11 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------ #
     num_commands: int = 3
     command_cfg: dict = {
-        "lin_vel_x_range": [-0.3, 0.3],
-        "lin_vel_y_range": [-0.3, 0.3],
-        "ang_vel_range": [-0.3, 0.3],
+        # Interaction 테스크에서는 속도 커맨드를 사용하지 않으므로 비워둡니다.
     }
+
+    # 보상 계산 기준 좌표계 ("world" 또는 "base")
+    reward_frame: str = "world"
 
     # ------------------------------------------------------------------ #
     # 모션 데이터 설정
@@ -198,6 +199,7 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     y_offset: float = 0.07
     z_offset: float = 0.05
     x_offset: float = 0.0
+    target_default_hind_x: float = -0.25  # 참조 데이터 정렬용 뒷발 X 좌표 (기존 -0.295에서 조정)
 
     # Genesis 참조 데이터의 관절 인덱스
     # FL_hip(15), FR_hip(20), RL_hip(4), RR_hip(8)
@@ -237,7 +239,7 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     action_rate_reward_scale: float = -0.01
     delta_torques_reward_scale: float = -1.0e-5
     torques_reward_scale: float = -0.0001
-    similar_to_default_reward_scale: float = 1.0
+    similar_to_default_reward_scale: float = 5.0  # 정적 자세 유지 강화를 위해 상향 (기존 1.0)
     lin_vel_z_reward_scale: float = -1.0
     ang_vel_xy_reward_scale: float = -0.5
     torques_balance_reward_scale: float = -0.01

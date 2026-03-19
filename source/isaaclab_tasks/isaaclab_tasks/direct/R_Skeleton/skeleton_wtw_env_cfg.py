@@ -16,13 +16,8 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg, GaussianNoiseCfg
 
-##
-# Pre-defined configs
-##
-# from isaaclab_assets.robots.rga import MOTION_JIG_CFG  # isort: skip
-from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
-from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
-from isaaclab_assets.robots.rga import RGA_GO2_CFG
+from isaaclab_assets.robots.rga import R_SKELETON_CFG
+from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 @configclass
 class EventCfg:
@@ -33,56 +28,24 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.8, 0.8),
-            "dynamic_friction_range": (0.6, 0.6),
-            "restitution_range": (0.0, 0.0),
+            "static_friction_range": (5.0, 5.0),
+            "dynamic_friction_range": (2.0, 2.0),
+            "restitution_range": (0.1, 0.1),
             "num_buckets": 64,
         },
     )
 
-    add_base_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_distribution_params": (-1.0, 6.0),
-            "operation": "add",
-        },
-    )
-
-    randomize_com = EventTerm(
-        func=mdp.randomize_rigid_body_com,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "com_range": {"x": (-0.15, 0.15), "y": (-0.05, 0.05), "z": (-0.01, 0.01)},
-        },
-    )
-
-    robot_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
-        mode="reset",
-        params={
-          "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-          "stiffness_distribution_params": (0.75, 1.5),
-          "damping_distribution_params": (0.3, 3.0),
-          "operation": "scale",
-          "distribution": "log_uniform",
-        },
-    )
-
-
 @configclass
-class Go2FlatEnvCfg(DirectRLEnvCfg):
+class SkeletonWtwEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     resampling_time = 5.0
     dt = 1 / 200
     decimation = 4
     action_scale = 0.25
-    action_space = 12
-    clip_actions = 10.0
-    hip_scale_reduction = True
+    action_space = 34
+    clip_actions = 6.28
+    hip_scale_reduction = False  # Set to false for skeleton unless requested otherwise
 
     priv_explicit = False
     priv_latent = True
@@ -94,6 +57,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     history_observation = True
     debug_vis = True
 
+    # 3 (lin vel) + 14 (projected grav + commands) + action_space*3 (joint pos, joint vel, actions)
     num_prio_obs = 3 + 14 + action_space * 3
 
     if timing_parameter:
@@ -106,13 +70,32 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     num_priv = 3 if priv_explicit else 0
     num_friction = 1 if friction_terrain else 31
     num_priv_latent = 4 + num_friction if priv_latent else 0
-    history_len = 20
+    history_len = 10
 
     observation_space = num_prio_obs + num_heights + num_priv + num_priv_latent + num_prio_obs * history_len
 
     state_space = 0
 
-    penalized_body_names = ['base', '.*thigh', '.*calf', '.*hip']
+    penalized_body_names = [
+        ".*_shoulder_y",
+        ".*_shoulder_r",
+        ".*_shoulder_p",
+        ".*_thigh_y",
+        ".*_thigh_r",
+        ".*_thigh_p",
+        ".*_elbow_p",
+        ".*_knee_p",
+        ".*_ankle_p",
+        ".*_ankle_r",
+        ".*_wrist_p",
+        ".*_wrist_r",
+        ".*_neck_p",
+        ".*_neck_r",
+        ".*_neck_y",
+        ".*_waist_p",
+        ".*_waist_r",
+        ".*_waist_y",
+    ]
     
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -147,29 +130,28 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     # robot
-    robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = R_SKELETON_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.005, track_air_time=True
     )
 
-
     gait_force_sigma = 100.
     gait_vel_sigma = 10.
     tracking_sigma = 0.25
-    base_height_target = 0.34
+    base_height_target = 0.608 # Updated base height for skeleton
     sigma_rew_neg = 0.02
+
     # reward scales
-    lin_vel_reward_scale = 1.2
-    yaw_rate_reward_scale = 0.7
-    z_vel_reward_scale = -0.02
-    ang_vel_reward_scale = -0.001
-    # joint_torque와 action_rate 페널티를 절반 정도로 줄여 다리가 힘을 더 잘 내게 함
-    joint_torque_reward_scale = -0.0001
-    joint_accel_reward_scale = -2.5e-7
-    action_rate_reward_scale = -0.005
+    lin_vel_reward_scale = 1.5
+    yaw_rate_reward_scale = 0.75
+    z_vel_reward_scale = -0.5
+    ang_vel_reward_scale = -0.01
+    joint_torque_reward_scale = -0.00001
+    joint_accel_reward_scale = -1e-8
+    action_rate_reward_scale = -0.01
     undesired_contact_reward_scale = -10.0
-    jump_reward_scale = 10.
-    raibert_heuristic_reward_scale = -10.
+    jump_reward_scale = 5.0
+    raibert_heuristic_reward_scale = -10.0
     feet_clearance_cmd_linear_reward_scale = -30
     orientation_control_reward_scale = -5
     tracking_contacts_shaped_force_reward_scale = 1.0
@@ -177,8 +159,6 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     dof_vel_reward_scale = -1e-5
     action_smoothness1_reward_scale = -0.1
     action_smoothness2_reward_scale = -0.1
-
-
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
@@ -199,41 +179,23 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     curriculum_step = 0.05
     command_cfg = {
         "lin_vel_x_range": [-0.5, 1.5],
-        "lin_vel_y_range": [-0.5, 0.5],
+        "lin_vel_y_range": [-0.0, 0.0],
         "ang_vel_range": [-0.5, 0.5],
-        "body_height_cmd_range": [-0.25, 0.1],
-        "gait_frequency_cmd_range": [2.0, 4.0],
+        "body_height_cmd_range": [-0.3, 0.15],
+        "gait_frequency_cmd_range": [1.5, 3.0],
         "gait_phase_cmd_range": [0.0, 1.0],
         "gait_offset_cmd_range": [0.0, 1.0],
         "gait_bound_cmd_range": [0.0, 1.0],
-        "gait_duration_cmd_range": [0.5, 0.5],
+        "gait_duration_cmd_range": [0.3, 0.7],
         "footswing_height_range": [0.03, 0.2],
-        "body_pitch_range": [-0.4, 0.4],
+        "body_pitch_range": [-0., 0.],
         "body_roll_range": [-0., 0.],
-        "stance_width_range": [0.10, 0.45],
-        "stance_length_range": [0.35, 0.45]
+        "stance_width_range": [0.19, 0.20], #0.195
+        "stance_length_range": [0.75, 0.85]
     }
-
-    command_cfg = {
-        "lin_vel_x_range": [-1.0, 2.0],
-        "lin_vel_y_range": [-0.5, 0.5],
-        "ang_vel_range": [-1.0, 1.0],
-        "body_height_cmd_range": [-0.2, 0.1],
-        "gait_frequency_cmd_range": [2.0, 4.0],
-        "gait_phase_cmd_range": [0.0, 1.0],
-        "gait_offset_cmd_range": [0.0, 1.0],
-        "gait_bound_cmd_range": [0.0, 1.0],
-        "gait_duration_cmd_range": [0.5, 0.5],
-        "footswing_height_range": [0.03, 0.2],
-        "body_pitch_range": [-0.3, 0.3],
-        "body_roll_range": [-0., 0.],
-        "stance_width_range": [0.1, 0.45],
-        "stance_length_range": [0.35, 0.45]
-    }
-
 
 @configclass
-class Go2RoughEnvCfg(Go2FlatEnvCfg):
+class SkeletonWtwRoughEnvCfg(SkeletonWtwEnvCfg):
     # env
     observation_space = 235
 
@@ -265,44 +227,3 @@ class Go2RoughEnvCfg(Go2FlatEnvCfg):
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
-
-    # reward scales (override from flat config)
-    flat_orientation_reward_scale = 0.0
-
-
-@configclass
-class Go2NeckFlatEnvCfg(Go2FlatEnvCfg):
-    # env
-    whole_body_control: bool = False
-    
-    action_space = 19 # 12 (legs) + 7 (neck)
-    
-    clock_inputs = True
-    # observation
-    # num_prio_obs = 3 (lin_vel) + 14 (projected_gravity + commands) + 19 (joint_pos) + 19 (joint_vel) + 19 (actions)
-    num_prio_obs = 3 + 14 + action_space * 3 # 74
-
-    if clock_inputs:
-        num_prio_obs += 4
-    
-    history_len = 20
-
-    observation_space = num_prio_obs + (num_prio_obs * history_len) # 74 + 74 * 20 = 1554
-    
-    # robot
-    robot = RGA_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    
-    # update penalized body names to include neck if necessary
-    penalized_body_names = ['base', '.*thigh', '.*calf', '.*hip', '.*neck_p', '.*neck_r', '.*neck_y']
-    # neck action smoothness
-    neck_alpha = 0.1
-
-    def __post_init__(self):
-        super().__post_init__()
-        # Adjust dimensions based on control mode
-        self.action_space = 19 if self.whole_body_control else 12
-        # obs is composed of: gravity(3) + commands(14) + joint_pos(19) + joint_vel(19) + actions(action_space)
-        self.num_prio_obs = 3 + 14 + 19 * 2 + self.action_space
-        if self.clock_inputs:
-            self.num_prio_obs += 4
-        self.observation_space = self.num_prio_obs + (self.num_prio_obs * self.history_len)
