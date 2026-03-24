@@ -169,8 +169,9 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = -0.005
     undesired_contact_reward_scale = -10.0
     jump_reward_scale = 10.
-    raibert_heuristic_reward_scale = -10.
-    feet_clearance_cmd_linear_reward_scale = -30
+    raibert_heuristic_reward_scale = 0.
+    feet_clearance_cmd_linear_reward_scale = 0.
+    feet_clearance_bezier_reward_scale = -10.0
     orientation_control_reward_scale = -5
     tracking_contacts_shaped_force_reward_scale = 1.0
     tracking_contacts_shaped_vel_reward_scale = 1.0
@@ -219,11 +220,11 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         "lin_vel_y_range": [-0.5, 0.5],
         "ang_vel_range": [-1.0, 1.0],
         "body_height_cmd_range": [-0.2, 0.1],
-        "gait_frequency_cmd_range": [2.0, 4.0],
+        "gait_frequency_cmd_range": [1.5, 4.0],
         "gait_phase_cmd_range": [0.0, 1.0],
         "gait_offset_cmd_range": [0.0, 1.0],
         "gait_bound_cmd_range": [0.0, 1.0],
-        "gait_duration_cmd_range": [0.5, 0.5],
+        "gait_duration_cmd_range": [0.3, 0.7],
         "footswing_height_range": [0.03, 0.2],
         "body_pitch_range": [-0.3, 0.3],
         "body_roll_range": [-0., 0.],

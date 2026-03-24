@@ -1,18 +1,19 @@
-# Progress
+# Progress Log
 
-## Session 1 — 2026-03-23
+## Session: 2026-03-24
 
-### Completed
-- [x] Phase 1: 데이터 구조 파악
-  - contact_sensor.data.net_forces_w shape 확인
-  - report_data_recorder.py 현재 구조 확인
-  - 실시간 마커 API (VisualizationMarkers) 확인
+### 완료
+- [x] go2_wtw_env.py 코드 분석
+  - 기존 feet_clearance_cmd_linear 구조 파악
+  - foot_indices, desired_contact_states, desired_footsteps_world_frame 이해
+  - swing_start_pos 버퍼 부재 확인
+  - _episode_sums 자동 초기화 확인
+- [x] 사용자 Bezier 구현안 타당성 검토 완료
+  - 주요 이슈: phase 변수가 삼각파 → 단조증가로 수정 필요
+  - swing_start_pos 버퍼 추가 필요
+  - desired_footsteps_world_frame z=0 확인 (c3=0)
+- [x] task_plan.md, findings.md 작성
 
-### Completed
-- [x] Phase 2: report_data_recorder.py — contact_forces 버퍼, record(), save(), _save_csv(), _plot_contact_forces() 추가
-- [x] Phase 3: Collision Force Plot — body별 force magnitude, 발/비발 색상 구분, threshold 초과 배경 강조
-- [x] Phase 4: report.py — VisualizationMarkers 실시간 sphere 마커 (force>1N body에 빨간 구체)
-
-### Notes
-- 기존 코드 패턴 유지하며 최소 변경
-- contact_sensor 없는 env → graceful skip
+### 다음 단계
+- go2_wtw_env_cfg.py에서 scale 파라미터 확인 후 추가
+- go2_wtw_env.py 6단계 구현

@@ -386,7 +386,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # ── 추론 ────────────────────────────────────────────────────────
             actions = policy(obs)
-            actions = torch.zeros_like(actions, device=actions.device)
+            # actions = torch.zeros_like(actions, device=actions.device)
 
             # ── Collision 센서 lazy-init (reset() 이후 첫 스텝에서 수행) ────────
             if not _collision_sensor_ready and _contact_sensor_ref is not None:

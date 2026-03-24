@@ -100,6 +100,7 @@ R_SKELETON_CFG = ArticulationCfg(
         # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Collision/R_skeleton.usd",
         # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Collision2/R_skeleton.usd",
         usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Collision3/R_skeleton.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Collision4/R_skeleton.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
