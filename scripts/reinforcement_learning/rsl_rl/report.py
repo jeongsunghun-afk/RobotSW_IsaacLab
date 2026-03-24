@@ -97,6 +97,7 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import copy
 import time
 import datetime
 
@@ -115,6 +116,8 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
+from isaaclab.markers import VisualizationMarkers
+from isaaclab.markers.config import SPHERE_MARKER_CFG
 
 from isaaclab_rl.rsl_rl import (
     RslRlBaseRunnerCfg,
@@ -305,6 +308,46 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
 
+    # ── Collision Force 실시간 마커 초기화 ───────────────────────────
+    # contact_sensor의 net_forces_w를 이용해 충돌 중인 링크를 실시간 시각화.
+    # - External collision (발/지면 접촉): 빨간색 sphere
+    # - Self-collision (발 아닌 링크 + 높이 충분): 노란색 sphere
+    # force_matrix_w는 filter_prim_paths_expr 미설정으로 사용 불가.
+    # 링크 쌍은 공간 근접성(두 self-collision 링크 간 거리) 휴리스틱으로 추론.
+    # NOTE: 마커 객체만 여기서 생성. body_names/find_bodies는 센서 초기화가
+    # 완료되는 env.reset() 이후 루프 첫 스텝에서 lazy-init으로 수행.
+    _CONTACT_THRESHOLD = 1.0    # N: 이 값 이상의 force를 collision로 판단
+    _GROUND_HEIGHT_THRESH = 0.12  # m: body z 위치가 이보다 낮으면 external 판단
+    _PAIR_DIST_THRESH = 0.25    # m: 이 거리 이내의 두 링크는 서로 충돌 쌍으로 추론
+    _COLLISION_LOG_INTERVAL = 50  # 스텝마다 터미널 로그 출력
+    _ext_contact_marker = None
+    _self_contact_marker = None
+    _sensor_body_names: list[str] = []
+    _foot_sensor_ids: list[int] = []
+    _collision_sensor_ready = False   # reset() 후 lazy-init 완료 플래그
+    _contact_sensor_ref = getattr(env.unwrapped, "contact_sensor", None)
+    if _contact_sensor_ref is not None:
+        try:
+            # External collision 마커 — 빨간색 sphere
+            _ext_cfg = copy.deepcopy(SPHERE_MARKER_CFG)
+            _ext_cfg.markers["sphere"].radius = 0.07  # type: ignore[attr-defined]
+            _ext_cfg.markers["sphere"].visual_material.diffuse_color = (1.0, 0.1, 0.1)  # type: ignore[attr-defined]
+            _ext_cfg.prim_path = "/Visuals/ContactForce/external"
+            _ext_contact_marker = VisualizationMarkers(_ext_cfg)
+            print("[INFO] External collision 마커 생성 완료.")
+        except Exception as _e:
+            print(f"[WARN] External 마커 생성 실패 (skip): {_e}")
+        try:
+            # Self-collision 마커 — 노란색 sphere
+            _self_cfg = copy.deepcopy(SPHERE_MARKER_CFG)
+            _self_cfg.markers["sphere"].radius = 0.07  # type: ignore[attr-defined]
+            _self_cfg.markers["sphere"].visual_material.diffuse_color = (1.0, 1.0, 0.0)  # type: ignore[attr-defined]
+            _self_cfg.prim_path = "/Visuals/ContactForce/self"
+            _self_contact_marker = VisualizationMarkers(_self_cfg)
+            print("[INFO] Self-collision 마커 생성 완료.")
+        except Exception as _e:
+            print(f"[WARN] Self 마커 생성 실패 (skip): {_e}")
+
     # ── 시뮬레이션 루프 ──────────────────────────────────────────────
     dt = env.unwrapped.step_dt
     
@@ -344,6 +387,95 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # ── 추론 ────────────────────────────────────────────────────────
             actions = policy(obs)
             actions = torch.zeros_like(actions, device=actions.device)
+
+            # ── Collision 센서 lazy-init (reset() 이후 첫 스텝에서 수행) ────────
+            if not _collision_sensor_ready and _contact_sensor_ref is not None:
+                try:
+                    if hasattr(_contact_sensor_ref, "body_names"):
+                        _sensor_body_names = list(_contact_sensor_ref.body_names)
+                    _foot_ids_t, _ = _contact_sensor_ref.find_bodies(".*foot")
+                    _foot_sensor_ids = _foot_ids_t.tolist() if hasattr(_foot_ids_t, "tolist") else list(_foot_ids_t)
+                    print(f"[INFO] Collision 센서 초기화 완료. 추적 bodies: {len(_sensor_body_names)}, 발 IDs: {_foot_sensor_ids}")
+                except Exception as _lazy_e:
+                    print(f"[WARN] Collision 센서 lazy-init 실패: {_lazy_e}")
+                _collision_sensor_ready = True  # 실패해도 재시도 안 함
+
+            # ── Collision Force 마커 업데이트 ────────────────────────────────
+            # force_matrix_w 미사용(filter_prim_paths_expr 없음).
+            # net_forces_w + 높이 휴리스틱으로 external/self 구분.
+            # self-collision 쌍은 공간 근접성으로 추론 후 터미널 로그 출력.
+            if (_ext_contact_marker is not None or _self_contact_marker is not None) and _contact_sensor_ref is not None:
+                try:
+                    forces_w = _contact_sensor_ref.data.net_forces_w  # (num_envs, num_sensor_bodies, 3)
+                    _robot_vis = getattr(env.unwrapped, "_robot", None)
+                    if forces_w is not None and forces_w.numel() > 0 and _robot_vis is not None:
+                        force_mag = forces_w.norm(dim=-1)          # (num_envs, num_sensor_bodies)
+                        contact_mask = force_mag > _CONTACT_THRESHOLD
+
+                        # robot body_pos_w와 sensor 인덱스 범위 맞추기
+                        body_pos_w = _robot_vis.data.body_pos_w    # (num_envs, num_robot_bodies, 3)
+                        n_s = forces_w.shape[1]
+                        n_r = body_pos_w.shape[1]
+                        n_b = min(n_s, n_r)
+                        contact_mask = contact_mask[:, :n_b]
+                        body_pos = body_pos_w[:, :n_b, :]          # (num_envs, n_b, 3)
+
+                        # 발 body 마스크 (1D, shape: n_b)
+                        foot_mask = torch.zeros(n_b, dtype=torch.bool, device=forces_w.device)
+                        for _fid in _foot_sensor_ids:
+                            if _fid < n_b:
+                                foot_mask[_fid] = True
+
+                        body_z = body_pos[..., 2]                  # (num_envs, n_b)
+                        low_mask = body_z < _GROUND_HEIGHT_THRESH  # 지면 근접 body
+
+                        # External: 발 body이거나 지면 근접 body 중 contact 있는 것
+                        ext_mask = contact_mask & (foot_mask.unsqueeze(0) | low_mask)
+                        # Self-collision: 발 아닌 body, 지면 높이 이상, contact 있는 것
+                        self_mask = contact_mask & ~foot_mask.unsqueeze(0) & ~low_mask
+
+                        # 마커 업데이트
+                        if _ext_contact_marker is not None:
+                            ext_pos = body_pos[ext_mask]
+                            if ext_pos.shape[0] > 0:
+                                _ext_contact_marker.visualize(ext_pos)
+                            else:
+                                _ext_contact_marker.set_visibility(False)
+
+                        if _self_contact_marker is not None:
+                            self_pos = body_pos[self_mask]
+                            if self_pos.shape[0] > 0:
+                                _self_contact_marker.visualize(self_pos)
+                            else:
+                                _self_contact_marker.set_visibility(False)
+
+                        # 터미널 로그: 충돌 링크 이름 + self-collision 쌍 추론 출력
+                        if timestep % _COLLISION_LOG_INTERVAL == 0 and (ext_mask.any() or self_mask.any()):
+                            print(f"[Collision @ step {timestep}]")
+                            for _ei in range(min(forces_w.shape[0], 4)):
+                                _ext_ids = ext_mask[_ei].nonzero(as_tuple=True)[0].tolist()
+                                _self_ids = self_mask[_ei].nonzero(as_tuple=True)[0].tolist()
+                                if _ext_ids:
+                                    _ext_names = [_sensor_body_names[i] if i < len(_sensor_body_names) else f"body_{i}" for i in _ext_ids]
+                                    print(f"  [Env{_ei}] External (빨강): {_ext_names}")
+                                if _self_ids:
+                                    _self_names = [_sensor_body_names[i] if i < len(_sensor_body_names) else f"body_{i}" for i in _self_ids]
+                                    print(f"  [Env{_ei}] Self-Collision 링크 (노랑): {_self_names}")
+                                    # 공간 근접성으로 충돌 쌍 추론
+                                    if len(_self_ids) >= 2:
+                                        _self_pos_ei = body_pos[_ei, _self_ids, :]  # (k, 3)
+                                        _pairs_found = []
+                                        for _pi in range(len(_self_ids)):
+                                            for _pj in range(_pi + 1, len(_self_ids)):
+                                                _d = (_self_pos_ei[_pi] - _self_pos_ei[_pj]).norm().item()
+                                                if _d < _PAIR_DIST_THRESH:
+                                                    _na = _self_names[_pi]
+                                                    _nb = _self_names[_pj]
+                                                    _pairs_found.append(f"{_na} <-> {_nb} (dist={_d:.3f}m)")
+                                        if _pairs_found:
+                                            print(f"  [Env{_ei}] 추정 충돌 쌍: {_pairs_found}")
+                except Exception:
+                    pass
 
             # print(actions)
 

@@ -97,8 +97,8 @@ class PPOAMP(PPOParkour):
         total_loss.backward()
         self.disc_optimizer.step()
         
-        # update obs normalization
-        self.discriminator.update_normalization(policy_batch)
+        # update obs normalization (expert + policy 모두 포함)
+        self.discriminator.update_normalization(torch.cat([expert_batch, policy_batch]))
 
         # 명시적 메모리 해제 (VRAM 누수 방지)
         expert_loss_val = expert_loss.item()

@@ -1,0 +1,13 @@
+{
+    "python.defaultInterpreterPath": "/home/user/miniconda3/envs/isaac/bin/python3.11",
+    "python.interpreter.infoVisibility": "always",
+    "python.envFile": "${workspaceFolder}/.env",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/source/isaaclab",
+        "${workspaceFolder}/source/isaaclab_assets",
+        "${workspaceFolder}/source/isaaclab_tasks",
+        "${workspaceFolder}/source/isaaclab_rl",
+        "${workspaceFolder}/source/isaaclab_mimic",
+        "${workspaceFolder}/source/isaaclab_contrib"
+    ]
+}

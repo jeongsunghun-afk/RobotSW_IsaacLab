@@ -244,6 +244,10 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     ang_vel_xy_reward_scale: float = -0.5
     torques_balance_reward_scale: float = -0.01
 
+    # Stand 앞다리 진동 억제
+    stand_front_vel_reward_scale: float = -0.05   # [A] FL/FR 관절 속도² 페널티 (음수)
+    front_stillness_reward_scale: float = 0.5     # [B] 타겟 근방 정지 보상 (양수)
+
     # ------------------------------------------------------------------ #
     # 노이즈 모델
     # ------------------------------------------------------------------ #

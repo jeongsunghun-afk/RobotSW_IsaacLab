@@ -11,11 +11,13 @@ results 폴더 내 개별 환경별 디렉토리에 CSV / 조인트 분할 Plot 
     - processed actions     (num_joints)
     - base linear velocity  (3, body frame)
     - base angular velocity (3, body frame)
+    - contact force magnitude (num_bodies) — self-collision/외부 충돌 감지
 
 Plots 분할:
     1. 왼쪽 다리 (Left Leg)
     2. 오른쪽 다리 (Right Leg)
     3. 허리/목 등 (Waist/Neck/Other)
+    4. Contact Forces (발/비발 분리, 임계값 강조)
 """
 
 from __future__ import annotations
@@ -123,6 +125,9 @@ class ReportMultiDataRecorder:
         self._proc_actions: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
         self._lin_vel: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
         self._ang_vel: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
+        # contact force magnitude per body: [env_id][step_idx] = np.ndarray(num_bodies,)
+        self._contact_forces: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
+        self._body_names: list[str] = []  # 최초 record 시 채워짐
 
         self._step = 0
         self._saved = False
@@ -148,6 +153,8 @@ class ReportMultiDataRecorder:
             self._proc_actions[i].clear()
             self._lin_vel[i].clear()
             self._ang_vel[i].clear()
+            self._contact_forces[i].clear()
+        self._body_names = []
         self._step = 0
         self._saved = False
 
@@ -175,6 +182,20 @@ class ReportMultiDataRecorder:
             else:
                 curr_proc_actions = np.zeros_like(curr_joint_pos)
 
+            # Contact force magnitude per body: (num_envs, num_bodies)
+            curr_contact_forces = None
+            contact_sensor = getattr(base_env, "contact_sensor", None)
+            if contact_sensor is not None:
+                forces_w = getattr(contact_sensor.data, "net_forces_w", None)
+                if forces_w is not None and forces_w.numel() > 0:
+                    # forces_w: (num_envs, num_bodies, 3) → magnitude: (num_envs, num_bodies)
+                    curr_contact_forces = forces_w.norm(dim=-1).detach().cpu().numpy()
+                    # body_names는 최초 1회만 저장
+                    if not self._body_names:
+                        self._body_names = list(robot.data.body_names)
+
+            num_bodies = curr_contact_forces.shape[1] if curr_contact_forces is not None else 0
+
             for i in range(self._num_envs):
                 self._torques[i].append(curr_torques[i].copy())
                 self._joint_pos[i].append(curr_joint_pos[i].copy())
@@ -182,6 +203,10 @@ class ReportMultiDataRecorder:
                 self._proc_actions[i].append(curr_proc_actions[i].copy())
                 self._lin_vel[i].append(curr_lin_vel[i].copy())
                 self._ang_vel[i].append(curr_ang_vel[i].copy())
+                if curr_contact_forces is not None:
+                    self._contact_forces[i].append(curr_contact_forces[i].copy())
+                else:
+                    self._contact_forces[i].append(np.zeros(num_bodies, dtype=np.float32))
 
         except Exception as e:
             print(f"[ReportMultiDataRecorder] 데이터 수집 오류 (스텝 {self._step}): {e}", flush=True)
@@ -248,9 +273,11 @@ class ReportMultiDataRecorder:
             proc_actions = np.array(self._proc_actions[env_id]) * (180.0 / np.pi)
             lin_vel = np.array(self._lin_vel[env_id])
             ang_vel = np.array(self._ang_vel[env_id]) * (180.0 / np.pi)
+            contact_forces = np.array(self._contact_forces[env_id]) if self._contact_forces[env_id] else None
 
             self._save_csv(
-                env_dir, joint_names, torques, joint_pos, joint_vel, proc_actions, lin_vel, ang_vel
+                env_dir, joint_names, torques, joint_pos, joint_vel, proc_actions, lin_vel, ang_vel,
+                contact_forces, self._body_names,
             )
 
             # 조인트 파트별 그래프 생성 헬퍼
@@ -277,6 +304,10 @@ class ReportMultiDataRecorder:
             # Base Velocity Plot
             self._plot_base_velocity(lin_vel, ang_vel, env_dir / "base_velocity.png")
 
+            # Contact Force Plot
+            if contact_forces is not None and contact_forces.ndim == 2 and contact_forces.shape[1] > 0:
+                self._plot_contact_forces(contact_forces, self._body_names, env_dir / "contact_forces.png")
+
         print(f"[ReportMultiDataRecorder] 모든 환경 데이터 저장 완료: {base_save_dir}")
         self._saved = True
         return base_save_dir
@@ -287,6 +318,8 @@ class ReportMultiDataRecorder:
         joint_names: list[str],
         torques, joint_pos, joint_vel, proc_actions,
         lin_vel, ang_vel,
+        contact_forces=None,
+        body_names=None,
     ) -> None:
         import csv
 
@@ -303,6 +336,13 @@ class ReportMultiDataRecorder:
         headers += ["lin_vel_x", "lin_vel_y", "lin_vel_z",
                     "ang_vel_x", "ang_vel_y", "ang_vel_z"]
 
+        # contact force 헤더
+        has_contact = contact_forces is not None and contact_forces.ndim == 2 and contact_forces.shape[1] > 0
+        if has_contact:
+            n_bodies = contact_forces.shape[1]
+            cf_names = body_names if (body_names and len(body_names) == n_bodies) else [f"body_{b}" for b in range(n_bodies)]
+            headers += [f"contact_{bn.replace(',', '_')}" for bn in cf_names]
+
         csv_path = save_dir / "robot_data.csv"
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
@@ -317,6 +357,8 @@ class ReportMultiDataRecorder:
                         proc_actions[t, j],
                     ]
                 row += list(lin_vel[t]) + list(ang_vel[t])
+                if has_contact:
+                    row += list(contact_forces[t])
                 writer.writerow(row)
 
         rms_path = save_dir / "rms_summary.csv"
@@ -335,6 +377,21 @@ class ReportMultiDataRecorder:
                                   ("ang_vel_x", 0), ("ang_vel_y", 1), ("ang_vel_z", 2)]:
                 arr = lin_vel[:, idx] if ax_name.startswith("lin") else ang_vel[:, idx]
                 writer.writerow([ax_name, _rms_no_outlier(arr), "", "", ""])
+
+        # contact force RMS 별도 CSV
+        if has_contact:
+            cf_rms_path = save_dir / "contact_forces_rms.csv"
+            with open(cf_rms_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["body", "max_force_N", "mean_force_N", "contact_ratio"])
+                for b, bn in enumerate(cf_names):
+                    col = contact_forces[:, b]
+                    writer.writerow([
+                        bn,
+                        float(col.max()),
+                        float(col.mean()),
+                        float((col > 1.0).mean()),  # 1N 초과 비율
+                    ])
 
     def _plot_base_velocity(
         self,
@@ -366,6 +423,69 @@ class ReportMultiDataRecorder:
             ax.legend(fontsize=6)
 
         fig.suptitle("Base Velocity (Body Frame)", fontsize=11, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=130)
+        plt.close(fig)
+
+    def _plot_contact_forces(
+        self,
+        contact_forces: np.ndarray,   # [steps, num_bodies]
+        body_names: list[str],
+        save_path: pathlib.Path,
+        threshold: float = 1.0,
+        ncols: int = 4,
+    ) -> None:
+        """body별 contact force magnitude를 시각화합니다.
+
+        발(foot) body는 초록색, 비발 body는 파란색으로 표시합니다.
+        threshold(기본 1N)를 초과하는 구간은 붉은 배경으로 강조합니다.
+        """
+        n_bodies = contact_forces.shape[1]
+        if n_bodies == 0:
+            return
+
+        # foot vs non-foot 분류
+        foot_keywords = ["toe", "foot", "link7"]
+        is_foot = [
+            any(kw in name.lower() for kw in foot_keywords)
+            for name in body_names
+        ]
+
+        nrows = max(1, (n_bodies + ncols - 1) // ncols)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 2.8))
+        axes = np.array(axes).reshape(-1)
+
+        steps = np.arange(contact_forces.shape[0])
+
+        for b, (ax, name) in enumerate(zip(axes, body_names)):
+            y = contact_forces[:, b]
+            color = "mediumseagreen" if is_foot[b] else "steelblue"
+
+            # threshold 초과 구간 배경 강조
+            above = y > threshold
+            if above.any():
+                starts = np.where(np.diff(np.concatenate([[False], above, [False]])))[0]
+                ends = np.where(np.diff(np.concatenate([[False], above, [False]])) < 0)[0]
+                for s, e in zip(starts, ends):
+                    ax.axvspan(s, e, color="tomato", alpha=0.25)
+
+            ax.plot(steps, y, linewidth=0.9, color=color)
+            ax.axhline(threshold, color="tomato", linewidth=1.0, linestyle="--",
+                       label=f"thr={threshold:.1f}N")
+            max_f = float(y.max())
+            ratio = float((y > threshold).mean()) * 100.0
+            ax.set_title(f"{name}\nmax={max_f:.1f}N  hit={ratio:.1f}%", fontsize=7)
+            ax.set_ylabel("Force [N]", fontsize=7)
+            ax.set_xlabel("step", fontsize=7)
+            ax.tick_params(labelsize=6)
+            ax.legend(fontsize=5)
+
+        # 빈 subplot 숨기기
+        for ax in axes[n_bodies:]:
+            ax.set_visible(False)
+
+        fig.suptitle("Contact Forces per Body  (green=foot / blue=other / red bg=above threshold)",
+                     fontsize=10, fontweight="bold")
         plt.tight_layout()
         plt.savefig(save_path, dpi=130)
         plt.close(fig)

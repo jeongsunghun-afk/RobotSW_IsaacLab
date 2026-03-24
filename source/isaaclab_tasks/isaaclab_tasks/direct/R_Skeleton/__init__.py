@@ -40,29 +40,6 @@ gym.register(
 )
 
 gym.register(
-    id="R_Skeleton_Amp-v0",
-    entry_point=f"{__name__}.skeleton_env:SkeletonEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.skeleton_env_cfg:SkeletonEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_amp_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:SkeletonAmpPPORunnerCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_amp_ppo_cfg.yaml",
-    },
-)
-
-gym.register(
-    id="R_Skeleton-AMP-v0",
-    entry_point=f"{__name__}.skeleton_amp_env:SkeletonAmpEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.skeleton_amp_env_cfg:SkeletonAmpEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:SkeletonAmpPPORunnerCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_amp_cfg.yaml",
-    },
-)
-
-gym.register(
     id="R_Skeleton-WTW-v0",
     entry_point=f"{__name__}.skeleton_wtw_env:SkeletonWtwEnv",
     disable_env_checker=True,

@@ -32,7 +32,9 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import (
     euler_xyz_from_quat,
+    quat_apply,
     quat_conjugate,
+    quat_from_euler_xyz,
     quat_rotate_inverse,
     quat_apply_inverse,
     subtract_frame_transforms,
@@ -151,6 +153,8 @@ class Go2InteractionEnv(DirectRLEnv):
                 "lin_vel_z",
                 "ang_vel_xy",
                 "torques_balance",
+                "stand_front_vel",
+                "front_stillness",
             ]
         }
 
@@ -192,6 +196,13 @@ class Go2InteractionEnv(DirectRLEnv):
 
         self._hip_joint_ids = torch.tensor(
             [i for i, n in enumerate(all_joint_names) if "hip" in n],
+            dtype=torch.long, device=self.device,
+        )
+
+        # 앞다리(FL, FR) 관절 인덱스 (stand 진동 억제용)
+        front_names = ["FL_hip", "FL_thigh", "FL_calf", "FR_hip", "FR_thigh", "FR_calf"]
+        self._front_joint_ids = torch.tensor(
+            [i for i, n in enumerate(all_joint_names) if any(fn in n for fn in front_names)],
             dtype=torch.long, device=self.device,
         )
 
@@ -363,18 +374,20 @@ class Go2InteractionEnv(DirectRLEnv):
         # 1. Hip/Foot 위치 추적 보상 (기준 좌표계 선택)
         # ------------------------------------------------------------------ #
         if self.cfg.reward_frame == "base":
-            # [Base Frame] 현재 로봇 부위를 Base로 변환하여 로컬 타겟과 비교
+            # [Base Frame] 현재 로봇 부위를 body frame으로 변환하고 body-frame 타겟과 비교
             root_pos = self._robot.data.root_link_pos_w.unsqueeze(1)  # [N, 1, 3]
             root_quat = self._robot.data.root_link_quat_w             # [N, 4]
-            
-            # Hip (Base Frame Error)
-            cur_hip_local = quat_apply_inverse(root_quat.unsqueeze(1).repeat(1, 4, 1), hip_positions - root_pos)
-            target_hip_local = self._target_reference_positions["hip_local"]
-            hip_pos_error = torch.norm(cur_hip_local - target_hip_local, dim=2)
+            root_quat_rep = root_quat.unsqueeze(1).repeat(1, 4, 1)    # [N, 4, 4]
 
-            # Foot (Base Frame Error)
-            cur_foot_local = quat_apply_inverse(root_quat.unsqueeze(1).repeat(1, 4, 1), foot_positions - root_pos)
-            target_foot_local = self._target_reference_positions["foot_local"]
+            # 현재 hip/foot를 로봇 body frame으로 변환
+            cur_hip_local  = quat_apply_inverse(root_quat_rep, hip_positions  - root_pos)  # [N, 4, 3]
+            cur_foot_local = quat_apply_inverse(root_quat_rep, foot_positions - root_pos)  # [N, 4, 3]
+
+            # 타겟은 이미 body-frame 상대 오프셋이므로 그대로 사용
+            target_hip_local  = self._target_reference_positions["hip_local"]   # [N, 4, 3]
+            target_foot_local = self._target_reference_positions["foot_local"]  # [N, 4, 3]
+
+            hip_pos_error  = torch.norm(cur_hip_local  - target_hip_local,  dim=2)
             foot_pos_error = torch.norm(cur_foot_local - target_foot_local, dim=2)
         else:
             # [World Frame] 기존 방식
@@ -493,6 +506,33 @@ class Go2InteractionEnv(DirectRLEnv):
             rew_torques_balance = torch.zeros(self.num_envs, device=self.device)
 
         # ------------------------------------------------------------------ #
+        # [A] Stand 앞다리 관절 속도 페널티
+        #     stand(cmd=3)일 때 FL/FR 관절 속도²를 추가로 페널티하여 진동 억제
+        # ------------------------------------------------------------------ #
+        rew_stand_front_vel = torch.zeros(self.num_envs, device=self.device)
+        if mask_stand.any():
+            front_vel_sq = torch.sum(
+                torch.square(self._robot.data.joint_vel[:, self._front_joint_ids]), dim=1
+            )  # [N]
+            rew_stand_front_vel[mask_stand] = front_vel_sq[mask_stand]
+
+        # ------------------------------------------------------------------ #
+        # [B] Stand 앞발 근방 정지 보상
+        #     FL/FR 발이 타겟 8cm 이내에 들어오면 속도가 낮을수록 보상
+        #     → 타겟 도달 후 떨지 않고 자세 유지 유도
+        # ------------------------------------------------------------------ #
+        rew_front_stillness = torch.zeros(self.num_envs, device=self.device)
+        if mask_stand.any():
+            # foot_pos_error[:,0]=FL, foot_pos_error[:,1]=FR
+            front_near = (foot_pos_error[:, 0] < 0.08) & (foot_pos_error[:, 1] < 0.08)
+            active = mask_stand & front_near
+            if active.any():
+                front_vel_mag = torch.norm(
+                    self._robot.data.joint_vel[:, self._front_joint_ids], dim=1
+                )  # [N]
+                rew_front_stillness[active] = torch.exp(-front_vel_mag[active] / 0.5)
+
+        # ------------------------------------------------------------------ #
         # 보상 합산 (스케일 × step_dt 처리)
         # ------------------------------------------------------------------ #
         rewards = {
@@ -510,6 +550,8 @@ class Go2InteractionEnv(DirectRLEnv):
             "lin_vel_z":        rew_lin_vel_z       * self.cfg.lin_vel_z_reward_scale        * self.step_dt,
             "ang_vel_xy":       rew_ang_vel_xy      * self.cfg.ang_vel_xy_reward_scale       * self.step_dt,
             "torques_balance":  rew_torques_balance * self.cfg.torques_balance_reward_scale  * self.step_dt,
+            "stand_front_vel":  rew_stand_front_vel * self.cfg.stand_front_vel_reward_scale  * self.step_dt,
+            "front_stillness":  rew_front_stillness * self.cfg.front_stillness_reward_scale  * self.step_dt,
         }
         total_reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
@@ -708,6 +750,21 @@ class Go2InteractionEnv(DirectRLEnv):
                     z_rel = float(foot_data["base_rel_z"].values[0]) * self.cfg.size_prop + self.cfg.z_offset
                     preprocessed[frame][foot_idx] = {"x_rel": x_rel, "y_rel": y_rel, "z_rel": z_rel}
 
+        # 좌우 대칭화: 원본 데이터의 비대칭을 제거하고 좌우 y값을 평균값으로 통일
+        lr_pairs = list(zip(self.cfg.left_indices, self.cfg.right_indices))
+        for frame in preprocessed:
+            for left_idx, right_idx in lr_pairs:
+                if left_idx in preprocessed[frame] and right_idx in preprocessed[frame]:
+                    avg_y = (preprocessed[frame][left_idx]["y_rel"] - preprocessed[frame][right_idx]["y_rel"]) / 2.0
+                    preprocessed[frame][left_idx]["y_rel"] = avg_y
+                    preprocessed[frame][right_idx]["y_rel"] = -avg_y
+                    avg_x = (preprocessed[frame][left_idx]["x_rel"] + preprocessed[frame][right_idx]["x_rel"]) / 2.0
+                    preprocessed[frame][left_idx]["x_rel"] = avg_x
+                    preprocessed[frame][right_idx]["x_rel"] = avg_x
+                    avg_z = (preprocessed[frame][left_idx]["z_rel"] + preprocessed[frame][right_idx]["z_rel"]) / 2.0
+                    preprocessed[frame][left_idx]["z_rel"] = avg_z
+                    preprocessed[frame][right_idx]["z_rel"] = avg_z
+
         return preprocessed
 
     def _get_target_reference_data(self) -> dict:
@@ -767,9 +824,48 @@ class Go2InteractionEnv(DirectRLEnv):
             "base_height":    base_height,
         }
 
+    # Stand-up 자세 body-frame 타겟 (뒷발 지지, 앞발 들기)
+    # 순서: FL, FR, RL, RR  /  x=전후, y=좌우, z=상하
+    STAND_HIP_LOCAL = [
+        [ 0.18,  0.07,  0.03],   # FL hip: 앞-상
+        [ 0.18, -0.07,  0.03],   # FR hip: 앞-상
+        [-0.18,  0.07, -0.03],   # RL hip: 뒤-하
+        [-0.18, -0.07, -0.03],   # RR hip: 뒤-하
+    ]
+    STAND_FOOT_LOCAL = [
+        [ 0.15,  0.09,  0.28],   # FL foot: 들어올림
+        [ 0.15, -0.09,  0.28],   # FR foot: 들어올림
+        [-0.10,  0.09, -0.48],   # RL foot: 땅에 닿도록
+        [-0.10, -0.09, -0.48],   # RR foot: 땅에 닿도록
+    ]
+    STAND_BASE_HEIGHT = 0.65     # 기립 시 base 높이 (m)
+    STAND_BASE_PITCH  = 1.1      # 기립 시 pitch (rad, ~63도)
+
     def _calculate_reference_positions(self):
         """참조 위치(월드 및 로컬)를 계산하고 내부 버퍼에 저장합니다."""
         ref = self._get_target_reference_data()
+
+        # Stand 커맨드(cmd=3): CSV 모션 대신 하드코딩된 body-frame 기립 자세 타겟 사용
+        mask_stand = (self._interaction_command.squeeze(-1) == 3)
+        if mask_stand.any():
+            n_stand = int(mask_stand.sum().item())
+            stand_hip = torch.tensor(
+                self.STAND_HIP_LOCAL, device=self.device, dtype=torch.float
+            ).unsqueeze(0).expand(n_stand, -1, -1)  # [n_stand, 4, 3]
+            stand_foot = torch.tensor(
+                self.STAND_FOOT_LOCAL, device=self.device, dtype=torch.float
+            ).unsqueeze(0).expand(n_stand, -1, -1)  # [n_stand, 4, 3]
+
+            ref["hip_positions_local"][mask_stand] = stand_hip
+            ref["foot_positions_local"][mask_stand] = stand_foot
+            ref["base_height"][mask_stand] = self.STAND_BASE_HEIGHT
+            ref["base_rotation"][mask_stand, 1] = self.STAND_BASE_PITCH  # pitch
+
+            # world 좌표도 갱신 (root_pos 기준 단순 오프셋 – world 모드용)
+            root_pos_stand = self._robot.data.root_link_pos_w[mask_stand].unsqueeze(1)
+            ref["hip_positions"][mask_stand]  = root_pos_stand + stand_hip
+            ref["foot_positions"][mask_stand] = root_pos_stand + stand_foot
+
         self._target_reference_positions = {
             "hip":           ref["hip_positions"],
             "foot":          ref["foot_positions"],
@@ -784,9 +880,28 @@ class Go2InteractionEnv(DirectRLEnv):
             robot_hip_pos = self._robot.data.body_pos_w[:, self._hip_body_ids, :]
             robot_foot_pos = self._robot.data.body_pos_w[:, self._foot_body_ids, :]
 
+            if self.cfg.reward_frame == "base":
+                # base frame 타겟을 world space로 변환하여 시각화
+                # hip_local / foot_local 은 이미 로봇 body frame 상대 오프셋이므로
+                # 현재 로봇 회전을 적용한 뒤 world 위치를 더하면 됩니다
+                root_pos_w = self._robot.data.root_link_pos_w    # [N, 3]
+                root_quat = self._robot.data.root_link_quat_w    # [N, 4]
+
+                hip_local = ref["hip_positions_local"]           # [N, 4, 3]
+                foot_local = ref["foot_positions_local"]         # [N, 4, 3]
+
+                root_quat_rep = root_quat.unsqueeze(1).repeat(1, 4, 1)  # [N, 4, 4]
+
+                # body frame offset → world frame
+                vis_hip_world  = root_pos_w.unsqueeze(1) + quat_apply(root_quat_rep, hip_local)   # [N, 4, 3]
+                vis_foot_world = root_pos_w.unsqueeze(1) + quat_apply(root_quat_rep, foot_local)  # [N, 4, 3]
+            else:
+                vis_hip_world = ref["hip_positions"]    # [N, 4, 3]
+                vis_foot_world = ref["foot_positions"]  # [N, 4, 3]
+
             for i in range(4):
-                self._ref_hip_vis[i].visualize(ref["hip_positions"][:, i, :])
-                self._ref_foot_vis[i].visualize(ref["foot_positions"][:, i, :])
+                self._ref_hip_vis[i].visualize(vis_hip_world[:, i, :])
+                self._ref_foot_vis[i].visualize(vis_foot_world[:, i, :])
                 self._robot_hip_vis[i].visualize(robot_hip_pos[:, i, :])
                 self._robot_foot_vis[i].visualize(robot_foot_pos[:, i, :])
 
