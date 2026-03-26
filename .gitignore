@@ -75,3 +75,9 @@ results/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Claude
+task_plan.md
+progress.md
+findings.md
+CLAUDE.md
