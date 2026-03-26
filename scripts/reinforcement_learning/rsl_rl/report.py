@@ -325,7 +325,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _sensor_body_names: list[str] = []
     _foot_sensor_ids: list[int] = []
     _collision_sensor_ready = False   # reset() 후 lazy-init 완료 플래그
-    _contact_sensor_ref = getattr(env.unwrapped, "contact_sensor", None)
+    # 환경마다 contact_sensor 속성명이 다를 수 있으므로 여러 이름을 시도
+    _contact_sensor_ref = (
+        getattr(env.unwrapped, "contact_sensor", None)
+        or getattr(env.unwrapped, "_contact_sensor", None)
+    )
+    if _contact_sensor_ref is None:
+        _scene_sensors = getattr(getattr(env.unwrapped, "scene", None), "sensors", {})
+        _contact_sensor_ref = _scene_sensors.get("contact_sensor", None)
     if _contact_sensor_ref is not None:
         try:
             # External collision 마커 — 빨간색 sphere
@@ -393,8 +400,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 try:
                     if hasattr(_contact_sensor_ref, "body_names"):
                         _sensor_body_names = list(_contact_sensor_ref.body_names)
-                    _foot_ids_t, _ = _contact_sensor_ref.find_bodies(".*foot")
-                    _foot_sensor_ids = _foot_ids_t.tolist() if hasattr(_foot_ids_t, "tolist") else list(_foot_ids_t)
+                    # 로봇 종류별로 발 body 이름 패턴이 다름 (foot, toe, .*foot 등)
+                    _foot_sensor_ids = []
+                    for _foot_pattern in [".*foot", ".*toe", ".*_foot", ".*_toe"]:
+                        try:
+                            _foot_ids_t, _foot_names_t = _contact_sensor_ref.find_bodies(_foot_pattern)
+                            if len(_foot_ids_t) > 0:
+                                _foot_sensor_ids = _foot_ids_t.tolist() if hasattr(_foot_ids_t, "tolist") else list(_foot_ids_t)
+                                print(f"[INFO] 발 body 패턴 '{_foot_pattern}' 매칭: {_foot_names_t}")
+                                break
+                        except Exception:
+                            continue
                     print(f"[INFO] Collision 센서 초기화 완료. 추적 bodies: {len(_sensor_body_names)}, 발 IDs: {_foot_sensor_ids}")
                 except Exception as _lazy_e:
                     print(f"[WARN] Collision 센서 lazy-init 실패: {_lazy_e}")

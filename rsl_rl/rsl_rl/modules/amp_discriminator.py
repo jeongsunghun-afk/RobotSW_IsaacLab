@@ -47,10 +47,9 @@ class AMPDiscriminator(nn.Module):
         # 간단히 skrl 구현체와 유사하게 최소-최대 clip 등의 연산을 사용할 수 있습니다.
         # 여기서는 기본적으로 -log(1 - D(x)) 에 비례하는 형태로 단순화할 수도 있습니다.
         
-        prob = torch.sigmoid(disc_logits)
-        reward = -torch.log(torch.maximum(1 - prob, torch.tensor(0.0001, device=self.device)))
-        reward = torch.clamp(reward, 0.0, 10.0) # 안전장치
-        
+        # LS-GAN reward: clamp(1 - (1/4)*(d-1)^2, min=0) · coef  (Genesis 원본 방식)
+        reward = torch.clamp(1 - 0.25 * torch.square(disc_logits - 1), min=0)
+
         return reward.squeeze(-1) * self.amp_reward_coef
 
     def get_logits(self, amp_obs):

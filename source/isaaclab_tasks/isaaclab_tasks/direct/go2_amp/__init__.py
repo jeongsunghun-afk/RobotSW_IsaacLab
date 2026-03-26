@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-AMP Humanoid locomotion environment.
+Ant locomotion environment.
 """
 
 import gymnasium as gym
@@ -15,12 +15,13 @@ from . import agents
 # Register Gym environments.
 ##
 
+
 gym.register(
-    id="Isaac-Humanoid-AMP-Dance-Direct-v1",
-    entry_point=f"{__name__}.humanoid_amp_env:HumanoidAmpEnv",
+    id="Go2AMP",
+    entry_point=f"{__name__}.go2_amp_env:Go2AmpEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.humanoid_amp_env_cfg:HumanoidAmpDanceEnvCfg",
-        "skrl_amp_cfg_entry_point": f"{agents.__name__}:skrl_dance_amp_cfg.yaml",
+        "env_cfg_entry_point": f"{__name__}.go2_amp_env_cfg:Go2AmpEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2AmpPPORunnerCfg",
     },
 )

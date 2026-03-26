@@ -2,23 +2,27 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+
 from isaaclab.utils import configclass
+
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
 
 @configclass
-class SkeletonAmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class Go2AmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Go2 AMP 환경용 PPO 러너 설정."""
+
     num_steps_per_env = 24
     max_iterations = 50000
     save_interval = 100
-    experiment_name = "skeleton_amp_direct"
+    experiment_name = "go2_amp_direct"
     clip_actions = 1.0
     class_name = "OnPolicyRunnerAMP"
     obs_groups = {
-            "policy": ["policy"],
-            "critic": ["policy", "priv"],
-            "history": ["history"],
-            "priv": ["priv"]
+        "policy": ["policy"],
+        "critic": ["policy", "priv"],
+        "history": ["history"],
+        "priv": ["priv"],
     }
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
@@ -42,12 +46,12 @@ class SkeletonAmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOAMP"
+        class_name="PPOAMP",
     )
     amp = dict(
-        task_reward_lerp=0.5,
+        task_reward_lerp=0.7,
         discriminator_learning_rate=1e-4,
-        gradient_penalty_coef=10.0,
-        reward_coef=2.0 / 6.0,
-        discriminator_hidden_dims=[1024, 512]
+        gradient_penalty_coef=5.0,
+        reward_coef=2.0 * 0.02,
+        discriminator_hidden_dims=[1024, 512],
     )

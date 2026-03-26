@@ -49,64 +49,41 @@ class PPOAMP(PPOParkour):
         expert_logits = self.discriminator.get_logits(expert_batch)
         policy_logits = self.discriminator.get_logits(policy_batch)
 
-        if not getattr(self, "_debug_printed", False):
-            print("\n" + "="*60)
-            print("[DEBUG] Discriminator Inputs Comparison (AMP Obs)")
-            print(f"  [Ref Obs (Expert)]  shape: {expert_batch.shape}")
-            print(f"                      mean: {expert_batch.mean().item():.4f}, min: {expert_batch.min().item():.4f}, max: {expert_batch.max().item():.4f}")
-            print(f"  [Sim Obs (Policy)]  shape: {policy_batch.shape}")
-            print(f"                      mean: {policy_batch.mean().item():.4f}, min: {policy_batch.min().item():.4f}, max: {policy_batch.max().item():.4f}")
-            print("-" * 60)
-            print("[DEBUG] Discriminator Outputs Comparison (Logits)")
-            print(f"  [Ref Obs Output]    shape: {expert_logits.shape}")
-            print(f"                      mean: {expert_logits.mean().item():.4f}, min: {expert_logits.min().item():.4f}, max: {expert_logits.max().item():.4f}")
-            print(f"  [Sim Obs Output]    shape: {policy_logits.shape}")
-            print(f"                      mean: {policy_logits.mean().item():.4f}, min: {policy_logits.min().item():.4f}, max: {policy_logits.max().item():.4f}")
-            print("="*60 + "\n")
-            self._debug_printed = True
+        # LS-GAN: expert target=+1, policy target=-1
+        expert_loss = nn.MSELoss()(expert_logits, torch.ones_like(expert_logits))
+        policy_loss = nn.MSELoss()(policy_logits, -1 * torch.ones_like(policy_logits))
 
-        # Discriminator 손실 계산 (Least Squares GAN 방식 튜닝 또는 기본 로그 로스)
-        expert_loss = nn.BCEWithLogitsLoss()(expert_logits, torch.ones_like(expert_logits))
-        policy_loss = nn.BCEWithLogitsLoss()(policy_logits, torch.zeros_like(policy_logits))
+        # Gradient Penalty: expert 데이터에만 적용 (Genesis 원본 방식)
+        expert_data = expert_batch.detach().requires_grad_(True)
+        expert_logits_gp = self.discriminator.get_logits(expert_data)
+        grad_outputs = torch.ones_like(expert_logits_gp)
 
-        # Gradient Penalty 연산 (WGAN-GP 1-Lipschitz continuity 강제)
-        # 전문가 모션과 정책 생성 모션 사이를 보간(Interpolation)하여 그라디언트를 계산
-        alpha = torch.rand(expert_batch.size(0), 1, device=self.device)
-        alpha = alpha.expand(-1, expert_batch.size(1))
-        
-        mixed_batch = (alpha * expert_batch + (1 - alpha) * policy_batch).detach()
-        mixed_batch.requires_grad_(True)
-        
-        mixed_logits = self.discriminator.get_logits(mixed_batch)
-        grad_outputs = torch.ones_like(mixed_logits)
-        
         gradients = torch.autograd.grad(
-            outputs=mixed_logits,
-            inputs=mixed_batch,
+            outputs=expert_logits_gp,
+            inputs=expert_data,
             grad_outputs=grad_outputs,
             create_graph=True,
             retain_graph=True,
             only_inputs=True,
         )[0]
-        
-        # L2 norm 구하고 (||grad||_2 - 1)^2 등 변형 또는 직접 사용
-        grad_penalty = torch.sum(torch.square(gradients), dim=-1).mean()
 
-        total_loss = 0.5 * (expert_loss + policy_loss) + (self.amp_gradient_penalty_coef * 0.5) * grad_penalty
+        grad_penalty = self.amp_gradient_penalty_coef * gradients.norm(2, dim=1).pow(2).mean()
+
+        total_loss = 0.5 * (expert_loss + policy_loss) + grad_penalty
 
         total_loss.backward()
         self.disc_optimizer.step()
-        
-        # update obs normalization (expert + policy 모두 포함)
-        self.discriminator.update_normalization(torch.cat([expert_batch, policy_batch]))
+
+        # update obs normalization (expert 기준으로 정규화)
+        self.discriminator.update_normalization(expert_batch)
 
         # 명시적 메모리 해제 (VRAM 누수 방지)
         expert_loss_val = expert_loss.item()
         policy_loss_val = policy_loss.item()
         grad_penalty_val = grad_penalty.item()
         total_loss_val = total_loss.item()
-        
-        del mixed_batch, mixed_logits, grad_outputs, gradients
+
+        del expert_data, expert_logits_gp, grad_outputs, gradients
         del expert_logits, policy_logits, expert_loss, policy_loss, grad_penalty, total_loss
         
         return {

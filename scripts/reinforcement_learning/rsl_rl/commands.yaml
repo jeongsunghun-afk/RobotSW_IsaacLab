@@ -59,6 +59,24 @@ R_Skeleton:
     lin_vel_y: 0.0
     yaw_vel: 0.0
 
+Go2AMP:
+  env_0:
+    type: "simple"
+    lin_vel_x: 0.0
+    lin_vel_y: 0.0
+    yaw_vel: 0.0
+  env_1:
+    type: "simple"
+    lin_vel_x: 0.5
+    lin_vel_y: 0.0
+    yaw_vel: 0.0
+  env_2:
+    type: "simple"
+    lin_vel_x: 2.0
+    lin_vel_y: 0.0
+    yaw_vel: 0.0
+
+
 Go2Interaction:
   env_0:
     type: "interaction"

@@ -155,7 +155,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
 
     gait_force_sigma = 100.
     gait_vel_sigma = 10.
-    tracking_sigma = 0.25
+    tracking_sigma = 0.125 # 0.25
     base_height_target = 0.34
     sigma_rew_neg = 0.02
     # reward scales
@@ -178,6 +178,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     dof_vel_reward_scale = -1e-5
     action_smoothness1_reward_scale = -0.1
     action_smoothness2_reward_scale = -0.1
+    foot_landing_vel_reward_scale = -3.0
 
 
 

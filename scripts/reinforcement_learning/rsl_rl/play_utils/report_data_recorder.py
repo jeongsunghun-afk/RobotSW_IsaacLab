@@ -183,16 +183,28 @@ class ReportMultiDataRecorder:
                 curr_proc_actions = np.zeros_like(curr_joint_pos)
 
             # Contact force magnitude per body: (num_envs, num_bodies)
+            # 환경마다 contact_sensor 속성명이 다를 수 있으므로 여러 이름을 시도
             curr_contact_forces = None
-            contact_sensor = getattr(base_env, "contact_sensor", None)
+            contact_sensor = (
+                getattr(base_env, "contact_sensor", None)
+                or getattr(base_env, "_contact_sensor", None)
+            )
+            if contact_sensor is None:
+                # scene.sensors dict에서도 탐색
+                scene_sensors = getattr(getattr(base_env, "scene", None), "sensors", {})
+                contact_sensor = scene_sensors.get("contact_sensor", None)
             if contact_sensor is not None:
                 forces_w = getattr(contact_sensor.data, "net_forces_w", None)
                 if forces_w is not None and forces_w.numel() > 0:
                     # forces_w: (num_envs, num_bodies, 3) → magnitude: (num_envs, num_bodies)
                     curr_contact_forces = forces_w.norm(dim=-1).detach().cpu().numpy()
-                    # body_names는 최초 1회만 저장
+                    # body_names는 최초 1회만 저장 (contact_sensor 기준 우선)
                     if not self._body_names:
-                        self._body_names = list(robot.data.body_names)
+                        sensor_body_names = getattr(contact_sensor, "body_names", None)
+                        if sensor_body_names is not None:
+                            self._body_names = list(sensor_body_names)
+                        else:
+                            self._body_names = list(robot.data.body_names)
 
             num_bodies = curr_contact_forces.shape[1] if curr_contact_forces is not None else 0
 
