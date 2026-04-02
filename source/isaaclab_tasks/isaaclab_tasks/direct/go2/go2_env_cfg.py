@@ -155,7 +155,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
 
     gait_force_sigma = 100.
     gait_vel_sigma = 10.
-    tracking_sigma = 0.125 # 0.25
+    tracking_sigma = 0.25 # 0.25, 0.125 사용함
     base_height_target = 0.34
     sigma_rew_neg = 0.02
     # reward scales
@@ -169,9 +169,10 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = -0.005
     undesired_contact_reward_scale = -10.0
     jump_reward_scale = 10.
-    raibert_heuristic_reward_scale = 0.
-    feet_clearance_cmd_linear_reward_scale = 0.
-    feet_clearance_bezier_reward_scale = -10.0
+    raibert_heuristic_reward_scale = -10.
+    feet_clearance_cmd_linear_reward_scale = -0.0    # 목표 발 높이 추종 (swing phase)
+    feet_clearance_bezier_reward_scale = 0.0         # 3차 베지에 추종 (ablation: 3차 실험 시 -5.0으로 활성화)
+    feet_clearance_bezier_5th_reward_scale = -3.0     # 비활성화 (ablation: 5차 실험 시 -5.0으로 활성화)
     orientation_control_reward_scale = -5
     tracking_contacts_shaped_force_reward_scale = 1.0
     tracking_contacts_shaped_vel_reward_scale = 1.0
@@ -179,6 +180,9 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     action_smoothness1_reward_scale = -0.1
     action_smoothness2_reward_scale = -0.1
     foot_landing_vel_reward_scale = -3.0
+    foot_landing_vel_xy_reward_scale = -2.0          # 착지 순간 수평 속도 패널티 (발 구르기 방지)
+    landing_impact_reward_scale = 0.0    # Force 노이즈 기반 → 비활성화 (foot_landing_vel로 대체)
+    feet_vel_5th_late_reward_scale = -0.0  # 5차 베지에 Z velocity target 추종 (swing 후반 s>0.7), 비교용
 
 
 
@@ -209,7 +213,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         "gait_offset_cmd_range": [0.0, 1.0],
         "gait_bound_cmd_range": [0.0, 1.0],
         "gait_duration_cmd_range": [0.5, 0.5],
-        "footswing_height_range": [0.03, 0.2],
+        "footswing_height_range": [0.05, 0.35],
         "body_pitch_range": [-0.4, 0.4],
         "body_roll_range": [-0., 0.],
         "stance_width_range": [0.10, 0.45],
@@ -226,7 +230,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         "gait_offset_cmd_range": [0.0, 1.0],
         "gait_bound_cmd_range": [0.0, 1.0],
         "gait_duration_cmd_range": [0.3, 0.7],
-        "footswing_height_range": [0.03, 0.2],
+        "footswing_height_range": [0.05, 0.35],
         "body_pitch_range": [-0.3, 0.3],
         "body_roll_range": [-0., 0.],
         "stance_width_range": [0.1, 0.45],

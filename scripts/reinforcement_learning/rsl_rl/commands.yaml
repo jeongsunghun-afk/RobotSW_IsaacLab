@@ -9,6 +9,12 @@ Go2WTW:
     lin_vel_x: 0.0
     lin_vel_y: 0.0
     yaw_vel: 0.0
+  env_4:
+    type: "go2wtw"
+    gait: "trotting"
+    lin_vel_x: 0.5
+    lin_vel_y: 0.0
+    yaw_vel: 0.5
   env_1:
     type: "go2wtw"
     gait: "trotting"
@@ -19,6 +25,12 @@ Go2WTW:
     type: "go2wtw"
     gait: "trotting"
     lin_vel_x: 0.5
+    lin_vel_y: 0.0
+    yaw_vel: 0.0
+  env_3:
+    type: "go2wtw"
+    gait: "trotting"
+    lin_vel_x: 2.0
     lin_vel_y: 0.0
     yaw_vel: 0.0
 
@@ -72,10 +84,19 @@ Go2AMP:
     yaw_vel: 0.0
   env_2:
     type: "simple"
+    lin_vel_x: 1.0
+    lin_vel_y: 0.0
+    yaw_vel: 0.0
+  env_3:
+    type: "simple"
     lin_vel_x: 2.0
     lin_vel_y: 0.0
     yaw_vel: 0.0
-
+  env_4:
+    type: "simple"
+    lin_vel_x: 3.0
+    lin_vel_y: 0.0
+    yaw_vel: 0.0
 
 Go2Interaction:
   env_0:

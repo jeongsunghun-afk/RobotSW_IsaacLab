@@ -13,6 +13,12 @@ report.py
 - 입력 커맨드 개수만큼 `num_envs`를 강제 설정.
 - 동영상 녹화 및 데이터 저장을 기본적으로(Default) 강제 적용.
 - 500스텝 후 결과를 results 폴더에 개별 저장하고 스크립트 자동 종료.
+
+저장 데이터:
+- 관절 토크, 위치, 속도, 액션
+- 베이스 선속도, 각속도
+- 네 발의 선속도 (X, Y, Z 축별)
+- 접촉력 (바닥, 자가충돌)
 """
 
 import argparse
@@ -102,6 +108,7 @@ import time
 import datetime
 
 import gymnasium as gym
+import numpy as np
 import torch
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
@@ -114,6 +121,7 @@ from isaaclab.envs import (
     ManagerBasedRLEnvCfg,
     multi_agent_to_single_agent,
 )
+import isaaclab.sim as sim_utils
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab.markers import VisualizationMarkers
@@ -372,6 +380,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs, _ = env.reset()
     timestep = 0
 
+    # ── 사이드뷰 카메라 추적 설정 ────────────────────────────────────────────
+    # env 0번 로봇을 로봇 오른쪽 옆에서 가까이 찍는 카메라.
+    # 카메라 오프셋: (x_fwd, y_side, z_up) — 양의 Y 방향(로봇 오른쪽)에서 촬영.
+    _sim_context = sim_utils.SimulationContext.instance()
+    if args_cli.task[:3] == "Go2":
+        _CAM_SIDE_OFFSET = np.array([0.0, 2.5, 0.2])
+        _CAM_TARGET_OFFSET = np.array([0.0, 0.0, 0.34])  # 로봇 base 기준 바라볼 높이
+    else:
+        _CAM_SIDE_OFFSET = np.array([0.0, 2.5, 0.5])
+        _CAM_TARGET_OFFSET = np.array([0.0, 0.0, 0.608])  # 로봇 base 기준 바라볼 높이
+
     print("[INFO] Report 루프 시작 (500 스텝).")
     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     video_frames = []
@@ -494,6 +513,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     pass
 
             # print(actions)
+
+            # ── 사이드뷰 카메라 업데이트 (env 0 로봇 추적) ─────────────────────
+            if _sim_context is not None:
+                try:
+                    _root_pos_w = env.unwrapped._robot.data.root_pos_w[0].cpu().numpy()
+                    _cam_eye = _root_pos_w + _CAM_SIDE_OFFSET
+                    _cam_target = _root_pos_w + _CAM_TARGET_OFFSET
+                    _sim_context.set_camera_view(eye=_cam_eye, target=_cam_target)
+                except Exception:
+                    pass
 
             # ── 영상 프레임 캡처 ─────────────────────────────────────────────
             if getattr(args_cli, "video", False) and len(video_frames) < args_cli.video_length:

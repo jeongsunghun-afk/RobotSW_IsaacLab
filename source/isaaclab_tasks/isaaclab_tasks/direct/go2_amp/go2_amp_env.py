@@ -32,9 +32,9 @@ from .go2_amp_env_cfg import Go2AmpEnvCfg
 class Go2AmpEnv(DirectRLEnv):
     """Go2 AMP imitation 환경.
 
-    AMP 관측 벡터 (amp_observation_space = 55):
+    AMP 관측 벡터 (amp_observation_space = 43):
         dof_pos(12) + dof_vel(12) + root_height(1) +
-        lin_vel(3) + ang_vel(3) + key_body_pos(12) + key_body_lin_vel(12)
+        lin_vel(3) + ang_vel(3) + key_body_pos(12)
     """
 
     cfg: Go2AmpEnvCfg
@@ -54,9 +54,10 @@ class Go2AmpEnv(DirectRLEnv):
 
         # 모션 로더 초기화
         motion_file = self.cfg.motion_file
-        print(motion_file)
         if os.path.isdir(motion_file):
-            motion_files = sorted(glob.glob(os.path.join(motion_file, "*.txt")))
+            txt_files = sorted(glob.glob(os.path.join(motion_file, "*.txt")))
+            pkl_files = sorted(glob.glob(os.path.join(motion_file, "*.pkl")))
+            motion_files = txt_files + pkl_files
         else:
             motion_files = [motion_file]
         self._motion_loader = Go2MotionLoader(motion_files=motion_files, device=self.device)
@@ -69,6 +70,9 @@ class Go2AmpEnv(DirectRLEnv):
 
         # X/Y linear velocity and yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # RSI reset 시 선택된 frame의 forward velocity 저장 (in-episode curriculum용)
+        self._rsi_ref_vel = torch.zeros(self.num_envs, device=self.device)
 
         # 모션 로더에서 DOF 인덱스 매핑
         robot_joint_names = list(self._robot.data.joint_names)
@@ -146,16 +150,23 @@ class Go2AmpEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
+        # In-episode command 재샘플링 (curriculum delta 기반)
+        if self.cfg.command_resample_interval > 0:
+            resample_mask = (
+                (self.episode_length_buf % self.cfg.command_resample_interval == 0)
+                & (self.episode_length_buf > 0)
+            )
+            resample_ids = resample_mask.nonzero(as_tuple=False).flatten()
+            if len(resample_ids) > 0:
+                self._resample_commands_in_episode(resample_ids)
+
         root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]
         root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]
-        root_lin_vel_w = self._robot.data.body_lin_vel_w[:, self.ref_body_index]
-
         root_lin_vel_b = self._robot.data.root_lin_vel_b
         root_ang_vel_b = self._robot.data.root_ang_vel_b
 
-        # 월드 기준 상대 거리/속도
+        # 월드 기준 상대 거리
         rel_pos = self._robot.data.body_pos_w[:, self.key_body_indexes] - root_pos_w.unsqueeze(1)
-        rel_vel = self._robot.data.body_lin_vel_w[:, self.key_body_indexes] - root_lin_vel_w.unsqueeze(1)
 
         num_keys = rel_pos.shape[1]
         root_quat_expanded = root_quat_w.unsqueeze(1).expand(-1, num_keys, -1)
@@ -166,11 +177,6 @@ class Go2AmpEnv(DirectRLEnv):
             rel_pos.reshape(-1, 3),
         ).view(*rel_pos.shape)
 
-        local_key_body_vel = quat_apply_inverse(
-            root_quat_expanded.reshape(-1, 4),
-            rel_vel.reshape(-1, 3),
-        ).view(*rel_vel.shape)
-
         obs = compute_obs(
             self._robot.data.joint_pos,
             self._robot.data.joint_vel,
@@ -178,7 +184,6 @@ class Go2AmpEnv(DirectRLEnv):
             root_lin_vel_b,
             root_ang_vel_b,
             local_key_body_pos,
-            local_key_body_vel,
         )
 
         # AMP 히스토리 버퍼 업데이트
@@ -276,11 +281,12 @@ class Go2AmpEnv(DirectRLEnv):
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 
+        rsi_times = None
         if self.cfg.reset_strategy == "default":
             root_state, joint_pos, joint_vel = self._reset_strategy_default(env_ids)
         elif self.cfg.reset_strategy.startswith("random"):
             start = "start" in self.cfg.reset_strategy
-            root_state, joint_pos, joint_vel = self._reset_strategy_random(env_ids, start)
+            root_state, joint_pos, joint_vel, rsi_times = self._reset_strategy_random(env_ids, start)
         else:
             raise ValueError(f"Unknown reset strategy: {self.cfg.reset_strategy}")
 
@@ -289,6 +295,18 @@ class Go2AmpEnv(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
         self._resample_commands(env_ids)
+
+        # RSI frame 속도로 command override (자세와 명령 속도 일치)
+        if rsi_times is not None:
+            frame_indices = np.clip(
+                np.round(rsi_times / self._motion_loader.dt).astype(int),
+                0,
+                self._motion_loader.num_frames - 1,
+            )
+            ref_vel_x = self._motion_loader._frame_lin_vel_x[frame_indices]
+            ref_vel_tensor = torch.tensor(ref_vel_x, dtype=torch.float32, device=self.device)
+            self._commands[env_ids, 0] = ref_vel_tensor
+            self._rsi_ref_vel[env_ids] = ref_vel_tensor
 
         if self.cfg.history_observation:
             self.obs_history_buf[env_ids, :, :] = 0.0
@@ -319,7 +337,7 @@ class Go2AmpEnv(DirectRLEnv):
 
     def _reset_strategy_random(
         self, env_ids: torch.Tensor, start: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]:
         num_samples = env_ids.shape[0]
         times = np.zeros(num_samples) if start else self._motion_loader.sample_times(num_samples)
 
@@ -354,7 +372,7 @@ class Go2AmpEnv(DirectRLEnv):
             num_samples, self.cfg.num_amp_observations, -1
         )
 
-        return root_state, joint_pos, joint_vel
+        return root_state, joint_pos, joint_vel, times
 
     # ------------------------------------------------------------------
     # AMP 인터페이스
@@ -388,7 +406,6 @@ class Go2AmpEnv(DirectRLEnv):
             body_linear_velocities[:, self.motion_ref_body_index],
             body_angular_velocities[:, self.motion_ref_body_index],
             body_positions[:, self.motion_key_body_indexes],
-            body_linear_velocities[:, self.motion_key_body_indexes],
         )
         return amp_obs.view(-1, self.amp_observation_size)
 
@@ -449,6 +466,36 @@ class Go2AmpEnv(DirectRLEnv):
                 (len(env_ids),), self.device,
             )
 
+    def _resample_commands_in_episode(self, env_ids: torch.Tensor):
+        """에피소드 중 command 재샘플링 — curriculum delta 기반.
+
+        Stage 1 (step < start):  command 변경 없음
+        Stage 2 (start ~ end):   RSI 기준 ± delta 점진 증가
+        Stage 3 (step > end):    RSI 기준 ± delta_end (전체 범위)
+        """
+        start_step = self.cfg.command_curriculum_start_step
+        end_step = self.cfg.command_curriculum_end_step
+
+        if self.common_step_counter < start_step:
+            return  # Stage 1: curriculum 시작 전, command 변경 없음
+
+        progress = min(
+            (self.common_step_counter - start_step) / max(end_step - start_step, 1), 1.0
+        )
+        delta = self.cfg.command_delta_start + (
+            self.cfg.command_delta_end - self.cfg.command_delta_start
+        ) * progress
+
+        vel_min = float(self.cfg.command_cfg["lin_vel_x_range"][0])
+        vel_max = float(self.cfg.command_cfg["lin_vel_x_range"][1])
+
+        ref_vel = self._rsi_ref_vel[env_ids]
+        noise = (torch.rand(len(env_ids), device=self.device) * 2.0 - 1.0) * delta
+        new_vel = torch.clamp(ref_vel + noise, vel_min, vel_max)
+
+        alpha = self.cfg.command_soft_update_alpha
+        self._commands[env_ids, 0] = alpha * new_vel + (1.0 - alpha) * self._commands[env_ids, 0]
+
     # ------------------------------------------------------------------
     # 헬퍼
     # ------------------------------------------------------------------
@@ -485,11 +532,10 @@ def compute_obs(
     root_linear_velocities: torch.Tensor,
     root_angular_velocities: torch.Tensor,
     local_key_body_positions: torch.Tensor,
-    local_key_body_linear_velocities: torch.Tensor,
 ) -> torch.Tensor:
     """AMP 관측 벡터 계산.
 
-    출력 크기: 12+12+1+3+3+12+12 = 55
+    출력 크기: 12+12+1+3+3+12 = 43
     """
     obs = torch.cat(
         (
@@ -499,7 +545,6 @@ def compute_obs(
             root_linear_velocities,      # 3
             root_angular_velocities,     # 3
             local_key_body_positions.view(local_key_body_positions.shape[0], -1),   # 4×3=12
-            local_key_body_linear_velocities.view(local_key_body_linear_velocities.shape[0], -1),  # 4×3=12
         ),
         dim=-1,
     )

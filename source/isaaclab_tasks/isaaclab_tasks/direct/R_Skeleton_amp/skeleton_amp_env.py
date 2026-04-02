@@ -22,7 +22,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_apply, quat_rotate_inverse, quat_apply_inverse
+from isaaclab.utils.math import quat_apply, quat_apply_inverse
 from isaaclab.utils.math import sample_uniform as torch_rand_float
 
 from .motion_loader import SkeletonMotionLoader
@@ -49,12 +49,6 @@ class SkeletonAmpEnv(DirectRLEnv):
 
     def __init__(self, cfg: SkeletonAmpEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-
-        # 액션 오프셋/스케일 (관절 범위 기반)
-        # dof_lower = self._robot.data.soft_joint_pos_limits[0, :, 0]
-        # dof_upper = self._robot.data.soft_joint_pos_limits[0, :, 1]
-        # self.action_offset = 0.5 * (dof_upper + dof_lower)
-        # self.action_scale = dof_upper - dof_lower
 
         self.cfg = cfg
 
@@ -165,8 +159,7 @@ class SkeletonAmpEnv(DirectRLEnv):
         root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]
         root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]
         root_lin_vel_w = self._robot.data.body_lin_vel_w[:, self.ref_body_index]
-        root_ang_vel_w = self._robot.data.body_ang_vel_w[:, self.ref_body_index]
-        
+
         root_lin_vel_b = self._robot.data.root_lin_vel_b
         root_ang_vel_b = self._robot.data.root_ang_vel_b
         
@@ -198,10 +191,6 @@ class SkeletonAmpEnv(DirectRLEnv):
             local_key_body_pos,
             local_key_body_vel,
         )
-        # print('-----Simulation-----')
-        # print(root_pos_w[0])
-        # print(local_key_body_pos[0])
-
         # AMP 히스토리 버퍼 업데이트 (최신 obs = index 0)
         for i in reversed(range(self.cfg.num_amp_observations - 1)):
             self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]
@@ -266,13 +255,9 @@ class SkeletonAmpEnv(DirectRLEnv):
         yaw_rate_error = torch.square(self._commands[:, 2] - base_ang_vel[:, 2])
         tracking_ang_vel = torch.exp(-yaw_rate_error / self.cfg.tracking_sigma)
 
-        # Tracking Rewards
         lin_vel_reward = tracking_lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt
         ang_vel_reward = tracking_ang_vel * self.cfg.yaw_rate_reward_scale * self.step_dt
-        # lin_vel_reward = tracking_lin_vel * self.cfg.lin_vel_reward_scale
-        # ang_vel_reward = tracking_ang_vel * self.cfg.yaw_rate_reward_scale
 
-        # Total Task Reward
         task_reward = lin_vel_reward + ang_vel_reward
 
         # 누적 보상 기록 (로깅용)
@@ -362,12 +347,6 @@ class SkeletonAmpEnv(DirectRLEnv):
         root_state[:, :3] += self.scene.env_origins[env_ids]
         joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
         joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
-
-        # print(root_state)
-        # print(joint_pos)
-        # print(joint_vel)
-        # print(self.action_scale)
-        # AMP 히스토리 버퍼 초기화
         self.amp_observation_buffer[env_ids] = 0.0
         
         return root_state, joint_pos, joint_vel
@@ -399,12 +378,8 @@ class SkeletonAmpEnv(DirectRLEnv):
         # motion_loader의 속도 데이터는 Base 로컬 좌표계 기준이므로, 월드 좌표계 속도로 변환하여 할당합니다.
         root_state[:, 7:10] = quat_apply(root_rot, body_linear_velocities[:, self.motion_ref_body_index])
         root_state[:, 10:13] = quat_apply(root_rot, body_angular_velocities[:, self.motion_ref_body_index])
-        
-        # print(root_state)
-        
-        # DOF 상태
+
         n_dofs = len(self.motion_dof_indexes)
-        robot_ndof = self._robot.data.default_joint_pos.shape[1]
         joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
         joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
         joint_pos[:, : n_dofs] = dof_positions[:, self.motion_dof_indexes[: n_dofs]]
@@ -442,8 +417,6 @@ class SkeletonAmpEnv(DirectRLEnv):
             body_linear_velocities,
             body_angular_velocities,
         ) = self._motion_loader.sample(num_samples=num_samples * self.cfg.num_amp_observations, times=times)
-        # print('-----data-----')
-        # print(body_positions[0])
         amp_obs = compute_obs(
             dof_positions[:, self.motion_dof_indexes],
             dof_velocities[:, self.motion_dof_indexes],
@@ -485,7 +458,7 @@ class SkeletonAmpEnv(DirectRLEnv):
                             self._commands[env_ids, i] = torch.lerp(
                                 low, high, torch.rand(len(env_ids), device=self.device)
                             )
-                        elif i == 1 or i == 2:  # ang_vel에 curriculum 적용
+                        else:  # ang_vel에 curriculum 적용
                             if not hasattr(self, 'curriculum_ang_vel'):
                                 self.curriculum_ang_vel = torch.full((self.num_envs,), lower, device=self.device)
                             curr = self.curriculum_ang_vel[env_ids]

@@ -73,6 +73,12 @@ class WTWEnv(DirectRLEnv):
         self.global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
         self.bezier_target_pos = torch.zeros(self.num_envs, 4, 3, device=self.device, requires_grad=False)
 
+        # Bezier c0/c3 latch: swing 시작 시 고정하여 궤적 안정화
+        # c0 = 실제 liftoff 위치 (s=0 오차 제거), c3 = 착지 목표 (피드백 루프 차단)
+        self.c0_latched = torch.zeros(self.num_envs, 4, 3, device=self.device, requires_grad=False)
+        self.c3_latched = torch.zeros(self.num_envs, 4, 3, device=self.device, requires_grad=False)
+        self.prev_is_swing = torch.zeros(self.num_envs, 4, dtype=torch.bool, device=self.device)
+
         if self.cfg.history_observation:
             self.obs_history_buf = torch.zeros(
                 self.num_envs, self.cfg.history_len, self.cfg.num_prio_obs, device=self.device, dtype=torch.float
@@ -107,6 +113,7 @@ class WTWEnv(DirectRLEnv):
                 "similar_to_default",
                 "feet_clearance_cmd_linear",
                 "feet_clearance_bezier",
+                "feet_clearance_bezier_5th",
                 "orientation_control",
                 "raibert_heuristic",
                 "tracking_contacts_shaped_force",
@@ -116,6 +123,9 @@ class WTWEnv(DirectRLEnv):
                 "action_smoothness1",
                 "action_smoothness2",
                 "foot_landing_vel",
+                "foot_landing_vel_xy",
+                "landing_impact",
+                "feet_vel_5th_late"
             ]
         }
         # Get specific body indices
@@ -149,6 +159,16 @@ class WTWEnv(DirectRLEnv):
             [i for i, n in enumerate(all_joint_names) if "hip" in n],
             dtype=torch.long, device=self.device
         )
+
+        # [FL, FR, RL, RR] 순서로 hip body ids 정렬 (x_corr clamp용)
+        all_hip_body_ids, all_hip_body_names = self._robot.find_bodies(".*hip")
+        self._hip_body_ids = []
+        for prefix in ["FL", "FR", "RL", "RR"]:
+            for b_id, b_name in zip(all_hip_body_ids, all_hip_body_names):
+                if prefix in b_name:
+                    self._hip_body_ids.append(b_id)
+                    break
+        self._hip_body_ids = torch.tensor(self._hip_body_ids, dtype=torch.long, device=self.device)
 
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
         self.set_debug_vis(getattr(self.cfg, "debug_vis", True))
@@ -198,6 +218,12 @@ class WTWEnv(DirectRLEnv):
             bounds = self._commands[:, 7]
             durations = self._commands[:, 8]
             self.gait_indices = torch.remainder(self.gait_indices + self.dt * frequencies, 1.0)
+
+            # both_low: 발을 땅에 고정 — gait phase를 0으로 고정하여 발 구르기 방지
+            low_lin_vel_ct = torch.norm(self._commands[:, :2], dim=1) < 0.1
+            low_ang_vel_ct = torch.abs(self._commands[:, 2]) < 0.05
+            both_low_ct = low_lin_vel_ct & low_ang_vel_ct
+            self.gait_indices[both_low_ct] = 0.0
 
             foot_indices = [
                 self.gait_indices + phases + offsets + bounds,
@@ -266,6 +292,11 @@ class WTWEnv(DirectRLEnv):
             self.desired_contact_states[:, 1] = smoothing_multiplier_FR
             self.desired_contact_states[:, 2] = smoothing_multiplier_RL
             self.desired_contact_states[:, 3] = smoothing_multiplier_RR
+
+            # both_low: 모든 발을 stance 강제 + clock signal 0으로 고정
+            self.foot_indices[both_low_ct] = 0.0
+            self.clock_inputs[both_low_ct] = 0.0
+            self.desired_contact_states[both_low_ct] = 1.0
 
         if self.num_commands > 9:
             self.desired_footswing_height = self._commands[:, 9]
@@ -533,7 +564,17 @@ class WTWEnv(DirectRLEnv):
         self.desired_footsteps_world_frame[:, :, 2] = 0.0
 
         err_raibert_heuristic = torch.abs(desired_footsteps_body_frame - footsteps_in_body_frame[:, :, 0:2])
-        raibert_heuristic = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
+
+        # Phase-masked Raibert: 스윙 후반(s > 0.7)과 stance 발에만 페널티 적용
+        # → 스윙 초반 snap 현상 방지, 체공 중 자연스러운 궤적 이동 허용
+        swing_s_raibert = torch.clamp((self.foot_indices - 0.5) * 2.0, 0.0, 1.0)    # [num_envs, 4], swing=0~1
+        late_swing_mask = (swing_s_raibert > 0.7).float()                             # 스윙 후반 30%
+        stance_mask_raibert = (self.desired_contact_states > 0.5).float()             # stance 발
+        raibert_phase_mask = (late_swing_mask + stance_mask_raibert).clamp(0.0, 1.0) # [num_envs, 4]
+
+        err_raibert_masked = err_raibert_heuristic * raibert_phase_mask.unsqueeze(-1) # [num_envs, 4, 2]
+        raibert_heuristic = torch.sum(torch.square(err_raibert_masked), dim=(1, 2))
+        raibert_heuristic[both_low] = 0.0  # both_low: gait clock 정지 상태에서 패널티 제거
 
         # bezier curve foot clearance reward
         # --- swing 착지 목표 계산 ---
@@ -559,7 +600,15 @@ class WTWEnv(DirectRLEnv):
         # Raibert 보정: vel * T_stance/2 = vel * durations / (2 * freq)
         # durations = commands[:, 8] (duty cycle, stance 비율)
         dur = commands[:, 8:9].clamp(min=0.1, max=0.9)                               # [num_envs, 1]
-        x_corr = x_vel_des * dur / (2.0 * freq_clamped.unsqueeze(1))                 # [num_envs, 1]
+
+        # x_corr clamp: 실제 hip body의 base frame x 거리 이내로 제한
+        hip_pos_w = self._robot.data.body_link_pos_w[:, self._hip_body_ids, :]       # [N, 4, 3]
+        hip_rel_w = hip_pos_w - base_pos.unsqueeze(1)                                # [N, 4, 3]
+        q_inv = inv_quat(base_quat).unsqueeze(1).expand(-1, 4, -1).reshape(self.num_envs * 4, 4)
+        hip_pos_b = quat_apply(q_inv, hip_rel_w.reshape(self.num_envs * 4, 3)).view(self.num_envs, 4, 3)
+        x_corr_limit = hip_pos_b[:, :, 0].abs().min(dim=1, keepdim=True)[0]         # [N, 1]
+
+        x_corr = (x_vel_des * dur / (2.0 * freq_clamped.unsqueeze(1))).clamp(-x_corr_limit, x_corr_limit)  # [N, 1]
         yaw_v = commands[:, 2:3]
         y_corr = (yaw_v * s_len / 2.0) * dur / (2.0 * freq_clamped.unsqueeze(1))    # [num_envs, 1]
 
@@ -587,41 +636,70 @@ class WTWEnv(DirectRLEnv):
 
         # --- Body Frame 기반 3차 Bezier 궤적 계산 ---
         # c0: liftoff 위치 = hip - x_corr (c3 landing = hip + x_corr 와 대칭)
-        # → Raibert 원리: mid-stance에서 foot이 hip 직하, liftoff/landing이 hip 중심 대칭
-        c0_body = torch.zeros(self.num_envs, 4, 3, device=self.device)
-        c0_body[:, :, 0] = hip_xs - x_corr                                            # [num_envs, 4]
-        start_ys = hip_ys.clone()
-        start_ys[:, 0:2] = start_ys[:, 0:2] - y_corr                                 # front legs: -y_corr
-        start_ys[:, 2:4] = start_ys[:, 2:4] + y_corr                                 # rear legs:  +y_corr
-        c0_body[:, :, 1] = start_ys                                                   # [num_envs, 4]
-        q_rep = base_quat.unsqueeze(1).repeat(1, 4, 1).reshape(self.num_envs * 4, 4)
-        c0 = quat_apply(q_rep, c0_body.reshape(self.num_envs * 4, 3)).view(self.num_envs, 4, 3)
-        c0 = c0 + base_pos.unsqueeze(1)
-        c0[:, :, 2] = 0.0                                                              # z = 지면
+        # swing 시작 감지: 이전 스텝 stance → 현재 스텝 swing 전환
+        is_swing_now = ~(self.desired_contact_states > 0.5)                            # [num_envs, 4]
+        is_swing_start = is_swing_now & ~self.prev_is_swing                            # [num_envs, 4]
+        self.prev_is_swing = is_swing_now.clone()
 
-        # c3: Raibert 착지 목표 (world frame, 매 스텝 fresh 계산)
-        c3 = landing_target_new                                                        # [num_envs, 4, 3], z=0
+        # c0: swing 시작 시 실제 발 위치로 latch → s=0 오차 제거
+        self.c0_latched = torch.where(
+            is_swing_start.unsqueeze(-1),
+            foot_positions.detach(),
+            self.c0_latched,
+        )
+
+        # c3: swing 시작 시 착지 목표로 latch → swing 중 c3 변동 차단 (ang_vel 피드백 루프 방지)
+        self.c3_latched = torch.where(
+            is_swing_start.unsqueeze(-1),
+            landing_target_new.detach(),
+            self.c3_latched,
+        )
+
+        c0 = self.c0_latched
+        c3 = self.c3_latched
 
         s = torch.clamp((self.foot_indices - 0.5) * 2.0, 0.0, 1.0).unsqueeze(-1)     # [num_envs, 4, 1]
         height_cmd = commands[:, 9].unsqueeze(1).unsqueeze(1)                         # [num_envs, 1, 1]
         height_cmd[both_low] = 0.0
         c1 = c0.clone()
-        c1[:, :, 2:3] = height_cmd                                                    # 이륙 시 z 상승
+        c1[:, :, 2:3] = c0[:, :, 2:3] + height_cmd                                   # liftoff 기준 상대 높이
         c2 = c3.clone()
-        c2[:, :, 2:3] = height_cmd * 0.1                                              # 착지 전 낮게 유지 → soft landing
+        c2[:, :, 2:3] = c3[:, :, 2:3] + height_cmd * 0.1                             # 착지 전 낮게 유지 → soft landing
 
+        # 3차 베지에 궤적 (ablation 기준선)
         bezier = (1 - s) ** 3 * c0 + 3 * (1 - s) ** 2 * s * c1 + 3 * (1 - s) * s**2 * c2 + s**3 * c3
 
-        is_stance = (self.desired_contact_states > 0.5).unsqueeze(-1)                  # [num_envs, 4, 1]
-        self.bezier_target_pos = torch.where(is_stance, foot_positions, bezier.detach())
+        # 5차 베지에 Z 계산: B5(s) = 10H·s²·(1-s)² + c0_z
+        # 제어점 P=[0,0,H,H,0,0] 단순화 공식 (XY는 3차 bezier 유지)
+        # 경계 조건: dB/ds|_{s=0}=0 (이륙), dB/ds|_{s=1}=0 (착지) — 착지 속도 0 보장
+        # 최고점: s=0.5에서 0.625·H (c0_z 기준 상대값)
+        s_z = s.squeeze(-1)                                                            # [num_envs, 4]
+        H_5th = height_cmd[:, 0, 0].unsqueeze(1)                                     # [num_envs, 1]
+        bezier_z_5th = 10.0 * H_5th * s_z ** 2 * (1.0 - s_z) ** 2 + c0[:, :, 2]   # [num_envs, 4]
 
-        # 보상: Raibert heuristic과 동일한 방식 - swing 구간에서 Bezier 목표와의 squared error 패널티
+        # 5차 베지에 3D target: XY는 3차 그대로, Z만 5차로 대체 (시각화 및 향후 XY 추종에 활용)
+        bezier_5th = bezier.clone()
+        bezier_5th[:, :, 2] = bezier_z_5th
+
+        is_stance = (self.desired_contact_states > 0.5).unsqueeze(-1)                 # [num_envs, 4, 1]
+        self.bezier_target_pos = torch.where(is_stance, foot_positions, bezier_5th.detach())
+
+        # 보상: z 방향만 → yaw 회전 영향 없음, clearance가 목적
         swing_mask = 1.0 - self.desired_contact_states                                # [num_envs, 4]
-        err_bezier = bezier - foot_positions                                           # [num_envs, 4, 3]
+
+        # 3차 베지에 Z 추종 보상 (ablation 기준선: feet_clearance_bezier_reward_scale 활성화 시 사용)
+        err_bezier_z = bezier[:, :, 2] - foot_positions[:, :, 2]                     # [num_envs, 4]
         feet_clearance_bezier = torch.sum(
-            torch.square(err_bezier) * swing_mask.unsqueeze(-1), dim=(1, 2)
+            torch.square(err_bezier_z) * swing_mask, dim=1
         )                                                                              # [num_envs]
         feet_clearance_bezier[both_low] = 0.0
+
+        # 5차 베지에 Z 추종 보상 (착지 속도·가속도=0 보장: feet_clearance_bezier_5th_reward_scale 활성화 시 사용)
+        err_bezier_5th_z = bezier_z_5th - foot_positions[:, :, 2]                   # [num_envs, 4]
+        feet_clearance_bezier_5th = torch.sum(
+            torch.square(err_bezier_5th_z) * swing_mask, dim=1
+        )                                                                              # [num_envs]
+        feet_clearance_bezier_5th[both_low] = 0.0
 
         self._visualize_desired_footsteps()
 
@@ -652,10 +730,30 @@ class WTWEnv(DirectRLEnv):
         dof_vel_penalty = dof_vel[:]
         dof_vel_l2 = torch.sum(torch.square(dof_vel_penalty), dim=1)
 
-        # foot touchdown velocity penalty (착지 순간 z속도 패널티)
+        # foot touchdown velocity penalty (착지 순간 3D velocity 패널티)
         first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._feet_contact_ids]
-        foot_z_vel = self._robot.data.body_link_lin_vel_w[:, self._feet_ids, 2]  # [num_envs, 4]
-        foot_landing_vel = torch.sum(torch.square(foot_z_vel) * first_contact, dim=1)
+        foot_vel_3d = self._robot.data.body_link_lin_vel_w[:, self._feet_ids, :]   # [num_envs, 4, 3]
+        foot_landing_vel = torch.sum(torch.norm(foot_vel_3d, dim=-1) ** 2 * first_contact, dim=1)
+
+        # foot touchdown XY velocity penalty (착지 순간 수평 속도 패널티 — 발 구르기 방지)
+        foot_vel_xy = foot_vel_3d[:, :, :2]                                          # [num_envs, 4, 2]
+        foot_landing_vel_xy = torch.sum(torch.norm(foot_vel_xy, dim=-1) ** 2 * first_contact, dim=1)
+        # landing impact force penalty (착지 순간 충격력 패널티)
+        foot_impact_forces = torch.norm(net_contact_forces[:, 0, self._feet_contact_ids], dim=-1)  # [num_envs, 4]
+        landing_impact = torch.sum(foot_impact_forces * first_contact.float(), dim=1)
+
+        # 5차 베지에 Z velocity target 추종 보상 (swing 후반 s>0.7, 비교용)
+        # vz_target(s) = dBz/dt = dBz/ds · ds/dt
+        #              = 20·H·s(1-s)(1-2s) · (2·freq)
+        #              = 40·H·freq · s(1-s)(1-2s)
+        # s=1에서 0으로 수렴 → 착지 속도 0을 명시적으로 유도
+        freq_per_foot = freq_clamped.unsqueeze(1).expand(-1, 4)                               # [num_envs, 4]
+        vz_target_5th = 40.0 * H_5th * freq_per_foot * s_z * (1.0 - s_z) * (1.0 - 2.0 * s_z)  # [num_envs, 4]
+        foot_vel_z = foot_vel_3d[:, :, 2]                                                     # [num_envs, 4]
+        late_swing_vel_mask = (s_z > 0.7).float() * swing_mask                               # [num_envs, 4]
+        err_vz_5th = vz_target_5th - foot_vel_z                                              # [num_envs, 4]
+        feet_vel_5th_late = torch.sum(torch.square(err_vz_5th) * late_swing_vel_mask, dim=1)  # [num_envs]
+        feet_vel_5th_late[both_low] = 0.0
 
         # jump height tracking reward
         body_height = base_pos[:, 2]
@@ -674,6 +772,7 @@ class WTWEnv(DirectRLEnv):
             # "similar_to_default": similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
             "feet_clearance_cmd_linear": feet_clearance_cmd_linear * _scale("feet_clearance_cmd_linear") * self.step_dt,
             "feet_clearance_bezier": feet_clearance_bezier * _scale("feet_clearance_bezier") * self.step_dt,
+            "feet_clearance_bezier_5th": feet_clearance_bezier_5th * _scale("feet_clearance_bezier_5th") * self.step_dt,
             "orientation_control": orientation_control * _scale("orientation_control") * self.step_dt,
             "raibert_heuristic": raibert_heuristic * _scale("raibert_heuristic") * self.step_dt,
             "tracking_contacts_shaped_force": tracking_contacts_shaped_force
@@ -687,6 +786,9 @@ class WTWEnv(DirectRLEnv):
             "action_smoothness1": action_smoothness1 * _scale("action_smoothness1") * self.step_dt,
             "action_smoothness2": action_smoothness2 * _scale("action_smoothness2") * self.step_dt,
             "foot_landing_vel": foot_landing_vel * _scale("foot_landing_vel") * self.step_dt,
+            "foot_landing_vel_xy": foot_landing_vel_xy * _scale("foot_landing_vel_xy") * self.step_dt,
+            "landing_impact": landing_impact * _scale("landing_impact") * self.step_dt,
+            "feet_vel_5th_late": feet_vel_5th_late * _scale("feet_vel_5th_late") * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -724,6 +826,9 @@ class WTWEnv(DirectRLEnv):
         if self.cfg.history_observation:
             self.obs_history_buf[env_ids, :, :] = 0.0
         self.gait_indices[env_ids] = 0.0
+        self.c0_latched[env_ids] = 0.0
+        self.c3_latched[env_ids] = 0.0
+        self.prev_is_swing[env_ids] = False
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]

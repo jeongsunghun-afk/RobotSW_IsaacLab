@@ -20,18 +20,20 @@ from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 # 모션 파일 디렉토리 (stmr_go2.py 출력 경로와 일치해야 함)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset")
-MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_50")
+# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_50")
+# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_walk")
+MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_smr")
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_single")
+# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "go2")  # pkl (walk/run/trot/pace)
 
 
 @configclass
 class Go2AmpEnvCfg(DirectRLEnvCfg):
     """Go2 AMP imitation 학습 환경 설정.
 
-    AMP 관측 벡터 구성 (amp_observation_space = 55):
+    AMP 관측 벡터 구성 (amp_observation_space = 43):
         dof_pos(12) + dof_vel(12) + root_height(1) +
-        lin_vel(3) + ang_vel(3) +
-        key_body_pos(12) + key_body_lin_vel(12)
+        lin_vel(3) + ang_vel(3) + key_body_pos(12)
 
     Policy 관측 벡터 구성 (observation_space = 42):
         projected_gravity_b(3) + commands(3) +
@@ -46,8 +48,8 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
     observation_space = 42
     action_space = 12            # Go2 DOF 수
     state_space = 0
-    num_amp_observations = 2
-    amp_observation_space = 55
+    num_amp_observations = 10
+    amp_observation_space = 43
 
     # History & Privileged
     history_observation = True
@@ -63,7 +65,7 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
     # 모션
     motion_file: str = MOTION_FILES_DIR
     reference_body = "base"
-    reset_strategy = "random"    # {"default", "random", "random-start"}
+    reset_strategy = "random"     # {"default", "random", "random-start"}
 
     # 시뮬레이션 (200 Hz physics, 50 Hz policy)
     sim: SimulationCfg = SimulationCfg(
@@ -98,10 +100,22 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
     curriculum_threshold = 10.0
     curriculum_step = 0.05
     command_cfg = {
-        "lin_vel_x_range": [0.0, 4.0],
+        "lin_vel_x_range": [0.0, 5.0],
         "lin_vel_y_range": [-0.0, 0.0],
         "ang_vel_range": [-0.5, 0.5],
     }
+
+    # RSI-Command Matching + In-episode Velocity Curriculum
+    # Stage 1 (step < start):  RSI matching만, command 변동 없음
+    # Stage 2 (start ~ end):   RSI ± delta 점진 증가
+    # Stage 3 (step > end):    RSI ± delta_end (전체 범위)
+    # 기본값: task_reward_lerp anneal(10000 iter × 24 steps = 240000) 이후 시작
+    command_delta_start: float = 0.0           # Stage 1: 변동 없음
+    command_delta_end: float = 5.0             # Stage 3: 전체 범위
+    command_curriculum_start_step: int = 240000  # curriculum 시작 (common_step_counter 기준)
+    command_curriculum_end_step: int = 600000    # curriculum 완료 (~25000 iter × 24 steps)
+    command_resample_interval: int = 200         # 에피소드 중 재샘플링 주기 (env steps)
+    command_soft_update_alpha: float = 0.5       # 새 command 반영 비율 (1=즉시, 0=유지)
 
     # Tracking 보상
     tracking_sigma = 0.25

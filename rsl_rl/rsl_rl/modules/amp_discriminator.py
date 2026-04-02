@@ -16,7 +16,7 @@ class AMPDiscriminator(nn.Module):
         self.input_dim = input_dim
 
         # AMP loss parameter
-        self.amp_reward_coef = 1.5 * (1.0 / 6.0) # AMP style 보상 스케일
+        self.amp_reward_coef = 1.5 # AMP style 보상 스케일
         
         # Empirical Normalizer (input_dim 수치만큼 정규화)
         self.amp_obs_normalizer = EmpiricalNormalization(input_dim).to(self.device)

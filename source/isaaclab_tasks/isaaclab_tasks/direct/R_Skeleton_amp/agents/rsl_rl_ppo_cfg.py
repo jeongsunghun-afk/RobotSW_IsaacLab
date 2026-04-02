@@ -47,7 +47,7 @@ class SkeletonAmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     amp = dict(
         task_reward_lerp=0.5,
         discriminator_learning_rate=1e-4,
-        gradient_penalty_coef=10.0,
-        reward_coef=2.0 / 6.0,
+        gradient_penalty_coef=1.0,
+        reward_coef=2.0 * 0.02,
         discriminator_hidden_dims=[1024, 512]
     )

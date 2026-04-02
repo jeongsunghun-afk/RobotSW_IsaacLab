@@ -36,7 +36,7 @@ GAITS: dict[str, list[float]] = {
 
 STEP_FREQUENCY: dict[str, float] = {
     "pronking":     2.0,
-    "trotting":     1.5,
+    "trotting":     2.0,
     "bounding":     2.0,
     "pacing":       2.0,
     "galloping":    3.0,
@@ -49,7 +49,7 @@ STEP_FREQUENCY: dict[str, float] = {
 
 FOOTSWING_HEIGHT: dict[str, float] = {
     "pronking":     0.2,
-    "trotting":     0.1,
+    "trotting":     0.0,
     "bounding":     0.2,
     "pacing":       0.1,
     "galloping":    0.1,

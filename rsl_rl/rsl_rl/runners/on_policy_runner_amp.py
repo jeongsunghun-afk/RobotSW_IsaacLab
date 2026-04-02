@@ -59,10 +59,21 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
 
         start_it = self.current_learning_iteration
         total_it = start_it + num_learning_iterations
-        
+
+        # Lerp annealing 파라미터 (Stage 1: task 위주 → Stage 2: AMP 도입)
+        _amp_cfg = self.cfg.get("amp", {})
+        _lerp_end = _amp_cfg.get("task_reward_lerp", self.alg.amp_task_reward_lerp)
+        _lerp_start = _amp_cfg.get("task_reward_lerp_start", _lerp_end)
+        _anneal_iters = _amp_cfg.get("task_reward_lerp_anneal_iters", 0)
+
         amp_obs_buffer = []
 
         for it in range(start_it, total_it):
+            # task_reward_lerp 스케줄 업데이트 (Stage 1 → Stage 2)
+            if self.alg.enable_lerp_schedule and _anneal_iters > 0:
+                progress = min(1.0, (it - start_it) / _anneal_iters)
+                self.alg.amp_task_reward_lerp = _lerp_start + (_lerp_end - _lerp_start) * progress
+
             start = time.time()
             hist_encoding = it % 20 == 0 # dagger_update_freq
             amp_obs_buffer.clear()
@@ -118,19 +129,23 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             if len(amp_obs_buffer) > 0 and hasattr(self.env, "get_amp_observations"):
                 # Concatenate accumulated batched policy motions
                 policy_amp_obs_batch = torch.cat(amp_obs_buffer, dim=0)
-                
-                # Fetch expert reference motion samples from env (or dataset)
-                # Env should provide a method to sample experts -> e.g., get_amp_observations(num_samples)
                 num_samples = policy_amp_obs_batch.shape[0]
 
-                expert_amp_obs_batch = self.env.get_amp_observations(num_samples).to(self.device)
-                
-                # Unfrozen/Update discriminator
-                self.train_mode() 
+                # Replay buffer에 current policy obs 추가
+                self.alg.add_to_replay_buffer(policy_amp_obs_batch)
+
+                self.train_mode()
                 for param in self.alg.discriminator.parameters():
                     param.requires_grad = True
-                
-                amp_loss_dict = self.alg.update_amp(expert_amp_obs_batch, policy_amp_obs_batch)
+
+                amp_loss_dict = {}
+                for disc_epoch in range(self.alg.disc_num_epochs):
+                    # Replay buffer에서 샘플링 (가능한 경우)
+                    replayed = self.alg.sample_replay_buffer(num_samples)
+                    policy_sample = replayed if replayed is not None else policy_amp_obs_batch
+
+                    expert_amp_obs_batch = self.env.get_amp_observations(num_samples).to(self.device)
+                    amp_loss_dict = self.alg.update_amp(expert_amp_obs_batch, policy_sample)
                 
                 # Freeze Discriminator for Actor-Critic Update
                 # for param in self.alg.discriminator.parameters():
@@ -143,6 +158,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             loss_dict = self.alg.update()
             loss_dict.update(amp_loss_dict)
             loss_dict["hist_latent_loss"] = self.alg.update_dagger()
+            loss_dict["amp_task_reward_lerp"] = self.alg.amp_task_reward_lerp  # type: ignore[attr-defined]
 
             stop = time.time()
             learn_time = stop - start

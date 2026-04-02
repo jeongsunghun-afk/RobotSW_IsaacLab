@@ -1,9 +1,9 @@
 """Go2 모션 파일 로더.
 
-stmr_go2.py가 생성하는 DeepMimic JSON 형식 txt 파일을 파싱하여
-Isaac Lab AMP 학습에 사용할 수 있는 인터페이스를 제공합니다.
+stmr_go2.py가 생성하는 DeepMimic JSON 형식 txt 파일과
+MuJoCo pkl 형식 파일을 파싱하여 Isaac Lab AMP 학습에 사용할 수 있는 인터페이스를 제공합니다.
 
-각 프레임 레이아웃 (61개 값):
+txt 각 프레임 레이아웃 (61개 값):
   [0:3]    root_pos  (x, y, z)
   [3:7]    root_rot  (quat xyzw)
   [7:19]   joint_pos (12개 관절, MuJoCo 순서)
@@ -12,6 +12,12 @@ Isaac Lab AMP 학습에 사용할 수 있는 인터페이스를 제공합니다.
   [34:37]  ang_vel   (base frame)
   [37:49]  joint_vel (12개)
   [49:61]  toe_vel_local (발 4개 × 3, [FL, RL, FR, RR] 순서)
+
+pkl 각 프레임 레이아웃 (18개 값):
+  [0:3]    root_pos  (x, y, z)
+  [3:6]    root_euler (roll, pitch, yaw) [rad]
+  [6:18]   joint_pos (12개 관절, DOF_NAMES 순서)
+  velocities / toe_pos: finite difference 및 FK로 자동 계산
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import pickle
 from typing import Optional
 
 import numpy as np
@@ -79,6 +86,166 @@ class Go2MotionLoader:
         "base",
     ]
 
+    # ------------------------------------------------------------------ #
+    #  Go2 FK 파라미터 (표준 Unitree Go2 URDF 기준, 검증 오차 < 0.5mm)    #
+    # ------------------------------------------------------------------ #
+    # 각 다리의 hip joint 위치 (body frame, xyz)
+    _HIP_BASE = {
+        "FL": np.array([+0.1934, +0.0465, 0.0]),
+        "FR": np.array([+0.1934, -0.0465, 0.0]),
+        "RL": np.array([-0.1934, +0.0465, 0.0]),
+        "RR": np.array([-0.1934, -0.0465, 0.0]),
+    }
+    # hip frame 내 thigh joint y-offset (좌측 +, 우측 -)
+    _THIGH_OFS_Y = {"FL": +0.0955, "FR": -0.0955, "RL": +0.0955, "RR": -0.0955}
+    _THIGH_LEN = 0.213
+    _CALF_LEN = 0.213
+
+    @staticmethod
+    def _Rx(a: np.ndarray) -> np.ndarray:
+        """Roll 회전 행렬 (N,) → (N,3,3)."""
+        N = len(a)
+        R = np.zeros((N, 3, 3))
+        R[:, 0, 0] = 1.0
+        R[:, 1, 1] = np.cos(a)
+        R[:, 1, 2] = -np.sin(a)
+        R[:, 2, 1] = np.sin(a)
+        R[:, 2, 2] = np.cos(a)
+        return R
+
+    @staticmethod
+    def _Ry(a: np.ndarray) -> np.ndarray:
+        """Pitch 회전 행렬 (N,) → (N,3,3)."""
+        N = len(a)
+        R = np.zeros((N, 3, 3))
+        R[:, 0, 0] = np.cos(a)
+        R[:, 0, 2] = np.sin(a)
+        R[:, 1, 1] = 1.0
+        R[:, 2, 0] = -np.sin(a)
+        R[:, 2, 2] = np.cos(a)
+        return R
+
+    @classmethod
+    def _go2_fk_toe_pos(cls, joint_pos: np.ndarray) -> np.ndarray:
+        """Go2 순운동학으로 발 위치(body frame local)를 계산합니다.
+
+        Args:
+            joint_pos: (N, 12) — [FL_hip, FL_thigh, FL_calf, FR_..., RL_..., RR_...]
+
+        Returns:
+            toe_pos: (N, 4, 3) — [FL, FR, RL, RR] 순서 (BODY_NAMES 순서)
+        """
+        N = joint_pos.shape[0]
+        # 관절 인덱스: DOF_NAMES 순서 = [FL(0-2), FR(3-5), RL(6-8), RR(9-11)]
+        leg_slices = {"FL": slice(0, 3), "FR": slice(3, 6), "RL": slice(6, 9), "RR": slice(9, 12)}
+        leg_order = ["FL", "FR", "RL", "RR"]
+
+        toe_pos = np.zeros((N, 4, 3))
+        _down = np.array([0.0, 0.0, -1.0])
+
+        for idx, leg in enumerate(leg_order):
+            s = leg_slices[leg]
+            hip_a = joint_pos[:, s.start]        # (N,)
+            thigh_a = joint_pos[:, s.start + 1]  # (N,)
+            calf_a = joint_pos[:, s.start + 2]   # (N,)
+
+            hip_base = cls._HIP_BASE[leg]         # (3,)
+            thigh_ofs = np.array([0.0, cls._THIGH_OFS_Y[leg], 0.0])
+
+            R_hip = cls._Rx(hip_a)    # (N,3,3)
+            R_th = cls._Ry(thigh_a)   # (N,3,3)
+            R_ca = cls._Ry(calf_a)    # (N,3,3)
+
+            # thigh pivot = hip_base + R_hip @ thigh_ofs
+            thigh_pivot = hip_base + np.einsum("nij,j->ni", R_hip, thigh_ofs)  # (N,3)
+
+            # calf pivot = thigh_pivot + R_hip @ R_th @ (0,0,-thigh_len)
+            thigh_end_local = _down * cls._THIGH_LEN   # (3,)
+            thigh_end_th = np.einsum("nij,j->ni", R_th, thigh_end_local)       # (N,3)
+            calf_pivot = thigh_pivot + np.einsum("nij,nj->ni", R_hip, thigh_end_th)  # (N,3)
+
+            # foot = calf_pivot + R_hip @ R_th @ R_ca @ (0,0,-calf_len)
+            calf_end_local = _down * cls._CALF_LEN
+            calf_end_ca = np.einsum("nij,j->ni", R_ca, calf_end_local)          # (N,3)
+            calf_end_th = np.einsum("nij,nj->ni", R_th, calf_end_ca)            # (N,3)
+            foot = calf_pivot + np.einsum("nij,nj->ni", R_hip, calf_end_th)     # (N,3)
+
+            toe_pos[:, idx, :] = foot
+
+        return toe_pos.astype(np.float32)
+
+    @staticmethod
+    def _euler_to_quat_wxyz(rpy: np.ndarray) -> np.ndarray:
+        """Roll-Pitch-Yaw → 쿼터니언 wxyz (ZYX 내재적 회전, scipy 불필요).
+
+        Args:
+            rpy: (N, 3) — [roll, pitch, yaw] in radians
+
+        Returns:
+            quat: (N, 4) — [w, x, y, z]
+        """
+        r, p, y = rpy[:, 0] / 2, rpy[:, 1] / 2, rpy[:, 2] / 2
+        cr, cp, cy = np.cos(r), np.cos(p), np.cos(y)
+        sr, sp, sy = np.sin(r), np.sin(p), np.sin(y)
+        w = cr * cp * cy + sr * sp * sy
+        x = sr * cp * cy - cr * sp * sy
+        yq = cr * sp * cy + sr * cp * sy
+        z = cr * cp * sy - sr * sp * cy
+        return np.stack([w, x, yq, z], axis=-1).astype(np.float32)
+
+    @staticmethod
+    def _finite_diff(arr: np.ndarray, dt: float, loop: bool = False) -> np.ndarray:
+        """Forward finite difference로 속도 계산 (N, D) → (N, D).
+
+        마지막 프레임은 loop=True이면 wraparound, 아니면 이전 프레임 복사.
+        """
+        vel = np.zeros_like(arr)
+        vel[:-1] = (arr[1:] - arr[:-1]) / dt
+        if loop:
+            vel[-1] = (arr[0] - arr[-1]) / dt
+        else:
+            vel[-1] = vel[-2]
+        return vel
+
+    def _load_pkl_file(self, path: str) -> tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, float
+    ]:
+        """pkl 파일을 로드하고 txt 로더와 동일한 출력을 반환합니다.
+
+        Returns:
+            (root_pos, root_rot_wxyz, joint_pos, joint_vel,
+             lin_vel, ang_vel, toe_pos, toe_vel, frame_duration)
+        """
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+
+        fps: int = int(data["fps"])
+        dt = 1.0 / fps
+        frames = np.array(data["frames"], dtype=np.float32)  # (N, 18)
+
+        assert frames.shape[1] == 18, f"pkl 프레임 크기 불일치: {frames.shape[1]} != 18 ({path})"
+
+        root_pos = frames[:, 0:3]    # (N, 3)
+        root_euler = frames[:, 3:6]  # (N, 3) — roll, pitch, yaw
+        joint_pos = frames[:, 6:18]  # (N, 12)
+
+        # euler → quaternion wxyz
+        root_rot_wxyz = self._euler_to_quat_wxyz(root_euler)  # (N, 4)
+
+        # 속도: finite difference (loop=False — 위치는 절대 좌표라 wraparound 불가)
+        lin_vel = self._finite_diff(root_pos, dt, loop=False)        # (N, 3)
+        ang_vel = self._finite_diff(root_euler, dt, loop=False)      # (N, 3)
+        joint_vel = self._finite_diff(joint_pos, dt, loop=False)     # (N, 12)
+
+        # 발 위치: FK
+        toe_pos = self._go2_fk_toe_pos(joint_pos)                    # (N, 4, 3)
+        toe_vel = np.zeros_like(toe_pos)
+        toe_vel_flat = self._finite_diff(toe_pos.reshape(len(toe_pos), -1), dt, loop=False)
+        toe_vel = toe_vel_flat.reshape(len(toe_pos), 4, 3)           # (N, 4, 3)
+
+        return root_pos, root_rot_wxyz, joint_pos, joint_vel, lin_vel, ang_vel, toe_pos, toe_vel, dt
+
     def __init__(
         self,
         motion_files: str | list[str],
@@ -88,7 +255,9 @@ class Go2MotionLoader:
 
         if isinstance(motion_files, str):
             if os.path.isdir(motion_files):
-                motion_files = sorted(glob.glob(os.path.join(motion_files, "*.txt")))
+                txt_files = sorted(glob.glob(os.path.join(motion_files, "*.txt")))
+                pkl_files = sorted(glob.glob(os.path.join(motion_files, "*.pkl")))
+                motion_files = txt_files + pkl_files
             else:
                 motion_files = [motion_files]
 
@@ -107,38 +276,45 @@ class Go2MotionLoader:
 
         for path in motion_files:
             assert os.path.isfile(path), f"파일이 존재하지 않습니다: {path}"
-            with open(path) as f:
-                data = json.load(f)
+            ext = os.path.splitext(path)[1].lower()
 
-            frames = np.array(data["Frames"], dtype=np.float32)  # (N, 61)
-            frame_duration = float(data["FrameDuration"])
+            if ext == ".pkl":
+                # ---- pkl 로딩 경로 ----
+                (root_pos, root_rot_wxyz, joint_pos, joint_vel,
+                 lin_vel, ang_vel, toe_pos, toe_vel, frame_duration) = self._load_pkl_file(path)
+                num_frames_file = root_pos.shape[0]
+            else:
+                # ---- txt (JSON) 로딩 경로 ----
+                with open(path) as f:
+                    data = json.load(f)
+
+                frames = np.array(data["Frames"], dtype=np.float32)  # (N, 61)
+                frame_duration = float(data["FrameDuration"])
+                num_frames_file = frames.shape[0]
+
+                root_pos = frames[:, self.ROOT_POS_START : self.ROOT_POS_END]
+                root_rot_xyzw = frames[:, self.ROOT_ROT_START : self.ROOT_ROT_END]
+                joint_pos = frames[:, self.JOINT_POS_START : self.JOINT_POS_END]
+                toe_pos_flat = frames[:, self.TOE_POS_START : self.TOE_POS_END]
+                lin_vel = frames[:, self.LIN_VEL_START : self.LIN_VEL_END]
+                ang_vel = frames[:, self.ANG_VEL_START : self.ANG_VEL_END]
+                joint_vel = frames[:, self.JOINT_VEL_START : self.JOINT_VEL_END]
+                toe_vel_flat = frames[:, self.TOE_VEL_START : self.TOE_VEL_END]
+
+                # xyzw → wxyz
+                root_rot_wxyz = np.concatenate(
+                    [root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1
+                )
+                # stmr_go2.py 저장 순서: [FL=0, RL=1, FR=2, RR=3] → [FL, FR, RL, RR]
+                toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
+                toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
 
             if total_dt is None:
                 total_dt = frame_duration
             else:
-                assert abs(total_dt - frame_duration) < 1e-6, (
+                assert abs(total_dt - frame_duration) < 1e-3, (
                     f"FrameDuration 불일치: {total_dt} vs {frame_duration} ({path})"
                 )
-
-            root_pos = frames[:, self.ROOT_POS_START : self.ROOT_POS_END]          # (N,3)
-            root_rot_xyzw = frames[:, self.ROOT_ROT_START : self.ROOT_ROT_END]     # (N,4) xyzw
-            joint_pos = frames[:, self.JOINT_POS_START : self.JOINT_POS_END]       # (N,12)
-            toe_pos_flat = frames[:, self.TOE_POS_START : self.TOE_POS_END]        # (N,12)
-            lin_vel = frames[:, self.LIN_VEL_START : self.LIN_VEL_END]             # (N,3)
-            ang_vel = frames[:, self.ANG_VEL_START : self.ANG_VEL_END]             # (N,3)
-            joint_vel = frames[:, self.JOINT_VEL_START : self.JOINT_VEL_END]       # (N,12)
-            toe_vel_flat = frames[:, self.TOE_VEL_START : self.TOE_VEL_END]        # (N,12)
-
-            # xyzw → wxyz (Isaac Lab 쿼터니언 순서)
-            root_rot_wxyz = np.concatenate(
-                [root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1
-            )  # (N,4)
-
-            # stmr_go2.py 저장 순서: [FL=0, RL=1, FR=2, RR=3]
-            # BODY_NAMES 기대 순서: [FL=0, FR=1, RL=2, RR=3]
-            # 재정렬: [0, 2, 1, 3]
-            toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
-            toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
 
             all_root_pos.append(root_pos)
             all_root_rot_wxyz.append(root_rot_wxyz)
@@ -150,8 +326,8 @@ class Go2MotionLoader:
             all_toe_vel.append(toe_vel)
 
             print(
-                f"모션 로드 ({os.path.basename(path)}): "
-                f"{frames.shape[0]} 프레임 ({frames.shape[0] * frame_duration:.2f}s)"
+                f"모션 로드 ({os.path.basename(path)}, {ext}): "
+                f"{num_frames_file} 프레임 ({num_frames_file * frame_duration:.2f}s)"
             )
 
         joint_pos_all = np.concatenate(all_joint_pos, axis=0)
@@ -192,6 +368,12 @@ class Go2MotionLoader:
         self.dt = total_dt
         self.num_frames = self.dof_positions.shape[0]
         self.duration = self.dt * (self.num_frames - 1)
+
+        # per-frame forward velocity 저장 (RSI-command 매칭용)
+        self._frame_lin_vel_x = lin_vel_all[:, 0].copy()
+
+        # 속도 구간별 균등 샘플링 가중치 사전 계산
+        self._vel_sample_weights = self._build_velocity_sample_weights(lin_vel_all)
 
         print(
             f"Go2MotionLoader: 총 {self.num_frames} 프레임 "
@@ -272,7 +454,44 @@ class Go2MotionLoader:
         blend = np.clip(blend, 0.0, 1.0)
         return index_0, index_1, blend
 
-    def sample_times(self, num_samples: int, duration: Optional[float] = None) -> np.ndarray:
+    def _build_velocity_sample_weights(self, lin_vel_all: np.ndarray, num_bins: int = 5) -> np.ndarray:
+        """속도 구간별 균등 샘플링 가중치를 계산합니다.
+
+        전체 프레임을 num_bins개의 속도 구간으로 나누고, 각 구간에 동일한 총 가중치를
+        부여합니다. 고속 프레임이 적더라도 저속 프레임과 동일한 비율로 샘플링됩니다.
+        """
+        speeds = np.abs(lin_vel_all[:, 0])  # forward (x) 속도 크기
+        max_speed = speeds.max()
+        bin_edges = np.linspace(0.0, max_speed + 1e-6, num_bins + 1)
+        bin_ids = np.clip(np.digitize(speeds, bin_edges) - 1, 0, num_bins - 1)
+
+        weights = np.zeros(len(speeds), dtype=np.float64)
+        occupied = 0
+        for b in range(num_bins):
+            mask = bin_ids == b
+            count = int(mask.sum())
+            if count > 0:
+                occupied += 1
+                weights[mask] = 1.0 / count  # 구간 내 균등
+
+        weights /= weights.sum()  # 전체 합 = 1
+
+        # 로그: 구간별 프레임 수와 속도 범위 출력
+        print("Go2MotionLoader: velocity-balanced sampling weights")
+        for b in range(num_bins):
+            mask = bin_ids == b
+            count = int(mask.sum())
+            lo, hi = bin_edges[b], bin_edges[b + 1]
+            pct = 100.0 * count / len(speeds)
+            w_pct = 100.0 * weights[mask].sum() if count > 0 else 0.0
+            print(f"  bin {b} [{lo:.1f}, {hi:.1f}) m/s: {count:4d} frames ({pct:5.1f}%) → sample prob {w_pct:.1f}%")
+
+        return weights.astype(np.float64)
+
+    def sample_times(self, num_samples: int, duration: Optional[float] = None, velocity_balanced: bool = True) -> np.ndarray:
+        if velocity_balanced:
+            frame_indices = np.random.choice(self.num_frames, size=num_samples, p=self._vel_sample_weights)
+            return (frame_indices * float(self.dt)).astype(np.float32)  # type: ignore[arg-type]
         duration = self.duration if duration is None else duration
         assert duration <= self.duration, (
             f"요청 duration({duration}) > 모션 duration({self.duration})"

@@ -21,7 +21,8 @@ from isaaclab_assets.robots.rga import R_SKELETON_CFG  # isort: skip
 # 모션 파일 디렉토리 (이 파일 기준으로 상대 경로)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_sample")
-MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_stmr")
+# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_stmr")
+MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset")
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "txt_dataset_skeleton_sample2")
 
 
@@ -105,5 +106,7 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
 
     # Tracking 보상
     tracking_sigma = 0.25
-    lin_vel_reward_scale = 1.0 * 1. / (.02 * 6)
-    yaw_rate_reward_scale = 0.5 * 1. / (.02 * 6)
+    lin_vel_reward_scale = 1.0
+    yaw_rate_reward_scale = 0.5
+    # lin_vel_reward_scale = 1.0 * 1. / (.02 * 6)
+    # yaw_rate_reward_scale = 0.5 * 1. / (.02 * 6)

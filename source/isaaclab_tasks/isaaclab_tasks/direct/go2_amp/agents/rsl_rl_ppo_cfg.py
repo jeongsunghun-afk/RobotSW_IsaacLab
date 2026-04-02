@@ -37,7 +37,7 @@ class Go2AmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        entropy_coef=0.007,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-4,
@@ -49,9 +49,16 @@ class Go2AmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         class_name="PPOAMP",
     )
     amp = dict(
-        task_reward_lerp=0.7,
+        task_reward_lerp=0.3,                   # Stage 2 최종값 (annealing 완료 후)
+        task_reward_lerp_start=0.95,            # Stage 1 초기값 (pure task 위주)
+        task_reward_lerp_anneal_iters=10000,    # Stage 1→2 전환 iteration 수
         discriminator_learning_rate=1e-4,
         gradient_penalty_coef=5.0,
         reward_coef=2.0 * 0.02,
         discriminator_hidden_dims=[1024, 512],
+        enable_replay_buffer=True,
+        replay_buffer_size=100000,
+        disc_num_epochs=2,
+        enable_lerp_schedule=True,              # False로 바꾸면 lerp annealing 비활성화
+        disc_logit_reg=0.01,                    # discriminator 출력 L2 정규화 (MimicKit 방식)
     )

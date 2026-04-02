@@ -223,9 +223,8 @@ class SkeletonMotionLoader:
 
         # body_rotations: (N, num_bodies, 4)  — 발끝은 root rot 복사, root는 실제값
         root_rot_t = torch.tensor(root_rot_all, dtype=torch.float32, device=device)
-        toe_rot_t = root_rot_t.unsqueeze(1).expand(-1, self.NUM_TOES, -1)  # (N,4,4)
-        root_rot_body = root_rot_t.unsqueeze(1)  # (N,1,4)
-        self.body_rotations = torch.cat([toe_rot_t, root_rot_body], dim=1)  # (N,5,4)
+        toe_rot_t = root_rot_t.unsqueeze(1).expand(-1, self.NUM_TOES, -1)
+        self.body_rotations = torch.cat([toe_rot_t, root_rot_t.unsqueeze(1)], dim=1)  # (N,5,4)
 
         # body linear/angular velocities
         lin_vel_t = torch.tensor(lin_vel_all, dtype=torch.float32, device=device)
@@ -313,18 +312,11 @@ class SkeletonMotionLoader:
         if q0.ndim >= 3:
             blend = blend.unsqueeze(-1)
 
-        qw, qx, qy, qz = 0, 1, 2, 3
-        cos_half_theta = (
-            q0[..., qw] * q1[..., qw]
-            + q0[..., qx] * q1[..., qx]
-            + q0[..., qy] * q1[..., qy]
-            + q0[..., qz] * q1[..., qz]
-        )
+        cos_half_theta = (q0 * q1).sum(dim=-1, keepdim=True)
         neg_mask = cos_half_theta < 0
         q1 = q1.clone()
-        q1[neg_mask] = -q1[neg_mask]
+        q1[neg_mask.expand_as(q1)] = -q1[neg_mask.expand_as(q1)]
         cos_half_theta = torch.abs(cos_half_theta)
-        cos_half_theta = torch.unsqueeze(cos_half_theta, dim=-1)
 
         half_theta = torch.acos(torch.clamp(cos_half_theta, -1.0 + 1e-6, 1.0 - 1e-6))
         sin_half_theta = torch.sqrt(torch.clamp(1.0 - cos_half_theta * cos_half_theta, min=1e-10))
@@ -332,13 +324,7 @@ class SkeletonMotionLoader:
         ratio_a = torch.sin((1 - blend) * half_theta) / sin_half_theta
         ratio_b = torch.sin(blend * half_theta) / sin_half_theta
 
-        new_q = torch.cat(
-            [
-                ratio_a * q0[..., i : i + 1] + ratio_b * q1[..., i : i + 1]
-                for i in range(4)
-            ],
-            dim=-1,
-        )
+        new_q = ratio_a * q0 + ratio_b * q1
         new_q = torch.where(torch.abs(sin_half_theta) < 0.001, 0.5 * q0 + 0.5 * q1, new_q)
         new_q = torch.where(cos_half_theta >= 1.0, q0, new_q)
         return new_q
@@ -348,6 +334,7 @@ class SkeletonMotionLoader:
         index_0 = (phase * (self.num_frames - 1)).round(decimals=0).astype(int)
         index_1 = np.minimum(index_0 + 1, self.num_frames - 1)
         blend = ((times - index_0 * self.dt) / self.dt).round(decimals=5)
+        blend = np.clip(blend, 0.0, 1.0)
         return index_0, index_1, blend
 
     # ------------------------------------------------------------------

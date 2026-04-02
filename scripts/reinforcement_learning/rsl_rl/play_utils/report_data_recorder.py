@@ -127,7 +127,10 @@ class ReportMultiDataRecorder:
         self._ang_vel: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
         # contact force magnitude per body: [env_id][step_idx] = np.ndarray(num_bodies,)
         self._contact_forces: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
+        # foot linear velocities: [env_id][step_idx] = np.ndarray(num_feet, 3)
+        self._foot_lin_vels: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
         self._body_names: list[str] = []  # 최초 record 시 채워짐
+        self._foot_body_names: list[str] = []  # 발 body 이름 (contact sensor 기준)
 
         self._step = 0
         self._saved = False
@@ -154,7 +157,9 @@ class ReportMultiDataRecorder:
             self._lin_vel[i].clear()
             self._ang_vel[i].clear()
             self._contact_forces[i].clear()
+            self._foot_lin_vels[i].clear()
         self._body_names = []
+        self._foot_body_names = []
         self._step = 0
         self._saved = False
 
@@ -162,6 +167,8 @@ class ReportMultiDataRecorder:
         """env에서 모든 로봇의 현재 스텝 데이터를 수집합니다."""
         if self._step >= self._max_steps:
             return
+
+        import re
 
         base_env = env.unwrapped
         robot = getattr(base_env, "_robot", None)
@@ -208,6 +215,31 @@ class ReportMultiDataRecorder:
 
             num_bodies = curr_contact_forces.shape[1] if curr_contact_forces is not None else 0
 
+            # 발 body의 선속도 추출
+            curr_foot_lin_vels = None
+            foot_body_ids = []
+            try:
+                body_lin_vel_w = getattr(robot.data, "body_lin_vel_w", None)
+                body_names = getattr(robot.data, "body_names", [])
+                if body_lin_vel_w is not None and body_names:
+                    # 발 body 패턴 식별
+                    foot_patterns = [".*foot", ".*toe", ".*_foot", ".*_toe"]
+                    for idx, name in enumerate(body_names):
+                        for pattern in foot_patterns:
+                            if re.search(pattern, name, re.IGNORECASE):
+                                if idx not in foot_body_ids:
+                                    foot_body_ids.append(idx)
+                                break
+
+                    if foot_body_ids:
+                        # body_lin_vel_w: (num_envs, num_bodies, 3)
+                        curr_foot_lin_vels = body_lin_vel_w[:, foot_body_ids, :].detach().cpu().numpy()
+                        # 최초 1회만 발 body 이름 저장
+                        if not self._foot_body_names:
+                            self._foot_body_names = [body_names[idx] for idx in foot_body_ids]
+            except Exception:
+                pass
+
             for i in range(self._num_envs):
                 self._torques[i].append(curr_torques[i].copy())
                 self._joint_pos[i].append(curr_joint_pos[i].copy())
@@ -219,6 +251,12 @@ class ReportMultiDataRecorder:
                     self._contact_forces[i].append(curr_contact_forces[i].copy())
                 else:
                     self._contact_forces[i].append(np.zeros(num_bodies, dtype=np.float32))
+
+                # 발 속도 저장
+                if curr_foot_lin_vels is not None:
+                    self._foot_lin_vels[i].append(curr_foot_lin_vels[i].copy())
+                else:
+                    self._foot_lin_vels[i].append(np.zeros((len(foot_body_ids), 3), dtype=np.float32) if foot_body_ids else np.array([]))
 
         except Exception as e:
             print(f"[ReportMultiDataRecorder] 데이터 수집 오류 (스텝 {self._step}): {e}", flush=True)
@@ -255,6 +293,9 @@ class ReportMultiDataRecorder:
         if joint_names is None or len(joint_names) != n_joints:
             joint_names = [f"joint_{i}" for i in range(n_joints)]
 
+        # 발 body 이름 추출
+        foot_body_names = self._foot_body_names if self._foot_body_names else []
+
         # --- 조인트 필터링 인덱스 분류 ---
         # 1: 왼쪽 다리 (Left)
         # 2: 오른쪽 다리 (Right)
@@ -286,10 +327,11 @@ class ReportMultiDataRecorder:
             lin_vel = np.array(self._lin_vel[env_id])
             ang_vel = np.array(self._ang_vel[env_id]) * (180.0 / np.pi)
             contact_forces = np.array(self._contact_forces[env_id]) if self._contact_forces[env_id] else None
+            foot_lin_vels = np.array(self._foot_lin_vels[env_id]) if self._foot_lin_vels[env_id] else None
 
             self._save_csv(
                 env_dir, joint_names, torques, joint_pos, joint_vel, proc_actions, lin_vel, ang_vel,
-                contact_forces, self._body_names,
+                contact_forces, self._body_names, foot_lin_vels, foot_body_names,
             )
 
             # 조인트 파트별 그래프 생성 헬퍼
@@ -316,6 +358,10 @@ class ReportMultiDataRecorder:
             # Base Velocity Plot
             self._plot_base_velocity(lin_vel, ang_vel, env_dir / "base_velocity.png")
 
+            # Foot Linear Velocities Plot
+            if foot_lin_vels is not None and foot_lin_vels.ndim == 3 and foot_lin_vels.shape[1] > 0:
+                self._plot_foot_velocities(foot_lin_vels, foot_body_names, env_dir / "foot_velocities.png")
+
             # Contact Force Plot
             if contact_forces is not None and contact_forces.ndim == 2 and contact_forces.shape[1] > 0:
                 self._plot_contact_forces(contact_forces, self._body_names, env_dir / "contact_forces.png")
@@ -332,6 +378,8 @@ class ReportMultiDataRecorder:
         lin_vel, ang_vel,
         contact_forces=None,
         body_names=None,
+        foot_lin_vels=None,
+        foot_body_names=None,
     ) -> None:
         import csv
 
@@ -347,6 +395,14 @@ class ReportMultiDataRecorder:
             ]
         headers += ["lin_vel_x", "lin_vel_y", "lin_vel_z",
                     "ang_vel_x", "ang_vel_y", "ang_vel_z"]
+
+        # foot linear velocity 헤더
+        has_foot = foot_lin_vels is not None and foot_lin_vels.ndim == 3 and foot_lin_vels.shape[1] > 0
+        foot_names = foot_body_names if (foot_body_names and len(foot_body_names) == foot_lin_vels.shape[1]) else [f"foot_{f}" for f in range(foot_lin_vels.shape[1])] if has_foot else []
+        if has_foot:
+            for fn in foot_names:
+                fn_s = fn.replace(",", "_")
+                headers += [f"foot_vel_x_{fn_s}", f"foot_vel_y_{fn_s}", f"foot_vel_z_{fn_s}"]
 
         # contact force 헤더
         has_contact = contact_forces is not None and contact_forces.ndim == 2 and contact_forces.shape[1] > 0
@@ -369,6 +425,9 @@ class ReportMultiDataRecorder:
                         proc_actions[t, j],
                     ]
                 row += list(lin_vel[t]) + list(ang_vel[t])
+                if has_foot:
+                    for f in range(foot_lin_vels.shape[1]):
+                        row += list(foot_lin_vels[t, f, :])
                 if has_contact:
                     row += list(contact_forces[t])
                 writer.writerow(row)
@@ -389,6 +448,11 @@ class ReportMultiDataRecorder:
                                   ("ang_vel_x", 0), ("ang_vel_y", 1), ("ang_vel_z", 2)]:
                 arr = lin_vel[:, idx] if ax_name.startswith("lin") else ang_vel[:, idx]
                 writer.writerow([ax_name, _rms_no_outlier(arr), "", "", ""])
+            if has_foot:
+                for f, fn in enumerate(foot_names):
+                    for ax in range(3):
+                        ax_name = f"foot_vel_{'xyz'[ax]}_{fn}"
+                        writer.writerow([ax_name, _rms_no_outlier(foot_lin_vels[:, f, ax]), "", "", ""])
 
         # contact force RMS 별도 CSV
         if has_contact:
@@ -435,6 +499,41 @@ class ReportMultiDataRecorder:
             ax.legend(fontsize=6)
 
         fig.suptitle("Base Velocity (Body Frame)", fontsize=11, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=130)
+        plt.close(fig)
+
+    def _plot_foot_velocities(
+        self,
+        foot_lin_vels: np.ndarray,  # [steps, num_feet, 3]
+        foot_body_names: list[str],
+        save_path: pathlib.Path,
+    ) -> None:
+        """네 발의 선속도(X, Y, Z)를 시각화합니다."""
+        n_feet = foot_lin_vels.shape[1]
+        steps = np.arange(foot_lin_vels.shape[0])
+        axes_labels = ["x", "y", "z"]
+        colors = ["steelblue", "darkorange", "seagreen", "crimson"]
+
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+
+        for ax_idx, ax_label in enumerate(axes_labels):
+            ax = axes[ax_idx]
+            for foot_idx in range(n_feet):
+                foot_name = foot_body_names[foot_idx] if foot_idx < len(foot_body_names) else f"foot_{foot_idx}"
+                y = foot_lin_vels[:, foot_idx, ax_idx]
+                rms = _rms_no_outlier(y)
+                color = colors[foot_idx % len(colors)]
+                ax.plot(steps, y, linewidth=1.0, label=f"{foot_name} (RMS={rms:.3f})", color=color)
+
+            ax.set_title(f"Foot Velocity (axis: {ax_label})", fontsize=10)
+            ax.set_ylabel("m/s", fontsize=8)
+            ax.set_xlabel("step", fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
+
+        fig.suptitle("Four Foot Linear Velocities (World Frame)", fontsize=12, fontweight="bold")
         plt.tight_layout()
         plt.savefig(save_path, dpi=130)
         plt.close(fig)

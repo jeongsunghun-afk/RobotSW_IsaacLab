@@ -29,12 +29,54 @@ class PPOAMP(PPOParkour):
             device=self.device
         )
         self.discriminator.amp_reward_coef = self.amp_reward_coef
-        
+
         # Discriminator Optimizer
         self.disc_optimizer = optim.Adam(
-            self.discriminator.parameters(), 
+            self.discriminator.parameters(),
             lr=self.amp_discriminator_lr
         )
+
+        # Replay Buffer (catastrophic forgetting 방지)
+        self.enable_replay_buffer = amp_cfg.get("enable_replay_buffer", True)
+        self.replay_buffer_size = amp_cfg.get("replay_buffer_size", 100000)
+        self._replay_buffer: torch.Tensor | None = None
+        self._replay_buffer_ptr: int = 0
+        self._replay_buffer_full: bool = False
+
+        # disc_num_epochs: discriminator를 iteration당 반복 업데이트 횟수
+        self.disc_num_epochs = amp_cfg.get("disc_num_epochs", 2)
+
+        # enable_lerp_schedule: task_reward_lerp annealing 활성화 여부
+        self.enable_lerp_schedule = amp_cfg.get("enable_lerp_schedule", True)
+
+    def add_to_replay_buffer(self, policy_obs: torch.Tensor) -> None:
+        """Policy AMP obs를 replay buffer에 추가 (circular)."""
+        if not self.enable_replay_buffer:
+            return
+        obs = policy_obs.detach()
+        n = obs.shape[0]
+        if self._replay_buffer is None:
+            obs_dim = obs.shape[-1]
+            self._replay_buffer = torch.zeros(self.replay_buffer_size, obs_dim, device=self.device)
+        buf_size = self._replay_buffer.shape[0]
+        if self._replay_buffer_ptr + n <= buf_size:
+            self._replay_buffer[self._replay_buffer_ptr : self._replay_buffer_ptr + n] = obs
+        else:
+            first = buf_size - self._replay_buffer_ptr
+            self._replay_buffer[self._replay_buffer_ptr :] = obs[:first]
+            self._replay_buffer[: n - first] = obs[first:]
+            self._replay_buffer_full = True
+        self._replay_buffer_ptr = (self._replay_buffer_ptr + n) % buf_size
+
+    def sample_replay_buffer(self, num_samples: int) -> torch.Tensor | None:
+        """Replay buffer에서 num_samples개 샘플링. 데이터 부족 시 None 반환."""
+        if self._replay_buffer is None:
+            return None
+        valid_size = self._replay_buffer.shape[0] if self._replay_buffer_full else self._replay_buffer_ptr
+        if valid_size < num_samples:
+            return None
+        idx = torch.randint(0, valid_size, (num_samples,), device=self.device)
+        return self._replay_buffer[idx]
 
     def update_amp(self, expert_batch, policy_batch):
         """판별자(Discriminator) 업데이트
@@ -53,29 +95,40 @@ class PPOAMP(PPOParkour):
         expert_loss = nn.MSELoss()(expert_logits, torch.ones_like(expert_logits))
         policy_loss = nn.MSELoss()(policy_logits, -1 * torch.ones_like(policy_logits))
 
-        # Gradient Penalty: expert 데이터에만 적용 (Genesis 원본 방식)
+        # Gradient Penalty: expert + policy 양쪽에 적용
         expert_data = expert_batch.detach().requires_grad_(True)
         expert_logits_gp = self.discriminator.get_logits(expert_data)
-        grad_outputs = torch.ones_like(expert_logits_gp)
-
-        gradients = torch.autograd.grad(
+        gradients_expert = torch.autograd.grad(
             outputs=expert_logits_gp,
             inputs=expert_data,
-            grad_outputs=grad_outputs,
+            grad_outputs=torch.ones_like(expert_logits_gp),
             create_graph=True,
             retain_graph=True,
             only_inputs=True,
         )[0]
+        grad_penalty_expert = gradients_expert.norm(2, dim=1).pow(2).mean()
 
-        grad_penalty = self.amp_gradient_penalty_coef * gradients.norm(2, dim=1).pow(2).mean()
+        policy_data = policy_batch.detach().requires_grad_(True)
+        policy_logits_gp = self.discriminator.get_logits(policy_data)
+        gradients_policy = torch.autograd.grad(
+            outputs=policy_logits_gp,
+            inputs=policy_data,
+            grad_outputs=torch.ones_like(policy_logits_gp),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+        grad_penalty_policy = gradients_policy.norm(2, dim=1).pow(2).mean()
+
+        grad_penalty = 0.5 * self.amp_gradient_penalty_coef * (grad_penalty_expert + grad_penalty_policy)
 
         total_loss = 0.5 * (expert_loss + policy_loss) + grad_penalty
 
         total_loss.backward()
         self.disc_optimizer.step()
 
-        # update obs normalization (expert 기준으로 정규화)
-        self.discriminator.update_normalization(expert_batch)
+        # update obs normalization (expert + policy 혼합으로 정규화)
+        self.discriminator.update_normalization(torch.cat([expert_batch, policy_batch], dim=0))
 
         # 명시적 메모리 해제 (VRAM 누수 방지)
         expert_loss_val = expert_loss.item()
@@ -83,7 +136,8 @@ class PPOAMP(PPOParkour):
         grad_penalty_val = grad_penalty.item()
         total_loss_val = total_loss.item()
 
-        del expert_data, expert_logits_gp, grad_outputs, gradients
+        del expert_data, expert_logits_gp, gradients_expert
+        del policy_data, policy_logits_gp, gradients_policy
         del expert_logits, policy_logits, expert_loss, policy_loss, grad_penalty, total_loss
         
         return {
