@@ -4,6 +4,8 @@ description: Actor/Critic 네트워크 또는 Discriminator 아키텍처 변경
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/network-worker.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 강화학습 네트워크의 아키텍처를 변경합니다. 레이어 추가/제거, activation 변경, discriminator 재설계 등.
 

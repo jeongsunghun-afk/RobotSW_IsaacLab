@@ -4,6 +4,8 @@ description: 코드 정합성 체크 (체크리스트 A~D, 빠른 정적 분석)
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/validate-code.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 Worker들이 변경한 코드의 정합성을 빠르게 검증합니다. 체크리스트 A~D 실행. Haiku 모델로 충분.
 

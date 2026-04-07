@@ -4,6 +4,8 @@ description: Observation 변경 및 새 센서 추가 작업 수행
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/obs-worker.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 사족보행 로봇 환경의 observation을 변경합니다. 새 센서 추가, obs 크기 조정, normalization 수정 등.
 

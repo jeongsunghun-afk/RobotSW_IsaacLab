@@ -1,7 +1,7 @@
 ---
 name: research-surveyor
 description: 사족보행 로봇 보행 학습(RL/AMP) 관련 최신 논문/기법을 Gemini CLI와 WebSearch로 조사하고 요약하는 리서치 에이전트
-model: opus
+model: sonnet
 ---
 
 ## 역할

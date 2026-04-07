@@ -49,6 +49,9 @@ class PPOAMP(PPOParkour):
         # enable_lerp_schedule: task_reward_lerp annealing 활성화 여부
         self.enable_lerp_schedule = amp_cfg.get("enable_lerp_schedule", True)
 
+        # disc_logit_reg: discriminator 출력 레이어 L2 정규화 (MimicKit 방식)
+        self.disc_logit_reg = amp_cfg.get("disc_logit_reg", 0.0)
+
     def add_to_replay_buffer(self, policy_obs: torch.Tensor) -> None:
         """Policy AMP obs를 replay buffer에 추가 (circular)."""
         if not self.enable_replay_buffer:
@@ -122,7 +125,10 @@ class PPOAMP(PPOParkour):
 
         grad_penalty = 0.5 * self.amp_gradient_penalty_coef * (grad_penalty_expert + grad_penalty_policy)
 
-        total_loss = 0.5 * (expert_loss + policy_loss) + grad_penalty
+        # Logit regularization (MimicKit: 출력 레이어 L2 정규화)
+        logit_reg = self.disc_logit_reg * (expert_logits.pow(2).mean() + policy_logits.pow(2).mean())
+
+        total_loss = 0.5 * (expert_loss + policy_loss) + grad_penalty + logit_reg
 
         total_loss.backward()
         self.disc_optimizer.step()
@@ -138,7 +144,7 @@ class PPOAMP(PPOParkour):
 
         del expert_data, expert_logits_gp, gradients_expert
         del policy_data, policy_logits_gp, gradients_policy
-        del expert_logits, policy_logits, expert_loss, policy_loss, grad_penalty, total_loss
+        del expert_logits, policy_logits, expert_loss, policy_loss, grad_penalty, logit_reg, total_loss
         
         return {
             "disc_total_loss": total_loss_val,

@@ -22,9 +22,9 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset")
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_50")
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_walk")
-MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_smr")
+# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_smr")
 # MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "new_dataset_single")
-# MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "go2")  # pkl (walk/run/trot/pace)
+MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "go2")  # pkl (walk/run/trot/pace)
 
 
 @configclass
@@ -42,7 +42,9 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
 
     # 에피소드
     episode_length_s = 20.0
-    decimation = 4
+    sim_dt = 120.0
+    policy_dt = 30.0
+    decimation = (int)(sim_dt / policy_dt)
 
     # 공간
     observation_space = 42
@@ -59,7 +61,12 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
 
     # 조기 종료
     early_termination = True
-    termination_height = 0.15    # Go2 기본 높이 0.34m, 절반 이하이면 넘어짐으로 판정
+    termination_height = 0.1        # Go2 기본 높이 0.34m, 절반 이하이면 넘어짐으로 판정
+    contact_force_threshold = 500.    # base 접촉 판정 임계값 (N), MimicKit 기준
+    pose_termination = False         # reference pose 이탈 시 조기 종료 (DeepMimic 방식, AMP에서는 비권장)
+    pose_termination_dist = 0.5      # key body 최대 허용 이탈 거리 (m)
+    roll_termination_deg = 70.0      # roll 각도 termination 임계값 (deg)
+    pitch_termination_deg = 70.0     # pitch 각도 termination 임계값 (deg)
     action_scale = 0.25
 
     # 모션
@@ -67,9 +74,9 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
     reference_body = "base"
     reset_strategy = "random"     # {"default", "random", "random-start"}
 
-    # 시뮬레이션 (200 Hz physics, 50 Hz policy)
+    # 시뮬레이션 (200 Hz physics, 50 Hz policy) -> (60hz physics, 10hz policy)
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 200,
+        dt=1 / sim_dt,
         render_interval=decimation,
         physx=PhysxCfg(
             gpu_found_lost_pairs_capacity=2**23,

@@ -1,7 +1,7 @@
 ---
 name: research-advisor
 description: 조사된 방법론을 IsaacLab 프로젝트에 적용 가능한지 비판적으로 판별하는 전문가 에이전트. 코드베이스를 직접 읽어 구현 가능성을 평가한다.
-model: opus
+model: sonnet
 ---
 
 ## 역할

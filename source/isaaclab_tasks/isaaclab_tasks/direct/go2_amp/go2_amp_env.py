@@ -74,6 +74,11 @@ class Go2AmpEnv(DirectRLEnv):
         # RSI reset 시 선택된 frame의 forward velocity 저장 (in-episode curriculum용)
         self._rsi_ref_vel = torch.zeros(self.num_envs, device=self.device)
 
+        # Pose termination용: 에피소드 내 현재 모션 시간 추적
+        self._episode_motion_times = torch.zeros(self.num_envs, device=self.device)
+        # RSI로 리셋된 환경만 pose termination 적용 (default 전략 환경 제외)
+        self._rsi_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
         # 모션 로더에서 DOF 인덱스 매핑
         robot_joint_names = list(self._robot.data.joint_names)
         try:
@@ -144,7 +149,7 @@ class Go2AmpEnv(DirectRLEnv):
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
 
     def _post_physics_step(self):
-        pass
+        self._episode_motion_times += self.step_dt
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
@@ -261,15 +266,53 @@ class Go2AmpEnv(DirectRLEnv):
             flipped = self._robot.data.projected_gravity_b[:, 2] > 0.0
             died = died | flipped
 
+            # Roll / Pitch 각도 기반 termination
+            grav_b = self._robot.data.projected_gravity_b  # (N, 3), 정규화된 중력 벡터
+            roll = torch.atan2(grav_b[:, 1], -grav_b[:, 2])
+            pitch = torch.atan2(-grav_b[:, 0], torch.sqrt(grav_b[:, 1] ** 2 + grav_b[:, 2] ** 2))
+            roll_limit = self.cfg.roll_termination_deg * torch.pi / 180.0
+            pitch_limit = self.cfg.pitch_termination_deg * torch.pi / 180.0
+            bad_orientation = (torch.abs(roll) > roll_limit) | (torch.abs(pitch) > pitch_limit)
+            died = died | bad_orientation
+
             if hasattr(self, "contact_sensor"):
                 contact_forces = self.contact_sensor.data.net_forces_w
                 if contact_forces is not None and contact_forces.numel() > 0:
                     body_names = self._robot.data.body_names
-                    bad_contact_keywords = ["base"]
-                    bad_contacts = torch.zeros_like(died)
-                    for keyword in bad_contact_keywords:
-                        bad_contacts |= self._get_body_contact(contact_forces, body_names, keyword)
+                    bad_contacts = self._get_body_contact(
+                        contact_forces, body_names, "base",
+                        threshold=self.cfg.contact_force_threshold,
+                    )
                     died = died | bad_contacts
+
+            # Pose divergence termination (MimicKit 방식)
+            # RSI로 리셋된 환경에서만 reference와 key body 위치 비교
+            if self.cfg.pose_termination and self._rsi_active.any():
+                times_np = self._episode_motion_times.cpu().numpy()
+                (_, _, ref_body_positions, _, _, _) = self._motion_loader.sample(
+                    num_samples=self.num_envs, times=times_np
+                )
+                # motion loader: body_positions[0:4] = 발, root-local 프레임
+                ref_key_pos = ref_body_positions[:, self.motion_key_body_indexes]  # (N, 4, 3)
+
+                root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]
+                root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]
+                key_pos_w = self._robot.data.body_pos_w[:, self.key_body_indexes]
+                rel_pos = key_pos_w - root_pos_w.unsqueeze(1)
+                N, K = rel_pos.shape[:2]
+                local_key_pos = quat_apply_inverse(
+                    root_quat_w.unsqueeze(1).expand(-1, K, -1).reshape(-1, 4),
+                    rel_pos.reshape(-1, 3),
+                ).view(N, K, 3)
+
+                body_diff = ref_key_pos - local_key_pos
+                max_dist_sq = torch.sum(body_diff * body_diff, dim=-1).max(dim=-1).values
+                pose_fail = (max_dist_sq > self.cfg.pose_termination_dist ** 2) & self._rsi_active
+                died = died | pose_fail
+
+            # MimicKit과 동일: 첫 스텝 직후부터만 termination 적용 (physics 정착 시간 확보)
+            not_first_step = self.episode_length_buf > 1
+            died = died & not_first_step
         else:
             died = torch.zeros_like(time_out)
 
@@ -293,6 +336,16 @@ class Go2AmpEnv(DirectRLEnv):
         self._robot.write_root_link_pose_to_sim(root_state[:, :7], env_ids)
         self._robot.write_root_com_velocity_to_sim(root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # pose termination 추적용 모션 시간 초기화
+        if rsi_times is not None:
+            self._episode_motion_times[env_ids] = torch.tensor(
+                rsi_times, dtype=torch.float32, device=self.device
+            )
+            self._rsi_active[env_ids] = True
+        else:
+            self._episode_motion_times[env_ids] = 0.0
+            self._rsi_active[env_ids] = False
 
         self._resample_commands(env_ids)
 

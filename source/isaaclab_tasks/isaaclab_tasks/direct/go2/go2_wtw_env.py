@@ -679,6 +679,7 @@ class WTWEnv(DirectRLEnv):
 
         # 5차 베지에 3D target: XY는 3차 그대로, Z만 5차로 대체 (시각화 및 향후 XY 추종에 활용)
         bezier_5th = bezier.clone()
+        bezier_5th[both_low] = 0.0
         bezier_5th[:, :, 2] = bezier_z_5th
 
         is_stance = (self.desired_contact_states > 0.5).unsqueeze(-1)                 # [num_envs, 4, 1]
@@ -724,7 +725,7 @@ class WTWEnv(DirectRLEnv):
                 desired_contact[:, i] * (1 - torch.exp(-1 * foot_velocities[:, i] ** 2 / self.cfg.gait_vel_sigma))
             )
         tracking_contacts_shaped_vel = tracking_contacts_shaped_vel / 4
-        tracking_contacts_shaped_vel[both_low] = 0.
+        # tracking_contacts_shaped_vel[both_low] = 0.
 
         # dof velocity penalty
         dof_vel_penalty = dof_vel[:]
@@ -962,6 +963,7 @@ class WTWEnv(DirectRLEnv):
             self._commands[env_ids[both_low], 0] = 0.0
             self._commands[env_ids[both_low], 1] = 0.0
             self._commands[env_ids[both_low], 2] = 0.0
+            self._commands[env_ids[both_low], 9] = 0.0
 
         else:
             for i in range(self.cfg.num_commands):

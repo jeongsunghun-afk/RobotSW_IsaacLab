@@ -140,11 +140,14 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
 
                 amp_loss_dict = {}
                 for disc_epoch in range(self.alg.disc_num_epochs):
-                    # Replay buffer에서 샘플링 (가능한 경우)
+                    # Replay buffer에서 샘플링하여 현재 데이터와 concat (MimicKit 방식)
                     replayed = self.alg.sample_replay_buffer(num_samples)
-                    policy_sample = replayed if replayed is not None else policy_amp_obs_batch
+                    if replayed is not None:
+                        policy_sample = torch.cat([policy_amp_obs_batch, replayed], dim=0)
+                    else:
+                        policy_sample = policy_amp_obs_batch
 
-                    expert_amp_obs_batch = self.env.get_amp_observations(num_samples).to(self.device)
+                    expert_amp_obs_batch = self.env.get_amp_observations(policy_sample.shape[0]).to(self.device)
                     amp_loss_dict = self.alg.update_amp(expert_amp_obs_batch, policy_sample)
                 
                 # Freeze Discriminator for Actor-Critic Update

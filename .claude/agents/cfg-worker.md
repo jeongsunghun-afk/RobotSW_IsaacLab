@@ -4,6 +4,8 @@ description: Config 파라미터 추가/수정 (타입, 범위 검증)
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/cfg-worker.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 사족보행 로봇 환경의 config 파라미터를 변경합니다. learning rate, timeout, action_scale, physics 설정 등.
 

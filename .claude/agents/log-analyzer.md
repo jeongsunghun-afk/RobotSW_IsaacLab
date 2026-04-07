@@ -4,6 +4,8 @@ description: 학습 로그 수치 분석 및 추이 파악
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/log-analyzer.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 강화학습 로그(WandB, TensorBoard)를 분석합니다. 학습 곡선 추이, 이상 탐지, 성능 평가 등.
 

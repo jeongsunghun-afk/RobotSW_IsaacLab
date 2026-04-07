@@ -4,6 +4,8 @@ description: 보상 함수 추가/수정/제거 및 reward scale 조정
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/reward-worker.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 사족보행 로봇 환경의 보상 함수를 변경합니다. 새로운 보상 항 추가, 기존 항 제거/수정, weight 조정 등.
 

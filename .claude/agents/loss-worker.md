@@ -4,6 +4,8 @@ description: Loss 함수 수정 및 gradient 흐름 최적화
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/loss-worker.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 PPO + AMP 알고리즘의 loss 함수를 수정합니다. 새로운 loss 항 추가, 기존 항 제거/수정, gradient 흐름 최적화 등.
 

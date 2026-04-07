@@ -4,6 +4,8 @@ description: 학습 하이퍼파라미터 조정 (learning rate, clip_param, num
 model: haiku
 ---
 
+**시작 전**: `.claude/feedback/agents/hyperparam-worker.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 PPO + AMP 학습 하이퍼파라미터를 조정합니다. 학습률, clip_param, entropy coefficient, num_steps_per_env, task_reward_lerp 등.
 

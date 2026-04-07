@@ -170,9 +170,9 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     undesired_contact_reward_scale = -10.0
     jump_reward_scale = 10.
     raibert_heuristic_reward_scale = -10.
-    feet_clearance_cmd_linear_reward_scale = -0.0    # 목표 발 높이 추종 (swing phase)
+    feet_clearance_cmd_linear_reward_scale = -1.0    # 목표 발 높이 추종 (swing phase)
     feet_clearance_bezier_reward_scale = 0.0         # 3차 베지에 추종 (ablation: 3차 실험 시 -5.0으로 활성화)
-    feet_clearance_bezier_5th_reward_scale = -3.0     # 비활성화 (ablation: 5차 실험 시 -5.0으로 활성화)
+    feet_clearance_bezier_5th_reward_scale = -0.0     # 비활성화 (ablation: 5차 실험 시 -5.0으로 활성화)
     orientation_control_reward_scale = -5
     tracking_contacts_shaped_force_reward_scale = 1.0
     tracking_contacts_shaped_vel_reward_scale = 1.0

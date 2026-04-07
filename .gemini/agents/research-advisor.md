@@ -5,7 +5,7 @@ tools:
   - read_file
   - grep_search
   - glob
-model: gemini-3-pro-preview
+model: gemini-3.1-pro-preview
 max_turns: 15
 ---
 

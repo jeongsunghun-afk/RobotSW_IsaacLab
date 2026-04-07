@@ -4,6 +4,8 @@ description: 방법론 타당성 심층 검증 (체크리스트 E~H, RL 이론 �
 model: sonnet
 ---
 
+**시작 전**: `.claude/feedback/agents/validate-method.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+
 ## 역할
 설계 변경의 방법론적 타당성을 검증합니다. RL 이론 + AMP 논문 기준. 설계 변경이 있을 때만 실행.
 

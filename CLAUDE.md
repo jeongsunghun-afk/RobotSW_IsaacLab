@@ -3,7 +3,7 @@
 ## 프로젝트 미션
 Go2(+Neck Module) 및 R_Skeleton의 **자연스럽고 강건한 보행** 구현.
 - 강건성: 속도 명령에 정확히 추종, 외란에 강인
-- 자연스러움: AMP및 모방학습 기반 dog motion 모방 (발 충격 최소화, 부드러운 동작)
+- 자연스러움: AMP와 같은 모방학습 기반 dog motion 모방 (발 충격 최소화, 부드러운 동작)
 - 확장 순서: Go2 → Go2+Neck → R_Skeleton
 
 ## 실행 환경
@@ -45,13 +45,10 @@ rsl_rl/             → rsl_rl_algorithms.md
 |-----------|---------|
 | ENV (reward, obs, 보상, 환경, cfg, 관절, 발) | `/env-coordinator` |
 | ALGO (network, loss, PPO, AMP, discriminator, 하이퍼파라미터) | `/algo-coordinator` |
+| 디버그, 분석, 학습 결과 이상, 문제 원인 | `/debug` (RL/IL 자동 분류 → Gemini 위임) |
 | 리서치, 논문, 최신 방법, survey | `/research-team` |
 | 학습 루프, 이터레이션, 전체 파이프라인 | `/locomotion-loop` |
 | 보고, report, notion | `/report` |
-
-### Coordinator 역할
-- **env-coordinator**: ENV worker(obs/reward/cfg)들을 병렬 dispatch 후 validate-code 자동 실행
-- **algo-coordinator**: ALGO worker(network/loss/hyperparam)들을 병렬 dispatch 후 validate-code 자동 실행
 
 ## Worker 레지스트리
 
@@ -82,17 +79,38 @@ rsl_rl/             → rsl_rl_algorithms.md
 | motion-analyzer | haiku | `motion_loader.py` 일부 |
 | report-worker | sonnet | 보고서 템플릿 + Notion target |
 
-### 디버그 계열 (Sonnet)
-| Worker | 역할 | 읽는 파일 |
-|--------|------|-----------|
-| wtw-debug-worker | WTW 코드 레벨 분석 | `go2_env_cfg.py`, `go2_wtw_env.py` |
-| amp-debug-worker | AMP 코드 레벨 분석 | `rsl_rl_ppo_cfg.py`, `ppo_amp.py`, `amp_discriminator.py` |
+### 디버그 계열 (Sonnet — Gemini CLI Thin Wrapper)
+> Claude는 `gemini -p "@debug-worker ..." -y` 호출 후 `_workspace/debug_report.md`를 읽어 추가 분석 + 코드 구현을 수행한다.
 
-### 리서치 팀 계열 (Opus)
-| 에이전트 | 역할 | 도구 |
+| Worker | 역할 | 위임 대상 |
+|--------|------|-----------|
+| rl-debug-worker | RL 환경 디버그 (go2_wtw, R_Skeleton 등) | Gemini `@debug-worker` (RL 체크리스트) |
+| il-debug-worker | IL/AMP 환경 디버그 (go2_amp, R_Skeleton_amp 등) | Gemini `@debug-worker` (IL 체크리스트) |
+
+**디버그 워크플로우:**
+```
+사용자 요청 → Claude (rl/il-debug-worker)
+  → gemini -p "@debug-worker ..." -y
+  → Gemini: 로그+코드 분석 → _workspace/debug_report.md 저장
+  → Claude: 보고서 읽기 + 추가 분석 + 코드 구현
+```
+
+**출력 파일:** `/home/lgb/IsaacLab/_workspace/debug_report.md`
+
+### 리서치 팀 계열 (Gemini CLI 위임)
+> Claude는 `gemini -p "..." -y` 로 단일 호출만 수행. 내부 협업은 Gemini가 GEMINI.md 라우팅에 따라 처리.
+
+| 에이전트 | 위치 | 역할 |
 |---------|------|------|
-| research-surveyor | Gemini CLI + WebSearch 조사 | Bash(gemini), WebSearch |
-| research-advisor | 적용 가능성 판별 (교수 역할) | Read, WebSearch |
+| research-surveyor | `.gemini/agents/research-surveyor.md` | 웹 검색·논문 조사 + IsaacLab 적용 아이디어 제안 |
+| research-advisor | `.gemini/agents/research-advisor.md` | 코드베이스 기반 비판적 검증 (교수 역할) |
+| debug-worker | `.gemini/agents/debug-worker.md` | RL/IL 코드+로그 종합 분석 |
+| log-analyzer | `.gemini/agents/log-analyzer.md` | 학습 로그 수치 분석 |
+
+**출력 파일 경로:**
+- `.claude/skills/research-team/_workspace/01_surveyor_research.md`
+- `.claude/skills/research-team/_workspace/02_advisor_final_proposal.md`
+- `_workspace/debug_report.md`
 
 ### 학습 루프 계열 (Sonnet)
 | 에이전트 | 역할 | 입력/출력 |
@@ -107,9 +125,9 @@ rsl_rl/             → rsl_rl_algorithms.md
 - `/validate-code`    : 코드 정합성 체크 (A~D, 빠름)
 - `/validate-method`  : 방법론 타당성 체크 (E~H, 심층)
 - `/report`           : Notion 보고서 생성
-- `/debug`            : 학습 결과 디버깅 (자동 WTW/AMP 분류)
-- `/debug-wtw`        : WTW tracking + foot impact 전용 분석
-- `/debug-amp`        : AMP discriminator + gait 다양성 전용 분석
+- `/debug`            : 학습 결과 디버깅 (자동 RL/IL 분류 → Gemini 위임 → Claude 추가 분석 + 구현)
+- `/debug-rl`         : RL 환경 전용 디버그 (go2_wtw, R_Skeleton 등)
+- `/debug-il`         : IL/AMP 환경 전용 디버그 (go2_amp, R_Skeleton_amp 등)
 - `/debug-proactive`  : 능동적 전체 학습 결과 이상징후 스캔
 - `/research`         : Gemini 협업 deep research (논문 리서치 → 방향 제안 → 구현)
 - `/research-team`    : 리서치 팀 (surveyor + advisor 토론) → 심층 방법론 검토 + 최종 제안
@@ -122,12 +140,18 @@ rsl_rl/             → rsl_rl_algorithms.md
 - config 변경은 반드시 `*_env_cfg.py`에서, 로직 변경은 `*_env.py`에서
 - 새 텐서 추가 시 `_reset_idx`에서 반드시 초기화
 - AMP 관련 작업 시 `rsl_rl/rsl_rl_algorithms.md`를 참조
+- **새 agent 생성 시**: `.claude/agents/{name}.md` 상단(frontmatter 직후)에 아래 줄 추가 + `.claude/feedback/agents/{name}.md` 빈 파일 생성
+  ```
+  **시작 전**: `.claude/feedback/agents/{name}.md`의 `## Active Rules`를 Read하여 과거 누적 피드백을 반영하라. (`## Deprecated` 섹션은 무시)
+  ```
+  빈 피드백 파일 포맷: [`.claude/feedback/README.md`](.claude/feedback/README.md) 참조
 
 **DON'T:**
 - `source/isaaclab/` 내부 코어 파일 직접 수정 금지
 - `python` 직접 실행 금지 — 반드시 `./isaaclab.sh -p` 사용
 - 검증 없이 reward weight 합산이 설계 의도를 벗어나는 값 사용 금지
 - 구현 전 `/validate` 없이 큰 변경 진행 금지
+- **agent 삭제 시**: `.claude/feedback/agents/{name}.md`도 함께 삭제
 
 ## 코드 스타일
 - 라인 길이: 120자

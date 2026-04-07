@@ -6,7 +6,7 @@ tools:
   - google_web_search
   - read_file
   - grep_search
-model: gemini-3-pro-preview
+model: gemini-3.1-pro-preview
 max_turns: 15
 ---
 
