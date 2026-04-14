@@ -1,0 +1,107 @@
+:tocdepth: 4
+
+File post-processing
+====================
+
+Utilities for processing files generated during training/evaluation.
+
+|br| |hr|
+
+Exported memories
+-----------------
+
+This library provides an implementation for quickly loading exported memory files to inspect their contents
+in future post-processing steps. See the section :ref:`Library utilities (skrl.utils module) <library_utilities>`
+for example usage.
+
+|
+
+Usage
+^^^^^
+
+.. tabs::
+
+    .. tab:: PyTorch (.pt)
+
+        .. literalinclude:: ../../snippets/utils_postprocessing.py
+            :language: python
+            :start-after: [start-memory_file_iterator-torch]
+            :end-before: [end-memory_file_iterator-torch]
+
+    .. tab:: NumPy (.npz)
+
+        .. literalinclude:: ../../snippets/utils_postprocessing.py
+            :language: python
+            :start-after: [start-memory_file_iterator-numpy]
+            :end-before: [end-memory_file_iterator-numpy]
+
+    .. tab:: Comma-separated values (.csv)
+
+        .. literalinclude:: ../../snippets/utils_postprocessing.py
+            :language: python
+            :start-after: [start-memory_file_iterator-csv]
+            :end-before: [end-memory_file_iterator-csv]
+
+|
+
+API
+^^^
+
+.. autoclass:: skrl.utils.postprocessing.MemoryFileIterator
+    :undoc-members:
+    :show-inheritance:
+    :inherited-members:
+    :private-members: _format_numpy, _format_torch, _format_csv
+    :members:
+
+    .. automethod:: __iter__
+    .. automethod:: __next__
+
+|
+
+TensorBoard files
+-----------------
+
+This library provides an implementation for quickly loading TensorBoard files to inspect their contents
+in future post-processing steps. See the section :ref:`Library utilities (skrl.utils module) <library_utilities>`
+for example usage.
+
+|
+
+Requirements
+^^^^^^^^^^^^
+
+This utility requires the `TensorFlow <https://www.tensorflow.org/>`_ package to be installed
+to load and parse TensorBoard files:
+
+.. code-block:: bash
+
+    pip install tensorflow
+
+|
+
+Usage
+^^^^^
+
+.. tabs::
+
+    .. tab:: TensorBoard (events.out.tfevents.*)
+
+        .. literalinclude:: ../../snippets/utils_postprocessing.py
+            :language: python
+            :start-after: [start-tensorboard_file_iterator-list]
+            :end-before: [end-tensorboard_file_iterator-list]
+
+|
+
+API
+^^^
+
+.. autoclass:: skrl.utils.postprocessing.TensorboardFileIterator
+    :undoc-members:
+    :show-inheritance:
+    :inherited-members:
+    :members:
+
+    .. automethod:: __iter__
+    .. automethod:: __next__

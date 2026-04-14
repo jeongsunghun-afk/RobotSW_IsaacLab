@@ -1,0 +1,128 @@
+Isaac Lab environments
+======================
+
+.. image:: ../../_static/imgs/example_isaaclab.png
+    :width: 100%
+    :align: center
+    :alt: Isaac Lab environments
+
+|br| |hr|
+
+Overview
+--------
+
+The repository https://github.com/isaac-sim/IsaacLab provides the example reinforcement learning environments for
+Isaac Lab (Orbit and Omniverse Isaac Gym unification).
+
+These environments can be easily loaded and configured by calling a single function provided with this library.
+Such function also makes it possible to configure the environment from the command line arguments or from its parameters.
+
+.. note::
+
+    The command line arguments has priority over the function parameters.
+
+.. note::
+
+    Isaac Lab environments implement a functionality to get their configuration from the command line.
+    Setting the :literal:`headless` option from the trainer configuration will not work.
+    In this case, it is necessary to set the load function's :literal:`headless` argument to True
+    or to invoke the scripts as follows: :literal:`isaaclab -p script.py --headless`.
+
+|
+
+Usage
+-----
+
+The following snippets show how to load Isaac Lab environments:
+
+|
+
+.. tabs::
+
+    .. tab:: Function parameters
+
+        .. tabs::
+
+            .. group-tab:: |_4| |pytorch| |_4|
+
+                .. literalinclude:: ../../snippets/loaders.py
+                    :language: python
+                    :emphasize-lines: 2, 5
+                    :start-after: [start-isaaclab-envs-parameters-torch]
+                    :end-before: [end-isaaclab-envs-parameters-torch]
+
+            .. group-tab:: |_4| |jax| |_4|
+
+                .. literalinclude:: ../../snippets/loaders.py
+                    :language: python
+                    :emphasize-lines: 2, 5
+                    :start-after: [start-isaaclab-envs-parameters-jax]
+                    :end-before: [end-isaaclab-envs-parameters-jax]
+
+            .. group-tab:: |_4| |warp| |_4|
+
+                .. literalinclude:: ../../snippets/loaders.py
+                    :language: python
+                    :emphasize-lines: 2, 5
+                    :start-after: [start-isaaclab-envs-parameters-warp]
+                    :end-before: [end-isaaclab-envs-parameters-warp]
+
+    .. tab:: Command line arguments (priority)
+
+        .. tabs::
+
+            .. group-tab:: |_4| |pytorch| |_4|
+
+                .. literalinclude:: ../../snippets/loaders.py
+                    :language: python
+                    :emphasize-lines: 2, 5
+                    :start-after: [start-isaaclab-envs-cli-torch]
+                    :end-before: [end-isaaclab-envs-cli-torch]
+
+            .. group-tab:: |_4| |jax| |_4|
+
+                .. literalinclude:: ../../snippets/loaders.py
+                    :language: python
+                    :emphasize-lines: 2, 5
+                    :start-after: [start-isaaclab-envs-cli-jax]
+                    :end-before: [end-isaaclab-envs-cli-jax]
+
+            .. group-tab:: |_4| |warp| |_4|
+
+                .. literalinclude:: ../../snippets/loaders.py
+                    :language: python
+                    :emphasize-lines: 2, 5
+                    :start-after: [start-isaaclab-envs-cli-warp]
+                    :end-before: [end-isaaclab-envs-cli-warp]
+
+        Run the main script passing the configuration as command line arguments. For example:
+
+        .. code-block::
+
+            isaaclab -p main.py --task Isaac-Cartpole-v0
+
+|
+
+API
+---
+
+|
+
+PyTorch
+^^^^^^^
+
+.. autofunction:: skrl.envs.loaders.torch.load_isaaclab_env
+
+|
+
+JAX
+^^^
+
+.. autofunction:: skrl.envs.loaders.jax.load_isaaclab_env
+
+|
+
+Warp
+^^^^
+
+.. autofunction:: skrl.envs.loaders.warp.load_isaaclab_env
