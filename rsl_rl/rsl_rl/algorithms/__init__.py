@@ -8,6 +8,6 @@
 from .distillation import Distillation
 from .ppo import PPO
 from .ppo_parkour import PPOParkour
-from .ppo_amp import PPOAMP
+from .ppo_amp import PPOAMP, PPOAMPBase
 
-__all__ = ["PPO", "Distillation", "PPOParkour", "PPOAMP"]
+__all__ = ["PPO", "Distillation", "PPOParkour", "PPOAMP", "PPOAMPBase"]

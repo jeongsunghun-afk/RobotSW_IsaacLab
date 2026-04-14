@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import os
-
+import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
+from isaaclab.terrains import TerrainImporterCfg
 
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 
@@ -42,8 +43,8 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
 
     # 에피소드
     episode_length_s = 20.0
-    sim_dt = 120.0
-    policy_dt = 30.0
+    sim_dt = 200.0
+    policy_dt = 50.0
     decimation = (int)(sim_dt / policy_dt)
 
     # 공간
@@ -55,7 +56,7 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
 
     # History & Privileged
     history_observation = True
-    history_len = 50
+    history_len = 10
     priv_latent = True
     num_priv_obs = 74            # lin_vel(3)+ang_vel(3)+masses(17)+material(51) ≈ 74
 
@@ -72,18 +73,41 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
     # 모션
     motion_file: str = MOTION_FILES_DIR
     reference_body = "base"
-    reset_strategy = "random"     # {"default", "random", "random-start"}
+    reset_strategy = "default"     # {"default", "random", "random-start"}
 
     # 시뮬레이션 (200 Hz physics, 50 Hz policy) -> (60hz physics, 10hz policy)
+    # sim: SimulationCfg = SimulationCfg(
+    #     dt=1 / sim_dt,
+    #     render_interval=decimation,
+    #     # physx=PhysxCfg(
+    #     #     gpu_found_lost_pairs_capacity=2**23,
+    #     #     gpu_total_aggregate_pairs_capacity=2**23,
+    #     # ),
+    # )
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / sim_dt,
+        dt= 1 / sim_dt,
         render_interval=decimation,
-        physx=PhysxCfg(
-            gpu_found_lost_pairs_capacity=2**23,
-            gpu_total_aggregate_pairs_capacity=2**23,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
         ),
     )
-
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )
     # 씬
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096, env_spacing=5.0, replicate_physics=True
@@ -107,7 +131,7 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
     curriculum_threshold = 10.0
     curriculum_step = 0.05
     command_cfg = {
-        "lin_vel_x_range": [0.0, 5.0],
+        "lin_vel_x_range": [0.0, 3.0],
         "lin_vel_y_range": [-0.0, 0.0],
         "ang_vel_range": [-0.5, 0.5],
     }
@@ -126,7 +150,18 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
 
     # Tracking 보상
     tracking_sigma = 0.25
-    lin_vel_reward_scale = 1.0
-    yaw_rate_reward_scale = 0.5
-    # lin_vel_reward_scale = 1.0 * 1.0 / (0.02 * 6)
-    # yaw_rate_reward_scale = 0.5 * 1.0 / (0.02 * 6)
+    # lin_vel_reward_scale = 1.0
+    # yaw_rate_reward_scale = 0.5
+    lin_vel_reward_scale = 1.0 * 1.0 / (.02 * 6)
+    yaw_rate_reward_scale = 0.5 * 1.0 / (.02 * 6)
+
+
+@configclass
+class Go2AmpSimpleEnvCfg(Go2AmpEnvCfg):
+    """Go2 AMP 단순 버전 환경 설정.
+
+    history_observation=False, ActorCritic(RMA 없음), PPOAMPBase(PPO 기반)와 함께 사용.
+    priv_latent는 유지하여 비대칭 actor-critic(critic만 특권 관측 사용) 구조 유지.
+    """
+
+    history_observation = False

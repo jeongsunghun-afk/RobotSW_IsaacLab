@@ -25,3 +25,13 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2AmpPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="Go2AMP-Simple",
+    entry_point=f"{__name__}.go2_amp_env:Go2AmpEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.go2_amp_env_cfg:Go2AmpSimpleEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2AmpSimplePPORunnerCfg",
+    },
+)

@@ -8,10 +8,10 @@ projects:
     page_id: "325fcb97742f815393e0d5856f793ffb"
     aliases: ["go2", "Go2", "GO2", "Go2-Neck", "Go2Neck"]
 
-  R_Skeleton:
-    url: "https://www.notion.so/rgarobot/R-Skeleton-Locomotion-RL-IL-325fcb97742f8127abe1d9271fb696a8"
+  Imitation:
+    url: "https://www.notion.so/rgarobot/Imitation-Learning-325fcb97742f8127abe1d9271fb696a8?source=copy_link"
     page_id: "325fcb97742f8127abe1d9271fb696a8"
-    aliases: ["r_skeleton", "R_Skeleton", "RSkeleton", "skeleton", "Skeleton"]
+    aliases: ["r_skeleton", "R_Skeleton", "RSkeleton", "skeleton", "Skeleton", "Imitation", "imitation" ,"il"]
 
   Retargeting:
     url: "https://www.notion.so/rgarobot/Motion-Retargeting-325fcb97742f81c4905bd7926fe5fd41"

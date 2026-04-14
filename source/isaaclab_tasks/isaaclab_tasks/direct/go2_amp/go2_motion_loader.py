@@ -207,6 +207,40 @@ class Go2MotionLoader:
             vel[-1] = vel[-2]
         return vel
 
+    @staticmethod
+    def _world_vel_to_body(vel_world: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
+        """World frame 속도 → body frame 속도 (quaternion inverse 적용).
+
+        R^T @ v_world (R: body→world 회전행렬, R^T: world→body)
+        """
+        w = quat_wxyz[:, 0]
+        x = quat_wxyz[:, 1]
+        y = quat_wxyz[:, 2]
+        z = quat_wxyz[:, 3]
+        vx = (1 - 2*(y*y + z*z)) * vel_world[:, 0] + (2*(x*y + w*z)) * vel_world[:, 1] + (2*(x*z - w*y)) * vel_world[:, 2]
+        vy = (2*(x*y - w*z))     * vel_world[:, 0] + (1 - 2*(x*x + z*z)) * vel_world[:, 1] + (2*(y*z + w*x)) * vel_world[:, 2]
+        vz = (2*(x*z + w*y))     * vel_world[:, 0] + (2*(y*z - w*x)) * vel_world[:, 1] + (1 - 2*(x*x + y*y)) * vel_world[:, 2]
+        return np.stack([vx, vy, vz], axis=-1).astype(np.float32)
+
+    @staticmethod
+    def _euler_rates_to_body_angvel(euler: np.ndarray, euler_rates: np.ndarray) -> np.ndarray:
+        """ZYX Euler rates → body frame 각속도.
+
+        ZYX 오일러각 (roll φ, pitch θ, yaw ψ) 에 대한 Jacobian:
+          ω_x =  dφ/dt - sin(θ) * dψ/dt
+          ω_y =  cos(φ) * dθ/dt + sin(φ)*cos(θ) * dψ/dt
+          ω_z = -sin(φ) * dθ/dt + cos(φ)*cos(θ) * dψ/dt
+        """
+        roll  = euler[:, 0]
+        pitch = euler[:, 1]
+        dr = euler_rates[:, 0]
+        dp = euler_rates[:, 1]
+        dy = euler_rates[:, 2]
+        wx = dr - np.sin(pitch) * dy
+        wy =  np.cos(roll) * dp + np.sin(roll) * np.cos(pitch) * dy
+        wz = -np.sin(roll) * dp + np.cos(roll) * np.cos(pitch) * dy
+        return np.stack([wx, wy, wz], axis=-1).astype(np.float32)
+
     def _load_pkl_file(self, path: str) -> tuple[
         np.ndarray, np.ndarray, np.ndarray, np.ndarray,
         np.ndarray, np.ndarray, np.ndarray, np.ndarray, float
@@ -234,9 +268,14 @@ class Go2MotionLoader:
         root_rot_wxyz = self._euler_to_quat_wxyz(root_euler)  # (N, 4)
 
         # 속도: finite difference (loop=False — 위치는 절대 좌표라 wraparound 불가)
-        lin_vel = self._finite_diff(root_pos, dt, loop=False)        # (N, 3)
-        ang_vel = self._finite_diff(root_euler, dt, loop=False)      # (N, 3)
-        joint_vel = self._finite_diff(joint_pos, dt, loop=False)     # (N, 12)
+        lin_vel_world = self._finite_diff(root_pos, dt, loop=False)  # (N, 3) world frame
+        euler_rates   = self._finite_diff(root_euler, dt, loop=False) # (N, 3) euler rates
+        joint_vel     = self._finite_diff(joint_pos, dt, loop=False)  # (N, 12)
+
+        # TXT 파일과 동일한 body frame으로 정규화
+        # (TXT: lin_vel/ang_vel이 명시적으로 base frame 으로 저장되어 있음)
+        lin_vel = self._world_vel_to_body(lin_vel_world, root_rot_wxyz)   # world → body
+        ang_vel = self._euler_rates_to_body_angvel(root_euler, euler_rates)  # euler rate → body ω
 
         # 발 위치: FK
         toe_pos = self._go2_fk_toe_pos(joint_pos)                    # (N, 4, 3)
@@ -448,10 +487,11 @@ class Go2MotionLoader:
 
     def _compute_frame_blend(self, times: np.ndarray):
         phase = np.clip(times / self.duration, 0.0, 1.0)
-        index_0 = (phase * (self.num_frames - 1)).round(decimals=0).astype(int)
-        index_1 = np.minimum(index_0 + 1, self.num_frames - 1)
-        blend = ((times - index_0 * self.dt) / self.dt).round(decimals=5)
-        blend = np.clip(blend, 0.0, 1.0)
+        frame_float = phase * (self.num_frames - 1)
+        index_0 = frame_float.astype(int)  # truncate = floor (phase >= 0)
+        index_0 = np.minimum(index_0, self.num_frames - 2)  # index_1 범위 보장
+        index_1 = index_0 + 1
+        blend = frame_float - index_0
         return index_0, index_1, blend
 
     def _build_velocity_sample_weights(self, lin_vel_all: np.ndarray, num_bins: int = 5) -> np.ndarray:
@@ -488,7 +528,7 @@ class Go2MotionLoader:
 
         return weights.astype(np.float64)
 
-    def sample_times(self, num_samples: int, duration: Optional[float] = None, velocity_balanced: bool = True) -> np.ndarray:
+    def sample_times(self, num_samples: int, duration: Optional[float] = None, velocity_balanced: bool = False) -> np.ndarray:
         if velocity_balanced:
             frame_indices = np.random.choice(self.num_frames, size=num_samples, p=self._vel_sample_weights)
             return (frame_indices * float(self.dt)).astype(np.float32)  # type: ignore[arg-type]

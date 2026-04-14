@@ -163,7 +163,7 @@ class Go2AmpEnv(DirectRLEnv):
             )
             resample_ids = resample_mask.nonzero(as_tuple=False).flatten()
             if len(resample_ids) > 0:
-                self._resample_commands_in_episode(resample_ids)
+                self._resample_commands(resample_ids)
 
         root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]
         root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]
@@ -229,6 +229,8 @@ class Go2AmpEnv(DirectRLEnv):
                 [
                     self._robot.data.root_lin_vel_b,                                                              # 3
                     self._robot.data.root_ang_vel_b,                                                              # 3
+                    # self._robot.root_physx_view.get_masses().reshape(self.num_envs, -1),
+                    # self._robot.root_physx_view.get_material_properties().reshape(self.num_envs, -1),
                     torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device).reshape(self.num_envs, -1),
                     torch.tensor(self._robot.root_physx_view.get_material_properties(), device=self.device).reshape(self.num_envs, -1),
                 ],
@@ -349,18 +351,6 @@ class Go2AmpEnv(DirectRLEnv):
 
         self._resample_commands(env_ids)
 
-        # RSI frame 속도로 command override (자세와 명령 속도 일치)
-        if rsi_times is not None:
-            frame_indices = np.clip(
-                np.round(rsi_times / self._motion_loader.dt).astype(int),
-                0,
-                self._motion_loader.num_frames - 1,
-            )
-            ref_vel_x = self._motion_loader._frame_lin_vel_x[frame_indices]
-            ref_vel_tensor = torch.tensor(ref_vel_x, dtype=torch.float32, device=self.device)
-            self._commands[env_ids, 0] = ref_vel_tensor
-            self._rsi_ref_vel[env_ids] = ref_vel_tensor
-
         if self.cfg.history_observation:
             self.obs_history_buf[env_ids, :, :] = 0.0
 
@@ -407,10 +397,11 @@ class Go2AmpEnv(DirectRLEnv):
         root_state[:, 0:3] = (
             body_positions[:, self.motion_ref_body_index] + self.scene.env_origins[env_ids]
         )
-        root_state[:, 2] += 0.05  # 지면 충돌 방지
+        # root_state[:, 2] += 0.05  # 지면 충돌 방지
         root_rot = body_rotations[:, self.motion_ref_body_index]
         root_state[:, 3:7] = root_rot
 
+        # motion_loader는 lin_vel/ang_vel을 body frame으로 저장하므로 quat_apply로 world frame 변환
         root_state[:, 7:10] = quat_apply(root_rot, body_linear_velocities[:, self.motion_ref_body_index])
         root_state[:, 10:13] = quat_apply(root_rot, body_angular_velocities[:, self.motion_ref_body_index])
 
@@ -442,6 +433,7 @@ class Go2AmpEnv(DirectRLEnv):
             np.expand_dims(current_times, axis=-1)
             - self.step_dt * np.arange(0, self.cfg.num_amp_observations)
         ).flatten()
+        times = np.maximum(times, 0.0)
 
         (
             dof_positions,
@@ -518,36 +510,6 @@ class Go2AmpEnv(DirectRLEnv):
                 self.cfg.command_cfg["ang_vel_range"][1],
                 (len(env_ids),), self.device,
             )
-
-    def _resample_commands_in_episode(self, env_ids: torch.Tensor):
-        """에피소드 중 command 재샘플링 — curriculum delta 기반.
-
-        Stage 1 (step < start):  command 변경 없음
-        Stage 2 (start ~ end):   RSI 기준 ± delta 점진 증가
-        Stage 3 (step > end):    RSI 기준 ± delta_end (전체 범위)
-        """
-        start_step = self.cfg.command_curriculum_start_step
-        end_step = self.cfg.command_curriculum_end_step
-
-        if self.common_step_counter < start_step:
-            return  # Stage 1: curriculum 시작 전, command 변경 없음
-
-        progress = min(
-            (self.common_step_counter - start_step) / max(end_step - start_step, 1), 1.0
-        )
-        delta = self.cfg.command_delta_start + (
-            self.cfg.command_delta_end - self.cfg.command_delta_start
-        ) * progress
-
-        vel_min = float(self.cfg.command_cfg["lin_vel_x_range"][0])
-        vel_max = float(self.cfg.command_cfg["lin_vel_x_range"][1])
-
-        ref_vel = self._rsi_ref_vel[env_ids]
-        noise = (torch.rand(len(env_ids), device=self.device) * 2.0 - 1.0) * delta
-        new_vel = torch.clamp(ref_vel + noise, vel_min, vel_max)
-
-        alpha = self.cfg.command_soft_update_alpha
-        self._commands[env_ids, 0] = alpha * new_vel + (1.0 - alpha) * self._commands[env_ids, 0]
 
     # ------------------------------------------------------------------
     # 헬퍼

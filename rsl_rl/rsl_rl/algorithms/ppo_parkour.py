@@ -104,8 +104,6 @@ class PPOParkour:
         # Adaptation
         self.hist_encoder_optimizer = optim.Adam(self.policy.history_encoder.parameters(), lr=learning_rate)
         self.priv_reg_coef_schedual = [0, 0.1, 2000, 3000]
-        # LCP: Gradient Penalty 계수 스케줄 [start_coef, end_coef, delay_iters, transition_iters]
-        self.grad_penalty_coef_schedule = [0.002, 0.002, 700, 1000]
         self.counter = 0
         # Create the optimizer
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
@@ -196,19 +194,6 @@ class PPOParkour:
         if not self.normalize_advantage_per_mini_batch:
             st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
 
-    def _calc_grad_penalty(self, obs_for_grad: torch.Tensor, actions_log_prob: torch.Tensor) -> torch.Tensor:
-        """Compute gradient penalty (LCP) of log_prob w.r.t. obs.
-
-        Args:
-            obs_for_grad: Input observation tensor with requires_grad=True
-            actions_log_prob: Log probability of actions (output to differentiate)
-
-        Returns:
-            Gradient penalty loss (scalar)
-        """
-        grad = torch.autograd.grad(actions_log_prob.sum(), obs_for_grad, create_graph=True)[0]
-        return torch.sum(torch.square(grad), dim=-1).mean()
-
     def update(self) -> dict[str, float]:
         mean_value_loss = 0
         mean_surrogate_loss = 0
@@ -219,8 +204,6 @@ class PPOParkour:
         mean_symmetry_loss = 0 if self.symmetry else None
         # Adaptation Reg loss
         mean_priv_reg_loss = 0
-        # LCP Gradient Penalty loss
-        mean_gradient_penalty_loss = 0
 
         # Get mini batch generator
         if self.policy.is_recurrent:
@@ -269,9 +252,9 @@ class PPOParkour:
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: We need to do this because we updated the policy with the new parameters
-            # For LCP gradient penalty: enable gradient flow through obs_batch
-            obs_batch_gp = obs_batch.clone().apply(lambda x: x.requires_grad_(True) if isinstance(x, torch.Tensor) else x)
-            self.policy.act(obs_batch_gp, masks=masks_batch, hidden_state=hidden_states_batch[0])
+            # # For LCP gradient penalty: enable gradient flow through obs_batch
+            # obs_batch_gp = obs_batch.clone().apply(lambda x: x.requires_grad_(True) if isinstance(x, torch.Tensor) else x)
+            self.policy.act(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[1])
             # Note: We only keep the entropy of the first augmentation (the original one)
@@ -342,29 +325,9 @@ class PPOParkour:
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
-            # LCP Gradient Penalty 계수 스케줄링
-            grad_penalty_stage = min(
-                max((self.counter - self.grad_penalty_coef_schedule[2]), 0)
-                / (self.grad_penalty_coef_schedule[3] + 1e-8),
-                1,
-            )
-            grad_penalty_coef = (
-                grad_penalty_stage
-                * (self.grad_penalty_coef_schedule[1] - self.grad_penalty_coef_schedule[0])
-                + self.grad_penalty_coef_schedule[0]
-            )
-
-            # LCP Gradient Penalty: policy obs leaf 텐서에 직접 미분 (별도 forward pass 없음)
-            # get_actor_obs()는 내부에서 torch.cat으로 새 tensor를 만들기 때문에 graph가 끊김.
-            # obs_batch_gp[group] 텐서 자체가 computation graph의 leaf node → 직접 미분.
-            # policy_tensors = [obs_batch_gp[g] for g in self.policy.obs_groups["policy"]]  # type: ignore
-            policy_tensors = [obs_batch_gp[g] for g in self.policy.obs_groups["critic"]]  # type: ignore
-            grads = torch.autograd.grad(actions_log_prob_batch.sum(), policy_tensors, create_graph=True)
-            gradient_penalty_loss = torch.stack([g.square().sum(-1).mean() for g in grads]).sum()
-
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + \
-                   priv_reg_coef * priv_reg_loss + grad_penalty_coef * gradient_penalty_loss
-
+                   priv_reg_coef * priv_reg_loss
+            
             # Symmetry loss
             if self.symmetry:
                 # Obtain the symmetric actions
@@ -437,7 +400,6 @@ class PPOParkour:
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy_batch.mean().item()
             mean_priv_reg_loss += priv_reg_loss.item()
-            mean_gradient_penalty_loss += gradient_penalty_loss.item()
             # RND loss
             if mean_rnd_loss is not None:
                 mean_rnd_loss += rnd_loss.item()
@@ -456,7 +418,6 @@ class PPOParkour:
             mean_symmetry_loss /= num_updates
         
         mean_priv_reg_loss /= num_updates
-        mean_gradient_penalty_loss /= num_updates
 
         # Clear the storage
         self.storage.clear()
@@ -467,7 +428,6 @@ class PPOParkour:
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
             "priv_reg_loss": mean_priv_reg_loss,
-            "gradient_penalty": mean_gradient_penalty_loss,
         }
         if self.rnd:
             loss_dict["rnd"] = mean_rnd_loss
@@ -496,7 +456,7 @@ class PPOParkour:
             masks_batch,
         ) in generator:
             with torch.inference_mode():
-                self.policy.act(obs_batch, hist_encoding=True, masks=masks_batch, hidden_states=hidden_states_batch[0])
+                self.policy.act(obs_batch, hist_encoding=True, masks=masks_batch, hidden_state=hidden_states_batch[0])
 
             # Adaptation module update
             with torch.inference_mode():
