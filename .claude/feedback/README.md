@@ -1,39 +1,23 @@
-# Feedback System 운영 방침
+# .claude/feedback/
 
-## 목적
-사용자와의 대화에서 발생한 피드백/결론을 다음 세션 agent에 전달하여 동일한 실수 반복 방지.
+이 디렉토리는 **Notion 저장 실패 시 로컬 fallback 저장소**로만 사용됩니다.
 
 ## 구조
+
 ```
-.claude/feedback/
-├── README.md           ← 이 파일
-├── global_lessons.md   ← 교차-agent 공통 규칙
-├── agents/             ← agent별 누적 피드백 (최대 10개 Active Rules)
-│   ├── reward-worker.md
-│   ├── obs-worker.md
-│   └── ...
-└── sessions/           ← 세션별 원본 요약 (감사 추적, agent는 읽지 않음)
-    └── YYYY-MM-DD.md
+feedback/
+└── sessions/
+    └── YYYY-MM-DD-{slug}.md   # /report 가 Notion 저장 실패 시 여기에 저장
 ```
 
-## 업데이트 시점
-`/report` 명령 실행 시 Step 4에서 자동 업데이트 (별도 명령 불필요).
+## 정책 (2026-04-30 개편)
 
-## Pruning 규칙 (report Step 4에서 적용)
-- Active Rules는 **최대 10개** 유지
-- 새 규칙이 기존 규칙을 포함/대체 → 기존 규칙을 Deprecated로 이동
-- 10개 초과 시 → 가장 오래된 non-critical 규칙을 Deprecated로
-- Deprecated 섹션은 agent가 읽지 않음 (감사 추적 전용)
+- **폐기**: `global_lessons.md` 및 agent별 누적 규칙(`agents/`)은 더 이상 사용하지 않습니다. 보고 시스템은 글로벌 `~/.claude/agents/session-report-writer.md` agent와 `~/.claude/commands/report.md` 명령어로 통합되었습니다.
+- **유지**: `sessions/` — `/report` 실행 중 Notion API 호출이 실패하면 보고서가 이곳에 자동 저장됩니다.
+- **수동 정리**: 더 이상 필요 없는 fallback 파일은 자유롭게 삭제 가능합니다.
 
-## Agent별 피드백 파일 포맷
-```markdown
-# {agent-name} Feedback Log
+## 관련 위치
 
-## Active Rules
-<!-- 최대 10개. session이 관리. -->
-- [YYYY-MM-DD] 규칙 (위반 시 결과)
-
-## Deprecated
-<!-- agent 무시 — 감사 추적 전용 -->
-- [날짜] ~~구 규칙~~ → 대체 이유
-```
+- 보고서 작성 명령: `~/.claude/commands/report.md`
+- 보고서 작성 agent: `~/.claude/agents/session-report-writer.md`
+- Notion 저장 대상: `~/.claude/notion_targets.yaml`

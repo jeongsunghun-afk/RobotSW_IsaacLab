@@ -419,9 +419,9 @@ class PPOParkour:
         
         mean_priv_reg_loss /= num_updates
 
-        # Clear the storage
-        self.storage.clear()
-        self.update_counter()
+        # NOTE: storage.clear() and update_counter() are deferred to update_dagger()
+        # which runs after this method, so the dagger generator can iterate over the
+        # rollout one more time before storage is cleared.
         # Construct the loss dictionary
         loss_dict = {
             "value": mean_value_loss,

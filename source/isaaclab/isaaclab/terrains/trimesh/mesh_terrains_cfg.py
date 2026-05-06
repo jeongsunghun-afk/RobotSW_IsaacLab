@@ -318,3 +318,165 @@ class MeshRepeatedCylindersTerrainCfg(MeshRepeatedObjectsTerrainCfg):
 
     object_params_end: ObjectCfg = MISSING
     """The box curriculum parameters at the end of the curriculum."""
+
+
+@configclass
+class MeshParkourGapTerrainCfg(SubTerrainBaseCfg):
+    """Configuration for a parkour gap terrain.
+
+    A series of platforms separated by gaps along the x-direction.
+    The robot must jump over the gaps to progress.
+    """
+
+    function = mesh_terrains.parkour_gap_terrain
+
+    platform_length: float = 2.0
+    """The length of the start/end platform along x (in m). Defaults to 2.0."""
+
+    num_gaps: int = MISSING
+    """The number of gaps (and intermediate platforms) in the terrain."""
+
+    gap_length_range: tuple[float, float] = MISSING
+    """The minimum and maximum length of each gap along x (in m). Interpolated by difficulty."""
+
+    platform_length_range: tuple[float, float] = (1.6, 2.4)
+    """The minimum and maximum length of each intermediate platform along x (in m). Defaults to (1.6, 2.4)."""
+
+    y_offset_range: tuple[float, float] = (-1.2, 1.2)
+    """The minimum and maximum y-offset of each intermediate platform center (in m). Defaults to (-1.2, 1.2)."""
+
+    half_valid_width_range: tuple[float, float] = (0.6, 1.2)
+    """The minimum and maximum half-width of each intermediate platform (in m). Defaults to (0.6, 1.2)."""
+
+    platform_height: float = 0.2
+    """The height of all platforms (in m). Defaults to 0.2."""
+
+    border_width: float = 0.0
+    """The width of the border around the terrain (in m). Defaults to 0.0."""
+
+    border_height: float = 0.5
+    """The height of the border walls (in m). Defaults to 0.5."""
+
+    num_goals: int = 8
+    """The number of goal waypoints to emit per terrain tile. Defaults to 8."""
+
+
+@configclass
+class MeshParkourHurdleTerrainCfg(SubTerrainBaseCfg):
+    """Configuration for a parkour hurdle terrain.
+
+    A start platform followed by N hurdles along the x-direction.
+    Each hurdle has a gap in the middle (valid corridor) that the robot must pass through,
+    while jumping over the hurdle height.
+    """
+
+    function = mesh_terrains.parkour_hurdle_terrain
+
+    platform_length: float = 2.5
+    """The length of the start platform along x (in m). Defaults to 2.5."""
+
+    num_hurdles: int = MISSING
+    """The number of hurdles in the terrain."""
+
+    hurdle_thickness: float = 0.3
+    """The thickness of each hurdle along x (in m). Defaults to 0.3."""
+
+    hurdle_height_range: tuple[float, float] = MISSING
+    """The minimum and maximum height of the hurdles (in m). Interpolated by difficulty."""
+
+    x_spacing_range: tuple[float, float] = (1.5, 2.4)
+    """The minimum and maximum spacing between hurdles along x (in m). Defaults to (1.5, 2.4)."""
+
+    y_offset_range: tuple[float, float] = (-0.4, 0.4)
+    """The minimum and maximum y-offset of each hurdle center (in m). Defaults to (-0.4, 0.4)."""
+
+    half_valid_width_range: tuple[float, float] = (0.4, 0.8)
+    """The minimum and maximum half-width of the passage corridor (in m). Defaults to (0.4, 0.8)."""
+
+    border_width: float = 0.0
+    """The width of the border around the terrain (in m). Defaults to 0.0."""
+
+    border_height: float = 0.5
+    """The height of the border walls (in m). Defaults to 0.5."""
+
+    flat: bool = False
+    """If True, hurdle boxes are skipped and the terrain is a flat corridor. Defaults to False."""
+
+    num_goals: int = 8
+    """The number of goal waypoints to emit per terrain tile. Defaults to 8."""
+
+
+@configclass
+class MeshParkourStairTerrainCfg(SubTerrainBaseCfg):
+    """Configuration for a parkour stair terrain.
+
+    Start platform -> ascending stairs -> flat section -> descending stairs -> flat section,
+    repeated num_stairs times. The robot must climb up and down stairs.
+    """
+
+    function = mesh_terrains.parkour_stair_terrain
+
+    platform_length: float = 2.5
+    """The length of the start platform along x (in m). Defaults to 2.5."""
+
+    stair_width_range: tuple[float, float] = MISSING
+    """The minimum and maximum tread depth (x-length) of each stair step (in m). Interpolated by difficulty."""
+
+    stair_height_range: tuple[float, float] = MISSING
+    """The minimum and maximum riser height of each stair step (in m). Interpolated by difficulty."""
+
+    flat_section_length: float = 1.5
+    """The length of the flat section between ascending and descending stairs (in m). Defaults to 1.5."""
+
+    num_steps_per_stair: int = 4
+    """The number of steps per ascending/descending stair section. Defaults to 4."""
+
+    num_stairs: int = 2
+    """The number of ascend-descend stair cycles. Defaults to 2."""
+
+    border_width: float = 0.0
+    """The width of the border around the terrain (in m). Defaults to 0.0."""
+
+    border_height: float = 0.5
+    """The height of the border walls (in m). Defaults to 0.5."""
+
+    num_goals: int = 8
+    """The number of goal waypoints to emit per terrain tile. Defaults to 8."""
+
+
+@configclass
+class MeshParkourStepTerrainCfg(SubTerrainBaseCfg):
+    """Configuration for a parkour step terrain.
+
+    A start platform followed by steps that rise to a peak then descend (pyramid profile),
+    constrained to a corridor along the x-direction. The robot must step up and down.
+    """
+
+    function = mesh_terrains.parkour_step_terrain
+
+    platform_length: float = 2.5
+    """The length of the start platform along x (in m). Defaults to 2.5."""
+
+    num_steps: int = MISSING
+    """The total number of steps (half ascending, half descending)."""
+
+    step_height_range: tuple[float, float] = MISSING
+    """The minimum and maximum height increment per step (in m). Interpolated by difficulty."""
+
+    x_length_range: tuple[float, float] = (0.2, 0.4)
+    """The minimum and maximum length of each step along x (in m). Defaults to (0.2, 0.4)."""
+
+    y_offset_range: tuple[float, float] = (-0.15, 0.15)
+    """The minimum and maximum y-offset of each step corridor center (in m). Defaults to (-0.15, 0.15)."""
+
+    half_valid_width_range: tuple[float, float] = (0.45, 0.5)
+    """The minimum and maximum half-width of the step corridor (in m). Defaults to (0.45, 0.5)."""
+
+    border_width: float = 0.0
+    """The width of the border around the terrain (in m). Defaults to 0.0."""
+
+    border_height: float = 0.5
+    """The height of the border walls (in m). Defaults to 0.5."""
+
+    num_goals: int = 8
+    """The number of goal waypoints to emit per terrain tile. Defaults to 8."""

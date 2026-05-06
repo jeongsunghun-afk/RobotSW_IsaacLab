@@ -50,7 +50,7 @@ class Go2ImitationEnvCfg(DirectRLEnvCfg):
     decimation: int = sim_dt_hz // policy_dt_hz  # 4
 
     # ── 공간 ────────────────────────────────────────────────────
-    observation_space: int = 44   # policy obs: gravity(3)+steering(5)+joint(12)+vel(12)+action(12)
+    observation_space: int = 44 + 6   # policy obs: gravity(3)+steering(5)+joint(12)+vel(12)+action(12)
     action_space: int = 12
     state_space: int = 0
 

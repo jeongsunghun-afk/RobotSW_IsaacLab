@@ -232,6 +232,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env_cfg.debug_vis = True
+    # Enable height scanner ray visualization in play mode (if the scene defines one)
+    if hasattr(env_cfg.scene, "height_scanner") and hasattr(env_cfg.scene.height_scanner, "debug_vis"):
+        env_cfg.scene.height_scanner.debug_vis = True
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     env.unwrapped.set_debug_vis(getattr(env_cfg, "debug_vis", True))
 

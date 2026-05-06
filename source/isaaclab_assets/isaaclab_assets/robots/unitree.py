@@ -175,6 +175,7 @@ UNITREE_GO2_CFG = ArticulationCfg(
             stiffness=25.0,
             damping=0.5,
             friction=0.0,
+            armature=0.01
         ),
     },
 )

@@ -393,6 +393,10 @@ class AMP(Agent):
 
         combined_rewards = self.cfg.task_reward_scale * rewards + self.cfg.style_reward_scale * style_reward
 
+        self.track_data("Reward / Task reward (mean)", rewards.mean().item())
+        self.track_data("Reward / Style reward AMP (mean)", style_reward.mean().item())
+        self.track_data("Reward / Combined reward (mean)", combined_rewards.mean().item())
+
         # compute returns and advantages
         values = self.memory.get_tensor_by_name("values")
         next_values = self.memory.get_tensor_by_name("next_values")

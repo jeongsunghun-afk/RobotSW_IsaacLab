@@ -236,6 +236,8 @@ class Go2ImitationEnv(DirectRLEnv):
         # ── Policy 관측 (44-dim) ──────────────────────────────
         policy_obs = torch.cat(
             [
+                root_lin_vel_b,
+                root_ang_vel_b,
                 self._robot.data.projected_gravity_b,                              # 3
                 local_tar_dir,                                                     # 2
                 tar_speed,                                                         # 1

@@ -39,6 +39,7 @@ parser.add_argument(
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--run_name", type=str, default=None, help="Experiment run name appended to the log directory.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--ml_framework",
@@ -85,13 +86,13 @@ import skrl
 from packaging import version
 
 # check for minimum supported skrl version
-SKRL_VERSION = "1.4.3"
-if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
-    skrl.logger.error(
-        f"Unsupported skrl version: {skrl.__version__}. "
-        f"Install supported version using 'pip install skrl>={SKRL_VERSION}'"
-    )
-    exit()
+# SKRL_VERSION = "1.4.3"
+# if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
+#     skrl.logger.error(
+#         f"Unsupported skrl version: {skrl.__version__}. "
+#         f"Install supported version using 'pip install skrl>={SKRL_VERSION}'"
+#     )
+#     exit()
 
 if args_cli.ml_framework.startswith("torch"):
     from skrl.utils.runner.torch import Runner
@@ -171,7 +172,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # The Ray Tune workflow extracts experiment name using the logging line below, hence,
     # do not change it (see PR #2346, comment-2819298849)
     print(f"Exact experiment name requested from command line: {log_dir}")
-    if agent_cfg["agent"]["experiment"]["experiment_name"]:
+    if args_cli.run_name:
+        log_dir += f"_{args_cli.run_name}"
+    elif agent_cfg["agent"]["experiment"]["experiment_name"]:
         log_dir += f"_{agent_cfg['agent']['experiment']['experiment_name']}"
     # set directory into agent config
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path

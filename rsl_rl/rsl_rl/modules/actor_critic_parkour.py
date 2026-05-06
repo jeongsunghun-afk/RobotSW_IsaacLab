@@ -96,9 +96,10 @@ class ActorCriticRMA(nn.Module):
             assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
             num_critic_obs += obs[obs_group].shape[-1]
         num_scan_obs = 0
-        # for obs_group in obs_groups["scan"]:
-        #     assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
-        #     num_scan_obs += obs[obs_group].shape[-1]
+        if "scan" in obs_groups:
+            for obs_group in obs_groups["scan"]:
+                assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
+                num_scan_obs += obs[obs_group].shape[-1]
         num_history = 0
         for obs_group in obs_groups["history"]:
             assert len(obs[obs_group].shape) == 3, "The ActorCritic module only supports 2D observations."
@@ -111,10 +112,13 @@ class ActorCriticRMA(nn.Module):
 
         # Actor
         self.state_dependent_std = state_dependent_std
+        # Actor input is concat of: proprio + priv_latent + scan_latent (only if scan present)
+        scan_latent_dim = scan_encoder_dims[-1] if num_scan_obs > 0 else 0
+        actor_input_dim = num_actor_obs + priv_encoder_dims[-1] + scan_latent_dim
         if self.state_dependent_std:
-            self.actor = MLP(num_scan_obs + num_actor_obs + priv_encoder_dims[-1], [2, num_actions], actor_hidden_dims, activation)
+            self.actor = MLP(actor_input_dim, [2, num_actions], actor_hidden_dims, activation)
         else:
-            self.actor = MLP(num_scan_obs + num_actor_obs + priv_encoder_dims[-1], num_actions, actor_hidden_dims, activation)
+            self.actor = MLP(actor_input_dim, num_actions, actor_hidden_dims, activation)
         print(f"Actor MLP: {self.actor}")
 
         # Actor observation normalization

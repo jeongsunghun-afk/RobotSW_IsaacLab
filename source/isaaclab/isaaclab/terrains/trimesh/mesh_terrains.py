@@ -20,6 +20,30 @@ from .utils import make_border, make_plane
 if TYPE_CHECKING:
     from . import mesh_terrains_cfg
 
+# ---------------------------------------------------------------------------
+# Module-level goals registry for parkour terrain functions.
+#
+# Each parkour terrain function appends ``(goals_local, terrain_origin_local)``
+# to this list at the end of execution.
+# ``goals_local`` is an ndarray of shape ``(num_goals, 3)`` in the pre-centering
+# local terrain frame (same as the origin returned by the function).
+# ``terrain_origin_local`` is the ``origin`` array returned by the function,
+# also in the pre-centering local frame.
+#
+# World-frame conversion (in the env):
+#   ``world_goal = terrain_origins[row, col] + (local_goal - local_origin)``
+# where ``terrain_origins`` is the ``TerrainImporter.terrain_origins`` tensor
+# (shape ``(num_rows, num_cols, 3)``, already in world frame).
+#
+# Caller protocol:
+#   1. Clear this list before calling ``TerrainImporter`` (i.e., terrain generation).
+#   2. Read after ``TerrainImporter`` construction completes.
+#   3. Entry order matches ``TerrainGenerator`` iteration:
+#        curriculum=True  → col-major: call k → (row=k % num_rows, col=k // num_rows)
+#        curriculum=False → row-major: call k → (row=k // num_cols, col=k % num_cols)
+# ---------------------------------------------------------------------------
+PARKOUR_GOALS_REGISTRY: list[tuple[np.ndarray, np.ndarray]] = []
+
 
 def flat_terrain(
     difficulty: float, cfg: mesh_terrains_cfg.MeshPlaneTerrainCfg
@@ -859,5 +883,320 @@ def repeated_objects_terrain(
     pos = (0.5 * cfg.size[0], 0.5 * cfg.size[1], 0.25 * platform_height)
     platform = trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos))
     meshes_list.append(platform)
+
+    return meshes_list, origin
+
+
+def parkour_gap_terrain(
+    difficulty: float, cfg: mesh_terrains_cfg.MeshParkourGapTerrainCfg
+) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate a parkour gap terrain with platforms separated by gaps along the x-direction.
+
+    The robot must jump over each gap to land on the next platform. No ground plane is placed so
+    the robot will fall if it misses a platform.
+
+    Args:
+        difficulty: The difficulty of the terrain. This is a value between 0 and 1.
+        cfg: The configuration for the terrain.
+
+    Returns:
+        A tuple containing the tri-mesh of the terrain and the origin of the terrain (in m).
+    """
+    # resolve difficulty-dependent parameter
+    gap_len = cfg.gap_length_range[0] + difficulty * (cfg.gap_length_range[1] - cfg.gap_length_range[0])
+
+    mid_y = cfg.size[1] / 2.0
+    half_valid_width = float(np.random.uniform(cfg.half_valid_width_range[0], cfg.half_valid_width_range[1]))
+
+    meshes_list: list[trimesh.Trimesh] = []
+
+    # start platform — full width of the terrain
+    dim = (cfg.platform_length, cfg.size[1], cfg.platform_height)
+    pos = (cfg.platform_length / 2.0, cfg.size[1] / 2.0, cfg.platform_height / 2.0)
+    meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+
+    goals_list: list[list[float]] = []
+
+    dis_x = cfg.platform_length
+    for _ in range(cfg.num_gaps):
+        rand_plen = float(np.random.uniform(cfg.platform_length_range[0], cfg.platform_length_range[1]))
+        rand_y = float(np.random.uniform(cfg.y_offset_range[0], cfg.y_offset_range[1]))
+        # advance past the gap
+        dis_x += gap_len
+        # intermediate platform — corridor width only
+        plat_w = 2.0 * half_valid_width
+        plat_center_y = mid_y + rand_y
+        # clamp so the platform stays within terrain bounds
+        plat_center_y = float(np.clip(plat_center_y, half_valid_width, cfg.size[1] - half_valid_width))
+        dim = (rand_plen, plat_w, cfg.platform_height)
+        pos = (dis_x + rand_plen / 2.0, plat_center_y, cfg.platform_height / 2.0)
+        meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+        # goal: center-top of this intermediate platform (landing spot after the gap)
+        goals_list.append([dis_x + rand_plen / 2.0, plat_center_y, float(cfg.platform_height)])
+        dis_x += rand_plen
+
+    # end platform — fill remaining terrain length if any
+    remaining = cfg.size[0] - dis_x
+    if remaining > 1e-3:
+        dim = (remaining, cfg.size[1], cfg.platform_height)
+        pos = (dis_x + remaining / 2.0, cfg.size[1] / 2.0, cfg.platform_height / 2.0)
+        meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+
+    # border walls
+    if cfg.border_width > 0.0:
+        inner_size = (cfg.size[0] - 2 * cfg.border_width, cfg.size[1] - 2 * cfg.border_width)
+        border_center = (cfg.size[0] / 2.0, cfg.size[1] / 2.0, -cfg.border_height / 2.0)
+        meshes_list += make_border(cfg.size, inner_size, cfg.border_height, border_center)
+
+    # origin at start platform top surface
+    origin = np.array([cfg.platform_length / 2.0, cfg.size[1] / 2.0, cfg.platform_height])
+
+    # build goals array: pad with last goal if needed, truncate to num_goals
+    _raw = np.array(goals_list, dtype=float) if goals_list else origin.reshape(1, 3)
+    if len(_raw) < cfg.num_goals:
+        _raw = np.vstack([_raw, np.tile(_raw[-1:], (cfg.num_goals - len(_raw), 1))])
+    goals = _raw[: cfg.num_goals]
+
+    # publish to module-level registry (consumed by parkour_env after terrain build)
+    PARKOUR_GOALS_REGISTRY.append((goals.copy(), origin.copy()))
+
+    return meshes_list, origin
+
+
+def parkour_hurdle_terrain(
+    difficulty: float, cfg: mesh_terrains_cfg.MeshParkourHurdleTerrainCfg
+) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate a parkour hurdle terrain with obstacles that have a passage corridor in the middle.
+
+    The robot must navigate through the corridor in each hurdle while jumping over the hurdle height.
+
+    Args:
+        difficulty: The difficulty of the terrain. This is a value between 0 and 1.
+        cfg: The configuration for the terrain.
+
+    Returns:
+        A tuple containing the tri-mesh of the terrain and the origin of the terrain (in m).
+    """
+    # resolve difficulty-dependent parameter
+    hurdle_h = cfg.hurdle_height_range[0] + difficulty * (cfg.hurdle_height_range[1] - cfg.hurdle_height_range[0])
+    half_valid_w = float(np.random.uniform(cfg.half_valid_width_range[0], cfg.half_valid_width_range[1]))
+
+    mid_y = cfg.size[1] / 2.0
+
+    meshes_list: list[trimesh.Trimesh] = []
+
+    # ground plane covers the full terrain
+    meshes_list.append(make_plane(cfg.size, height=0.0, center_zero=False))
+
+    goals_list: list[list[float]] = []
+
+    dis_x = cfg.platform_length
+    for _ in range(cfg.num_hurdles):
+        rand_x = float(np.random.uniform(cfg.x_spacing_range[0], cfg.x_spacing_range[1]))
+        rand_y = float(np.random.uniform(cfg.y_offset_range[0], cfg.y_offset_range[1]))
+        dis_x += rand_x
+        hurdle_center_y = mid_y + rand_y
+        # goal: just past the hurdle face, at corridor center (ground level)
+        goals_list.append([dis_x + cfg.hurdle_thickness + 0.3, hurdle_center_y, 0.0])
+
+        if cfg.flat or hurdle_h <= 0.0:
+            continue
+
+        gap_lo = hurdle_center_y - half_valid_w
+        gap_hi = hurdle_center_y + half_valid_w
+
+        # left hurdle box: y in [0, gap_lo]
+        left_w = max(0.0, gap_lo)
+        if left_w > 1e-3:
+            dim = (cfg.hurdle_thickness, left_w, hurdle_h)
+            pos = (dis_x + cfg.hurdle_thickness / 2.0, left_w / 2.0, hurdle_h / 2.0)
+            meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+
+        # right hurdle box: y in [gap_hi, cfg.size[1]]
+        right_w = max(0.0, cfg.size[1] - gap_hi)
+        if right_w > 1e-3:
+            dim = (cfg.hurdle_thickness, right_w, hurdle_h)
+            pos = (dis_x + cfg.hurdle_thickness / 2.0, gap_hi + right_w / 2.0, hurdle_h / 2.0)
+            meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+
+    # border walls
+    if cfg.border_width > 0.0:
+        inner_size = (cfg.size[0] - 2 * cfg.border_width, cfg.size[1] - 2 * cfg.border_width)
+        border_center = (cfg.size[0] / 2.0, cfg.size[1] / 2.0, cfg.border_height / 2.0)
+        meshes_list += make_border(cfg.size, inner_size, cfg.border_height, border_center)
+
+    # origin at center of start platform (ground level)
+    origin = np.array([cfg.platform_length / 2.0, cfg.size[1] / 2.0, 0.0])
+
+    # build goals array: pad with last goal if needed, truncate to num_goals
+    _raw = np.array(goals_list, dtype=float) if goals_list else origin.reshape(1, 3)
+    if len(_raw) < cfg.num_goals:
+        _raw = np.vstack([_raw, np.tile(_raw[-1:], (cfg.num_goals - len(_raw), 1))])
+    goals = _raw[: cfg.num_goals]
+
+    # publish to module-level registry (consumed by parkour_env after terrain build)
+    PARKOUR_GOALS_REGISTRY.append((goals.copy(), origin.copy()))
+
+    return meshes_list, origin
+
+
+def parkour_stair_terrain(
+    difficulty: float, cfg: mesh_terrains_cfg.MeshParkourStairTerrainCfg
+) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate a parkour stair terrain with ascending then descending stair sections.
+
+    Repeated num_stairs times: ascending stairs -> flat top -> descending stairs -> flat bottom.
+
+    Args:
+        difficulty: The difficulty of the terrain. This is a value between 0 and 1.
+        cfg: The configuration for the terrain.
+
+    Returns:
+        A tuple containing the tri-mesh of the terrain and the origin of the terrain (in m).
+    """
+    # resolve difficulty-dependent parameters
+    sw = cfg.stair_width_range[0] + difficulty * (cfg.stair_width_range[1] - cfg.stair_width_range[0])
+    sh = cfg.stair_height_range[0] + difficulty * (cfg.stair_height_range[1] - cfg.stair_height_range[0])
+
+    terrain_w = cfg.size[1]
+    mid_y = terrain_w / 2.0
+
+    meshes_list: list[trimesh.Trimesh] = []
+
+    # ground plane
+    meshes_list.append(make_plane(cfg.size, height=0.0, center_zero=False))
+
+    goals_list: list[list[float]] = []
+
+    current_x = cfg.platform_length
+
+    for _ in range(cfg.num_stairs):
+        # ascending steps
+        for k in range(cfg.num_steps_per_stair):
+            step_top = (k + 1) * sh
+            if step_top > 1e-3 and sw > 1e-3:
+                dim = (sw, terrain_w, step_top)
+                pos = (current_x + sw / 2.0, mid_y, step_top / 2.0)
+                meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+            current_x += sw
+
+        # flat top section
+        top_h = cfg.num_steps_per_stair * sh
+        # goal: center of the flat top (landing after ascent)
+        goals_list.append([current_x + cfg.flat_section_length / 2.0, mid_y, top_h])
+        if top_h > 1e-3 and cfg.flat_section_length > 1e-3:
+            dim = (cfg.flat_section_length, terrain_w, top_h)
+            pos = (current_x + cfg.flat_section_length / 2.0, mid_y, top_h / 2.0)
+            meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+        current_x += cfg.flat_section_length
+
+        # descending steps
+        for k in range(cfg.num_steps_per_stair):
+            step_top = (cfg.num_steps_per_stair - k - 1) * sh
+            if step_top > 1e-3 and sw > 1e-3:
+                dim = (sw, terrain_w, step_top)
+                pos = (current_x + sw / 2.0, mid_y, step_top / 2.0)
+                meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+            current_x += sw
+
+        # flat bottom section (ground level — no box needed, advance x only)
+        # goal: center of the flat bottom (landing after descent)
+        goals_list.append([current_x + cfg.flat_section_length / 2.0, mid_y, 0.0])
+        current_x += cfg.flat_section_length
+
+    # border walls
+    if cfg.border_width > 0.0:
+        inner_size = (cfg.size[0] - 2 * cfg.border_width, cfg.size[1] - 2 * cfg.border_width)
+        border_center = (cfg.size[0] / 2.0, cfg.size[1] / 2.0, cfg.border_height / 2.0)
+        meshes_list += make_border(cfg.size, inner_size, cfg.border_height, border_center)
+
+    # origin at center of start platform (ground level)
+    origin = np.array([cfg.platform_length / 2.0, cfg.size[1] / 2.0, 0.0])
+
+    # build goals array: pad with last goal if needed, truncate to num_goals
+    _raw = np.array(goals_list, dtype=float) if goals_list else origin.reshape(1, 3)
+    if len(_raw) < cfg.num_goals:
+        _raw = np.vstack([_raw, np.tile(_raw[-1:], (cfg.num_goals - len(_raw), 1))])
+    goals = _raw[: cfg.num_goals]
+
+    # publish to module-level registry (consumed by parkour_env after terrain build)
+    PARKOUR_GOALS_REGISTRY.append((goals.copy(), origin.copy()))
+
+    return meshes_list, origin
+
+
+def parkour_step_terrain(
+    difficulty: float, cfg: mesh_terrains_cfg.MeshParkourStepTerrainCfg
+) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate a parkour step terrain with a pyramid-profile step sequence in a corridor.
+
+    Steps rise to a peak height then descend back to ground, constrained to a y-corridor.
+    The robot must step up then back down.
+
+    Args:
+        difficulty: The difficulty of the terrain. This is a value between 0 and 1.
+        cfg: The configuration for the terrain.
+
+    Returns:
+        A tuple containing the tri-mesh of the terrain and the origin of the terrain (in m).
+    """
+    # resolve difficulty-dependent parameter
+    step_h = cfg.step_height_range[0] + difficulty * (cfg.step_height_range[1] - cfg.step_height_range[0])
+    half_valid_w = float(np.random.uniform(cfg.half_valid_width_range[0], cfg.half_valid_width_range[1]))
+
+    mid_y = cfg.size[1] / 2.0
+
+    meshes_list: list[trimesh.Trimesh] = []
+
+    # ground plane
+    meshes_list.append(make_plane(cfg.size, height=0.0, center_zero=False))
+
+    goals_list: list[list[float]] = []
+
+    dis_x = cfg.platform_length
+    current_height = 0.0
+
+    for i in range(cfg.num_steps):
+        rand_x_len = float(np.random.uniform(cfg.x_length_range[0], cfg.x_length_range[1])) + step_h
+        rand_y = float(np.random.uniform(cfg.y_offset_range[0], cfg.y_offset_range[1]))
+
+        # update height based on pyramid profile
+        if i < cfg.num_steps // 2:
+            current_height += step_h
+        elif i > cfg.num_steps // 2:
+            current_height -= step_h
+        # at the peak (i == num_steps // 2) height stays the same
+
+        step_center_y = mid_y + rand_y
+        # clamp corridor inside terrain bounds
+        step_center_y = float(np.clip(step_center_y, half_valid_w, cfg.size[1] - half_valid_w))
+
+        # goal: center-top of this step surface
+        goals_list.append([dis_x + rand_x_len / 2.0, step_center_y, max(0.0, current_height)])
+
+        if current_height > 1e-3 and rand_x_len > 1e-3:
+            dim = (rand_x_len, 2.0 * half_valid_w, current_height)
+            pos = (dis_x + rand_x_len / 2.0, step_center_y, current_height / 2.0)
+            meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+
+        dis_x += rand_x_len
+
+    # border walls
+    if cfg.border_width > 0.0:
+        inner_size = (cfg.size[0] - 2 * cfg.border_width, cfg.size[1] - 2 * cfg.border_width)
+        border_center = (cfg.size[0] / 2.0, cfg.size[1] / 2.0, cfg.border_height / 2.0)
+        meshes_list += make_border(cfg.size, inner_size, cfg.border_height, border_center)
+
+    # origin at center of start platform (ground level)
+    origin = np.array([cfg.platform_length / 2.0, cfg.size[1] / 2.0, 0.0])
+
+    # build goals array: pad with last goal if needed, truncate to num_goals
+    _raw = np.array(goals_list, dtype=float) if goals_list else origin.reshape(1, 3)
+    if len(_raw) < cfg.num_goals:
+        _raw = np.vstack([_raw, np.tile(_raw[-1:], (cfg.num_goals - len(_raw), 1))])
+    goals = _raw[: cfg.num_goals]
+
+    # publish to module-level registry (consumed by parkour_env after terrain build)
+    PARKOUR_GOALS_REGISTRY.append((goals.copy(), origin.copy()))
 
     return meshes_list, origin

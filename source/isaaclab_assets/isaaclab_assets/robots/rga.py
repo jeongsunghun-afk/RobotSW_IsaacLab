@@ -351,3 +351,78 @@ RGA_GO2_CFG = ArticulationCfg(
         ),
     },
 )
+
+
+R_SKELETON_HIND_LEG_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Hind_Leg/Leg.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Hind_Leg_fixed/Leg.usd",
+        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Hind_Leg_Fixed_Filpped/Leg.usd",
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=5.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=4
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.6),
+    ),
+    actuator_value_resolution_debug_print=True, # type: ignore
+    soft_joint_pos_limit_factor=0.9,
+    actuators={
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[
+                ".*_thigh_r",
+                ".*_thigh_p",
+                ".*_knee_p",
+            ],
+            velocity_limit_sim={
+                ".*_thigh_r": THIGH_VEL,
+                ".*_thigh_p": THIGH_P_VEL,
+                ".*_knee_p": KNEE_VEL,
+            },
+            effort_limit_sim={
+                ".*_thigh_r": THIGH_TORQUE,
+                ".*_thigh_p": THIGH_P_TORQUE,
+                ".*_knee_p": KNEE_TORQUE,
+            },
+            stiffness={
+                ".*_thigh_r": THIGH_KP,
+                ".*_thigh_p": THIGH_KP,
+                ".*_knee_p": KNEE_KP,
+            },
+            damping={
+                ".*_thigh_r": THIGH_KD,
+                ".*_thigh_p": THIGH_KD,
+                ".*_knee_p": KNEE_KD,
+            },
+        ),
+        "feet": ImplicitActuatorCfg(
+            joint_names_expr=[
+                ".*_ankle_p",
+                ".*_toe_p",
+            ],
+            velocity_limit_sim={
+                ".*_ankle_p": ANKLE_VEL,
+                ".*_toe_p": ANKLE_VEL,
+            },
+            effort_limit_sim={
+                ".*_ankle_p": ANKLE_TORQUE,
+                ".*_toe_p": ANKLE_TORQUE,
+            },
+            stiffness={
+                ".*_ankle_p": ANKLE_KP,
+                ".*_toe_p": ANKLE_KP,
+            },
+            damping={
+                ".*_ankle_p": ANKLE_KD,
+                ".*_toe_p": ANKLE_KD,
+            },
+        ),
+    },
+)
