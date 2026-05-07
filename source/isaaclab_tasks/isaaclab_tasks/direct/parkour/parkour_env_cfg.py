@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import PhysxCfg, SimulationCfg
@@ -20,6 +23,16 @@ from isaaclab.utils import configclass
 # Pre-defined configs
 ##
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
+
+from .parkour_terrains import parkour_jump_hurdle_terrain as _parkour_jump_hurdle_terrain
+from .parkour_terrains import (
+    MeshParkourSteppingStonesTerrainCfg,
+    MeshParkourBalanceBeamTerrainCfg,
+    MeshParkourCrawlTerrainCfg,
+    MeshParkourSlopeTerrainCfg,
+    MeshParkourZigzagHurdlesTerrainCfg,
+    MeshParkourRoughBlocksTerrainCfg,
+)
 
 ##
 # Parkour terrain configuration
@@ -43,6 +56,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
         # num_goals=8: explicit (matches default added by W1 to MeshParkour*TerrainCfg).
         # cfg.terrain_goals is populated by the terrain function at build time (used by W3 env wiring).
         "parkour_flat": terrain_gen.MeshParkourHurdleTerrainCfg(
+            function=_parkour_jump_hurdle_terrain,
             proportion=0.1,
             flat=True,
             num_hurdles=8,
@@ -58,6 +72,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "parkour_hurdle": terrain_gen.MeshParkourHurdleTerrainCfg(
+            function=_parkour_jump_hurdle_terrain,
             proportion=0.2,
             num_hurdles=8,
             num_goals=8,
@@ -75,6 +90,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.2,
             num_steps=8,
             num_goals=8,
+            x_length_range=(0.4, 0.8),
             step_height_range=(0.10, 0.45),
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
@@ -111,6 +127,118 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
                 )
             },
         ),
+        # -----------------------------------------------------------------------
+        # New terrain types — proportion=0.0 (inactive, registered for future use).
+        # Existing 5-terrain proportions (sum=1.0) are preserved unchanged.
+        # To activate: set proportion>0 and ensure all proportions still sum to 1.0.
+        # Class IDs follow dict insertion order: stones=5, beam=6, crawl=7,
+        # slope=8, zigzag=9, rough=10  (see TERRAIN_CLASS_* constants below).
+        # NOTE: With proportion=0.0 these terrains are never spawned; the _col_to_class
+        # LUT (parkour_env.py) will correctly assign class IDs 5-10 only once any of
+        # them has proportion > 0. The sum=1.0 assert still passes.
+        # -----------------------------------------------------------------------
+        "parkour_stepping_stones": MeshParkourSteppingStonesTerrainCfg(
+            proportion=0.0,
+            platform_length=2.5,
+            num_stones=8,
+            stone_size_xy_range=(0.20, 0.40),
+            stone_height_range=(0.05, 0.15),
+            gap_length_range=(0.20, 0.45),
+            lateral_jitter_range=(0.0, 0.30),
+            num_goals=8,
+            flat_patch_sampling={
+                "init_positions": FlatPatchSamplingCfg(
+                    num_patches=2,
+                    patch_radius=0.5,
+                    max_height_diff=0.05,
+                )
+            },
+        ),
+        "parkour_balance_beam": MeshParkourBalanceBeamTerrainCfg(
+            proportion=0.0,
+            platform_length=2.5,
+            platform_height=0.15,
+            beam_width_range=(0.20, 0.50),
+            beam_height=0.15,
+            max_segments=3,
+            y_shift_per_segment_range=(0.0, 0.40),
+            num_goals=8,
+            flat_patch_sampling={
+                "init_positions": FlatPatchSamplingCfg(
+                    num_patches=2,
+                    patch_radius=0.5,
+                    max_height_diff=0.05,
+                )
+            },
+        ),
+        "parkour_crawl": MeshParkourCrawlTerrainCfg(
+            proportion=0.0,
+            platform_length=2.5,
+            num_crawls=3,
+            ceiling_height_range=(0.28, 0.50),
+            ceiling_length_x=1.2,
+            ceiling_thickness=0.10,
+            ceiling_top_extra=0.50,
+            corridor_width=1.2,
+            side_wall_height=1.0,
+            side_walls=True,
+            x_spacing_range=(1.0, 2.0),
+            num_goals=8,
+            flat_patch_sampling={
+                "init_positions": FlatPatchSamplingCfg(
+                    num_patches=2,
+                    patch_radius=0.5,
+                    max_height_diff=0.05,
+                )
+            },
+        ),
+        "parkour_slope": MeshParkourSlopeTerrainCfg(
+            proportion=0.0,
+            platform_length=2.5,
+            slope_angle_deg_range=(5.0, 25.0),
+            slope_length=4.0,
+            flat_top_length=1.5,
+            num_goals=8,
+            flat_patch_sampling={
+                "init_positions": FlatPatchSamplingCfg(
+                    num_patches=2,
+                    patch_radius=0.5,
+                    max_height_diff=0.05,
+                )
+            },
+        ),
+        "parkour_zigzag_hurdles": MeshParkourZigzagHurdlesTerrainCfg(
+            proportion=0.0,
+            platform_length=2.5,
+            num_hurdles=6,
+            hurdle_thickness=0.30,
+            hurdle_height_range=(0.10, 0.25),
+            corridor_width=2.0,
+            x_spacing_range=(1.5, 2.4),
+            num_goals=8,
+            flat_patch_sampling={
+                "init_positions": FlatPatchSamplingCfg(
+                    num_patches=2,
+                    patch_radius=0.5,
+                    max_height_diff=0.05,
+                )
+            },
+        ),
+        "parkour_rough_blocks": MeshParkourRoughBlocksTerrainCfg(
+            proportion=0.0,
+            platform_length=2.5,
+            block_size=0.30,
+            block_height_range=(0.0, 0.10),
+            block_density_range=(0.6, 0.9),
+            num_goals=8,
+            flat_patch_sampling={
+                "init_positions": FlatPatchSamplingCfg(
+                    num_patches=2,
+                    patch_radius=0.5,
+                    max_height_diff=0.05,
+                )
+            },
+        ),
     },
 )
 """Parkour terrain configuration with 5 parkour-specific obstacle types for curriculum learning."""
@@ -124,6 +252,37 @@ TERRAIN_CLASS_HURDLE = 1  # parkour_hurdle — hurdle boxes the robot must jump 
 TERRAIN_CLASS_STEP = 2    # parkour_step   — ascending/descending step pyramid
 TERRAIN_CLASS_GAP = 3     # parkour_gap    — platforms separated by gaps
 TERRAIN_CLASS_STAIR = 4   # parkour_stair  — ascending/descending stair cycles
+# New terrain classes — registered inactive (proportion=0.0).
+# Class IDs follow dict insertion order in PARKOUR_TERRAINS_CFG.sub_terrains above.
+# To activate a terrain: set its proportion > 0 (ensure all proportions still sum to 1.0).
+TERRAIN_CLASS_STEPPING_STONES = 5   # parkour_stepping_stones — discrete stones with lateral jitter
+TERRAIN_CLASS_BALANCE_BEAM    = 6   # parkour_balance_beam    — narrow raised beam, fall-off risk
+TERRAIN_CLASS_CRAWL           = 7   # parkour_crawl           — low-ceiling corridor (requires height_scan masking)
+TERRAIN_CLASS_SLOPE           = 8   # parkour_slope           — wedge-primitive incline
+TERRAIN_CLASS_ZIGZAG_HURDLES  = 9   # parkour_zigzag_hurdles  — left/right alternating hurdles
+TERRAIN_CLASS_ROUGH_BLOCKS    = 10  # parkour_rough_blocks    — random-height block grid
+
+
+##
+# Event (randomization) configuration
+##
+
+
+@configclass
+class EventCfg:
+    """Configuration for environment randomization events."""
+
+    foot_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*foot"),
+            "static_friction_range": (0.4, 1.5),
+            "dynamic_friction_range": (0.3, 1.2),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 64,
+        },
+    )
 
 
 ##
@@ -147,6 +306,8 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # visualization toggles
     debug_vis: bool = False
     enable_keyboard_view_switch: bool = True
+    debug_vis_edge_mask: bool = True  # if True, visualize edge mask cells around env 0 as green spheres
+    debug_vis_edge_mask_radius_m: float = 5.0  # radius (m) around env 0 base position to visualize
 
     # env
     episode_length_s: float = 20.0
@@ -163,13 +324,13 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # history: history_len * num_proprio = 10 * 46 = 460
     # critic = policy + scan + priv + history = 46 + 187 + 4 + 460 = 697
     # Note: DirectRLEnv may still use observation_space for Space creation, but runners use dict obs.
-    observation_space: int = 46  # policy obs dim (runner overrides with dict obs_groups)
+    observation_space: int = 42  # policy obs dim (runner overrides with dict obs_groups)
     state_space: int = 0
 
     # Observation dimensions (Task #3)
-    num_proprio: int = 46  # 3+3+2+2+12+12+12
+    num_proprio: int = 42  # 3+1+1+1+12+12+12
     num_scan_obs: int = 187
-    num_priv_obs: int = 4  # Placeholder for friction, mass, kp, kv (Task #5)
+    num_priv_obs: int = 14  # lin_vel_b(3) + ang_vel_b(3) + foot_friction_4feet×2(8); mass excluded until randomized
     history_len: int = 10
 
     # simulation
@@ -215,6 +376,9 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
+    # events
+    events: EventCfg = EventCfg()
+
     # robot
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
@@ -237,17 +401,17 @@ class ParkourEnvCfg(DirectRLEnvCfg):
 
     # command configuration (Genesis original: forward-only parkour)
     command_cfg: dict = {
-        "lin_vel_x_range": [0.4, 1.0],   # forward only (Genesis original)
+        "lin_vel_x_range": [0.3, 1.0],   # forward only (Genesis original)
         "lin_vel_y_range": [0.0, 0.0],   # no lateral movement
         "ang_vel_range": [0.0, 0.0],     # no yaw turning
     }
 
     # reward scales (Genesis original: train_parkour.py line 184-214)
     reward_scales: dict = {
-        "tracking_goal_vel": 1.5,        # Genesis original
-        "tracking_yaw": 0.5,             # Genesis original
-        "tracking_lin_vel_xy_exp": 0.5,  # parkour-specific weakening
-        "tracking_ang_vel_z_exp": 0.5,   # parkour-specific weakening
+        "tracking_goal_vel": 1.2,        # Genesis original
+        "tracking_yaw": 0.7,             # Genesis original
+        "tracking_lin_vel_xy_exp": 0.0,  # parkour-specific weakening
+        "tracking_ang_vel_z_exp": 0.0,   # parkour-specific weakening
         "lin_vel_z_l2": -1.0,            # Genesis original
         "ang_vel_xy_l2": -0.05,          # Genesis original (= ang_vel_xy2)
         "orientation_l2": -1.0,          # Genesis original
@@ -261,7 +425,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         "feet_stumble": -1.0,            # Genesis original (= feet_stumble2)
         "feet_edge": -1.0,               # Genesis original (= feet_edge2)
         "termination": -100.0,           # Genesis original (NEW, suicide penalty)
-        "feet_dragging": -1.0,           # Genesis original (NEW)
+        "feet_dragging": -0.3,           # Genesis original (NEW)
         "action_smoothness_1": -0.01,    # Genesis original (NEW)
         "action_smoothness_2": -0.01,    # Genesis original (NEW)
         "base_height": 0.0,              # flat-only: penalize base height deviation (disabled by default)
