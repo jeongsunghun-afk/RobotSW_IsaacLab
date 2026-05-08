@@ -10,9 +10,6 @@ import weakref
 import numpy as np
 import torch
 
-import carb
-import carb.input
-import omni.appwindow
 import omni.kit.app
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
@@ -20,10 +17,35 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import SPHERE_MARKER_CFG
 from isaaclab.sensors import ContactSensor, RayCaster
+from isaaclab.terrains import TerrainImporter
 from isaaclab.terrains.trimesh import mesh_terrains as _parkour_mesh_terrains
 from isaaclab.utils import math as math_utils
 
+from isaaclab_tasks.direct._common import DebugViewer, DebugViewerCfg
+
 from .parkour_env_cfg import TERRAIN_CLASS_FLAT, ParkourEnvCfg
+from .parkour_terrains import compute_edge_mask_from_terrain_mesh as _compute_edge_mask_from_terrain_mesh
+
+
+class _CapturingTerrainImporter(TerrainImporter):
+    """TerrainImporter subclass that captures the concatenated trimesh before it is discarded.
+
+    ``TerrainImporter.__init__`` calls ``self.import_mesh("terrain", terrain_generator.terrain_mesh)``
+    and then lets the generator (and its mesh) go out of scope.  By overriding ``import_mesh`` we
+    grab the trimesh the first time it is called so the env can use it for edge-mask computation.
+
+    The captured mesh is stored in ``self._captured_trimesh`` (None until first import_mesh call).
+    """
+
+    def __init__(self, cfg, *args, **kwargs):
+        self._captured_trimesh = None
+        super().__init__(cfg, *args, **kwargs)
+
+    def import_mesh(self, name: str, mesh, **kwargs):
+        # Capture the very first mesh (which is the full terrain mesh from TerrainGenerator)
+        if self._captured_trimesh is None:
+            self._captured_trimesh = mesh
+        super().import_mesh(name, mesh, **kwargs)
 
 
 def torch_rand_float(lower, upper, shape, device):
@@ -112,8 +134,66 @@ class Go2ParkourEnv(DirectRLEnv):
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(
-            ["base", ".*thigh", ".*calf", ".*hip"]
+            ["base", ".*thigh", ".*calf", ".*hip", "Head_upper", "Head_lower"]
         )
+
+        # Foot shape indices for privileged friction observation (Task #5).
+        # PhysX ArticulationView.get_material_properties() returns (num_envs, num_shapes, 3)
+        # where num_shapes is the TOTAL number of collision shapes across all links — NOT num_bodies.
+        # Go2 has 27 shapes across 19 bodies (some links own multiple collision spheres/capsules).
+        #
+        # We compute num_shapes_per_body using the same pattern as isaaclab/envs/mdp/events.py
+        # (randomize_rigid_body_material, lines 208-220): iterate link_paths[0] and query each
+        # link's RigidBodyView.max_shapes.  The shape index range for body i is:
+        #   [sum(num_shapes_per_body[:i]),  sum(num_shapes_per_body[:i]) + num_shapes_per_body[i])
+        #
+        # Strategy: use the FIRST shape of each foot link as representative (Option a).
+        # Note: EventManager samples bucket_ids per-shape (not per-body), so in principle each
+        # shape on a foot link can receive different friction values.  Using only the first shape
+        # is therefore a representative (slightly lossy) sample of foot friction — acceptable for
+        # priv obs, and keeps the priv dimension fixed at 14.
+        _foot_body_ids, _foot_body_names = self._robot.find_bodies(".*foot")
+        assert len(_foot_body_ids) == 4, (
+            f"Expected 4 foot bodies (FR/FL/RR/RL_foot), got {len(_foot_body_ids)}: {_foot_body_names}"
+        )
+
+        # Build per-body shape counts via the link_paths API (identical to events.py pattern).
+        _num_shapes_per_body: list[int] = []
+        for _link_path in self._robot.root_physx_view.link_paths[0]:
+            _link_view = self._robot._physics_sim_view.create_rigid_body_view(_link_path)
+            _num_shapes_per_body.append(_link_view.max_shapes)
+
+        # Sanity check: sum of per-body shapes must match total shapes in articulation.
+        _total_shapes = self._robot.root_physx_view.max_shapes
+        assert sum(_num_shapes_per_body) == _total_shapes, (
+            f"Shape-count mismatch: per-body sum={sum(_num_shapes_per_body)} "
+            f"vs articulation max_shapes={_total_shapes}. link_paths parsing may be wrong."
+        )
+        # Each foot body must have at least one shape.
+        assert all(_num_shapes_per_body[bid] >= 1 for bid in _foot_body_ids), (
+            f"One or more foot bodies have 0 collision shapes. "
+            f"foot_body_ids={_foot_body_ids}, shapes={[_num_shapes_per_body[b] for b in _foot_body_ids]}"
+        )
+
+        # Compute cumulative shape offset for each body (i.e. the starting shape index).
+        _shape_offsets = [sum(_num_shapes_per_body[:i]) for i in range(len(_num_shapes_per_body))]
+        # First shape index for each foot body.
+        _foot_first_shape_indices = [_shape_offsets[bid] for bid in _foot_body_ids]
+        self._foot_shape_indices = torch.tensor(
+            _foot_first_shape_indices, dtype=torch.long, device=self.device
+        )  # shape: (4,)
+
+        # One-time INFO log: body names, per-body shape counts, and selected shape indices.
+        print(
+            f"[Parkour] Foot body→shape mapping:\n"
+            f"  foot body names : {_foot_body_names}\n"
+            f"  foot body ids   : {_foot_body_ids}\n"
+            f"  shapes per foot : {[_num_shapes_per_body[b] for b in _foot_body_ids]}\n"
+            f"  foot shape idx  : {_foot_first_shape_indices}  (first shape per foot)\n"
+            f"  total shapes    : {_total_shapes} across {len(_num_shapes_per_body)} bodies"
+        )
+        # get_material_properties() returns (N, num_shapes, 3).
+        # Slice: (N, 4, 3)[..., :2] → (N, 8) static+dynamic friction per foot, restitution excluded.
 
         # Hip joint indices for hip_pos reward [0, 3, 6, 9]
         all_joint_names = self._robot.data.joint_names
@@ -127,12 +207,34 @@ class Go2ParkourEnv(DirectRLEnv):
         self._term_base_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._term_tilt = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._term_low_height = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Successful episode termination: robot reached the last goal waypoint
+        self._term_goal_reached = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Initialize goal waypoints (must happen after terrain is set up)
         self._init_env_goals(torch.arange(self.num_envs, device=self.device))
 
-        # Keyboard env-switch (GUI only; no-op in headless)
-        self._setup_keyboard()
+        # DebugViewer: free-fly camera, WASD/arrow movement, [ / ] env-index switching.
+        # enable_keyboard_view_switch gates the helper in the same way it gated _setup_keyboard().
+        _dbg_enabled = getattr(self.cfg, "enable_keyboard_view_switch", True)
+        self._debug_viewer = DebugViewer(
+            self,
+            cfg=DebugViewerCfg(
+                enabled=_dbg_enabled,
+                free_fly_speed_mps=2.0,
+                free_fly_speed_boost_mps=6.0,
+            ),
+        )
+
+        # Parkour-specific P key: toggle contact debug print.
+        self._contact_print_handle = self._debug_viewer.register_debug_vis(
+            "contact_print",
+            lambda dt: self._print_contact_debug(),
+            default_on=bool(self.cfg.debug_print_contacts),
+        )
+        self._debug_viewer.register_key(
+            "P",
+            on_press=lambda: self._toggle_contact_print(),
+        )
 
         # Activate goal marker visualisation (respects cfg.debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
@@ -160,9 +262,16 @@ class Go2ParkourEnv(DirectRLEnv):
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         # Clear goals registry before terrain generation so we get a clean set for this env
         _parkour_mesh_terrains.PARKOUR_GOALS_REGISTRY.clear()
+        # Use capturing subclass to intercept the trimesh for edge-mask computation.
+        # The original class_type is restored after construction so cfg is not permanently mutated.
+        _original_class_type = self.cfg.terrain.class_type
+        self.cfg.terrain.class_type = _CapturingTerrainImporter
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        self.cfg.terrain.class_type = _original_class_type
         # Build world-frame goals map from registry populated by terrain functions
         self._build_terrain_goals_map(_parkour_mesh_terrains.PARKOUR_GOALS_REGISTRY)
+        # ---- Build Genesis-style edge mask from captured terrain mesh ----
+        self._build_edge_mask()
         self.scene.clone_environments(copy_from_source=False)
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
@@ -228,6 +337,73 @@ class Go2ParkourEnv(DirectRLEnv):
         self._terrain_goals_world = torch.tensor(goals_map, dtype=torch.float32, device=self.device)
         sample = goals_map[0, 0, :2]  # first two goals of cell (0,0) for logging
         print(f"[Parkour] Goals map ready: shape={goals_map.shape}, cell(0,0) goals[:2]={sample}")
+
+    def _build_edge_mask(self) -> None:
+        """Build Genesis-style x_edge_mask from the captured terrain trimesh.
+
+        Called once from ``_setup_scene`` after terrain construction.  The resulting
+        ``self.x_edge_mask`` is a bool tensor of shape (n_x, n_y) on ``self.device``.
+        ``self._edge_mask_origin`` holds the world-frame lower-left corner (x, y) of the
+        grid, and ``self._edge_mask_inv_scale`` is 1 / horizontal_scale.
+
+        World → grid index conversion (used in ``_get_rewards`` feet_edge):
+            idx_x = round((feet_x - origin_x) / scale - 0.5) = floor((feet_x - origin_x) / scale)
+            idx_y = round((feet_y - origin_y) / scale - 0.5) = floor((feet_y - origin_y) / scale)
+
+        If the terrain mesh was not captured (e.g. mesh import failed), falls back to an
+        all-False mask so training continues but feet_edge reward is zero.
+        """
+        import time
+
+        captured_mesh = getattr(self._terrain, "_captured_trimesh", None)
+        if captured_mesh is None:
+            print("[Parkour] WARN: _build_edge_mask: no captured trimesh, x_edge_mask all-False.")
+            self.x_edge_mask = torch.zeros(1, 1, dtype=torch.bool, device=self.device)
+            self._edge_mask_height_field = torch.zeros(1, 1, dtype=torch.float32, device=self.device)
+            self._edge_mask_origin = torch.zeros(2, dtype=torch.float32, device=self.device)
+            h_scale_fallback = self.cfg.terrain.terrain_generator.horizontal_scale
+            self._edge_mask_inv_scale = 1.0 / h_scale_fallback
+            self._edge_mask_scale = h_scale_fallback
+            return
+
+        h_scale = self.cfg.terrain.terrain_generator.horizontal_scale
+        num_rows = self.cfg.terrain.terrain_generator.num_rows
+        num_cols = self.cfg.terrain.terrain_generator.num_cols
+        tile_x = self.cfg.terrain.terrain_generator.size[0]
+        tile_y = self.cfg.terrain.terrain_generator.size[1]
+        terrain_size_x = tile_x * num_rows
+        terrain_size_y = tile_y * num_cols
+
+        # Lower-left corner (world frame) — same offset TerrainGenerator applies when centering.
+        # transform[:2, -1] = [-size_x * num_rows / 2, -size_y * num_cols / 2]
+        origin = np.array([-terrain_size_x / 2.0, -terrain_size_y / 2.0, 0.0])
+
+        t0 = time.time()
+        n_x = round(terrain_size_x / h_scale)
+        n_y = round(terrain_size_y / h_scale)
+        print(f"[Parkour] Building edge mask: {n_x}×{n_y} = {n_x * n_y:,} grid cells ...")
+        edge_mask_np, height_field_np = _compute_edge_mask_from_terrain_mesh(
+            terrain_mesh=captured_mesh,
+            terrain_origin=origin,
+            terrain_size_x=terrain_size_x,
+            terrain_size_y=terrain_size_y,
+            horizontal_scale=h_scale,
+        )
+        elapsed = time.time() - t0
+        n_edges = int(edge_mask_np.sum())
+        print(f"[Parkour] Edge mask built in {elapsed:.2f}s — {n_edges:,} / {n_x * n_y:,} edge cells "
+              f"({100.0 * n_edges / (n_x * n_y):.1f}%)")
+
+        self.x_edge_mask = torch.from_numpy(edge_mask_np).to(self.device)  # (n_x, n_y) bool
+        self._edge_mask_height_field = torch.from_numpy(height_field_np).to(self.device, dtype=torch.float32)
+        self._edge_mask_origin = torch.tensor(origin[:2], dtype=torch.float32, device=self.device)
+        self._edge_mask_inv_scale = 1.0 / h_scale
+        self._edge_mask_scale = h_scale
+        print(f"[edge_mask] origin={self._edge_mask_origin.tolist()}, "
+              f"mask_shape={tuple(self.x_edge_mask.shape)}, "
+              f"true_count={int(self.x_edge_mask.sum().item())}, "
+              f"hf_min={float(self._edge_mask_height_field.min()):.3f}, "
+              f"hf_max={float(self._edge_mask_height_field.max()):.3f}")
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._previous_actions = self._actions.clone()  # Save previous BEFORE updating current
@@ -306,6 +482,11 @@ class Go2ParkourEnv(DirectRLEnv):
         # Advance to next goal if hold time expired
         hold_time_steps = int(self.cfg.reach_goal_delay / self.step_dt)
         next_goal_mask = self._reach_goal_timer > hold_time_steps
+        # Detect success: currently at the LAST goal and hold time just expired → episode complete.
+        # We record this BEFORE advancing so _current_goal_idx stays at num_goals-1 (preserves gather
+        # and viz semantics; _get_dones() consumes this flag and triggers reset).
+        self._term_goal_reached = next_goal_mask & (self._current_goal_idx >= self.cfg.num_goals - 1)
+        # Advance index for non-terminal goals; clamp keeps index valid for remaining steps.
         self._current_goal_idx[next_goal_mask] = torch.clamp(
             self._current_goal_idx[next_goal_mask] + 1,
             max=self.cfg.num_goals - 1,
@@ -340,47 +521,100 @@ class Go2ParkourEnv(DirectRLEnv):
         # Update goal waypoints every step (Task #2)
         self._update_goals()
 
+        # Edge mask debug visualization (env 0 only; no-op when flag is False)
+        if self.cfg.debug_vis_edge_mask:
+            self._update_edge_mask_visualization()
+
         # Height scan: relative height difference (robot_z - ray_hit_z - 0.5)
+        # BUGFIX (Change K): pos_w[:, 2] includes the RayCasterCfg offset=(0,0,20), so using it
+        # directly would yield ~(base_z + 20) - terrain_z - 0.5 ≈ 19.84 → always clipped to 1.0.
+        # Use root_pos_w[:, 2] (robot base z, no sensor offset) instead.
         scan = (
             self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5
         ).clip(-1.0, 1.0)
 
+        # Change E: compute relative yaw error (target_yaw - robot_heading), wrapped to [-π, π].
+        # Genesis uses delta_yaw = target_yaw - self.yaw (robot heading), giving the policy direct
+        # information about how much it needs to rotate. The previous absolute world-frame yaw gave
+        # no heading reference — the policy could not compute turn direction/magnitude.
+        # NOTE: self._target_yaw (absolute) is preserved unchanged for reward use at line ~632.
+        yaw_diff = self._target_yaw - self._robot.data.heading_w          # [N] relative yaw error
+        yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))  # wrap to [-π, π]
+        next_yaw_diff = self._next_target_yaw - self._robot.data.heading_w
+        next_yaw_diff = torch.atan2(torch.sin(next_yaw_diff), torch.cos(next_yaw_diff))
+
         # Proprioceptive observations (Task #3)
-        target_yaw_cos_sin = torch.stack(
-            [torch.cos(self._target_yaw), torch.sin(self._target_yaw)], dim=-1
-        )
         proprio = torch.cat(
             [
                 self._robot.data.projected_gravity_b,                                # 3
-                self._commands,                                                       # 3
-                self._target_pos_rel,                                                # 2 (goal direction)
-                target_yaw_cos_sin,                                                  # 2 (goal yaw)
-                self._robot.data.joint_pos - self._robot.data.default_joint_pos,     # 12
-                self._robot.data.joint_vel * 0.05,                                   # 12
-                self._actions,                                                        # 12 (current actions taken this step)
+                self._commands[:, 0:1],                                              # 1
+                yaw_diff[:, None],                                                   # 1 (delta_yaw: target - robot heading, wrapped)
+                next_yaw_diff[:, None],                                              # 1 (delta_next_yaw)
+                self._robot.data.joint_pos - self._robot.data.default_joint_pos,    # 12
+                self._robot.data.joint_vel * 0.05,                                  # 12 (Change A: Genesis obs_scales["dof_vel"]=0.05; raw rad/s is ~20x too large)
+                self._actions,                                                       # 12 (current actions taken this step)
             ],
             dim=-1,
         )
-        # proprio dim = 3 + 3 + 2 + 2 + 12 + 12 + 12 = 46
+        # proprio dim = 3 + 1 + 1 + 1 + 12 + 12 + 12 = 42
 
-        # Placeholder for domain randomization (Task #5 future work)
-        priv = torch.zeros(self.num_envs, self.cfg.num_priv_obs, device=self.device)
+        # Privileged observations: domain-randomized physical properties visible to the critic /
+        # adaptation module but NOT the policy (RMA-style asymmetric AC).
+        #
+        # Composition (Option 1 — friction-only, 14 dims total):
+        #   root_lin_vel_b  : (N, 3)  — world-lin-vel expressed in robot body frame
+        #   root_ang_vel_b  : (N, 3)  — angular velocity in body frame
+        #   foot_friction   : (N, 8)  — static+dynamic friction for 4 feet × 2 coefficients
+        #                               sourced from EventManager-randomized robot material properties
+        #
+        # Mass is excluded: randomize_rigid_body_mass not yet wired in EventCfg → all envs share
+        # the same default mass → zero information content. Extend here once mass randomization lands.
+        #
+        # EventManager mode note: if EventCfg uses mode="startup", get_material_properties() returns
+        # the randomized values from startup; if mode="reset", values are refreshed each episode.
+        # Either way, the tensor read here reflects the current per-env material state.
+        #
+        # get_material_properties() returns a CPU tensor (num_envs, num_shapes, 3):
+        #   dim 2 → [static_friction, dynamic_friction, restitution]
+        # _foot_shape_indices holds the FIRST shape index for each of the 4 foot links, computed
+        # in __init__ via per-link RigidBodyView.max_shapes (events.py pattern). Go2 has 27 shapes
+        # across 19 bodies; indexing by body_id directly would be wrong.
+        # Restitution (dim 2) excluded — EventCfg randomize range is 0 → constant, zero info.
+        _mat_all = (
+            self._robot.root_physx_view.get_material_properties()
+            .clone()
+            .to(self.device)
+        )  # (N, num_shapes, 3)
+        foot_friction = _mat_all[:, self._foot_shape_indices, :2].reshape(self.num_envs, -1)  # (N, 8)
+        priv = torch.cat(
+            [
+                self._robot.data.root_lin_vel_b,   # 3
+                self._robot.data.root_ang_vel_b,   # 3
+                foot_friction,                     # 8  (4 feet × [static, dynamic])
+            ],
+            dim=-1,
+        )  # total: 14
 
-        # Full critic observation: proprio + scan + priv + flattened history
+        # Full critic observation: proprio + scan + priv
         critic_obs = torch.cat(
             [
                 proprio,
                 scan,
                 priv,
-                self._proprio_history.reshape(self.num_envs, -1),
             ],
             dim=-1,
         )
 
         # Update proprioceptive history ring buffer (shift and append new)
-        self._proprio_history = torch.cat(
-            [self._proprio_history[:, 1:], proprio.unsqueeze(1)], dim=1
+        self._proprio_history = torch.where(
+                (self.episode_length_buf <= 1)[:, None, None],
+                torch.stack([proprio] * self.cfg.history_len, dim=1),
+                torch.cat([self._proprio_history[:, 1:], proprio.unsqueeze(1)], dim=1),
         )
+
+        # Tick DebugViewer free-fly camera translation (no-op in headless or tracking mode).
+        if hasattr(self, "_debug_viewer") and self._debug_viewer is not None:
+            self._debug_viewer.update(self.step_dt)
 
         return {
             "policy": proprio,
@@ -410,7 +644,7 @@ class Go2ParkourEnv(DirectRLEnv):
         goal_dir_norm = torch.norm(self._target_pos_rel, dim=-1, keepdim=True)
         goal_dir = self._target_pos_rel / (goal_dir_norm + 1e-5)  # [N, 2]
         cur_vel_w = self._robot.data.root_lin_vel_w[:, :2]  # [N, 2] world frame velocity
-        proj_forward = torch.sum(cur_vel_w * goal_dir, dim=1)  # [N] velocity toward goal
+        proj_forward = torch.sum(cur_vel_w * goal_dir, dim=-1)  # [N] velocity toward goal
         commanded_speed = torch.abs(self._commands[:, 0])  # [N] forward command magnitude
         tracking_goal_vel = torch.minimum(proj_forward, commanded_speed) / (commanded_speed + 1e-5)
         tracking_goal_vel = torch.where(
@@ -497,15 +731,29 @@ class Go2ParkourEnv(DirectRLEnv):
             dim=1,
         ).float()
 
-        # === Feet edge (Genesis line 1518-1520, simplified) ===
-        contact_filt = (
-            torch.max(torch.norm(net_contact_forces[:, :, self._feet_ids], dim=-1), dim=1)[0] > 1.0
-        )
-        feet_edge = torch.sum(
-            contact_filt.float() * (torch.norm(feet_forces[..., :2], dim=-1) > 2.0 * torch.abs(feet_forces[..., 2])).float(),
-            dim=1,
-        )
-        feet_edge = feet_edge * (self._terrain_levels > 3).float()
+        # === Feet edge — Genesis x_edge_mask port (Option B) ===
+        # contact: current-step foot contact boolean (N, 4), threshold=2.0 N
+        contact = torch.max(torch.norm(net_contact_forces[:, :, self._feet_ids], dim=-1), dim=1)[0] > 2.0
+        # contact_filt: OR with last step to suppress 50 Hz false-negatives
+        contact_filt = torch.logical_or(contact, self._last_contacts)
+        self._last_contacts = contact
+        # feet world XY positions: (N, 4, 2)
+        feet_pos_w = self._robot.data.body_pos_w[:, self._feet_ids, :]  # (N, 4, 3)
+        feet_xy = feet_pos_w[..., :2]  # (N, 4, 2)
+        # World XY → grid index.
+        # Grid cell (i, j) covers [origin + i*scale, origin + (i+1)*scale).
+        # floor((x - origin) / scale) = round((x - origin) / scale - 0.5)
+        # Using round() with the - 0.5 correction is equivalent to floor and is Genesis-faithful.
+        feet_grid_xy = (
+            (feet_xy - self._edge_mask_origin) * self._edge_mask_inv_scale - 0.5
+        ).round().long()  # (N, 4, 2)
+        feet_grid_xy[..., 0] = feet_grid_xy[..., 0].clamp(0, self.x_edge_mask.shape[0] - 1)
+        feet_grid_xy[..., 1] = feet_grid_xy[..., 1].clamp(0, self.x_edge_mask.shape[1] - 1)
+        # Lookup edge mask: (N, 4) bool
+        feet_at_edge = self.x_edge_mask[feet_grid_xy[..., 0], feet_grid_xy[..., 1]]
+        # Gate by contact and terrain level (Genesis: rew=0 on levels ≤ 3)
+        feet_at_edge = contact_filt & feet_at_edge
+        feet_edge = (self._terrain_levels > 3).float() * torch.sum(feet_at_edge.float(), dim=-1)
 
         # === Termination penalty (Genesis line 1588-1594) — NEW ===
         # Penalize early termination: base_contact | tilt | low_height
@@ -582,10 +830,14 @@ class Go2ParkourEnv(DirectRLEnv):
         # Robot too low (fallen into terrain gap or flipped)
         self._term_low_height = self._robot.data.root_link_pos_w[:, 2] < self.cfg.termination_height
 
+        # Goal-reached termination is set in _update_goals() (called from _get_observations()).
+        # It fires when the robot holds position at the last waypoint long enough — a success event,
+        # NOT a failure.  Use terminated=True (not time_out) so the value bootstrap is zero (episode
+        # truly ends) rather than using the next-state value estimate.
+        # Grace period applies only to failure conditions, not to goal success.
         terminated = self._term_base_contact | self._term_tilt | self._term_low_height
-        # Grace period: skip termination during the first few steps to allow robot to settle after spawn
         grace = self.episode_length_buf < self.cfg.termination_grace_steps
-        terminated = terminated & ~grace
+        terminated = (terminated & ~grace) | self._term_goal_reached
         return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -604,6 +856,7 @@ class Go2ParkourEnv(DirectRLEnv):
         self._prev_joint_vel[env_ids] = 0.0
         self._current_goal_idx[env_ids] = 0
         self._last_contacts[env_ids] = False
+        self._term_goal_reached[env_ids] = False
 
         # Reset processed actions (Genesis original)
         self._processed_actions[env_ids] = 0.0
@@ -668,6 +921,9 @@ class Go2ParkourEnv(DirectRLEnv):
         ).item()
         self.extras["log"]["Episode_Termination/cause_low_height"] = torch.count_nonzero(
             self._term_low_height[env_ids]
+        ).item()
+        self.extras["log"]["Episode_Termination/cause_goal_reached"] = torch.count_nonzero(
+            self._term_goal_reached[env_ids]
         ).item()
         # Mean episode length at reset
         self.extras["log"]["Episode_Length/mean_at_reset"] = self.episode_length_buf[env_ids].float().mean().item()
@@ -756,44 +1012,185 @@ class Go2ParkourEnv(DirectRLEnv):
             if hasattr(self, "future_goal_visualizer"):
                 self.future_goal_visualizer.set_visibility(False)
 
+    # ------------------------------------------------------------------
+    # Edge mask debug visualisation
+    # ------------------------------------------------------------------
+
+    # Small z offset to lift markers above terrain surface to avoid z-fighting with mesh
+    _EDGE_VIS_Z_OFFSET: float = 0.01
+
+    def _setup_edge_mask_visualizer(self):
+        """Lazily create green sphere markers for edge mask debug visualization.
+
+        Mirrors the ``_set_debug_vis_impl`` pattern: create once on first call, guarded by
+        ``hasattr``.  Prim path lives under ``/Visuals/Parkour/`` alongside goal markers.
+        """
+        if hasattr(self, "_edge_mask_visualizer"):
+            return
+        edge_cfg = SPHERE_MARKER_CFG.copy()
+        edge_cfg.prim_path = "/Visuals/Parkour/edge_mask"
+        edge_cfg.markers["sphere"].radius = 0.02
+        edge_cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.0, 1.0, 0.0)  # green
+        )
+        self._edge_mask_visualizer = VisualizationMarkers(edge_cfg)
+
+    def _get_active_viewer_env_id(self) -> int:
+        """Return the env id currently tracked by the viewport camera controller.
+
+        Reads ``viewport_camera_controller.cfg.env_index``, which is the live value
+        updated by the UI/keyboard env-switching handler via ``set_view_env_index()``.
+        Falls back to env 0 when running headless (controller is None) or when the
+        index is out of range.
+        """
+        vcc = getattr(self, "viewport_camera_controller", None)
+        if vcc is None:
+            return 0
+        idx = int(vcc.cfg.env_index)
+        if 0 <= idx < self.num_envs:
+            return idx
+        return 0
+
+    def _update_edge_mask_visualization(self):
+        """Update green sphere markers at edge cells within radius of the active viewer env.
+
+        Algorithm:
+        1. Determine the env id currently tracked by the viewport camera (dynamic).
+        2. Convert that env's base XY to grid indices.
+        3. Clamp a window of ±radius_cells around that index to grid bounds.
+        4. Slice ``x_edge_mask`` within the window (no full-mask scan).
+        5. Extract nonzero cell indices, convert to world XY + terrain-height Z.
+        6. Call ``visualize()`` on the marker set.
+
+        Called every policy step from ``_get_observations`` when
+        ``cfg.debug_vis_edge_mask`` is True.  Uses only vectorised torch/numpy ops —
+        no Python-level loops over cells.
+        """
+        self._setup_edge_mask_visualizer()
+
+        # --- active viewer env (dynamically tracks keyboard/UI env switching) ---
+        active_env_id = self._get_active_viewer_env_id()
+
+        # --- grid metadata ---
+        origin_x = self._edge_mask_origin[0].item()
+        origin_y = self._edge_mask_origin[1].item()
+        inv_scale = self._edge_mask_inv_scale
+        h_scale = self._edge_mask_scale
+        n_x, n_y = self.x_edge_mask.shape
+
+        # --- active env base position → grid index ---
+        base_xy = self._robot.data.root_pos_w[active_env_id, :2]  # (2,) world frame
+        base_x = base_xy[0].item()
+        base_y = base_xy[1].item()
+        base_ix = int(round((base_x - origin_x) * inv_scale - 0.5))
+        base_iy = int(round((base_y - origin_y) * inv_scale - 0.5))
+
+        # --- window bounds (clamped to grid) ---
+        radius_cells = int(round(self.cfg.debug_vis_edge_mask_radius_m * inv_scale))
+        ix_lo = max(0, base_ix - radius_cells)
+        ix_hi = min(n_x, base_ix + radius_cells + 1)
+        iy_lo = max(0, base_iy - radius_cells)
+        iy_hi = min(n_y, base_iy + radius_cells + 1)
+
+        if ix_lo >= ix_hi or iy_lo >= iy_hi:
+            # Window entirely outside terrain — hide markers
+            self._edge_mask_visualizer.set_visibility(False)
+            return
+
+        # --- slice mask and height field within window ---
+        window_mask = self.x_edge_mask[ix_lo:ix_hi, iy_lo:iy_hi]  # (wx, wy) bool
+        window_hf = self._edge_mask_height_field[ix_lo:ix_hi, iy_lo:iy_hi]  # (wx, wy) float32
+
+        # --- extract edge cell indices within window ---
+        edge_local = window_mask.nonzero(as_tuple=False)  # (E, 2): local (ix, iy) offsets
+
+        # --- print on env transition (replaces once-only _edge_vis_logged guard) ---
+        last_active = getattr(self, "_last_active_env_id", None)
+        if last_active != active_env_id:
+            # window world-range: helps diagnose x/y swap if window extends in wrong direction
+            win_x_min = origin_x + ix_lo * h_scale
+            win_x_max = origin_x + ix_hi * h_scale
+            win_y_min = origin_y + iy_lo * h_scale
+            win_y_max = origin_y + iy_hi * h_scale
+            # robot yaw: if forward is +x, yaw≈0; if forward is +y, yaw≈±π/2
+            robot_quat = self._robot.data.root_quat_w[active_env_id]
+            _, _, yaw_tensor = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
+            yaw_deg = float(yaw_tensor[0]) * 57.2958
+            print(
+                f"[edge_mask viz] active_env={active_env_id}, "
+                f"base_xy=[{base_x:.2f}, {base_y:.2f}], "
+                f"robot_yaw_deg={yaw_deg:.1f}, "
+                f"window_x=[{win_x_min:.2f}, {win_x_max:.2f}], "
+                f"window_y=[{win_y_min:.2f}, {win_y_max:.2f}], "
+                f"edge_count_in_window={int(edge_local.shape[0])}"
+            )
+            self._last_active_env_id = active_env_id
+
+        if edge_local.shape[0] == 0:
+            # No edge cells in window — hide markers
+            self._edge_mask_visualizer.set_visibility(False)
+            return
+
+        # --- convert local offsets → global grid indices ---
+        global_ix = edge_local[:, 0] + ix_lo  # (E,)
+        global_iy = edge_local[:, 1] + iy_lo  # (E,)
+
+        # --- grid indices → world XY (cell centres) ---
+        world_x = origin_x + (global_ix.float() + 0.5) * h_scale  # (E,)
+        world_y = origin_y + (global_iy.float() + 0.5) * h_scale  # (E,)
+
+        # --- terrain height at each edge cell ---
+        world_z = window_hf[edge_local[:, 0], edge_local[:, 1]] + self._EDGE_VIS_Z_OFFSET  # (E,)
+
+        # --- stack into (E, 3) translations tensor ---
+        translations = torch.stack([world_x, world_y, world_z.to(world_x.dtype)], dim=-1)
+
+        self._edge_mask_visualizer.set_visibility(True)
+        self._edge_mask_visualizer.visualize(translations=translations)
+
     def _camera_follow_callback(self, _event):
         """Update side camera every render frame, regardless of debug_vis state."""
         del _event
+        if self.viewport_camera_controller is None:
+            return
+        # When DebugViewer free-fly is active, the helper drives camera translation via
+        # update(dt); skip parkour's robot-yaw tracking to avoid conflicting writes.
+        if hasattr(self, "_debug_viewer") and self._debug_viewer is not None and self._debug_viewer.is_free_fly_camera:
+            return
         # ---- camera follow ------------------------------------------------
-        if self.viewport_camera_controller is not None:
-            viewer_idx = self.cfg.viewer.env_index
+        viewer_idx = self.cfg.viewer.env_index
 
-            robot_pos = self._robot.data.root_pos_w[viewer_idx]       # (3,)
-            robot_quat = self._robot.data.root_quat_w[viewer_idx]     # (4,) wxyz
+        robot_pos = self._robot.data.root_pos_w[viewer_idx]       # (3,)
+        robot_quat = self._robot.data.root_quat_w[viewer_idx]     # (4,) wxyz
 
-            # Extract yaw from quaternion (euler_xyz_from_quat returns roll, pitch, yaw)
-            _, _, yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
-            yaw = yaw[0]  # scalar tensor
+        # Extract yaw from quaternion (euler_xyz_from_quat returns roll, pitch, yaw)
+        _, _, yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
+        yaw = yaw[0]  # scalar tensor
 
-            # Configured side-view offset (local robot frame): (0, -2.5, 0.8)
-            eye_cfg = self.cfg.viewer.eye    # tuple (x, y, z)
-            look_cfg = self.cfg.viewer.lookat  # tuple (x, y, z)
+        # Configured side-view offset (local robot frame): (0, -2.5, 0.8)
+        eye_cfg = self.cfg.viewer.eye    # tuple (x, y, z)
+        look_cfg = self.cfg.viewer.lookat  # tuple (x, y, z)
 
-            cos_y = torch.cos(yaw)
-            sin_y = torch.sin(yaw)
+        cos_y = torch.cos(yaw)
+        sin_y = torch.sin(yaw)
 
-            # Rotate XY component of eye offset by yaw; Z unchanged
-            eye_x = cos_y * eye_cfg[0] - sin_y * eye_cfg[1]
-            eye_y = sin_y * eye_cfg[0] + cos_y * eye_cfg[1]
-            eye_z = eye_cfg[2]
+        # Rotate XY component of eye offset by yaw; Z unchanged
+        eye_x = cos_y * eye_cfg[0] - sin_y * eye_cfg[1]
+        eye_y = sin_y * eye_cfg[0] + cos_y * eye_cfg[1]
+        eye_z = eye_cfg[2]
 
-            # lookat (0, 0, 0.3) — XY are zero so rotation is a no-op, but applied anyway
-            look_x = cos_y * look_cfg[0] - sin_y * look_cfg[1]
-            look_y = sin_y * look_cfg[0] + cos_y * look_cfg[1]
-            look_z = look_cfg[2]
+        # lookat (0, 0, 0.3) — XY are zero so rotation is a no-op, but applied anyway
+        look_x = cos_y * look_cfg[0] - sin_y * look_cfg[1]
+        look_y = sin_y * look_cfg[0] + cos_y * look_cfg[1]
+        look_z = look_cfg[2]
 
-            robot_pos_np = robot_pos.detach().cpu().numpy()
-            eye_world = robot_pos_np + np.array([eye_x.item(), eye_y.item(), eye_z], dtype=float)
-            look_world = robot_pos_np + np.array([look_x.item(), look_y.item(), look_z], dtype=float)
+        robot_pos_np = robot_pos.detach().cpu().numpy()
+        eye_world = robot_pos_np + np.array([eye_x.item(), eye_y.item(), eye_z], dtype=float)
+        look_world = robot_pos_np + np.array([look_x.item(), look_y.item(), look_z], dtype=float)
 
-            # update_view_location stores new offsets as default_cam_eye/lookat so the
-            # controller's own tick (fired in the same post-update stream) also uses them.
-            self.viewport_camera_controller.update_view_location(eye=eye_world, lookat=look_world)
+        # update_view_location stores new offsets as default_cam_eye/lookat so the
+        # controller's own tick (fired in the same post-update stream) also uses them.
+        self.viewport_camera_controller.update_view_location(eye=eye_world, lookat=look_world)
 
     def _debug_vis_callback(self, _event):
         """Update goal-waypoint sphere markers every render frame (only when debug_vis is True)."""
@@ -811,79 +1208,72 @@ class Go2ParkourEnv(DirectRLEnv):
         self.future_goal_visualizer.visualize(translations=all_goals)
 
     # ------------------------------------------------------------------
-    # Keyboard env-switch
+    # DebugViewer callbacks
     # ------------------------------------------------------------------
 
-    def _setup_keyboard(self):
-        """Subscribe to keyboard events for env-index switching (GUI mode only).
-
-        Guards:
-        - Only runs if ``cfg.enable_keyboard_view_switch`` is True.
-        - Only runs when a GUI window is available (``sim.has_gui()``).
-        - Uses weakref on the callback lambda so the env can be garbage-collected
-          without the carb subscription keeping it alive.
-
-        Key bindings:
-          ``]``  — switch to next env (index + 1)
-          ``[``  — switch to previous env (index - 1)
-        """
-        if not getattr(self.cfg, "enable_keyboard_view_switch", False):
-            return
-        if not self.sim.has_gui():
-            return
-
-        self._app_window = omni.appwindow.get_default_app_window()
-        self._keyboard = self._app_window.get_keyboard()
-        self._input = carb.input.acquire_input_interface()
-        self._keyboard_sub = self._input.subscribe_to_keyboard_events(
-            self._keyboard,
-            lambda event, *args, obj=weakref.proxy(self): obj._on_keyboard_event(event, *args),
-        )
-
     def __del__(self):
-        """Clean up keyboard subscription if it was created."""
+        """Clean up DebugViewer and camera-follow subscription."""
         try:
-            if hasattr(self, "_input") and hasattr(self, "_keyboard") and hasattr(self, "_keyboard_sub"):
-                self._input.unsubscribe_to_keyboard_events(self._keyboard, self._keyboard_sub)
-                self._keyboard_sub = None
+            if hasattr(self, "_debug_viewer") and self._debug_viewer is not None:
+                self._debug_viewer.close()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_camera_follow_handle"):
+                self._camera_follow_handle = None
         except Exception:
             pass
 
-    def _on_keyboard_event(self, event, *_args):
-        """Handle keyboard events for env-index switching.
+    def _toggle_contact_print(self):
+        """Toggle the contact-debug visualisation registered with DebugViewer."""
+        new_state = not self._debug_viewer.vis_is_enabled("contact_print")
+        self._debug_viewer.set_debug_vis("contact_print", new_state)
+        print(f"[parkour] Contact debug: {'ON' if new_state else 'OFF'}")
 
-        Only KEY_PRESS events are acted upon:
-          ``]`` / RIGHT_BRACKET : increment env_index
-          ``[`` / LEFT_BRACKET  : decrement env_index
+    # ------------------------------------------------------------------
+    # Contact debug helper
+    # ------------------------------------------------------------------
 
-        The new index is clamped to ``[0, num_envs - 1]`` and propagated to
-        ``viewport_camera_controller`` so the builtin asset-root tracker follows
-        the correct env on the next tick.
+    def _print_contact_debug(self):
+        """Print contact bodies and forces for the viewer env to stdout.
+
+        Invoked by the DebugViewer post-update callback when the "contact_print"
+        debug-vis is enabled (toggled by the P key).  The cfg.debug_print_contacts
+        early-return guard has been removed — call gating is now handled by
+        DebugViewer.vis_is_enabled("contact_print").
+
+        Output format (per active contact body, |F| >= 1 N):
+            [parkour env=<idx> step=<N>] contacts:
+              [contact_all] <body_name>   F=(fx, fy, fz)  |F|=<mag> N
         """
-        del _args
-        if event.type != carb.input.KeyboardEventType.KEY_PRESS:
+        env_idx = int(getattr(self.cfg.viewer, "env_index", 0))
+        env_idx = max(0, min(env_idx, self.num_envs - 1))
+
+        body_names = self._contact_sensor.body_names
+        if not body_names:
             return
 
-        current_idx = self.cfg.viewer.env_index
-        new_idx = current_idx
+        # net_forces_w shape: (num_envs, num_bodies, 3) — current step forces.
+        forces = self._contact_sensor.data.net_forces_w[env_idx]  # (B, 3)
+        magnitudes = forces.norm(dim=-1)                           # (B,)
 
-        if event.input == carb.input.KeyboardInput.RIGHT_BRACKET:
-            new_idx = current_idx + 1
-        elif event.input == carb.input.KeyboardInput.LEFT_BRACKET:
-            new_idx = current_idx - 1
-        else:
-            return
+        threshold = 1.0  # N — ignore simulation noise below this magnitude
+        step = int(self.episode_length_buf[env_idx].item())
+        lines = [f"[parkour env={env_idx} step={step}] contacts:"]
+        any_contact = False
 
-        # Clamp to valid range
-        new_idx = max(0, min(new_idx, self.num_envs - 1))
+        for b_idx, bname in enumerate(body_names):
+            mag = float(magnitudes[b_idx].item())
+            if mag < threshold or bname[-4:] == 'foot':
+                continue
+            
+            fx = float(forces[b_idx, 0].item())
+            fy = float(forces[b_idx, 1].item())
+            fz = float(forces[b_idx, 2].item())
+            lines.append(
+                f"  [contact_all] {bname:<24s} F=({fx:+7.2f},{fy:+7.2f},{fz:+7.2f}) |F|={mag:7.2f} N"
+            )
+            any_contact = True
 
-        if new_idx == current_idx:
-            return
-
-        self.cfg.viewer.env_index = new_idx
-        if self.viewport_camera_controller is not None:
-            # For asset_root origin: set_view_env_index updates cfg.env_index so the
-            # next tracker tick (and our _debug_vis_callback) picks up the new env.
-            self.viewport_camera_controller.set_view_env_index(new_idx)
-
-        print(f"[parkour] Switched to env {new_idx}/{self.num_envs - 1}")
+        if any_contact:
+            print("\n".join(lines))
