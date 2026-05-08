@@ -76,7 +76,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.2,
             num_hurdles=8,
             num_goals=8,
-            hurdle_height_range=(0.10, 0.30),
+            hurdle_height_range=(0.05, 0.30),
             x_spacing_range=(1.0, 1.5),  # explicit: 2.5 + 8*(1.5+0.3)=16.9m ≤ 20m
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
@@ -104,7 +104,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.3,
             num_gaps=8,
             num_goals=8,
-            gap_length_range=(0.2, 0.4),          # reduced: overflow fix (was 0.3, 0.8)
+            gap_length_range=(0.05, 0.5),          # reduced: overflow fix (was 0.3, 0.8)
             platform_length_range=(1.2, 1.6),     # explicit: 2.0+8*1.6+8*0.4=18.0m ≤ 20m
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
@@ -306,6 +306,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # visualization toggles
     debug_vis: bool = False
     enable_keyboard_view_switch: bool = True
+    debug_print_contacts: bool = False  # if True, print active contact bodies + forces to console every step (P key toggles at runtime)
     debug_vis_edge_mask: bool = True  # if True, visualize edge mask cells around env 0 as green spheres
     debug_vis_edge_mask_radius_m: float = 5.0  # radius (m) around env 0 base position to visualize
 
@@ -424,8 +425,8 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         "dof_error_l2": -0.04,           # Genesis original
         "feet_stumble": -1.0,            # Genesis original (= feet_stumble2)
         "feet_edge": -1.0,               # Genesis original (= feet_edge2)
-        "termination": -100.0,           # Genesis original (NEW, suicide penalty)
-        "feet_dragging": -0.3,           # Genesis original (NEW)
+        "termination": -0.0,           # Genesis original (NEW, suicide penalty)
+        "feet_dragging": -0.0,           # Genesis original (NEW)
         "action_smoothness_1": -0.01,    # Genesis original (NEW)
         "action_smoothness_2": -0.01,    # Genesis original (NEW)
         "base_height": 0.0,              # flat-only: penalize base height deviation (disabled by default)
@@ -444,7 +445,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     num_goals: int = 8
     num_future_goal_obs: int = 2  # Task #2: lookahead goals
     goal_distance: float = 1.0  # Task #2: spacing between waypoints (m)
-    next_goal_threshold: float = 0.5  # Task #2: distance to trigger goal reached
+    next_goal_threshold: float = 0.05  # Task #2: distance to trigger goal reached
     reach_goal_delay: float = 0.1  # Task #2: hold time after reaching goal (s)
     goal_z: float = 0.3  # Task #2: placeholder z coordinate for goals (m)
     goal_reach_threshold: float = 0.5  # (deprecated, use next_goal_threshold)

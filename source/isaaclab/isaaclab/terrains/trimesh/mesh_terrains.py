@@ -1055,7 +1055,8 @@ def parkour_stair_terrain(
         A tuple containing the tri-mesh of the terrain and the origin of the terrain (in m).
     """
     # resolve difficulty-dependent parameters
-    sw = cfg.stair_width_range[0] + difficulty * (cfg.stair_width_range[1] - cfg.stair_width_range[0])
+    # sw = cfg.stair_width_range[0] + difficulty * (cfg.stair_width_range[1] - cfg.stair_width_range[0])
+    sw = float(np.random.uniform(cfg.stair_width_range[0], cfg.stair_width_range[1]))
     sh = cfg.stair_height_range[0] + difficulty * (cfg.stair_height_range[1] - cfg.stair_height_range[0])
 
     terrain_w = cfg.size[1]

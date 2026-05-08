@@ -2,6 +2,7 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+# use --load_run 
 
 """Script to play a checkpoint if an RL agent from RSL-RL."""
 
@@ -235,6 +236,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # Enable height scanner ray visualization in play mode (if the scene defines one)
     if hasattr(env_cfg.scene, "height_scanner") and hasattr(env_cfg.scene.height_scanner, "debug_vis"):
         env_cfg.scene.height_scanner.debug_vis = True
+        env_cfg.debug_vis_edge_mask=True
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     env.unwrapped.set_debug_vis(getattr(env_cfg, "debug_vis", True))
 
