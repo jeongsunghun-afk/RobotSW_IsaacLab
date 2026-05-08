@@ -67,6 +67,20 @@ cfg 변경은 한 줄이지만 영향은 광범위하다 — `@configclass` 누�
 | decimation | 2 ~ 10 |
 | learning_rate (agent cfg) | 1e-5 ~ 5e-3 |
 
+## DebugViewerCfg 패턴 (env_cfg에 추가 시)
+
+viewer/디버그 cfg가 필요하면 `isaaclab_tasks.direct._common.DebugViewerCfg`를 직접 인스턴스화하거나, env_cfg에 필드로 추가:
+
+```python
+from isaaclab_tasks.direct._common import DebugViewerCfg
+
+@configclass
+class MyEnvCfg(DirectRLEnvCfg):
+    debug_viewer: DebugViewerCfg = DebugViewerCfg()
+```
+
+env에서는 `self._debug_viewer = DebugViewer(self, cfg=self.cfg.debug_viewer)`로 참조. `DebugViewerCfg` 필드(`fly_speed`, `fly_speed_boost`, `key_bindings`)를 task별로 조정 가능.
+
 ## Failure modes to avoid
 - **타입 사일런트 변경**: `float` 자리에 `int` 대입 — 일부 코드 경로에서 에러
 - **의존 cfg 누락**: 본 파일은 바꾸고 agent yaml은 안 바꿈 → discriminator shape mismatch

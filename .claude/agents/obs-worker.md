@@ -69,6 +69,14 @@ env는 학습의 입력단이다. obs 차원 mismatch는 즉시 RuntimeError, �
 - reset 시 history buffer 전체 초기화 필수
 - motion_loader의 obs 추출 순서와 env의 추출 순서가 정확히 일치
 
+## 새 direct RL 환경 작성 시 (DebugViewer 컨벤션)
+
+- viewer/키보드/디버그 시각화는 `isaaclab_tasks.direct._common.DebugViewer`를 composition으로 활성화 (`__init__`에 1줄: `self._debug_viewer = DebugViewer(self, cfg=DebugViewerCfg())`)
+- 환경별 키/시각화는 `register_key` / `register_debug_vis`로 등록 — DirectRLEnv 직접 수정 금지
+- 카메라 follow 콜백을 직접 등록하는 경우 `if self._debug_viewer.is_free_fly_camera: return` 가드를 콜백 첫 줄에 추가
+- `update(self.step_dt)`는 step 흐름 마지막에 1회만 호출 (2회 이상 금지)
+- 상세: `source/isaaclab_tasks/isaaclab_tasks/direct/_common/README.md`
+
 ## Failure modes to avoid
 - **buffer 누락**: 새 텐서 추가 후 `_reset_idx`에서 초기화 빠뜨림
 - **obs 순서 변경**: torch.cat 순서를 바꾸면 학습된 정책이 무효화됨 — 변경 시 명시

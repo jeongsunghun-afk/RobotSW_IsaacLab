@@ -150,6 +150,48 @@ scripts/reinforcement_learning/
 
 ---
 
+## 공유 인프라: viewer/디버그 (DebugViewer)
+
+새 direct RL 환경(`*_env.py`)을 작성할 때, viewer/키보드/디버그 시각화는 **공통 helper**를 통해 활성화한다. `source/isaaclab/` 코어를 수정하지 않고 모든 환경이 일관된 디버그 UX를 갖도록 하는 composition 패턴.
+
+**위치**: `source/isaaclab_tasks/isaaclab_tasks/direct/_common/`
+
+**권장 패턴 (env 작성 시 — 필수 3줄)**:
+
+```python
+from isaaclab_tasks.direct._common import DebugViewer, DebugViewerCfg
+
+class MyEnv(DirectRLEnv):
+    def __init__(self, cfg, render_mode=None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+        self._debug_viewer = DebugViewer(self, cfg=DebugViewerCfg())  # (1) 활성화
+
+        # task-specific 키/시각화 (선택)
+        self._debug_viewer.register_key("H", on_press=lambda: ...)
+        self._debug_viewer.register_debug_vis("terrain_edges", self._draw_terrain_edges, default_on=False)
+
+    def _get_observations(self):
+        ...
+        if hasattr(self, "_debug_viewer") and self._debug_viewer is not None:
+            self._debug_viewer.update(self.step_dt)  # (2) step 끝에 update
+        return obs
+
+    def __del__(self):
+        if hasattr(self, "_debug_viewer") and self._debug_viewer is not None:
+            self._debug_viewer.close()               # (3) cleanup
+```
+
+**자동 제공 기능**: `F` (free-fly 토글), `W/A/S/D`·방향키·`Q/E` (카메라 이동), `LEFT_SHIFT` (부스트), `[`/`]` (env_index 전환). headless 또는 `viewport_camera_controller is None`이면 자동 비활성.
+
+**환경별 확장**: `register_key(name, on_press, ...)` / `register_debug_vis(name, callback, default_on)` / `set_debug_vis(name, enabled)`.
+
+**카메라 follow 콜백과 충돌 방지**: 자체 카메라 tracking 콜백을 등록하는 경우 콜백 시작에 `if self._debug_viewer.is_free_fly_camera: return` 가드를 추가.
+
+> 상세 가이드 (cfg 필드, 키 매핑 표, FAQ): `source/isaaclab_tasks/isaaclab_tasks/direct/_common/README.md`
+> 참고 구현: `source/isaaclab_tasks/isaaclab_tasks/direct/parkour/parkour_env.py`
+
+---
+
 ## 역할 커맨드 (직접 호출용)
 - `/env-coordinator`   : ENV 작업 분류 + 적절한 worker dispatch
 - `/algo-coordinator`  : ALGO 작업 분류 + 적절한 worker dispatch
