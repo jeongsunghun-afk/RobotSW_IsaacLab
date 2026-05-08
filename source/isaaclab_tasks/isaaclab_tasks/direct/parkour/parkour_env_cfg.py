@@ -396,7 +396,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
         ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-        debug_vis=False,
+        debug_vis=True,
         mesh_prim_paths=["/World/ground"],
     )
 
@@ -416,9 +416,9 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         "lin_vel_z_l2": -1.0,            # Genesis original
         "ang_vel_xy_l2": -0.05,          # Genesis original (= ang_vel_xy2)
         "orientation_l2": -1.0,          # Genesis original
-        "dof_acc_l2": -2.5e-7,           # Genesis original
+        "dof_acc_l2": -1.0e-7,           # Genesis original
         "collision": -10.0,              # Genesis original (= collision2)
-        "action_rate_l2": -0.01,         # Genesis original (WAS -0.1, 10x error)
+        "action_rate_l2": -0.1,         # Genesis original (WAS -0.1, 10x error)
         "delta_torques": -1.0e-7,        # Genesis original (NEW)
         "torques_l2": -1e-5,             # Genesis original
         "hip_pos": -0.5,                 # Genesis original

@@ -284,7 +284,7 @@ def compute_edge_mask_from_terrain_mesh(
     # ---- Sobel x/y edge detection (OR-combined) ----
     hf_min = height_field.min()
     hf_max = height_field.max()
-    if hf_max - hf_min < 1e-6:
+    if hf_max - hf_min < 1e-3:
         return np.zeros((n_x, n_y), dtype=bool), height_field  # flat terrain, no edges
 
     hf_norm = ((height_field - hf_min) / (hf_max - hf_min) * 255.0).astype(np.uint8)

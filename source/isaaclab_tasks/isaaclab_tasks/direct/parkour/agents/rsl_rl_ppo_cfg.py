@@ -47,7 +47,7 @@ class Go2ParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     # ActorCriticRMA: policy network + critic network + scan_encoder + priv_encoder + state_history_encoder
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
-        init_noise_std=1.0,
+        init_noise_std=0.5,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[512, 256, 128],
@@ -61,7 +61,7 @@ class Go2ParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,  # CHANGED: 2.0e-4 → 1.0e-3 (for parkour adaptation)
