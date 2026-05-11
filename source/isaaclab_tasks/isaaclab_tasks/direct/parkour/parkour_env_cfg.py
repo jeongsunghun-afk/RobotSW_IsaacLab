@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+from dataclasses import field
+
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
+from isaaclab.actuators import DCMotorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -383,6 +386,45 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # robot
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
+    # === Robot actuator override (parkour-tuned) ===
+    # Stock UNITREE_GO2_CFG uses stiffness=25, effort_limit=23.5 N·m (designed for
+    # standard locomotion). Parkour requires stronger actuators for fast leg swing
+    # and obstacle clearance. Reference: ParkourDCMotorCfg in Isaaclab_Parkour
+    # (stiffness=40, effort_limit=35-40 N·m per joint).
+    # Edit the actuator_* fields below or override in a subclass for sweep experiments.
+    #
+    # Note on saturation_effort: DCMotorCfg.saturation_effort accepts only a scalar float
+    # (no joint-keyed dict). Using 35.0 (hip limit — most conservative joint) as the cap.
+    # A-project reference: hip=35, thigh=45, calf=45.
+    # actuator_stiffness: float = 40.0
+    # actuator_damping: float = 1.0
+    # actuator_friction: float = 0.0
+    # actuator_saturation_effort: float = 35.0
+    # actuator_effort_limit: dict = field(default_factory=lambda: {
+    #     ".*_hip_joint": 35.0,
+    #     ".*_thigh_joint": 40.0,
+    #     ".*_calf_joint": 40.0,
+    # })
+    # actuator_velocity_limit: dict = field(default_factory=lambda: {
+    #     ".*_hip_joint": 52.4,
+    #     ".*_thigh_joint": 30.1,
+    #     ".*_calf_joint": 30.1,
+    # })
+
+    # def __post_init__(self):
+    #     # Copy actuators dict to avoid mutating the global UNITREE_GO2_CFG.actuators
+    #     # (UNITREE_GO2_CFG is shared across multiple tasks in the same Python process).
+    #     self.robot.actuators = dict(self.robot.actuators)
+    #     self.robot.actuators["base_legs"] = DCMotorCfg(
+    #         joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+    #         effort_limit=self.actuator_effort_limit,
+    #         saturation_effort=self.actuator_saturation_effort,
+    #         velocity_limit=self.actuator_velocity_limit,
+    #         stiffness=self.actuator_stiffness,
+    #         damping=self.actuator_damping,
+    #         friction=self.actuator_friction,
+    #     )
+
     # sensors
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
@@ -393,10 +435,10 @@ class ParkourEnvCfg(DirectRLEnvCfg):
 
     height_scanner: RayCasterCfg = RayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.375, 0.0, 20.0)),
         ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-        debug_vis=True,
+        debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
 
@@ -409,23 +451,23 @@ class ParkourEnvCfg(DirectRLEnvCfg):
 
     # reward scales (Genesis original: train_parkour.py line 184-214)
     reward_scales: dict = {
-        "tracking_goal_vel": 1.2,        # Genesis original
-        "tracking_yaw": 0.7,             # Genesis original
+        "tracking_goal_vel": 1.5,        # was 1.2, Genesis original = 1.5; forward-velocity signal 강화
+        "tracking_yaw": 0.5,             # was 0.7, Genesis original = 0.5; tracking_goal_vel 우선시
         "tracking_lin_vel_xy_exp": 0.0,  # parkour-specific weakening
         "tracking_ang_vel_z_exp": 0.0,   # parkour-specific weakening
         "lin_vel_z_l2": -1.0,            # Genesis original
         "ang_vel_xy_l2": -0.05,          # Genesis original (= ang_vel_xy2)
         "orientation_l2": -1.0,          # Genesis original
-        "dof_acc_l2": -1.0e-7,           # Genesis original
+        "dof_acc_l2": -2.5e-7,           # Genesis original
         "collision": -10.0,              # Genesis original (= collision2)
-        "action_rate_l2": -0.1,         # Genesis original (WAS -0.1, 10x error)
+        "action_rate_l2": -0.01,         # Genesis original (WAS -0.1, 10x error)
         "delta_torques": -1.0e-7,        # Genesis original (NEW)
         "torques_l2": -1e-5,             # Genesis original
         "hip_pos": -0.5,                 # Genesis original
         "dof_error_l2": -0.04,           # Genesis original
         "feet_stumble": -1.0,            # Genesis original (= feet_stumble2)
         "feet_edge": -1.0,               # Genesis original (= feet_edge2)
-        "termination": -0.0,           # Genesis original (NEW, suicide penalty)
+        "termination": -100.0,          # was -0.0, Genesis original = -100.0; 넘어지면 안 된다 신호
         "feet_dragging": -0.0,           # Genesis original (NEW)
         "action_smoothness_1": -0.01,    # Genesis original (NEW)
         "action_smoothness_2": -0.01,    # Genesis original (NEW)
@@ -434,6 +476,12 @@ class ParkourEnvCfg(DirectRLEnvCfg):
 
     # tracking reward parameters (Genesis original)
     tracking_sigma: float = 0.2          # exp(-error / sigma) for tracking rewards
+
+    # === Yaw reward gating thresholds ===
+    # Robot이 정지 상태일 때 tracking_yaw가 max 값을 줘서 "정지+정면" local optimum이 형성되는
+    # 것을 방지. horizontal speed가 lower 이하면 reward=0, upper 이상이면 full, 사이는 smooth.
+    yaw_reward_speed_lower: float = 0.05  # m/s — 이 속도 이하에선 yaw reward 0
+    yaw_reward_speed_upper: float = 0.15  # m/s — 이 속도 이상에선 yaw reward full
 
     # feet dragging detection threshold (Genesis original)
     dragging_velocity_threshold: float = 0.05  # m/s — feet considered dragging if in contact + moving
@@ -445,11 +493,10 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     num_goals: int = 8
     num_future_goal_obs: int = 2  # Task #2: lookahead goals
     goal_distance: float = 1.0  # Task #2: spacing between waypoints (m)
-    next_goal_threshold: float = 0.05  # Task #2: distance to trigger goal reached
+    next_goal_threshold: float = 0.1  # Task #2: distance to trigger goal reached
     reach_goal_delay: float = 0.1  # Task #2: hold time after reaching goal (s)
     goal_z: float = 0.3  # Task #2: placeholder z coordinate for goals (m)
-    goal_reach_threshold: float = 0.5  # (deprecated, use next_goal_threshold)
-    termination_height: float = 0.1
+    termination_height: float = -0.2
     termination_grace_steps: int = 5  # skip termination during first N policy steps after spawn (for physics settling)
     max_tilt: float = 1.5
     terrain_curriculum: bool = True
