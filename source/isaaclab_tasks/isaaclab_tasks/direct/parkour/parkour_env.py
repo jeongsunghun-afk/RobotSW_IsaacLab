@@ -104,6 +104,16 @@ class Go2ParkourEnv(DirectRLEnv):
         # Commands [lin_vel_x, lin_vel_y, ang_vel_z]
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
 
+        # Cached sensor observations refreshed at 10 Hz (every 5 policy steps).
+        # Allocated here as zero tensors so _get_observations() never references an undefined
+        # attribute on the very first call (before common_step_counter reaches a multiple of 5).
+        # _reset_idx does NOT need to clear these: the elementwise recently_reset gate in
+        # _get_observations handles stale carry-over for newly reset envs.
+        _num_scan_rays = self._height_scanner.data.ray_hits_w.shape[1]  # C (e.g. 187)
+        self._scan = torch.zeros(self.num_envs, _num_scan_rays, device=self.device)
+        self._yaw_diff = torch.zeros(self.num_envs, device=self.device)
+        self._next_yaw_diff = torch.zeros(self.num_envs, device=self.device)
+
         # Goal tracking: which waypoint each env is targeting
         self._current_goal_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
@@ -580,20 +590,36 @@ class Go2ParkourEnv(DirectRLEnv):
         # (base_z + 20) - terrain_z - 0.5 ≈ 19.84 → always clipped to 1.0 (dead channel).
         # The DEBUG block below will confirm whether this saturation is occurring.
         # Fix: replace pos_w[:, 2] with root_pos_w[:, 2] once the diagnostic confirms the bug.
-        if self.common_step_counter % 5 == 0:
-            scan = (
-                self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.3
+        recently_reset = (self.episode_length_buf <= 1)           # [N] bool — env just reset this step
+        do_global_refresh = (self.common_step_counter % 5 == 0)  # 10 Hz cadence gate (hardware constraint)
+
+        if do_global_refresh or recently_reset.any():
+            # Compute fresh values for ALL envs in one pass (sensor data is fresh post sim-step).
+            scan_new = (
+                self._height_scanner.data.pos_w[:, 2].unsqueeze(1)
+                - self._height_scanner.data.ray_hits_w[..., 2] - 0.3
             ).clip(-1.0, 1.0)
-            self._scan = scan.clone()
             # Change E: compute relative yaw error (target_yaw - robot_heading), wrapped to [-π, π].
             # Genesis uses delta_yaw = target_yaw - self.yaw (robot heading), giving the policy direct
             # information about how much it needs to rotate. The previous absolute world-frame yaw gave
             # no heading reference — the policy could not compute turn direction/magnitude.
             # NOTE: self._target_yaw (absolute) is preserved unchanged for reward use at line ~632.
-            yaw_diff = self._target_yaw - self._robot.data.heading_w          # [N] relative yaw error
-            self._yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))  # wrap to [-π, π]
-            next_yaw_diff = self._next_target_yaw - self._robot.data.heading_w
-            self._next_yaw_diff = torch.atan2(torch.sin(next_yaw_diff), torch.cos(next_yaw_diff))
+            yaw_raw = self._target_yaw - self._robot.data.heading_w           # [N] relative yaw error
+            yaw_diff_new = torch.atan2(torch.sin(yaw_raw), torch.cos(yaw_raw))  # wrap to [-π, π]
+            next_yaw_raw = self._next_target_yaw - self._robot.data.heading_w
+            next_yaw_diff_new = torch.atan2(torch.sin(next_yaw_raw), torch.cos(next_yaw_raw))
+
+            if do_global_refresh:
+                # Normal 10 Hz cadence — update all envs at once (preserves hardware constraint).
+                self._scan = scan_new.clone()
+                self._yaw_diff = yaw_diff_new
+                self._next_yaw_diff = next_yaw_diff_new
+            else:
+                # One-shot per-env patch: only recently-reset envs get their stale cache cleared.
+                # Envs whose episode_length_buf > 1 keep their previous cached values unchanged.
+                self._scan[recently_reset] = scan_new[recently_reset]
+                self._yaw_diff[recently_reset] = yaw_diff_new[recently_reset]
+                self._next_yaw_diff[recently_reset] = next_yaw_diff_new[recently_reset]
 
         # DEBUG: Height-scan multi-step diagnostic.
         # Fires at each step in _scan_debug_print_steps (at most once per step value per process).
@@ -737,11 +763,11 @@ class Go2ParkourEnv(DirectRLEnv):
                       f"mean={scan_raw_mean:.4f}, "
                       f"min={scan_raw.min().item():.4f}, max={scan_raw.max().item():.4f}")
                 print(f"  scan post-clip:    "
-                      f"mean={scan.mean().item():.4f}, "
-                      f"min={scan.min().item():.4f}, "
-                      f"max={scan.max().item():.4f}, "
-                      f"unique={scan.unique().numel()}")
-                sat_count = (scan == -1.0).sum(dim=1)                      # (N,)
+                      f"mean={self._scan.mean().item():.4f}, "
+                      f"min={self._scan.min().item():.4f}, "
+                      f"max={self._scan.max().item():.4f}, "
+                      f"unique={self._scan.unique().numel()}")
+                sat_count = (self._scan == -1.0).sum(dim=1)                # (N,)
                 sat_per = sat_count[:n_show].cpu().tolist()
                 sat_per_str = ", ".join(f"env{i}={int(v)}" for i, v in enumerate(sat_per))
                 print(f"  cells saturated at -1 (post-clip): {sat_per_str}")
@@ -760,7 +786,7 @@ class Go2ParkourEnv(DirectRLEnv):
                 # First n_show envs sample values
                 print(f"\n[Sample cell values — first {n_show} envs, cells 0..9 post-clip (current)]")
                 for i in range(n_show):
-                    print(f"  env[{i}] = {scan[i, -50:].cpu().numpy()}")
+                    print(f"  env[{i}] = {self._scan[i, -50:].cpu().numpy()}")
                 print(f"\n[Sample cell values — first {n_show} envs, cells 0..9 post-clip (alt)]")
                 for i in range(n_show):
                     print(f"  env[{i}] = {scan_alt_clipped[i, -50:].cpu().numpy()}")
@@ -884,19 +910,12 @@ class Go2ParkourEnv(DirectRLEnv):
         # tracking_goal_vel = tracking_goal_vel.clamp(min=0.0)
 
         # tracking_yaw: exponential decay from heading error (Genesis line 1451-1454)
+        # No speed gating — stand-still local optimum is prevented by tracking_goal_vel (weight=1.5)
+        # which only rewards forward velocity along the goal direction.
         heading = self._robot.data.heading_w  # [N] world frame yaw
         yaw_diff = self._target_yaw - heading  # [N]
         yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
         tracking_yaw = torch.exp(-torch.abs(yaw_diff))
-
-        # Movement gating: robot이 정지 상태일 때 yaw reward를 차단 (정지+정면 응시 local optimum 방지)
-        # horizontal speed (body frame xy)가 cfg의 threshold 이상일 때만 reward 활성화
-        # 매끄러운 transition을 위해 smoothstep 형태 사용
-        horizontal_speed = torch.norm(self._robot.data.root_lin_vel_b[:, :2], dim=1)
-        speed_lo = self.cfg.yaw_reward_speed_lower
-        speed_hi = self.cfg.yaw_reward_speed_upper
-        moving_mask = ((horizontal_speed - speed_lo) / (speed_hi - speed_lo)).clamp(min=0.0, max=1.0)
-        tracking_yaw = tracking_yaw * moving_mask
 
         # === Velocity tracking (exponential) (Genesis line 1426-1435) ===
         lin_vel_error = torch.sum(
@@ -973,8 +992,11 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # === Feet edge — Genesis x_edge_mask port (Option B) ===
         # contact: current-step foot contact boolean (N, 4), threshold=2.0 N
-        contact = torch.max(torch.norm(net_contact_forces[:, :, self._feet_ids], dim=-1), dim=1)[0] > 2.0
-        # contact_filt: OR with last step to suppress 50 Hz false-negatives
+        # Use only the most-recent physics substep (history index 0) to match Genesis semantics.
+        # net_forces_w_history[:, 0] is the latest substep (contact_sensor_data.py:90).
+        # Genesis ref: legged_env_parkour.py:937,943 — single get_links_net_contact_force() call.
+        contact = torch.norm(net_contact_forces[:, 0, self._feet_ids], dim=-1) > 2.0
+        # contact_filt: OR with last step to suppress 50 Hz false-negatives (matches Genesis two-sample OR).
         contact_filt = torch.logical_or(contact, self._last_contacts)
         self._last_contacts = contact
         # feet world XY positions: (N, 4, 2)
