@@ -21,7 +21,7 @@ from isaaclab.terrains import TerrainImporter
 from isaaclab.terrains.trimesh import mesh_terrains as _parkour_mesh_terrains
 from isaaclab.utils import math as math_utils
 
-from isaaclab_tasks.direct._common import DebugViewer, DebugViewerCfg
+from isaaclab_tasks.direct._common import DebugKeyBindingCfg, DebugViewer, DebugViewerCfg
 
 from .parkour_env_cfg import (
     TERRAIN_CLASS_FLAT,
@@ -154,6 +154,11 @@ class Go2ParkourEnv(DirectRLEnv):
         self._col_to_class = (_col_vals.unsqueeze(1) >= _cumprops.unsqueeze(0)).sum(dim=1).long()
         self._env_class = self._col_to_class[self._terrain_types]  # [num_envs]
 
+        # Per-env flag: when True, _update_terrain_curriculum skips curriculum logic for that env
+        # so the keyboard-forced level/type is preserved.  Cleared inside _update_terrain_curriculum
+        # (not _reset_idx) because the curriculum block is the only consumer that would overwrite it.
+        self._skip_curriculum = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
         # Contact history for edge detection
         self._last_contacts = torch.zeros(self.num_envs, 4, dtype=torch.bool, device=self.device)
 
@@ -271,6 +276,7 @@ class Go2ParkourEnv(DirectRLEnv):
                 enabled=_dbg_enabled,
                 free_fly_speed_mps=2.0,
                 free_fly_speed_boost_mps=6.0,
+                keys=DebugKeyBindingCfg(toggle_free_fly="G"),
             ),
         )
 
@@ -283,6 +289,21 @@ class Go2ParkourEnv(DirectRLEnv):
         self._debug_viewer.register_key(
             "P",
             on_press=lambda: self._toggle_contact_print(),
+        )
+        # Interactive terrain navigation: J/K change difficulty level, L cycles terrain type.
+        # Only the env currently tracked by the viewport camera is affected; all other envs
+        # continue training without interruption.
+        self._debug_viewer.register_key(
+            "K",
+            on_press=lambda: self._change_terrain_for_viewer(level_delta=+1),
+        )
+        self._debug_viewer.register_key(
+            "J",
+            on_press=lambda: self._change_terrain_for_viewer(level_delta=-1),
+        )
+        self._debug_viewer.register_key(
+            "L",
+            on_press=lambda: self._change_terrain_for_viewer(type_delta=+1),
         )
 
         # Activate goal marker visualisation (respects cfg.debug_vis)
@@ -605,21 +626,25 @@ class Go2ParkourEnv(DirectRLEnv):
             # no heading reference — the policy could not compute turn direction/magnitude.
             # NOTE: self._target_yaw (absolute) is preserved unchanged for reward use at line ~632.
             yaw_raw = self._target_yaw - self._robot.data.heading_w           # [N] relative yaw error
-            yaw_diff_new = torch.atan2(torch.sin(yaw_raw), torch.cos(yaw_raw))  # wrap to [-π, π]
+            # yaw_diff_new = torch.atan2(torch.sin(yaw_raw), torch.cos(yaw_raw))  # wrap to [-π, π]
             next_yaw_raw = self._next_target_yaw - self._robot.data.heading_w
-            next_yaw_diff_new = torch.atan2(torch.sin(next_yaw_raw), torch.cos(next_yaw_raw))
+            # next_yaw_diff_new = torch.atan2(torch.sin(next_yaw_raw), torch.cos(next_yaw_raw))
 
             if do_global_refresh:
                 # Normal 10 Hz cadence — update all envs at once (preserves hardware constraint).
                 self._scan = scan_new.clone()
-                self._yaw_diff = yaw_diff_new
-                self._next_yaw_diff = next_yaw_diff_new
+                # self._yaw_diff = yaw_diff_new
+                # self._next_yaw_diff = next_yaw_diff_new
+                self._yaw_diff = yaw_raw
+                self._next_yaw_diff = next_yaw_raw
             else:
                 # One-shot per-env patch: only recently-reset envs get their stale cache cleared.
                 # Envs whose episode_length_buf > 1 keep their previous cached values unchanged.
                 self._scan[recently_reset] = scan_new[recently_reset]
-                self._yaw_diff[recently_reset] = yaw_diff_new[recently_reset]
-                self._next_yaw_diff[recently_reset] = next_yaw_diff_new[recently_reset]
+                # self._yaw_diff[recently_reset] = yaw_diff_new[recently_reset]
+                # self._next_yaw_diff[recently_reset] = next_yaw_diff_new[recently_reset]
+                self._yaw_diff[recently_reset] = yaw_raw[recently_reset]
+                self._next_yaw_diff[recently_reset] = next_yaw_raw[recently_reset]
 
         # DEBUG: Height-scan multi-step diagnostic.
         # Fires at each step in _scan_debug_print_steps (at most once per step value per process).
@@ -914,7 +939,7 @@ class Go2ParkourEnv(DirectRLEnv):
         # which only rewards forward velocity along the goal direction.
         heading = self._robot.data.heading_w  # [N] world frame yaw
         yaw_diff = self._target_yaw - heading  # [N]
-        yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
+        # yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
         tracking_yaw = torch.exp(-torch.abs(yaw_diff))
 
         # === Velocity tracking (exponential) (Genesis line 1426-1435) ===
@@ -1205,6 +1230,26 @@ class Go2ParkourEnv(DirectRLEnv):
         """Game-inspired terrain curriculum: advance on success, regress on failure."""
         # Skip on first reset (robot not yet initialized)
         if not getattr(self, "init_done", False):
+            return
+
+        # Keyboard-override bypass: envs flagged by _change_terrain_for_viewer keep their
+        # forced level/type.  Clear the flag unconditionally first (even if env_ids is a
+        # subset) so it never carries over into subsequent normal resets.
+        skip_mask = self._skip_curriculum[env_ids]          # bool [n], True → bypass curriculum
+        self._skip_curriculum[env_ids] = False              # always clear before returning
+
+        # Refresh env_origins for bypassed envs so the robot spawns on the forced patch.
+        # (env_origins was already set by _change_terrain_for_viewer, but we also update
+        # here to keep the update path symmetric with the normal curriculum branch below.)
+        skip_ids = env_ids[skip_mask]
+        if skip_ids.numel() > 0:
+            self._terrain.env_origins[skip_ids] = self._terrain.terrain_origins[
+                self._terrain_levels[skip_ids], self._terrain_types[skip_ids]
+            ]
+
+        # Only run curriculum logic for envs that were NOT keyboard-overridden.
+        env_ids = env_ids[~skip_mask]
+        if env_ids.numel() == 0:
             return
 
         # Distance traveled from spawn origin during episode
@@ -1562,6 +1607,60 @@ class Go2ParkourEnv(DirectRLEnv):
         new_state = not self._debug_viewer.vis_is_enabled("contact_print")
         self._debug_viewer.set_debug_vis("contact_print", new_state)
         print(f"[parkour] Contact debug: {'ON' if new_state else 'OFF'}")
+
+    def _change_terrain_for_viewer(self, level_delta: int = 0, type_delta: int = 0) -> None:
+        """Force a terrain level/type change on the currently-viewed env and reset it.
+
+        Only the single env tracked by the viewport camera is affected; all other envs
+        continue running without interruption.
+
+        Args:
+            level_delta: +1 to increase difficulty row, -1 to decrease.  Clamped to
+                         [0, num_rows - 1].
+            type_delta:  Column offset; wraps around via mod num_cols.
+        """
+        if not hasattr(self, "_terrain") or self._terrain is None:
+            print("[parkour] _change_terrain_for_viewer: terrain not yet initialized, skipping.")
+            return
+
+        env_id = self._get_active_viewer_env_id()
+
+        # terrain_origins shape: (num_rows, num_cols, 3) — derive grid size from tensor directly
+        # TerrainImporterCfg does not expose num_rows/num_cols as top-level attributes.
+        origins = getattr(self._terrain, "terrain_origins", None)
+        if origins is None or origins.ndim != 3:
+            print("[parkour] terrain_origins not available or unexpected shape — skip terrain change.")
+            return
+        num_rows = int(origins.shape[0])
+        num_cols = int(origins.shape[1])
+
+        cur_level = int(self._terrain_levels[env_id].item())
+        cur_type = int(self._terrain_types[env_id].item())
+
+        new_level = max(0, min(cur_level + level_delta, num_rows - 1))
+        new_type = (cur_type + type_delta) % num_cols
+
+        # Write forced values into the TerrainImporter tensors (which _terrain_levels /
+        # _terrain_types alias directly — no copy needed).
+        self._terrain_levels[env_id] = new_level
+        self._terrain_types[env_id] = new_type
+
+        # Update env_origin so the robot spawns on the correct patch.
+        # _update_terrain_curriculum would normally do this, but it is bypassed below.
+        self._terrain.env_origins[env_id] = self._terrain.terrain_origins[new_level, new_type]
+
+        # Flag this env so _update_terrain_curriculum does NOT overwrite the forced values.
+        self._skip_curriculum[env_id] = True
+
+        # Reset only the one env.  curriculum flag is cleared inside _update_terrain_curriculum.
+        env_ids = torch.tensor([env_id], device=self.device, dtype=torch.long)
+        self._reset_idx(env_ids)
+
+        terrain_name = _TERRAIN_CLASS_NAMES.get(int(self._env_class[env_id].item()), "unknown")
+        print(
+            f"[parkour] env {env_id} → terrain level={new_level}/{num_rows - 1}, "
+            f"type={new_type} ({terrain_name})"
+        )
 
     # ------------------------------------------------------------------
     # Contact debug helper
