@@ -626,25 +626,25 @@ class Go2ParkourEnv(DirectRLEnv):
             # no heading reference — the policy could not compute turn direction/magnitude.
             # NOTE: self._target_yaw (absolute) is preserved unchanged for reward use at line ~632.
             yaw_raw = self._target_yaw - self._robot.data.heading_w           # [N] relative yaw error
-            # yaw_diff_new = torch.atan2(torch.sin(yaw_raw), torch.cos(yaw_raw))  # wrap to [-π, π]
+            yaw_diff_new = torch.atan2(torch.sin(yaw_raw), torch.cos(yaw_raw))  # wrap to [-π, π]
             next_yaw_raw = self._next_target_yaw - self._robot.data.heading_w
-            # next_yaw_diff_new = torch.atan2(torch.sin(next_yaw_raw), torch.cos(next_yaw_raw))
+            next_yaw_diff_new = torch.atan2(torch.sin(next_yaw_raw), torch.cos(next_yaw_raw))
 
             if do_global_refresh:
                 # Normal 10 Hz cadence — update all envs at once (preserves hardware constraint).
                 self._scan = scan_new.clone()
-                # self._yaw_diff = yaw_diff_new
-                # self._next_yaw_diff = next_yaw_diff_new
-                self._yaw_diff = yaw_raw
-                self._next_yaw_diff = next_yaw_raw
+                self._yaw_diff = yaw_diff_new
+                self._next_yaw_diff = next_yaw_diff_new
+                # self._yaw_diff = yaw_raw
+                # self._next_yaw_diff = next_yaw_raw
             else:
                 # One-shot per-env patch: only recently-reset envs get their stale cache cleared.
                 # Envs whose episode_length_buf > 1 keep their previous cached values unchanged.
                 self._scan[recently_reset] = scan_new[recently_reset]
-                # self._yaw_diff[recently_reset] = yaw_diff_new[recently_reset]
-                # self._next_yaw_diff[recently_reset] = next_yaw_diff_new[recently_reset]
-                self._yaw_diff[recently_reset] = yaw_raw[recently_reset]
-                self._next_yaw_diff[recently_reset] = next_yaw_raw[recently_reset]
+                self._yaw_diff[recently_reset] = yaw_diff_new[recently_reset]
+                self._next_yaw_diff[recently_reset] = next_yaw_diff_new[recently_reset]
+                # self._yaw_diff[recently_reset] = yaw_raw[recently_reset]
+                # self._next_yaw_diff[recently_reset] = next_yaw_raw[recently_reset]
 
         # DEBUG: Height-scan multi-step diagnostic.
         # Fires at each step in _scan_debug_print_steps (at most once per step value per process).
@@ -1000,7 +1000,7 @@ class Go2ParkourEnv(DirectRLEnv):
             torch.square(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1
         )
         # Genesis conditional: dof_error penalized 10x more on flat (nominal posture expected there)
-        # dof_error_l2 = dof_error_l2 * (10.0 * is_flat + is_non_flat)
+        dof_error_l2 = dof_error_l2 * (10.0 * is_flat + is_non_flat * 0)
 
         # === Base height penalty (flat terrain only) (Genesis: base_height reward) ===
         # Penalizes deviation from nominal stance height; zeroed on non-flat where height varies.
@@ -1055,6 +1055,15 @@ class Go2ParkourEnv(DirectRLEnv):
             dim=1,
         )
 
+        # === Feet air time (anymal_c / R_Skeleton 표준 패턴) — NEW 2026-05-13 ===
+        # 발이 일정 시간 air 후 contact한 순간 양성 보상. command 크기 > 0.1 m/s일 때만 활성.
+        # trot 발현 유도 — feet_dragging의 negative 형태와 상보적.
+        first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._feet_ids]
+        last_air_time = self._contact_sensor.data.last_air_time[:, self._feet_ids]
+        feet_air_time = torch.sum((last_air_time - 0.5) * first_contact, dim=1) * (
+            torch.norm(self._commands[:, :2], dim=1) > 0.1
+        )
+
         # === Action smoothness 1 (Genesis line 1575-1579) — NEW ===
         # Penalize position target changes when last action was nonzero
         last_action_mask = (self._last_processed_actions != 0).float()
@@ -1091,6 +1100,7 @@ class Go2ParkourEnv(DirectRLEnv):
             "action_smoothness_1": action_smoothness_1,
             "action_smoothness_2": action_smoothness_2,
             "base_height": base_height,            # flat-only; scale=0.0 by default (disabled)
+            "feet_air_time": feet_air_time,        # NEW 2026-05-13: trot 발현 유도
         }
 
         # === Accumulate and scale rewards ===

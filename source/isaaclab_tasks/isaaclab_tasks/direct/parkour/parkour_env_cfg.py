@@ -60,7 +60,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
         # cfg.terrain_goals is populated by the terrain function at build time (used by W3 env wiring).
         "parkour_flat": terrain_gen.MeshParkourHurdleTerrainCfg(
             function=_parkour_jump_hurdle_terrain,
-            proportion=0.1,
+            proportion=1.0,
             flat=True,
             num_hurdles=8,
             num_goals=8,
@@ -74,62 +74,62 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
                 )
             },
         ),
-        "parkour_hurdle": terrain_gen.MeshParkourHurdleTerrainCfg(
-            function=_parkour_jump_hurdle_terrain,
-            proportion=0.2,
-            num_hurdles=8,
-            num_goals=8,
-            hurdle_height_range=(0.05, 0.30),
-            x_spacing_range=(1.0, 1.5),  # explicit: 2.5 + 8*(1.5+0.3)=16.9m ≤ 20m
-            flat_patch_sampling={
-                "init_positions": FlatPatchSamplingCfg(
-                    num_patches=2,
-                    patch_radius=0.5,
-                    max_height_diff=0.05,
-                )
-            },
-        ),
-        "parkour_step": terrain_gen.MeshParkourStepTerrainCfg(
-            proportion=0.2,
-            num_steps=8,
-            num_goals=8,
-            x_length_range=(0.4, 0.8),
-            step_height_range=(0.10, 0.45),
-            flat_patch_sampling={
-                "init_positions": FlatPatchSamplingCfg(
-                    num_patches=2,
-                    patch_radius=0.5,
-                    max_height_diff=0.05,
-                )
-            },
-        ),
-        "parkour_gap": terrain_gen.MeshParkourGapTerrainCfg(
-            proportion=0.3,
-            num_gaps=8,
-            num_goals=8,
-            gap_length_range=(0.05, 0.5),          # reduced: overflow fix (was 0.3, 0.8)
-            platform_length_range=(1.2, 1.6),     # explicit: 2.0+8*1.6+8*0.4=18.0m ≤ 20m
-            flat_patch_sampling={
-                "init_positions": FlatPatchSamplingCfg(
-                    num_patches=2,
-                    patch_radius=0.5,
-                    max_height_diff=0.05,
-                )
-            },
-        ),
-        "parkour_stair": terrain_gen.MeshParkourStairTerrainCfg(
-            proportion=0.2,
-            stair_width_range=(0.25, 0.40),
-            stair_height_range=(0.05, 0.20),
-            num_goals=8,
-            flat_patch_sampling={
-                "init_positions": FlatPatchSamplingCfg(
-                    num_patches=2,
-                    patch_radius=0.5,
-                    max_height_diff=0.05,
-                )
-            },
-        ),
+        # "parkour_hurdle": terrain_gen.MeshParkourHurdleTerrainCfg(
+        #     function=_parkour_jump_hurdle_terrain,
+        #     proportion=0.2,
+        #     num_hurdles=8,
+        #     num_goals=8,
+        #     hurdle_height_range=(0.05, 0.30),
+        #     x_spacing_range=(1.0, 1.5),  # explicit: 2.5 + 8*(1.5+0.3)=16.9m ≤ 20m
+        #     flat_patch_sampling={
+        #         "init_positions": FlatPatchSamplingCfg(
+        #             num_patches=2,
+        #             patch_radius=0.5,
+        #             max_height_diff=0.05,
+        #         )
+        #     },
+        # ),
+        # "parkour_step": terrain_gen.MeshParkourStepTerrainCfg(
+        #     proportion=0.2,
+        #     num_steps=8,
+        #     num_goals=8,
+        #     x_length_range=(0.4, 0.8),
+        #     step_height_range=(0.10, 0.45),
+        #     flat_patch_sampling={
+        #         "init_positions": FlatPatchSamplingCfg(
+        #             num_patches=2,
+        #             patch_radius=0.5,
+        #             max_height_diff=0.05,
+        #         )
+        #     },
+        # ),
+        # "parkour_gap": terrain_gen.MeshParkourGapTerrainCfg(
+        #     proportion=0.3,
+        #     num_gaps=8,
+        #     num_goals=8,
+        #     gap_length_range=(0.05, 0.5),          # reduced: overflow fix (was 0.3, 0.8)
+        #     platform_length_range=(1.2, 1.6),     # explicit: 2.0+8*1.6+8*0.4=18.0m ≤ 20m
+        #     flat_patch_sampling={
+        #         "init_positions": FlatPatchSamplingCfg(
+        #             num_patches=2,
+        #             patch_radius=0.5,
+        #             max_height_diff=0.05,
+        #         )
+        #     },
+        # ),
+        # "parkour_stair": terrain_gen.MeshParkourStairTerrainCfg(
+        #     proportion=0.2,
+        #     stair_width_range=(0.25, 0.40),
+        #     stair_height_range=(0.05, 0.20),
+        #     num_goals=8,
+        #     flat_patch_sampling={
+        #         "init_positions": FlatPatchSamplingCfg(
+        #             num_patches=2,
+        #             patch_radius=0.5,
+        #             max_height_diff=0.05,
+        #         )
+        #     },
+        # ),
         # -----------------------------------------------------------------------
         # New terrain types — proportion=0.0 (inactive, registered for future use).
         # Existing 5-terrain proportions (sum=1.0) are preserved unchanged.
@@ -310,7 +310,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     debug_vis: bool = False
     enable_keyboard_view_switch: bool = True
     debug_print_contacts: bool = False  # if True, print active contact bodies + forces to console every step (P key toggles at runtime)
-    debug_vis_edge_mask: bool = True  # if True, visualize edge mask cells around env 0 as green spheres
+    debug_vis_edge_mask: bool = False  # if True, visualize edge mask cells around env 0 as green spheres (default OFF for training perf; play.py forces True)
     debug_vis_edge_mask_radius_m: float = 5.0  # radius (m) around env 0 base position to visualize
 
     # env
@@ -396,34 +396,55 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # Note on saturation_effort: DCMotorCfg.saturation_effort accepts only a scalar float
     # (no joint-keyed dict). Using 35.0 (hip limit — most conservative joint) as the cap.
     # A-project reference: hip=35, thigh=45, calf=45.
-    # actuator_stiffness: float = 40.0
-    # actuator_damping: float = 1.0
-    # actuator_friction: float = 0.0
-    # actuator_saturation_effort: float = 35.0
-    # actuator_effort_limit: dict = field(default_factory=lambda: {
-    #     ".*_hip_joint": 35.0,
-    #     ".*_thigh_joint": 40.0,
-    #     ".*_calf_joint": 40.0,
-    # })
-    # actuator_velocity_limit: dict = field(default_factory=lambda: {
-    #     ".*_hip_joint": 52.4,
-    #     ".*_thigh_joint": 30.1,
-    #     ".*_calf_joint": 30.1,
-    # })
 
-    # def __post_init__(self):
-    #     # Copy actuators dict to avoid mutating the global UNITREE_GO2_CFG.actuators
-    #     # (UNITREE_GO2_CFG is shared across multiple tasks in the same Python process).
-    #     self.robot.actuators = dict(self.robot.actuators)
-    #     self.robot.actuators["base_legs"] = DCMotorCfg(
-    #         joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-    #         effort_limit=self.actuator_effort_limit,
-    #         saturation_effort=self.actuator_saturation_effort,
-    #         velocity_limit=self.actuator_velocity_limit,
-    #         stiffness=self.actuator_stiffness,
-    #         damping=self.actuator_damping,
-    #         friction=self.actuator_friction,
-    #     )
+    _actuator_mode = 2
+
+    if _actuator_mode == 1:
+        actuator_stiffness: float = 40.0
+        actuator_damping: float = 1.0
+        actuator_friction: float = 0.0
+        actuator_saturation_effort: float = 35.0
+        actuator_effort_limit: dict = field(default_factory=lambda: {
+            ".*_hip_joint": 35.0,
+            ".*_thigh_joint": 40.0,
+            ".*_calf_joint": 40.0,
+        })
+        actuator_velocity_limit: dict = field(default_factory=lambda: {
+            ".*_hip_joint": 52.4,
+            ".*_thigh_joint": 30.1,
+            ".*_calf_joint": 30.1,
+        })
+
+    elif _actuator_mode == 2:
+        actuator_stiffness: float = 25.0
+        actuator_damping: float = 0.5
+        actuator_friction: float = 0.0
+        actuator_saturation_effort: float = 23.5
+        actuator_effort_limit: dict = field(default_factory=lambda: {
+            ".*_hip_joint": 23.5,
+            ".*_thigh_joint": 23.5,
+            ".*_calf_joint": 23.5,
+        })
+        actuator_velocity_limit: dict = field(default_factory=lambda: {
+            ".*_hip_joint": 30.0,
+            ".*_thigh_joint": 30.0,
+            ".*_calf_joint": 30.0,
+        })
+
+    def __post_init__(self):
+        # Copy actuators dict to avoid mutating the global UNITREE_GO2_CFG.actuators
+        # (UNITREE_GO2_CFG is shared across multiple tasks in the same Python process).
+        self.robot.actuators = dict(self.robot.actuators)
+        self.robot.actuators["base_legs"] = DCMotorCfg(
+            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+            effort_limit=self.actuator_effort_limit,
+            saturation_effort=self.actuator_saturation_effort,
+            velocity_limit=self.actuator_velocity_limit,
+            stiffness=self.actuator_stiffness,
+            damping=self.actuator_damping,
+            friction=self.actuator_friction,
+            armature=0.01
+        )
 
     # sensors
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
@@ -438,7 +459,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(0.375, 0.0, 20.0)),
         ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-        debug_vis=False,
+        debug_vis=True,
         mesh_prim_paths=["/World/ground"],
     )
 
@@ -464,14 +485,15 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         "delta_torques": -1.0e-7,        # Genesis original (NEW)
         "torques_l2": -1e-5,             # Genesis original
         "hip_pos": -0.5,                 # Genesis original
-        "dof_error_l2": -0.04,           # Genesis original
+        "dof_error_l2": -0.5,           # Genesis original
         "feet_stumble": -1.0,            # Genesis original (= feet_stumble2)
         "feet_edge": -1.0,               # Genesis original (= feet_edge2)
         "termination": -100.0,          # was -0.0, Genesis original = -100.0; 넘어지면 안 된다 신호
-        "feet_dragging": -0.0,           # Genesis original (NEW)
+        "feet_dragging": -0.1,           # Genesis original (NEW)
         "action_smoothness_1": -0.01,    # Genesis original (NEW)
         "action_smoothness_2": -0.01,    # Genesis original (NEW)
         "base_height": 0.0,              # flat-only: penalize base height deviation (disabled by default)
+        "feet_air_time": 0.5,            # anymal_c/R_Skeleton 표준 패턴; trot 발현 유도 (NEW 2026-05-13)
     }
 
     # tracking reward parameters (Genesis original)
@@ -493,7 +515,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     num_goals: int = 8
     num_future_goal_obs: int = 2  # Task #2: lookahead goals
     goal_distance: float = 1.0  # Task #2: spacing between waypoints (m)
-    next_goal_threshold: float = 0.1  # Task #2: distance to trigger goal reached
+    next_goal_threshold: float = 0.2  # Task #2: distance to trigger goal reached
     reach_goal_delay: float = 0.1  # Task #2: hold time after reaching goal (s)
     goal_z: float = 0.3  # Task #2: placeholder z coordinate for goals (m)
     termination_height: float = -0.2
