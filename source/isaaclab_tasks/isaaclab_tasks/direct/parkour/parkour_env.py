@@ -175,11 +175,6 @@ class Go2ParkourEnv(DirectRLEnv):
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in self.cfg.reward_scales.keys()
         }
-        # Per-step scaled reward contribution for env 0 — read by external debug plotters.
-        # Updated every _get_rewards() call; never affects reward computation.
-        self._last_reward_breakdown_env0: dict[str, float] = {
-            key: 0.0 for key in self.cfg.reward_scales.keys()
-        }
 
         # Get body indices for contact sensing
         self._base_id, _ = self._contact_sensor.find_bodies("base")
@@ -976,7 +971,7 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # === Collision penalty (Genesis line 1540-1548) ===
         is_contact = (
-            torch.norm(net_contact_forces[:, 0, self._undesired_contact_body_ids], dim=-1) > 0.1
+            torch.max(torch.norm(net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=1)[0] > 0.1
         )
         collision = torch.sum(is_contact, dim=1).float()
 
@@ -1005,7 +1000,7 @@ class Go2ParkourEnv(DirectRLEnv):
             torch.square(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1
         )
         # Genesis conditional: dof_error penalized 10x more on flat (nominal posture expected there)
-        dof_error_l2 = dof_error_l2 * is_flat
+        dof_error_l2 = dof_error_l2 * (10.0 * is_flat + is_non_flat * 0)
 
         # === Base height penalty (flat terrain only) (Genesis: base_height reward) ===
         # Penalizes deviation from nominal stance height; zeroed on non-flat where height varies.
@@ -1067,7 +1062,7 @@ class Go2ParkourEnv(DirectRLEnv):
         last_air_time = self._contact_sensor.data.last_air_time[:, self._feet_ids]
         feet_air_time = torch.sum((last_air_time - 0.5) * first_contact, dim=1) * (
             torch.norm(self._commands[:, :2], dim=1) > 0.1
-        ) * (is_flat + is_non_flat * 0)
+        )
 
         # === Action smoothness 1 (Genesis line 1575-1579) — NEW ===
         # Penalize position target changes when last action was nonzero
@@ -1114,8 +1109,6 @@ class Go2ParkourEnv(DirectRLEnv):
             scaled = self.cfg.reward_scales[key] * self.step_dt * value
             self._episode_sums[key] += scaled
             total_reward += scaled
-            # Expose env-0 scaled contribution for external debug plotters (read-only hook).
-            self._last_reward_breakdown_env0[key] = float(scaled[0].detach().item())
 
         return total_reward
 

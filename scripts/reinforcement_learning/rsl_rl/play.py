@@ -96,12 +96,6 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import numpy as np
 import pandas as pd
 
-import os as _os
-import sys as _sys
-
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-from _debug.parkour_reward_plotter import LiveRewardPlotter
-
 
 def save_obs_data_to_csv(obs_history, save_path, num_obs):
     """
@@ -238,14 +232,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.log_dir = log_dir
 
     # create isaac environment
-    # Force-enable debug visualization in play mode (height scanner rays, goal/edge markers).
-    # All flags guarded by hasattr() so this is a no-op for envs that don't define them.
-    if hasattr(env_cfg, "debug_vis"):
-        env_cfg.debug_vis = True
-    if hasattr(env_cfg, "debug_vis_edge_mask"):
-        env_cfg.debug_vis_edge_mask = True
+    env_cfg.debug_vis = True
+    # Enable height scanner ray visualization in play mode (if the scene defines one)
     if hasattr(env_cfg.scene, "height_scanner") and hasattr(env_cfg.scene.height_scanner, "debug_vis"):
         env_cfg.scene.height_scanner.debug_vis = True
+        env_cfg.debug_vis_edge_mask=True
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     env.unwrapped.set_debug_vis(getattr(env_cfg, "debug_vis", True))
 
@@ -347,16 +338,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         duration = 0.5
         stance_width_cmd = 0.25
         stance_length_cmd = 0.45
-    # --- live reward plotter (parkour only) ---
-    _reward_plotter = None
-    _task_str = (args_cli.task or "").lower()
-    if "parkour" in _task_str:
-        try:
-            _reward_plotter = LiveRewardPlotter(env.unwrapped, target_env_id=0, window=500, refresh_ms=200)
-        except Exception as _exc:
-            print(f"[reward-plotter] init failed: {_exc}; continuing without live plot.")
-            _reward_plotter = None
-
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -386,7 +367,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print("here?")
             else:
                 actions = policy(obs)
-                # print(actions)
             obs_history.append(obs["policy"].cpu().numpy().squeeze())
             action_history.append(actions.detach().cpu().numpy().squeeze())
 
@@ -397,10 +377,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # print(obs["policy"])
             # env stepping
-            obs, rew, dones, _ = env.step(actions)
-            if _reward_plotter is not None:
-                _reward_plotter.step(env.unwrapped)
-            print(rew)
+            obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
         if args_cli.video:
@@ -413,10 +390,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
-
-    # close live reward plotter if active
-    if _reward_plotter is not None:
-        _reward_plotter.close()
 
     # close the simulator
     env.close()
