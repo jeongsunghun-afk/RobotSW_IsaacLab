@@ -191,6 +191,11 @@ class Go2ParkourEnv(DirectRLEnv):
         # Get body indices for contact sensing
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
+
+        # Robot articulation body index for base — used to read per-env mass and COM offset.
+        # Distinct from _base_id which comes from the contact sensor (same numeric value on Go2,
+        # but semantically different source).
+        self._robot_base_id, _ = self._robot.find_bodies("base")
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(
             ["base", ".*thigh", ".*calf", ".*hip", "Head_upper", "Head_lower"]
         )
@@ -886,21 +891,46 @@ class Go2ParkourEnv(DirectRLEnv):
             .to(self.device)
         )  # (N, num_shapes, 3)
         foot_friction = _mat_all[:, self._foot_shape_indices, :2].reshape(self.num_envs, -1)  # (N, 8)
-        priv = torch.cat(
+
+        # priv_explicit: privileged state directly observable from a real sensor (linear + angular vel).
+        #   root_lin_vel_b * 2.0  : (N, 3)
+        #   root_ang_vel_b * 0.25 : (N, 3)  ← moved from priv_latent
+        priv_explicit = torch.cat(
             [
-                self._robot.data.root_lin_vel_b,   # 3
-                self._robot.data.root_ang_vel_b,   # 3
-                foot_friction,                     # 8  (4 feet × [static, dynamic])
+                self._robot.data.root_lin_vel_b * 2.0,    # 3
+                self._robot.data.root_ang_vel_b * 0.25,   # 3
             ],
             dim=-1,
-        )  # total: 14
+        )  # (N, 6)
 
-        # Full critic observation: proprio + scan + priv
+        # priv_latent: startup-randomized domain parameters (quasi-static per episode).
+        #   foot_friction : (N, 8)  — 4 feet × [static, dynamic]
+        #   base_mass     : (N, 1)  — base body mass (per-env scalar, DR-randomized at startup)
+        #   base_com      : (N, 3)  — base body COM offset in body frame (per-env, DR-randomized)
+        # get_masses() returns a CPU tensor (N, num_bodies); index with list → (N, 1).
+        # body_com_pos_b shape: (N, num_bodies, 3); index with list → (N, 1, 3), squeeze → (N, 3).
+        base_mass = (
+            torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device)[:, self._robot_base_id]
+        )  # (N, 1)
+        base_com = (
+            self._robot.data.body_com_pos_b[:, self._robot_base_id, :].squeeze(1)
+        )  # (N, 3)
+        priv_latent = torch.cat(
+            [
+                foot_friction,   # 8  (4 feet × [static, dynamic])
+                base_mass,       # 1
+                base_com,        # 3
+            ],
+            dim=-1,
+        )  # (N, 12)
+
+        # Full critic observation: proprio + scan + priv_explicit + priv_latent
         critic_obs = torch.cat(
             [
                 proprio,
                 self._scan,
-                priv,
+                priv_explicit,
+                priv_latent,
             ],
             dim=-1,
         )
@@ -922,7 +952,8 @@ class Go2ParkourEnv(DirectRLEnv):
             "policy": proprio,
             # "critic": critic_obs,
             "scan": self._scan,
-            "priv": priv,
+            "priv_explicit": priv_explicit,
+            "priv_latent": priv_latent,
             "history": self._proprio_history,
         }
 

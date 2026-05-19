@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
@@ -12,12 +17,13 @@ from torch.distributions import Normal
 from typing import Any, NoReturn
 
 from rsl_rl.networks import MLP, EmpiricalNormalization
-from rsl_rl.utils import get_param, resolve_nn_activation
+from rsl_rl.utils import resolve_nn_activation
+
 
 class StateHistoryEncoder(nn.Module):
     def __init__(self, activation_fn, input_size, tsteps, output_size, tanh_encoder_output=False):
         # self.device = device
-        super(StateHistoryEncoder, self).__init__()
+        super().__init__()
         self.activation_fn = activation_fn
         self.tsteps = tsteps
 
@@ -25,35 +31,48 @@ class StateHistoryEncoder(nn.Module):
         # last_activation = nn.ELU()
 
         self.encoder = nn.Sequential(
-                nn.Linear(input_size, 3 * channel_size), resolve_nn_activation(self.activation_fn),
-                )
+            nn.Linear(input_size, 3 * channel_size),
+            resolve_nn_activation(self.activation_fn),
+        )
 
         if tsteps == 50:
             self.conv_layers = nn.Sequential(
-                    nn.Conv1d(in_channels = 3 * channel_size, out_channels = 2 * channel_size, kernel_size = 8, stride = 4), resolve_nn_activation(self.activation_fn),
-                    nn.Conv1d(in_channels = 2 * channel_size, out_channels = channel_size, kernel_size = 5, stride = 1), resolve_nn_activation(self.activation_fn),
-                    nn.Conv1d(in_channels = channel_size, out_channels = channel_size, kernel_size = 5, stride = 1), resolve_nn_activation(self.activation_fn), nn.Flatten())
+                nn.Conv1d(in_channels=3 * channel_size, out_channels=2 * channel_size, kernel_size=8, stride=4),
+                resolve_nn_activation(self.activation_fn),
+                nn.Conv1d(in_channels=2 * channel_size, out_channels=channel_size, kernel_size=5, stride=1),
+                resolve_nn_activation(self.activation_fn),
+                nn.Conv1d(in_channels=channel_size, out_channels=channel_size, kernel_size=5, stride=1),
+                resolve_nn_activation(self.activation_fn),
+                nn.Flatten(),
+            )
         elif tsteps == 10:
             self.conv_layers = nn.Sequential(
-                nn.Conv1d(in_channels = 3 * channel_size, out_channels = 2 * channel_size, kernel_size = 4, stride = 2), resolve_nn_activation(self.activation_fn),
-                nn.Conv1d(in_channels = 2 * channel_size, out_channels = channel_size, kernel_size = 2, stride = 1), resolve_nn_activation(self.activation_fn),
-                nn.Flatten())
+                nn.Conv1d(in_channels=3 * channel_size, out_channels=2 * channel_size, kernel_size=4, stride=2),
+                resolve_nn_activation(self.activation_fn),
+                nn.Conv1d(in_channels=2 * channel_size, out_channels=channel_size, kernel_size=2, stride=1),
+                resolve_nn_activation(self.activation_fn),
+                nn.Flatten(),
+            )
         elif tsteps == 20:
             self.conv_layers = nn.Sequential(
-                nn.Conv1d(in_channels = 3 * channel_size, out_channels = 2 * channel_size, kernel_size = 6, stride = 2), resolve_nn_activation(self.activation_fn),
-                nn.Conv1d(in_channels = 2 * channel_size, out_channels = channel_size, kernel_size = 4, stride = 2), resolve_nn_activation(self.activation_fn),
-                nn.Flatten())
+                nn.Conv1d(in_channels=3 * channel_size, out_channels=2 * channel_size, kernel_size=6, stride=2),
+                resolve_nn_activation(self.activation_fn),
+                nn.Conv1d(in_channels=2 * channel_size, out_channels=channel_size, kernel_size=4, stride=2),
+                resolve_nn_activation(self.activation_fn),
+                nn.Flatten(),
+            )
         else:
-            raise(ValueError("tsteps must be 10, 20 or 50"))
+            raise (ValueError("tsteps must be 10, 20 or 50"))
 
         self.linear_output = nn.Sequential(
-                nn.Linear(channel_size * 3, output_size), resolve_nn_activation(self.activation_fn)
-                )
+            nn.Linear(channel_size * 3, output_size), resolve_nn_activation(self.activation_fn)
+        )
+
     def forward(self, obs):
         # nd * T * n_proprio
         nd = obs.shape[0]
         T = self.tsteps
-        projection = self.encoder(obs.reshape([nd * T, -1])) # do projection for n_proprio -> 32
+        projection = self.encoder(obs.reshape([nd * T, -1]))  # do projection for n_proprio -> 32
         output = self.conv_layers(projection.reshape([nd, T, -1]).permute((0, 2, 1)))
         output = self.linear_output(output)
         return output
@@ -108,13 +127,16 @@ class ActorCriticRMA(nn.Module):
         for obs_group in obs_groups["priv"]:
             assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
             num_priv_obs += obs[obs_group].shape[-1]
-
+        num_priv_explicit = 0
+        for obs_group in obs_groups["priv_explicit"]:
+            assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
+            num_priv_explicit += obs[obs_group].shape[-1]
 
         # Actor
         self.state_dependent_std = state_dependent_std
-        # Actor input is concat of: proprio + priv_latent + scan_latent (only if scan present)
+        # Actor input is concat of: proprio + priv_explicit + priv_latent + scan_latent (only if scan present)
         scan_latent_dim = scan_encoder_dims[-1] if num_scan_obs > 0 else 0
-        actor_input_dim = num_actor_obs + priv_encoder_dims[-1] + scan_latent_dim
+        actor_input_dim = num_actor_obs + num_priv_explicit + priv_encoder_dims[-1] + scan_latent_dim
         if self.state_dependent_std:
             self.actor = MLP(actor_input_dim, [2, num_actions], actor_hidden_dims, activation)
         else:
@@ -148,6 +170,13 @@ class ActorCriticRMA(nn.Module):
         else:
             self.priv_obs_normalizer = torch.nn.Identity()
 
+        # Priv explicit observation normalization (priv_explicit is passed directly to actor, not encoded)
+        self.priv_explicit_obs_normalization = actor_obs_normalization
+        if actor_obs_normalization:
+            self.priv_explicit_obs_normalizer = EmpiricalNormalization(num_priv_explicit)
+        else:
+            self.priv_explicit_obs_normalizer = torch.nn.Identity()
+
         # History Encoder
         self.history_encoder = StateHistoryEncoder(activation, num_actor_obs, num_history, priv_encoder_dims[-1])
         # History observation normalization
@@ -156,7 +185,6 @@ class ActorCriticRMA(nn.Module):
             self.history_obs_normalizer = EmpiricalNormalization(num_actor_obs * num_history)
         else:
             self.history_obs_normalizer = torch.nn.Identity()
-
 
         # Critic
         self.critic = MLP(num_critic_obs, 1, critic_hidden_dims, activation)
@@ -241,15 +269,15 @@ class ActorCriticRMA(nn.Module):
         self.distribution = Normal(mean, std)
 
     def act(self, obs: TensorDict, hist_encoding=False, **kwargs: dict[str, Any]) -> torch.Tensor:
-        # obs = self.get_actor_obs(obs)
         obs_actor = self.get_actor_obs(obs)
         obs_actor = self.actor_obs_normalizer(obs_actor)
+        priv_explicit = self.priv_explicit_obs_normalizer(self.get_priv_explicit_obs(obs))
         if hist_encoding:
             history_latent = self.get_hist_latent(obs)
-            obs_actor = torch.cat([obs_actor, history_latent], dim=-1)
+            obs_actor = torch.cat([obs_actor, priv_explicit, history_latent], dim=-1)
         else:
             priv_latent = self.get_priv_latent(obs)
-            obs_actor = torch.cat([obs_actor, priv_latent], dim=-1)
+            obs_actor = torch.cat([obs_actor, priv_explicit, priv_latent], dim=-1)
 
         if self.scandot_encoder is not None:
             obs_scan = self.get_scan_obs(obs)
@@ -262,8 +290,9 @@ class ActorCriticRMA(nn.Module):
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
         obs_actor = self.get_actor_obs(obs)
         obs_actor = self.actor_obs_normalizer(obs_actor)
+        priv_explicit = self.priv_explicit_obs_normalizer(self.get_priv_explicit_obs(obs))
         history_latent = self.get_hist_latent(obs)
-        obs_actor = torch.cat([obs_actor, history_latent], dim=-1)
+        obs_actor = torch.cat([obs_actor, priv_explicit, history_latent], dim=-1)
 
         if self.scandot_encoder is not None:
             obs_scan = self.get_scan_obs(obs)
@@ -274,7 +303,7 @@ class ActorCriticRMA(nn.Module):
             return self.actor(obs_actor)[..., 0, :]
         else:
             return self.actor(obs_actor)
-    
+
     def get_hist_latent(self, obs: TensorDict) -> torch.Tensor:
         obs_history = self.get_history_obs(obs)
         obs_history_flat = obs_history.reshape(obs_history.shape[0], -1)
@@ -309,6 +338,10 @@ class ActorCriticRMA(nn.Module):
         obs_list = [obs[obs_group] for obs_group in self.obs_groups["priv"]]
         return torch.cat(obs_list, dim=-1)
 
+    def get_priv_explicit_obs(self, obs: TensorDict) -> torch.Tensor:
+        obs_list = [obs[obs_group] for obs_group in self.obs_groups["priv_explicit"]]
+        return torch.cat(obs_list, dim=-1)
+
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         return self.distribution.log_prob(actions).sum(dim=-1)
 
@@ -320,6 +353,8 @@ class ActorCriticRMA(nn.Module):
             self.history_obs_normalizer.update(history_obs.reshape(history_obs.shape[0], -1))
             priv_obs = self.get_priv_obs(obs)
             self.priv_obs_normalizer.update(priv_obs)
+            priv_explicit_obs = self.get_priv_explicit_obs(obs)
+            self.priv_explicit_obs_normalizer.update(priv_explicit_obs)
             if self.scandot_encoder is not None:
                 scan_obs = self.get_scan_obs(obs)
                 self.scan_obs_normalizer.update(scan_obs)

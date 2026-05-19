@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
@@ -43,6 +48,9 @@ class PPOParkour:
         device: str = "cpu",
         # RND parameters
         rnd_cfg: dict | None = None,
+        # Estimator parameters
+        estimator: nn.Module | None = None,
+        estimator_cfg: dict | None = None,
         # Symmetry parameters
         symmetry_cfg: dict | None = None,
         # Distributed training parameters
@@ -72,6 +80,16 @@ class PPOParkour:
         else:
             self.rnd = None
             self.rnd_optimizer = None
+
+        # Estimator components
+        if estimator is not None and estimator_cfg is not None:
+            self.estimator = estimator.to(self.device)
+            self.estimator_optimizer = optim.Adam(self.estimator.parameters(), lr=estimator_cfg["learning_rate"])
+            self.train_with_estimated_states = estimator_cfg["train_with_estimated_states"]
+        else:
+            self.estimator = None
+            self.estimator_optimizer = None
+            self.train_with_estimated_states = False
 
         # Symmetry components
         if symmetry_cfg is not None:
@@ -127,16 +145,22 @@ class PPOParkour:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
-    def act(self, obs: TensorDict, hist_encoding: bool =False) -> torch.Tensor:
+    def act(self, obs: TensorDict, hist_encoding: bool = False) -> torch.Tensor:
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
-        # Compute the actions and values
-        self.transition.actions = self.policy.act(obs, hist_encoding=hist_encoding).detach()
+        # Compute the actions — optionally replace priv_explicit with estimator output
+        if self.train_with_estimated_states and self.estimator is not None:
+            obs_est = obs.clone()
+            obs_est["priv_explicit"] = self.estimator(obs["policy"])
+            self.transition.actions = self.policy.act(obs_est, hist_encoding=hist_encoding).detach()
+        else:
+            self.transition.actions = self.policy.act(obs, hist_encoding=hist_encoding).detach()
+        # Critic always uses original obs (ground-truth priv_explicit)
         self.transition.values = self.policy.evaluate(obs).detach()
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.policy.action_mean.detach()
         self.transition.action_sigma = self.policy.action_std.detach()
-        # Record observations before env.step()
+        # Record original observations before env.step() — preserves ground-truth priv_explicit in storage
         self.transition.observations = obs
         return self.transition.actions
 
@@ -200,6 +224,8 @@ class PPOParkour:
         mean_entropy = 0
         # RND loss
         mean_rnd_loss = 0 if self.rnd else None
+        # Estimator loss
+        mean_estimator_loss = 0 if self.estimator else None
         # Symmetry loss
         mean_symmetry_loss = 0 if self.symmetry else None
         # Adaptation Reg loss
@@ -267,8 +293,13 @@ class PPOParkour:
             with torch.inference_mode():
                 hist_latent_batch = self.policy.get_hist_latent(obs_batch)
             priv_reg_loss = (priv_latent_batch - hist_latent_batch.detach()).norm(p=2, dim=1).mean()
-            priv_reg_stage = min(max((self.counter - self.priv_reg_coef_schedual[2]), 0) / self.priv_reg_coef_schedual[3], 1)
-            priv_reg_coef = priv_reg_stage * (self.priv_reg_coef_schedual[1] - self.priv_reg_coef_schedual[0]) + self.priv_reg_coef_schedual[0]
+            priv_reg_stage = min(
+                max((self.counter - self.priv_reg_coef_schedual[2]), 0) / self.priv_reg_coef_schedual[3], 1
+            )
+            priv_reg_coef = (
+                priv_reg_stage * (self.priv_reg_coef_schedual[1] - self.priv_reg_coef_schedual[0])
+                + self.priv_reg_coef_schedual[0]
+            )
 
             # Compute KL divergence and adapt the learning rate
             if self.desired_kl is not None and self.schedule == "adaptive":
@@ -325,9 +356,13 @@ class PPOParkour:
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + \
-                   priv_reg_coef * priv_reg_loss
-            
+            loss = (
+                surrogate_loss
+                + self.value_loss_coef * value_loss
+                - self.entropy_coef * entropy_batch.mean()
+                + priv_reg_coef * priv_reg_loss
+            )
+
             # Symmetry loss
             if self.symmetry:
                 # Obtain the symmetric actions
@@ -395,6 +430,16 @@ class PPOParkour:
             if self.rnd_optimizer:
                 self.rnd_optimizer.step()
 
+            # Estimator loss (separate optimizer — gradient isolated from PPO/RND)
+            if self.estimator is not None:
+                obs_orig = obs_batch[:original_batch_size]
+                priv_explicit_pred = self.estimator(obs_orig["policy"])
+                estimator_loss = (priv_explicit_pred - obs_orig["priv_explicit"]).pow(2).mean()
+                self.estimator_optimizer.zero_grad()
+                estimator_loss.backward()
+                nn.utils.clip_grad_norm_(self.estimator.parameters(), self.max_grad_norm)
+                self.estimator_optimizer.step()
+
             # Store the losses
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
@@ -403,6 +448,9 @@ class PPOParkour:
             # RND loss
             if mean_rnd_loss is not None:
                 mean_rnd_loss += rnd_loss.item()
+            # Estimator loss
+            if mean_estimator_loss is not None:
+                mean_estimator_loss += estimator_loss.item()
             # Symmetry loss
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
@@ -414,9 +462,11 @@ class PPOParkour:
         mean_entropy /= num_updates
         if mean_rnd_loss is not None:
             mean_rnd_loss /= num_updates
+        if mean_estimator_loss is not None:
+            mean_estimator_loss /= num_updates
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
-        
+
         mean_priv_reg_loss /= num_updates
 
         # NOTE: storage.clear() and update_counter() are deferred to update_dagger()
@@ -431,6 +481,8 @@ class PPOParkour:
         }
         if self.rnd:
             loss_dict["rnd"] = mean_rnd_loss
+        if self.estimator:
+            loss_dict["estimator"] = mean_estimator_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
 
@@ -467,9 +519,9 @@ class PPOParkour:
             hist_latent_loss.backward()
             nn.utils.clip_grad_norm_(self.policy.history_encoder.parameters(), self.max_grad_norm)
             self.hist_encoder_optimizer.step()
-            
+
             mean_hist_latent_loss += hist_latent_loss.item()
-            
+
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_hist_latent_loss /= num_updates
         self.storage.clear()

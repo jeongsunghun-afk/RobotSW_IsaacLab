@@ -339,6 +339,18 @@ class EventCfg:
         },
     )
 
+    # NEW — push DR: periodic random velocity impulse on the robot base (sim-to-real robustness)
+    # Reference: B parkour_mdp_cfg.py:321-327 (same interval / velocity ranges)
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(8.0, 8.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)},
+        },
+    )
+
 
 ##
 # Environment configuration
@@ -377,11 +389,12 @@ class ParkourEnvCfg(DirectRLEnvCfg):
 
     # Observation space (Task #3, #6 — dict-based, kept for backward compat):
     # Deprecated: observation_space is now a dict with keys {policy, critic, scan, history, priv}
-    # policy: 3+3+2+2+12+12+12 = 46
-    # scan: 187
-    # priv: 4 (placeholder for domain randomization)
-    # history: history_len * num_proprio = 10 * 46 = 460
-    # critic = policy + scan + priv + history = 46 + 187 + 4 + 460 = 697
+    # policy:        proprio          = 3+1+1+1+12+12+12 = 42
+    # scan:          height_scan      = 187
+    # priv_explicit: lin_vel + ang_vel = 6   (root_lin_vel_b*2.0(3) + root_ang_vel_b*0.25(3))
+    # priv_latent:   fric + mass + com = 12  (foot_friction(8) + base_mass(1) + base_com(3))
+    # history:       history_len * num_proprio = 10 * 42 = 420
+    # critic total:  policy + scan + priv_explicit + priv_latent = 42 + 187 + 6 + 12 = 247
     # Note: DirectRLEnv may still use observation_space for Space creation, but runners use dict obs.
     observation_space: int = 42  # policy obs dim (runner overrides with dict obs_groups)
     state_space: int = 0
@@ -389,7 +402,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # Observation dimensions (Task #3)
     num_proprio: int = 42  # 3+1+1+1+12+12+12
     num_scan_obs: int = 187
-    num_priv_obs: int = 20  # lin_vel_b(3) + ang_vel_b(3) + foot_friction(8) + body_friction(2) + added_base_mass(1) + base_com_offset(3)
+    num_priv_obs: int = 18  # priv_explicit(6): lin_vel_b(3) + ang_vel_b(3) + priv_latent(12): foot_friction(8) + base_mass(1) + base_com(3)
     history_len: int = 10
 
     # simulation

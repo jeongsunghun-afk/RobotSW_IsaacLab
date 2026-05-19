@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
@@ -11,7 +16,7 @@ import torch
 import warnings
 from tensordict import TensorDict
 
-from rsl_rl.algorithms import PPO, PPOParkour
+from rsl_rl.algorithms import PPOParkour
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import (
     ActorCritic,
@@ -21,6 +26,7 @@ from rsl_rl.modules import (
     resolve_rnd_config,
     resolve_symmetry_config,
 )
+from rsl_rl.modules.estimator import Estimator
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_obs_groups
 from rsl_rl.utils.logger import Logger
@@ -33,7 +39,7 @@ class OnPolicyRunnerParkour:
         self.cfg = train_cfg
         self.policy_cfg = train_cfg["policy"]
         self.alg_cfg = train_cfg["algorithm"]
-        # self.estimator_cfg = train_cfg["estimator"]
+        self.estimator_cfg = train_cfg["estimator"]
         # self.depth_encoder_cfg = train_cfg["depth_encoder"]
         self.device = device
         self.env = env
@@ -84,7 +90,7 @@ class OnPolicyRunnerParkour:
         total_it = start_it + num_learning_iterations
         for it in range(start_it, total_it):
             start = time.time()
-            hist_encoding = it % 20 == 0 # dagger_update_freq
+            hist_encoding = it % 20 == 0  # dagger_update_freq
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
@@ -144,6 +150,8 @@ class OnPolicyRunnerParkour:
             "optimizer_state_dict": self.alg.optimizer.state_dict(),
             "iter": self.current_learning_iteration,
             "infos": infos,
+            "estimator_state_dict": self.alg.estimator.state_dict(),
+            "estimator_optimizer_state_dict": self.alg.estimator_optimizer.state_dict(),
         }
         # Save RND model if used
         if self.alg_cfg["rnd_cfg"]:
@@ -162,6 +170,9 @@ class OnPolicyRunnerParkour:
         # Load RND model if used
         if self.alg_cfg["rnd_cfg"]:
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
+        # Load estimator model if present
+        if "estimator_state_dict" in loaded_dict:
+            self.alg.estimator.load_state_dict(loaded_dict["estimator_state_dict"])
         # Load optimizer if used
         if load_optimizer and resumed_training:
             # Algorithm optimizer
@@ -169,6 +180,9 @@ class OnPolicyRunnerParkour:
             # RND optimizer if used
             if self.alg_cfg["rnd_cfg"]:
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+            # Estimator optimizer if present
+            if "estimator_optimizer_state_dict" in loaded_dict:
+                self.alg.estimator_optimizer.load_state_dict(loaded_dict["estimator_optimizer_state_dict"])
         # Load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
@@ -283,10 +297,26 @@ class OnPolicyRunnerParkour:
             "rl", self.env.num_envs, self.cfg["num_steps_per_env"], obs, [self.env.num_actions], self.device
         )
 
+        # Initialize the estimator (predicts priv_explicit from policy obs)
+        estimator_input_dim = obs["policy"].shape[-1]
+        estimator_output_dim = sum(obs[k].shape[-1] for k in self.cfg["obs_groups"]["priv_explicit"])
+        estimator = Estimator(
+            input_dim=estimator_input_dim,
+            output_dim=estimator_output_dim,
+            hidden_dims=self.estimator_cfg["hidden_dims"],
+            activation=self.policy_cfg.get("activation", "elu"),
+        ).to(self.device)
+
         # Initialize the algorithm
         alg_class = eval(self.alg_cfg.pop("class_name"))
         alg: PPOParkour = alg_class(
-            actor_critic, storage, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
+            actor_critic,
+            storage,
+            device=self.device,
+            estimator=estimator,
+            estimator_cfg=self.estimator_cfg,
+            **self.alg_cfg,
+            multi_gpu_cfg=self.multi_gpu_cfg,
         )
 
         return alg
