@@ -104,6 +104,12 @@ class Go2ParkourEnv(DirectRLEnv):
         # Commands [lin_vel_x, lin_vel_y, ang_vel_z]
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
 
+        # Per-env step counter for time-based velocity command resampling.
+        # Counts policy steps since the last resample; reset to 0 on episode start and after each resample.
+        # Interval: cfg.resampling_time_s / step_dt  (6.0 s / 0.02 s = 300 steps).
+        self._time_since_command_resample = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._command_resample_interval: int = max(1, int(round(self.cfg.resampling_time_s / self.step_dt)))
+
         # Cached sensor observations refreshed at 10 Hz (every 5 policy steps).
         # Allocated here as zero tensors so _get_observations() never references an undefined
         # attribute on the very first call (before common_step_counter reaches a multiple of 5).
@@ -174,6 +180,12 @@ class Go2ParkourEnv(DirectRLEnv):
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in self.cfg.reward_scales.keys()
+        }
+
+        # Per-step scaled reward contribution for env 0 — read by external UDP debug publisher.
+        # Updated every _get_rewards() call; never affects reward computation.
+        self._last_reward_breakdown_env0: dict[str, float] = {
+            key: 0.0 for key in self.cfg.reward_scales.keys()
         }
 
         # Get body indices for contact sensing
@@ -484,6 +496,15 @@ class Go2ParkourEnv(DirectRLEnv):
         print("=======================================\n")
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        # Time-based velocity command resampling (every resampling_time_s = 300 steps @ 0.02 s/step).
+        # Each env is resampled independently when its per-env counter reaches the interval.
+        self._time_since_command_resample += 1
+        _resample_mask = self._time_since_command_resample >= self._command_resample_interval
+        if _resample_mask.any():
+            _resample_ids = _resample_mask.nonzero(as_tuple=False).squeeze(-1)
+            self._resample_commands(_resample_ids)
+            self._time_since_command_resample[_resample_ids] = 0
+
         self._previous_actions = self._actions.clone()  # Save previous BEFORE updating current
         self._actions = torch.clip(actions.clone(), -self.cfg.clip_actions, self.cfg.clip_actions)
         scaled = self._actions.clone()
@@ -942,15 +963,6 @@ class Go2ParkourEnv(DirectRLEnv):
         # yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
         tracking_yaw = torch.exp(-torch.abs(yaw_diff))
 
-        # === Velocity tracking (exponential) (Genesis line 1426-1435) ===
-        lin_vel_error = torch.sum(
-            torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1
-        )
-        tracking_lin_vel_xy_exp = torch.exp(-lin_vel_error / self.cfg.tracking_sigma)
-
-        ang_vel_z_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
-        tracking_ang_vel_z_exp = torch.exp(-ang_vel_z_error / self.cfg.tracking_sigma)
-
         # === Velocity penalties (Genesis line 1437-1445) ===
         lin_vel_z_l2 = torch.square(self._robot.data.root_lin_vel_b[:, 2])
         ang_vel_xy_l2 = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
@@ -980,6 +992,7 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # === Delta torques (Genesis line 1509-1510) — NEW ===
         current_applied_torque = self._robot.data.applied_torque.clone()
+        # print(current_applied_torque)
         delta_torques = torch.sum(torch.square(current_applied_torque - self._last_applied_torque), dim=1)
         self._last_applied_torque = current_applied_torque  # Update for next step
 
@@ -999,14 +1012,6 @@ class Go2ParkourEnv(DirectRLEnv):
         dof_error_l2 = torch.sum(
             torch.square(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1
         )
-        # Genesis conditional: dof_error penalized 10x more on flat (nominal posture expected there)
-        dof_error_l2 = dof_error_l2 * (10.0 * is_flat + is_non_flat * 0)
-
-        # === Base height penalty (flat terrain only) (Genesis: base_height reward) ===
-        # Penalizes deviation from nominal stance height; zeroed on non-flat where height varies.
-        base_height = torch.square(
-            self._robot.data.root_link_pos_w[:, 2] - self._terrain.env_origins[:, 2] - self.cfg.base_height_target
-        ) * is_flat
 
         # === Feet stumble (Genesis line 1559-1573) ===
         feet_forces = net_contact_forces[:, 0, self._feet_ids]  # [N, 4, 3]
@@ -1042,49 +1047,12 @@ class Go2ParkourEnv(DirectRLEnv):
         feet_at_edge = contact_filt & feet_at_edge
         feet_edge = (self._terrain_levels > 3).float() * torch.sum(feet_at_edge.float(), dim=-1)
 
-        # === Termination penalty (Genesis line 1588-1594) — NEW ===
-        # Penalize early termination: base_contact | tilt | low_height
-        termination = (self._term_base_contact | self._term_tilt | self._term_low_height).float()
-
-        # === Feet dragging (Genesis line 1596-1608) — NEW ===
-        # Penalize feet sliding horizontally while in contact
-        feet_lin_vel = self._robot.data.body_link_lin_vel_w[:, self._feet_ids, :2]  # [N, 4, 2]
-        feet_speed = torch.norm(feet_lin_vel, dim=-1)  # [N, 4]
-        feet_dragging = torch.sum(
-            feet_speed * contact_filt.float() * (feet_speed > self.cfg.dragging_velocity_threshold).float(),
-            dim=1,
-        )
-
-        # === Feet air time (anymal_c / R_Skeleton 표준 패턴) — NEW 2026-05-13 ===
-        # 발이 일정 시간 air 후 contact한 순간 양성 보상. command 크기 > 0.1 m/s일 때만 활성.
-        # trot 발현 유도 — feet_dragging의 negative 형태와 상보적.
-        first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._feet_ids]
-        last_air_time = self._contact_sensor.data.last_air_time[:, self._feet_ids]
-        feet_air_time = torch.sum((last_air_time - 0.5) * first_contact, dim=1) * (
-            torch.norm(self._commands[:, :2], dim=1) > 0.1
-        )
-
-        # === Action smoothness 1 (Genesis line 1575-1579) — NEW ===
-        # Penalize position target changes when last action was nonzero
-        last_action_mask = (self._last_processed_actions != 0).float()
-        diff_1 = torch.square(self._processed_actions - self._last_processed_actions) * last_action_mask
-        action_smoothness_1 = torch.sum(diff_1, dim=1)
-
-        # === Action smoothness 2 (Genesis line 1581-1586) — NEW ===
-        # Penalize 2nd-order action changes
-        last_last_action_mask = (self._last_last_processed_actions != 0).float()
-        diff_2 = torch.square(self._processed_actions - 2 * self._last_processed_actions + self._last_last_processed_actions)
-        diff_2 = diff_2 * last_action_mask * last_last_action_mask
-        action_smoothness_2 = torch.sum(diff_2, dim=1)
-
-        # === Assemble all reward terms (Genesis original + parkour extensions) ===
+        # === Assemble all reward terms (B-aligned 14-term set) ===
         reward_values = {
             "tracking_goal_vel": tracking_goal_vel,
             "tracking_yaw": tracking_yaw,
-            "tracking_lin_vel_xy_exp": tracking_lin_vel_xy_exp,
-            "tracking_ang_vel_z_exp": tracking_ang_vel_z_exp,
             "lin_vel_z_l2": lin_vel_z_l2,        # *= 0.1 on non-flat (applied above)
-            "ang_vel_xy_l2": ang_vel_xy_l2,       # *= 0.5 on flat (applied above)
+            "ang_vel_xy_l2": ang_vel_xy_l2,       # *= 0.5 on non-flat (applied above)
             "orientation_l2": orientation_l2,      # zero on non-flat (applied above)
             "dof_acc_l2": dof_acc_l2,
             "collision": collision,
@@ -1092,15 +1060,9 @@ class Go2ParkourEnv(DirectRLEnv):
             "delta_torques": delta_torques,
             "torques_l2": torques_l2,
             "hip_pos": hip_pos,
-            "dof_error_l2": dof_error_l2,          # *= 10.0 on flat (applied above)
+            "dof_error_l2": dof_error_l2,
             "feet_stumble": feet_stumble,
             "feet_edge": feet_edge,
-            "termination": termination,
-            "feet_dragging": feet_dragging,
-            "action_smoothness_1": action_smoothness_1,
-            "action_smoothness_2": action_smoothness_2,
-            "base_height": base_height,            # flat-only; scale=0.0 by default (disabled)
-            "feet_air_time": feet_air_time,        # NEW 2026-05-13: trot 발현 유도
         }
 
         # === Accumulate and scale rewards ===
@@ -1109,6 +1071,7 @@ class Go2ParkourEnv(DirectRLEnv):
             scaled = self.cfg.reward_scales[key] * self.step_dt * value
             self._episode_sums[key] += scaled
             total_reward += scaled
+            self._last_reward_breakdown_env0[key] = float(scaled[0].detach().item())
 
         return total_reward
 
@@ -1192,7 +1155,9 @@ class Go2ParkourEnv(DirectRLEnv):
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # Resample velocity commands
+        # Resample velocity commands and reset per-env timer so the next time-based
+        # resample fires exactly resampling_time_s after episode start.
+        self._time_since_command_resample[env_ids] = 0
         self._resample_commands(env_ids)
 
         # Logging
