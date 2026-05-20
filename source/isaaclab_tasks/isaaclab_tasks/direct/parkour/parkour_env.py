@@ -998,7 +998,7 @@ class Go2ParkourEnv(DirectRLEnv):
         lin_vel_z_l2 = torch.square(self._robot.data.root_lin_vel_b[:, 2])
         ang_vel_xy_l2 = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
         # Genesis conditional: lin_vel_z penalized 10x less on non-flat (robot needs to move vertically)
-        lin_vel_z_l2 = lin_vel_z_l2 * (is_flat + is_non_flat * 0.1)
+        lin_vel_z_l2 = lin_vel_z_l2 * (is_flat + is_non_flat * 0.5)
         # Genesis conditional: ang_vel_xy penalized 2x less on flat (upright posture less critical there)
         ang_vel_xy_l2 = ang_vel_xy_l2 * (is_flat + is_non_flat * 0.5)
 
@@ -1104,13 +1104,14 @@ class Go2ParkourEnv(DirectRLEnv):
             total_reward += scaled
             self._last_reward_breakdown_env0[key] = float(scaled[0].detach().item())
 
-        return total_reward
+        # return total_reward
+        return torch.clip(total_reward, min=0.)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        episode_timeout = self.episode_length_buf >= self.max_episode_length - 1
 
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        # Base contact with ground
+        # Base contact with ground (kept for per-cause logging at _reset_idx:1213; not in reset_all)
         self._term_base_contact = torch.any(
             torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 5.0,
             dim=1,
@@ -1121,14 +1122,22 @@ class Go2ParkourEnv(DirectRLEnv):
         # Robot too low (fallen into terrain gap or flipped)
         self._term_low_height = self._robot.data.root_link_pos_w[:, 2] < self.cfg.termination_height
 
-        # Goal-reached termination is set in _update_goals() (called from _get_observations()).
-        # It fires when the robot holds position at the last waypoint long enough — a success event,
-        # NOT a failure.  Use terminated=True (not time_out) so the value bootstrap is zero (episode
-        # truly ends) rather than using the next-state value estimate.
-        # Grace period applies only to failure conditions, not to goal success.
-        terminated = self._term_base_contact | self._term_tilt | self._term_low_height
+        # NOTE: Bootstrap-all policy — matches Isaaclab_Parkour (B) reference implementation.
+        # In B, all reset causes (tilt, low_height, goal_reached, episode timeout) are registered
+        # as DoneTerm(time_out=True), so termination_manager.terminated is always empty and PPO
+        # applies γ·V(s') bootstrap on every reset transition.  This treats every reset as a
+        # sim-side truncation of an infinite-horizon MDP rather than a true terminal state.
+        # Concretely: returning terminated=zeros means RslRlVecEnvWrapper sees extras["time_outs"]
+        # set for all resets, and the PPO update always bootstraps from V(s') instead of zeroing
+        # the value target at reset boundaries.
+        # Grace period applies only to failure conditions (tilt/low_height), matching original intent.
+        # _term_goal_reached is set in _update_goals() (called from _get_observations()).
+        failure = self._term_tilt | self._term_low_height
         grace = self.episode_length_buf < self.cfg.termination_grace_steps
-        terminated = (terminated & ~grace) | self._term_goal_reached
+        reset_all = (failure & ~grace) | self._term_goal_reached | episode_timeout
+
+        terminated = torch.zeros_like(reset_all)
+        time_out = reset_all
         return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -1178,6 +1187,8 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # Reset robot state at terrain origin
         joint_pos = self._robot.data.default_joint_pos[env_ids]
+        # Random start state
+        joint_pos += (torch.rand_like(joint_pos) * 0.1 - 0.05)
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
