@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
@@ -35,10 +40,10 @@ import numpy as np
 import torch
 import trimesh
 
+from isaaclab.terrains.sub_terrain_cfg import SubTerrainBaseCfg
 from isaaclab.terrains.trimesh.mesh_terrains import PARKOUR_GOALS_REGISTRY
 from isaaclab.terrains.trimesh.mesh_terrains_cfg import MeshParkourHurdleTerrainCfg
 from isaaclab.terrains.trimesh.utils import make_border, make_plane
-from isaaclab.terrains.sub_terrain_cfg import SubTerrainBaseCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
 
@@ -89,17 +94,40 @@ def parkour_jump_hurdle_terrain(
 
     goals_list: list[list[float]] = []
 
+    # ------------------------------------------------------------------
+    # Pass 1: sample all hurdle positions up-front so that goal_x[i] can
+    # be placed at the midpoint between hurdle[i]'s back face and
+    # hurdle[i+1]'s front face (rather than 0.3 m past the current hurdle).
+    # ------------------------------------------------------------------
+    hurdle_spacings: list[float] = []  # rand_x[i] — spacing *before* hurdle i
+    hurdle_front_xs: list[float] = []  # x of hurdle i front face (= dis_x after += rand_x)
+    hurdle_center_ys: list[float] = []
+
     dis_x = cfg.platform_length
     for _ in range(cfg.num_hurdles):
         rand_x = float(np.random.uniform(cfg.x_spacing_range[0], cfg.x_spacing_range[1]))
         rand_y = float(np.random.uniform(cfg.y_offset_range[0], cfg.y_offset_range[1]))
         dis_x += rand_x
-        hurdle_center_y = mid_y + rand_y
+        hurdle_spacings.append(rand_x)
+        hurdle_front_xs.append(dis_x)
+        hurdle_center_ys.append(mid_y + rand_y)
 
-        # Goal: just past the hurdle face, at corridor/hurdle center (ground level z=0).
-        # This matches the IsaacLab core goal convention — no platform-start goal prepended
-        # (Genesis prepends goals[0] on the start platform; IsaacLab does not).
-        goals_list.append([dis_x + cfg.hurdle_thickness + 0.3, hurdle_center_y, 0.0])
+    # Pass 2: build goals — midpoint between current hurdle back face and next hurdle front face.
+    # For the last hurdle there is no next hurdle; reuse the last spacing as an estimate.
+    for i in range(cfg.num_hurdles):
+        hurdle_back_x = hurdle_front_xs[i] + cfg.hurdle_thickness
+        if i + 1 < cfg.num_hurdles:
+            next_hurdle_front_x = hurdle_front_xs[i + 1]
+        else:
+            # Extrapolate: assume the gap after the last hurdle equals the last sampled spacing.
+            next_hurdle_front_x = hurdle_back_x + hurdle_spacings[i]
+        goal_x = (hurdle_back_x + next_hurdle_front_x) / 2.0  # midpoint between hurdles
+        goals_list.append([goal_x, hurdle_center_ys[i], 0.0])
+
+    # Pass 3: build meshes using the pre-sampled positions.
+    for i in range(cfg.num_hurdles):
+        dis_x = hurdle_front_xs[i]
+        hurdle_center_y = hurdle_center_ys[i]
 
         if cfg.flat or hurdle_h <= 0.0:
             # flat=True: skip obstacle creation but keep goal emission and registry append
@@ -270,10 +298,7 @@ def compute_edge_mask_from_terrain_mesh(
     ray_hits, *_ = raycast_mesh(ray_starts, ray_dirs, wp_mesh)  # ray_hits: (N, 3)
 
     elapsed = time.time() - t0
-    print(
-        f"[edge_mask] WARP raycast: {n_x * n_y:,} rays in {elapsed:.2f}s on {device} "
-        f"(grid {n_x}×{n_y})"
-    )
+    print(f"[edge_mask] WARP raycast: {n_x * n_y:,} rays in {elapsed:.2f}s on {device} (grid {n_x}×{n_y})")
 
     # 4. Extract z values; missed rays return inf — substitute with 0 (open gap = ground)
     hit_z = ray_hits[:, 2]  # (N,)
@@ -317,7 +342,7 @@ def compute_edge_mask_from_terrain_mesh(
 
 
 def parkour_stepping_stones_terrain(
-    difficulty: float, cfg: "MeshParkourSteppingStonesTerrainCfg"
+    difficulty: float, cfg: MeshParkourSteppingStonesTerrainCfg
 ) -> tuple[list[trimesh.Trimesh], np.ndarray]:
     """Generate a parkour stepping-stones terrain with discrete raised stones and lateral jitter.
 
@@ -338,9 +363,7 @@ def parkour_stepping_stones_terrain(
         Tuple of (list of trimesh objects, origin ndarray of shape (3,)).
     """
     # -- resolve difficulty-dependent parameters (IsaacLab standard: larger difficulty = harder) --
-    stone_size = cfg.stone_size_xy_range[1] - difficulty * (
-        cfg.stone_size_xy_range[1] - cfg.stone_size_xy_range[0]
-    )
+    stone_size = cfg.stone_size_xy_range[1] - difficulty * (cfg.stone_size_xy_range[1] - cfg.stone_size_xy_range[0])
     gap_len = cfg.gap_length_range[0] + difficulty * (cfg.gap_length_range[1] - cfg.gap_length_range[0])
     max_jitter = difficulty * cfg.lateral_jitter_range[1]
     stone_h = cfg.stone_height_range[0] + difficulty * (cfg.stone_height_range[1] - cfg.stone_height_range[0])
@@ -393,7 +416,7 @@ def parkour_stepping_stones_terrain(
 
 
 def parkour_balance_beam_terrain(
-    difficulty: float, cfg: "MeshParkourBalanceBeamTerrainCfg"
+    difficulty: float, cfg: MeshParkourBalanceBeamTerrainCfg
 ) -> tuple[list[trimesh.Trimesh], np.ndarray]:
     """Generate a parkour balance-beam terrain: a narrow raised beam the robot must traverse.
 
@@ -486,7 +509,7 @@ def parkour_balance_beam_terrain(
 
 
 def parkour_crawl_terrain(
-    difficulty: float, cfg: "MeshParkourCrawlTerrainCfg"
+    difficulty: float, cfg: MeshParkourCrawlTerrainCfg
 ) -> tuple[list[trimesh.Trimesh], np.ndarray]:
     """Generate a parkour crawl terrain: a low-ceiling corridor the robot must crouch to pass.
 
@@ -560,15 +583,11 @@ def parkour_crawl_terrain(
             # left wall: y in [0, side_w]
             dim_wall = (clen, side_w, wall_h)
             pos_left = (dis_x + clen / 2.0, side_w / 2.0, wall_h / 2.0)
-            meshes_list.append(
-                trimesh.creation.box(dim_wall, trimesh.transformations.translation_matrix(pos_left))
-            )
+            meshes_list.append(trimesh.creation.box(dim_wall, trimesh.transformations.translation_matrix(pos_left)))
             # right wall: y in [side_w + corr_w, size_y]
             right_wall_center_y = side_w + corr_w + side_w / 2.0
             pos_right = (dis_x + clen / 2.0, right_wall_center_y, wall_h / 2.0)
-            meshes_list.append(
-                trimesh.creation.box(dim_wall, trimesh.transformations.translation_matrix(pos_right))
-            )
+            meshes_list.append(trimesh.creation.box(dim_wall, trimesh.transformations.translation_matrix(pos_right)))
 
         # goal: just after the ceiling exit (robot has cleared the ceiling), ground level, corridor center
         goals_list.append([dis_x + clen + 0.3, mid_y, 0.0])
@@ -594,7 +613,7 @@ def parkour_crawl_terrain(
 
 
 def parkour_slope_terrain(
-    difficulty: float, cfg: "MeshParkourSlopeTerrainCfg"
+    difficulty: float, cfg: MeshParkourSlopeTerrainCfg
 ) -> tuple[list[trimesh.Trimesh], np.ndarray]:
     """Generate a parkour slope terrain using wedge primitives.
 
@@ -650,14 +669,17 @@ def parkour_slope_terrain(
     # where L=slope_len, W=terrain_w, H=slope_h
     L, W, H = float(slope_len), float(terrain_w), float(slope_h)
     ox = float(current_x)
-    v_asc = np.array([
-        [ox,     0.0, 0.0],   # 0
-        [ox,     W,   0.0],   # 1
-        [ox + L, 0.0, 0.0],   # 2
-        [ox + L, W,   0.0],   # 3
-        [ox + L, 0.0, H  ],   # 4
-        [ox + L, W,   H  ],   # 5
-    ], dtype=np.float32)
+    v_asc = np.array(
+        [
+            [ox, 0.0, 0.0],  # 0
+            [ox, W, 0.0],  # 1
+            [ox + L, 0.0, 0.0],  # 2
+            [ox + L, W, 0.0],  # 3
+            [ox + L, 0.0, H],  # 4
+            [ox + L, W, H],  # 5
+        ],
+        dtype=np.float32,
+    )
     # Faces (outward normals — CCW when viewed from outside):
     # Bottom: 0,1,3,2
     # Back:   0,1,5,4   (the slope face at front)
@@ -665,16 +687,19 @@ def parkour_slope_terrain(
     # Right:  1,3,5
     # Top-front (degenerate — no face needed, it's an edge)
     # We split quads into triangles:
-    f_asc = np.array([
-        [0, 3, 1],  # bottom tri 1
-        [0, 2, 3],  # bottom tri 2
-        [0, 1, 5],  # slope face tri 1
-        [0, 5, 4],  # slope face tri 2
-        [0, 4, 2],  # left triangular face
-        [1, 3, 5],  # right triangular face
-        [2, 5, 3],  # front vertical face tri 1  (outward normal: +x)
-        [2, 4, 5],  # front vertical face tri 2
-    ], dtype=np.int32)
+    f_asc = np.array(
+        [
+            [0, 3, 1],  # bottom tri 1
+            [0, 2, 3],  # bottom tri 2
+            [0, 1, 5],  # slope face tri 1
+            [0, 5, 4],  # slope face tri 2
+            [0, 4, 2],  # left triangular face
+            [1, 3, 5],  # right triangular face
+            [2, 5, 3],  # front vertical face tri 1  (outward normal: +x)
+            [2, 4, 5],  # front vertical face tri 2
+        ],
+        dtype=np.int32,
+    )
     asc_wedge = trimesh.Trimesh(vertices=v_asc, faces=f_asc, process=False)
     meshes_list.append(asc_wedge)
     current_x += slope_len
@@ -698,37 +723,46 @@ def parkour_slope_terrain(
     #   5: (L, W, 0)   bottom-front-right
     # Actually descend: high at back (current_x), low at front (current_x+L)
     ox2 = float(current_x)
-    v_desc = np.array([
-        [ox2,     0.0, H  ],   # 0 top-back-left
-        [ox2,     W,   H  ],   # 1 top-back-right
-        [ox2 + L, 0.0, H  ],   # 2 -- unused, descend goes to 0
-        [ox2 + L, W,   H  ],   # 3 -- unused
-        [ox2 + L, 0.0, 0.0],   # 4 bottom-front-left
-        [ox2 + L, W,   0.0],   # 5 bottom-front-right
-        [ox2,     0.0, 0.0],   # 6 bottom-back-left  (base of wedge)
-        [ox2,     W,   0.0],   # 7 bottom-back-right
-    ], dtype=np.float32)
+    v_desc = np.array(
+        [
+            [ox2, 0.0, H],  # 0 top-back-left
+            [ox2, W, H],  # 1 top-back-right
+            [ox2 + L, 0.0, H],  # 2 -- unused, descend goes to 0
+            [ox2 + L, W, H],  # 3 -- unused
+            [ox2 + L, 0.0, 0.0],  # 4 bottom-front-left
+            [ox2 + L, W, 0.0],  # 5 bottom-front-right
+            [ox2, 0.0, 0.0],  # 6 bottom-back-left  (base of wedge)
+            [ox2, W, 0.0],  # 7 bottom-back-right
+        ],
+        dtype=np.float32,
+    )
     # For descending wedge we only need 6 meaningful vertices (box-minus-triangle):
     # Use a simpler form: back face is at height H, front face descends to 0.
     # 6 vertices: 0,1 (top-back), 4,5 (bottom-front), 6,7 (bottom-back)
-    v_desc = np.array([
-        [ox2,     0.0, H  ],   # 0 top-back-left
-        [ox2,     W,   H  ],   # 1 top-back-right
-        [ox2 + L, 0.0, 0.0],   # 2 bottom-front-left
-        [ox2 + L, W,   0.0],   # 3 bottom-front-right
-        [ox2,     0.0, 0.0],   # 4 bottom-back-left
-        [ox2,     W,   0.0],   # 5 bottom-back-right
-    ], dtype=np.float32)
-    f_desc = np.array([
-        [0, 1, 5],  # bottom tri 1 (back bottom)
-        [0, 5, 4],  # bottom tri 2
-        [4, 5, 3],  # bottom tri 3 (front bottom)
-        [4, 3, 2],  # bottom tri 4
-        [0, 4, 2],  # left triangular face
-        [0, 2, 1],  # slope face tri 1
-        [1, 2, 3],  # slope face tri 2
-        [1, 3, 5],  # right triangular face
-    ], dtype=np.int32)
+    v_desc = np.array(
+        [
+            [ox2, 0.0, H],  # 0 top-back-left
+            [ox2, W, H],  # 1 top-back-right
+            [ox2 + L, 0.0, 0.0],  # 2 bottom-front-left
+            [ox2 + L, W, 0.0],  # 3 bottom-front-right
+            [ox2, 0.0, 0.0],  # 4 bottom-back-left
+            [ox2, W, 0.0],  # 5 bottom-back-right
+        ],
+        dtype=np.float32,
+    )
+    f_desc = np.array(
+        [
+            [0, 1, 5],  # bottom tri 1 (back bottom)
+            [0, 5, 4],  # bottom tri 2
+            [4, 5, 3],  # bottom tri 3 (front bottom)
+            [4, 3, 2],  # bottom tri 4
+            [0, 4, 2],  # left triangular face
+            [0, 2, 1],  # slope face tri 1
+            [1, 2, 3],  # slope face tri 2
+            [1, 3, 5],  # right triangular face
+        ],
+        dtype=np.int32,
+    )
     desc_wedge = trimesh.Trimesh(vertices=v_desc, faces=f_desc, process=False)
     meshes_list.append(desc_wedge)
 
@@ -755,7 +789,7 @@ def parkour_slope_terrain(
 
 
 def parkour_zigzag_hurdles_terrain(
-    difficulty: float, cfg: "MeshParkourZigzagHurdlesTerrainCfg"
+    difficulty: float, cfg: MeshParkourZigzagHurdlesTerrainCfg
 ) -> tuple[list[trimesh.Trimesh], np.ndarray]:
     """Generate a parkour zigzag-hurdles terrain with left/right alternating passage corridors.
 
@@ -842,7 +876,7 @@ def parkour_zigzag_hurdles_terrain(
 
 
 def parkour_rough_blocks_terrain(
-    difficulty: float, cfg: "MeshParkourRoughBlocksTerrainCfg"
+    difficulty: float, cfg: MeshParkourRoughBlocksTerrainCfg
 ) -> tuple[list[trimesh.Trimesh], np.ndarray]:
     """Generate a parkour rough-blocks terrain: a grid of small randomly-height blocks.
 
@@ -865,12 +899,8 @@ def parkour_rough_blocks_terrain(
         Tuple of (list of trimesh objects, origin ndarray of shape (3,)).
     """
     # -- difficulty-dependent parameters --
-    block_h_max = cfg.block_height_range[0] + difficulty * (
-        cfg.block_height_range[1] - cfg.block_height_range[0]
-    )
-    density = cfg.block_density_range[0] + difficulty * (
-        cfg.block_density_range[1] - cfg.block_density_range[0]
-    )
+    block_h_max = cfg.block_height_range[0] + difficulty * (cfg.block_height_range[1] - cfg.block_height_range[0])
+    density = cfg.block_density_range[0] + difficulty * (cfg.block_density_range[1] - cfg.block_density_range[0])
 
     terrain_w = cfg.size[1]
     mid_y = terrain_w / 2.0
