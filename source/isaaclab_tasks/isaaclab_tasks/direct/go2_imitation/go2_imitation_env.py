@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -5,17 +10,25 @@
 """Go2 Imitation 환경 — MimicKit TaskSteeringEnv 기반 AMP + Steering.
 
 MimicKit에서 잘 동작한 구조를 IsaacLab DirectRLEnv에 맞게 재구현:
-  - AMP Discriminator: 43-dim obs × 10 history = 430-dim
+  - AMP Discriminator: 49-dim obs × 2 history = 98-dim  (R4: root_rot_tan_norm 6D 추가)
   - Task reward: steering (tar_reward 0.7 + face_reward 0.3)
   - Reset: 항상 RSI (Reference State Initialization)
   - 알고리즘: PPOAMPBase + OnPolicyRunnerAMPBase (rsl_rl)
+
+[R4 ablation] MimicKit compute_tar_obs 방식 이식:
+  - 각 disc window frame의 root_quat을 window[-1](현재) frame의 heading-inv 기준 local로 변환
+  - 변환식: relative_quat = quat_mul(heading_inv_of_ref, frame_quat)
+    (MimicKit deepmimic_env.py:733,742 — heading-only inverse, 전체 quat inverse 아님)
+  - 변환된 quat → quat_to_tan_norm: [tan(x), norm(z)] 6D feature
+    (MimicKit torch_util.py:218-224 — ref_tan=[1,0,0], ref_norm=[0,0,1])
+  - per-step disc feature: 43 → 49 (base_43 + root_rot_tan_norm_6)
 """
 
 from __future__ import annotations
 
 import glob
-import os
 import math
+import os
 
 import gymnasium as gym
 import numpy as np
@@ -26,10 +39,10 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_apply, quat_apply_inverse
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_mul
 
-from .motion_lib import Go2MotionLib
 from .go2_imitation_env_cfg import Go2ImitationEnvCfg
+from .motion_lib import Go2MotionLib
 
 
 class Go2ImitationEnv(DirectRLEnv):
@@ -40,9 +53,10 @@ class Go2ImitationEnv(DirectRLEnv):
         local_tar_dir(2) + tar_speed(1) + local_face_dir(2) +
         joint_pos - default(12) + joint_vel(12) + actions(12)
 
-    AMP disc observation (43-dim per step):
+    AMP disc observation (49-dim per step):
         dof_pos(12) + dof_vel(12) + root_height(1) +
-        root_lin_vel(3) + root_ang_vel(3) + foot_pos_local(12)
+        root_lin_vel(3) + root_ang_vel(3) + foot_pos_local(12) +
+        root_rot_tan_norm(6)  [R4: heading-relative 6D rotation]
     """
 
     cfg: Go2ImitationEnvCfg
@@ -67,9 +81,7 @@ class Go2ImitationEnv(DirectRLEnv):
 
         # ── body / joint 인덱스 ──────────────────────────────────
         self.ref_body_index = self._robot.data.body_names.index(self.cfg.reference_body)
-        self.key_body_indexes = [
-            self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES
-        ]
+        self.key_body_indexes = [self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES]
 
         # ── motion_lib ↔ IsaacLab joint 순서 매핑 ────────────────
         # IsaacLab joint 순서(알파벳 등)와 PKL DOF_NAMES 순서가 다를 수 있음.
@@ -84,26 +96,37 @@ class Go2ImitationEnv(DirectRLEnv):
             self._motion_dof_indices = list(range(12))
 
         # ── Steering task state ──────────────────────────────────
-        self._tar_dir = torch.zeros(self.num_envs, 2, device=self.device)   # unit vec [N,2]
-        self._tar_speed = torch.zeros(self.num_envs, device=self.device)    # [N]
+        self._tar_dir = torch.zeros(self.num_envs, 2, device=self.device)  # unit vec [N,2]
+        self._tar_speed = torch.zeros(self.num_envs, device=self.device)  # [N]
         self._face_dir = torch.zeros(self.num_envs, 2, device=self.device)  # unit vec [N,2]
-        self._tar_timer = torch.zeros(self.num_envs, device=self.device)    # [N] seconds to change
+        self._tar_timer = torch.zeros(self.num_envs, device=self.device)  # [N] seconds to change
 
         # 이전 root 위치 (속도 계산용)
         self._prev_root_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
 
         # ── AMP 관측 버퍼 ─────────────────────────────────────────
+        # amp_observation_space (cfg=49) = base(43) + root_rot_tan_norm(6)  [R4]
+        # amp_observation_buffer 내부 저장은 base 43-dim만; tan_norm 6D는 소비 시점에 계산됨.
+        _AMP_BASE_DIM = 43  # 내부 버퍼 차원 (고정)
         self.amp_observation_size = self.cfg.num_amp_observations * (
             self.cfg.amp_observation_space + (2 if self.cfg.include_rel_track_obs else 0)
         )
-        self.amp_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.amp_observation_size,)
-        )
+        self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
         self.amp_observation_buffer = torch.zeros(
-            (self.num_envs, self.cfg.num_amp_observations, self.cfg.amp_observation_space),
+            (self.num_envs, self.cfg.num_amp_observations, _AMP_BASE_DIM),
             dtype=torch.float32,
             device=self.device,
         )
+        # [R4] per-step root_quat history buffer (wxyz, identity-initialized).
+        # Kept separate from amp_observation_buffer so base 43-dim stays untouched.
+        # The heading-relative tan_norm 6D is computed at consumption time.
+        self._amp_quat_buf = torch.zeros(
+            (self.num_envs, self.cfg.num_amp_observations, 4),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._amp_quat_buf[..., 0] = 1.0  # identity quat wxyz: w=1
+
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w = torch.zeros(
                 (self.num_envs, self.cfg.num_amp_observations, 3),
@@ -170,10 +193,10 @@ class Go2ImitationEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
-        root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]      # [N,3]
-        root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]    # [N,4] wxyz
-        root_lin_vel_b = self._robot.data.root_lin_vel_b                       # [N,3]
-        root_ang_vel_b = self._robot.data.root_ang_vel_b                       # [N,3]
+        root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]  # [N,3]
+        root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]  # [N,4] wxyz
+        root_lin_vel_b = self._robot.data.root_lin_vel_b  # [N,3]
+        root_ang_vel_b = self._robot.data.root_ang_vel_b  # [N,3]
 
         # ── 발 위치 (local frame) ─────────────────────────────
         rel_pos = self._robot.data.body_pos_w[:, self.key_body_indexes] - root_pos_w.unsqueeze(1)
@@ -192,30 +215,37 @@ class Go2ImitationEnv(DirectRLEnv):
             root_ang_vel_b,
             local_key_body_pos,
         )
-        # print('Env Debugging')
-        # print(root_lin_vel_b, root_ang_vel_b)
         for i in reversed(range(self.cfg.num_amp_observations - 1)):
             self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]
+            self._amp_quat_buf[:, i + 1] = self._amp_quat_buf[:, i]  # [R4]
             if self.cfg.include_rel_track_obs:
                 self._hist_root_pos_w[:, i + 1] = self._hist_root_pos_w[:, i]
-            
+
         self.amp_observation_buffer[:, 0] = amp_obs_step.clone()
-        
+        self._amp_quat_buf[:, 0] = root_quat_w.clone()  # [R4] wxyz
+
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w[:, 0] = root_pos_w.clone()
 
             # ── 상대 위치 궤적 피처 추가 (MimicKit 방식) ───────────
             N, H = self.num_envs, self.cfg.num_amp_observations
-            heading_rot_inv = _calc_heading_quat_inv(root_quat_w) # [N, 4]
-            root_pos_diff = self._hist_root_pos_w - root_pos_w.unsqueeze(1) # [N, H, 3]
-            
+            heading_rot_inv = _calc_heading_quat_inv(root_quat_w)  # [N, 4]
+            root_pos_diff = self._hist_root_pos_w - root_pos_w.unsqueeze(1)  # [N, H, 3]
+
             heading_inv_expand = heading_rot_inv.unsqueeze(1).expand(-1, H, -1).reshape(N * H, 4)
             local_root_pos_diff = quat_apply(heading_inv_expand, root_pos_diff.reshape(N * H, 3)).view(N, H, 3)
-            root_pos_obs_xy = local_root_pos_diff[:, :, :2] # [N, H, 2]
-            
-            final_amp_obs = torch.cat([root_pos_obs_xy, self.amp_observation_buffer], dim=-1) # [N, H, 45]
+            root_pos_obs_xy = local_root_pos_diff[:, :, :2]  # [N, H, 2]
+
+            base_amp = torch.cat([root_pos_obs_xy, self.amp_observation_buffer], dim=-1)  # [N, H, 45]
         else:
-            final_amp_obs = self.amp_observation_buffer
+            N, H = self.num_envs, self.cfg.num_amp_observations
+            base_amp = self.amp_observation_buffer  # [N, H, 43]
+
+        # [R4] heading-relative root_rot → tan_norm 6D (MimicKit compute_tar_obs 방식)
+        # ref = 현재(window 첫 번째=최신) frame의 heading_inv
+        # 각 window frame quat을 heading_inv 기준 local로 변환 후 tan_norm 적용
+        rot_tan_norm = _apply_root_rot_tan_norm(self._amp_quat_buf, N, H)  # [N, H, 6]
+        final_amp_obs = torch.cat([base_amp, rot_tan_norm], dim=-1)  # [N, H, 49]
 
         self.extras = {
             "amp_obs": final_amp_obs.view(self.num_envs, -1).clone(),
@@ -224,27 +254,27 @@ class Go2ImitationEnv(DirectRLEnv):
         }
 
         # ── Steering observations (heading-relative) ──────────
-        heading_rot_inv = _calc_heading_quat_inv(root_quat_w)            # [N,4]
+        heading_rot_inv = _calc_heading_quat_inv(root_quat_w)  # [N,4]
         tar_dir_3d = torch.cat([self._tar_dir, torch.zeros(N, 1, device=self.device)], dim=-1)
-        local_tar_dir = quat_apply(heading_rot_inv, tar_dir_3d)[:, :2]   # [N,2]
+        local_tar_dir = quat_apply(heading_rot_inv, tar_dir_3d)[:, :2]  # [N,2]
 
         face_dir_3d = torch.cat([self._face_dir, torch.zeros(N, 1, device=self.device)], dim=-1)
-        local_face_dir = quat_apply(heading_rot_inv, face_dir_3d)[:, :2] # [N,2]
+        local_face_dir = quat_apply(heading_rot_inv, face_dir_3d)[:, :2]  # [N,2]
 
-        tar_speed = self._tar_speed.unsqueeze(-1)                         # [N,1]
+        tar_speed = self._tar_speed.unsqueeze(-1)  # [N,1]
 
         # ── Policy 관측 (44-dim) ──────────────────────────────
         policy_obs = torch.cat(
             [
                 root_lin_vel_b,
                 root_ang_vel_b,
-                self._robot.data.projected_gravity_b,                              # 3
-                local_tar_dir,                                                     # 2
-                tar_speed,                                                         # 1
-                local_face_dir,                                                    # 2
+                self._robot.data.projected_gravity_b,  # 3
+                local_tar_dir,  # 2
+                tar_speed,  # 1
+                local_face_dir,  # 2
                 self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # 12
-                self._robot.data.joint_vel,                                        # 12
-                self.actions,                                                      # 12
+                self._robot.data.joint_vel,  # 12
+                self.actions,  # 12
             ],
             dim=-1,
         )  # total = 44
@@ -270,10 +300,10 @@ class Go2ImitationEnv(DirectRLEnv):
 
         # face_reward: max(0, dot(face_dir, char_forward_dir))
         root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]
-        heading_rot = _calc_heading_quat(root_quat_w)                         # [N,4]
+        heading_rot = _calc_heading_quat(root_quat_w)  # [N,4]
         fwd = torch.zeros(self.num_envs, 3, device=self.device)
         fwd[:, 0] = 1.0  # forward = +X
-        char_fwd = quat_apply(heading_rot, fwd)[:, :2]                        # [N,2]
+        char_fwd = quat_apply(heading_rot, fwd)[:, :2]  # [N,2]
         face_reward = torch.clamp_min(torch.sum(self._face_dir * char_fwd, dim=-1), 0.0)
 
         reward = self.cfg.tar_reward_w * tar_reward + self.cfg.face_reward_w * face_reward
@@ -308,7 +338,9 @@ class Go2ImitationEnv(DirectRLEnv):
                 contact_forces = self.contact_sensor.data.net_forces_w
                 if contact_forces is not None and contact_forces.numel() > 0:
                     bad_contacts = self._get_body_contact(
-                        contact_forces, self._robot.data.body_names, "base",
+                        contact_forces,
+                        self._robot.data.body_names,
+                        "base",
                         threshold=self.cfg.contact_force_threshold,
                     )
                     died = died | bad_contacts
@@ -327,13 +359,12 @@ class Go2ImitationEnv(DirectRLEnv):
         # ── Terminal amp_obs 캡처 (RSI/reset 이전 — 로봇이 아직 실패 에피소드 상태) ──
         # robot.data는 마지막 physics step 결과를 보유. _robot.reset() 전에 읽어야 함.
         n = len(env_ids)  # type: ignore[arg-type]
-        root_pos_w_t = self._robot.data.body_pos_w[env_ids][:, self.ref_body_index]       # [n,3]
-        root_quat_w_t = self._robot.data.body_quat_w[env_ids][:, self.ref_body_index]     # [n,4]
-        root_lin_vel_b_t = self._robot.data.root_lin_vel_b[env_ids]                       # [n,3]
-        root_ang_vel_b_t = self._robot.data.root_ang_vel_b[env_ids]                       # [n,3]
-        rel_pos_t = (
-            self._robot.data.body_pos_w[env_ids][:, self.key_body_indexes]
-            - root_pos_w_t.unsqueeze(1)
+        root_pos_w_t = self._robot.data.body_pos_w[env_ids][:, self.ref_body_index]  # [n,3]
+        root_quat_w_t = self._robot.data.body_quat_w[env_ids][:, self.ref_body_index]  # [n,4]
+        root_lin_vel_b_t = self._robot.data.root_lin_vel_b[env_ids]  # [n,3]
+        root_ang_vel_b_t = self._robot.data.root_ang_vel_b[env_ids]  # [n,3]
+        rel_pos_t = self._robot.data.body_pos_w[env_ids][:, self.key_body_indexes] - root_pos_w_t.unsqueeze(
+            1
         )  # [n,K,3]
         K = rel_pos_t.shape[1]
         local_key_body_pos_t = quat_apply_inverse(
@@ -348,18 +379,21 @@ class Go2ImitationEnv(DirectRLEnv):
             root_ang_vel_b_t,
             local_key_body_pos_t,
         )  # [n, amp_obs_space=43]
-        # 10-step 히스토리를 terminal state 기준으로 구성 (_get_observations와 동일한 시프트)
-        terminal_buf = self.amp_observation_buffer[env_ids].clone()  # [n, 10, 43]
+        # 히스토리를 terminal state 기준으로 구성 (_get_observations와 동일한 시프트)
+        terminal_buf = self.amp_observation_buffer[env_ids].clone()  # [n, H, 43]
+        terminal_quat_buf = self._amp_quat_buf[env_ids].clone()  # [n, H, 4]  [R4]
         if self.cfg.include_rel_track_obs:
-            terminal_hist_pos = self._hist_root_pos_w[env_ids].clone()   # [n, 10, 3]
+            terminal_hist_pos = self._hist_root_pos_w[env_ids].clone()  # [n, H, 3]
 
         for i in reversed(range(self.cfg.num_amp_observations - 1)):
             terminal_buf[:, i + 1] = terminal_buf[:, i]
+            terminal_quat_buf[:, i + 1] = terminal_quat_buf[:, i]  # [R4]
             if self.cfg.include_rel_track_obs:
                 terminal_hist_pos[:, i + 1] = terminal_hist_pos[:, i]
-            
+
         terminal_buf[:, 0] = amp_obs_terminal_step
-        
+        terminal_quat_buf[:, 0] = root_quat_w_t  # [R4]
+
         if self.cfg.include_rel_track_obs:
             terminal_hist_pos[:, 0] = root_pos_w_t
 
@@ -369,10 +403,14 @@ class Go2ImitationEnv(DirectRLEnv):
             heading_inv_expand_t = heading_rot_inv_t.unsqueeze(1).expand(-1, H, -1).reshape(n * H, 4)
             local_root_pos_diff_t = quat_apply(heading_inv_expand_t, root_pos_diff_t.reshape(n * H, 3)).view(n, H, 3)
             root_pos_obs_xy_t = local_root_pos_diff_t[:, :, :2]
-            
-            final_terminal_amp_obs = torch.cat([root_pos_obs_xy_t, terminal_buf], dim=-1)
+
+            base_terminal = torch.cat([root_pos_obs_xy_t, terminal_buf], dim=-1)  # [n, H, 45]
         else:
-            final_terminal_amp_obs = terminal_buf
+            base_terminal = terminal_buf  # [n, H, 43]
+
+        # [R4] 동일한 tan_norm 변환 적용 (live path와 대칭)
+        rot_tan_norm_t = _apply_root_rot_tan_norm(terminal_quat_buf, n, self.cfg.num_amp_observations)  # [n, H, 6]
+        final_terminal_amp_obs = torch.cat([base_terminal, rot_tan_norm_t], dim=-1)  # [n, H, 49]
 
         self._terminal_amp_obs[env_ids] = final_terminal_amp_obs.view(n, -1)
         # ────────────────────────────────────────────────────────────────────────
@@ -411,9 +449,7 @@ class Go2ImitationEnv(DirectRLEnv):
     # 리셋 전략
     # ──────────────────────────────────────────────────────────
 
-    def _reset_strategy_rsi(
-        self, env_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _reset_strategy_rsi(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reference State Initialization — 모션 데이터로 초기화."""
         n = len(env_ids)
         motion_ids = self._motion_lib.sample_motions(n)
@@ -423,8 +459,8 @@ class Go2ImitationEnv(DirectRLEnv):
         else:
             times = self._motion_lib.sample_times(motion_ids)
 
-        root_pos, root_quat, lin_vel_b, ang_vel_b, dof_pos, dof_vel, _ = (
-            self._motion_lib.calc_motion_frame(motion_ids, times)
+        root_pos, root_quat, lin_vel_b, ang_vel_b, dof_pos, dof_vel, _ = self._motion_lib.calc_motion_frame(
+            motion_ids, times
         )
 
         # root_state [N, 13]: pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
@@ -446,9 +482,12 @@ class Go2ImitationEnv(DirectRLEnv):
         # 1-step 오프셋: _get_observations()에서 버퍼 시프트가 한 번 더 일어나므로,
         # RSI 버퍼를 1 step 앞서 채워야 시프트 후 [ref@t, ref@t-dt, ..., ref@t-9dt]가 정렬됨.
         pre_shift_times = (times - self.step_dt).clamp(min=0.0)
-        amp_obs_buf, root_pos_hist, _ = self._compute_reference_buffers(n, pre_shift_times.cpu().numpy(), motion_ids=motion_ids)
-        
+        amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(
+            n, pre_shift_times.cpu().numpy(), motion_ids=motion_ids
+        )
+
         self.amp_observation_buffer[env_ids] = amp_obs_buf
+        self._amp_quat_buf[env_ids] = quat_hist  # [R4] fill quat history from motion data
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w[env_ids] = root_pos_hist
 
@@ -469,8 +508,7 @@ class Go2ImitationEnv(DirectRLEnv):
 
         # 목표 속도
         self._tar_speed[env_ids] = (
-            torch.rand(n, device=self.device)
-            * (self.cfg.tar_speed_max - self.cfg.tar_speed_min)
+            torch.rand(n, device=self.device) * (self.cfg.tar_speed_max - self.cfg.tar_speed_min)
             + self.cfg.tar_speed_min
         )
 
@@ -479,8 +517,7 @@ class Go2ImitationEnv(DirectRLEnv):
 
         # 다음 변경까지 남은 시간
         self._tar_timer[env_ids] = (
-            torch.rand(n, device=self.device)
-            * (self.cfg.tar_change_time_max - self.cfg.tar_change_time_min)
+            torch.rand(n, device=self.device) * (self.cfg.tar_change_time_max - self.cfg.tar_change_time_min)
             + self.cfg.tar_change_time_min
         )
 
@@ -510,7 +547,13 @@ class Go2ImitationEnv(DirectRLEnv):
 
         frame = self._motion_lib.calc_motion_frame(motion_ids_flat, times_flat)
         root_pos, root_quat, lin_vel, ang_vel, dof_pos, dof_vel, foot_pos = (
-            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6]
+            frame[0],
+            frame[1],
+            frame[2],
+            frame[3],
+            frame[4],
+            frame[5],
+            frame[6],
         )
 
         dof_pos = dof_pos[:, self._motion_dof_indices]
@@ -524,11 +567,13 @@ class Go2ImitationEnv(DirectRLEnv):
             ang_vel,
             foot_pos,
         )
-        
-        amp_obs_buf = amp_obs.view(num_samples, n_hist, -1)
+
+        amp_obs_buf = amp_obs.view(num_samples, n_hist, -1)  # [N, H, 43]
         root_pos_hist = root_pos.view(num_samples, n_hist, 3)
-        curr_root_quat = root_quat.view(num_samples, n_hist, 4)[:, 0, :]
-        return amp_obs_buf, root_pos_hist, curr_root_quat
+        # [R4] return full quat history (N, H, 4) so callers can build tan_norm window
+        quat_hist = root_quat.view(num_samples, n_hist, 4)  # [N, H, 4]
+        curr_root_quat = quat_hist[:, 0, :]  # [N, 4] current frame
+        return amp_obs_buf, root_pos_hist, quat_hist
 
     def collect_reference_motions(
         self,
@@ -536,23 +581,32 @@ class Go2ImitationEnv(DirectRLEnv):
         current_times: np.ndarray | None = None,
         motion_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """레퍼런스 모션 AMP 관측값 수집. (상대 궤적 피처 포함)"""
-        amp_obs_buf, root_pos_hist, curr_root_quat = self._compute_reference_buffers(num_samples, current_times, motion_ids)
-        
+        """레퍼런스 모션 AMP 관측값 수집. (상대 궤적 피처 + R4 root_rot_tan_norm 포함)"""
+        amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(
+            num_samples, current_times, motion_ids
+        )
+        curr_root_quat = quat_hist[:, 0, :]  # [N, 4]
+        n_hist = self.cfg.num_amp_observations
+
         if self.cfg.include_rel_track_obs:
-            n_hist = self.cfg.num_amp_observations
             curr_root_pos = root_pos_hist[:, 0, :]
             root_pos_diff = root_pos_hist - curr_root_pos.unsqueeze(1)
-            
+
             heading_rot_inv = _calc_heading_quat_inv(curr_root_quat)
             heading_inv_expand = heading_rot_inv.unsqueeze(1).expand(-1, n_hist, -1).reshape(num_samples * n_hist, 4)
-            local_root_pos_diff = quat_apply(heading_inv_expand, root_pos_diff.reshape(num_samples * n_hist, 3)).view(num_samples, n_hist, 3)
+            local_root_pos_diff = quat_apply(heading_inv_expand, root_pos_diff.reshape(num_samples * n_hist, 3)).view(
+                num_samples, n_hist, 3
+            )
             root_pos_obs_xy = local_root_pos_diff[:, :, :2]
-            
-            final_amp_obs = torch.cat([root_pos_obs_xy, amp_obs_buf], dim=-1)
+
+            base_amp = torch.cat([root_pos_obs_xy, amp_obs_buf], dim=-1)  # [N, H, 45]
         else:
-            final_amp_obs = amp_obs_buf
-            
+            base_amp = amp_obs_buf  # [N, H, 43]
+
+        # [R4] expert 측 동일한 tan_norm 변환 (live path와 완전 대칭)
+        rot_tan_norm = _apply_root_rot_tan_norm(quat_hist, num_samples, n_hist)  # [N, H, 6]
+        final_amp_obs = torch.cat([base_amp, rot_tan_norm], dim=-1)  # [N, H, 49]
+
         return final_amp_obs.view(num_samples, self.amp_observation_size)
 
     def get_amp_observations(self, num_samples: int) -> torch.Tensor:
@@ -593,21 +647,67 @@ def _compute_amp_obs(
     root_ang_vel: torch.Tensor,
     foot_pos_local: torch.Tensor,
 ) -> torch.Tensor:
-    """AMP disc 관측 벡터 계산 (43-dim).
+    """AMP disc 기본 관측 벡터 계산 (43-dim).
 
     dof_pos(12) + dof_vel(12) + root_height(1) + lin_vel(3) + ang_vel(3) + foot_pos(12)
+    root_rot_tan_norm(6)은 _apply_root_rot_tan_norm()에서 window stacking 후 추가됨 (→ 49-dim).
     """
     return torch.cat(
         [
-            dof_pos,                                                    # 12
-            dof_vel,                                                    # 12
-            root_pos[:, 2:3],                                          # 1 (root 높이)
-            root_lin_vel,                                              # 3
-            root_ang_vel,                                              # 3
-            foot_pos_local.view(foot_pos_local.shape[0], -1),         # 12
+            dof_pos,  # 12
+            dof_vel,  # 12
+            root_pos[:, 2:3],  # 1 (root 높이)
+            root_lin_vel,  # 3
+            root_ang_vel,  # 3
+            foot_pos_local.view(foot_pos_local.shape[0], -1),  # 12
         ],
         dim=-1,
     )
+
+
+def _apply_root_rot_tan_norm(
+    quat_buf: torch.Tensor,
+    num_envs: int,
+    n_hist: int,
+) -> torch.Tensor:
+    """Window 내 각 frame의 root_quat을 현재 frame heading-inv 기준 local로 변환 후 6D tan_norm 반환.
+
+    MimicKit compute_tar_obs (deepmimic_env.py:733,742) 방식:
+      - ref = quat_buf[:, 0, :] (window index 0 = 가장 최근 frame)
+      - heading_inv_rot = _calc_heading_quat_inv(ref)  (yaw-only inverse)
+      - relative_quat[h] = quat_mul(heading_inv_expand, quat_buf[:, h, :])
+      - tan_norm: [quat_rotate(q, [1,0,0]), quat_rotate(q, [0,0,1])] (MimicKit torch_util.py:216-227)
+
+    Args:
+        quat_buf: [N, H, 4] wxyz — per-step root_quat history (index 0 = newest)
+        num_envs: N
+        n_hist:   H
+
+    Returns:
+        rot_tan_norm: [N, H, 6]
+    """
+    # ref heading-inv: yaw-only inverse of the current (newest) frame
+    ref_quat = quat_buf[:, 0, :]  # [N, 4]
+    heading_inv = _calc_heading_quat_inv(ref_quat)  # [N, 4]
+
+    # expand heading_inv over history dimension
+    heading_inv_exp = heading_inv.unsqueeze(1).expand(-1, n_hist, -1).reshape(num_envs * n_hist, 4)  # [N*H, 4]
+    quats_flat = quat_buf.reshape(num_envs * n_hist, 4)  # [N*H, 4]
+
+    # relative_quat = heading_inv * frame_quat  (MimicKit deepmimic_env.py:742)
+    rel_quat = quat_mul(heading_inv_exp, quats_flat)  # [N*H, 4]
+
+    # tan_norm: rotate x-axis and z-axis (MimicKit torch_util.py:218-224)
+    tan_ref = torch.zeros(num_envs * n_hist, 3, dtype=quat_buf.dtype, device=quat_buf.device)
+    tan_ref[:, 0] = 1.0  # [1, 0, 0]
+    norm_ref = torch.zeros(num_envs * n_hist, 3, dtype=quat_buf.dtype, device=quat_buf.device)
+    norm_ref[:, 2] = 1.0  # [0, 0, 1]
+
+    tan = quat_apply(rel_quat, tan_ref)   # [N*H, 3]
+    norm = quat_apply(rel_quat, norm_ref)  # [N*H, 3]
+
+    tan_norm = torch.cat([tan, norm], dim=-1)  # [N*H, 6]
+    return tan_norm.view(num_envs, n_hist, 6)
 
 
 @torch.jit.script
