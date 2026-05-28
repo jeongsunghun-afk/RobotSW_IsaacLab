@@ -188,15 +188,32 @@ class Go2ParkourEnv(DirectRLEnv):
             key: 0.0 for key in self.cfg.reward_scales.keys()
         }
 
+        # Per-env per-term scaled reward contribution — read by external analysis tools.
+        # Updated every _get_rewards() call; never affects reward computation.
+        self._last_reward_breakdown_per_env = torch.zeros(
+            self.num_envs, len(self.cfg.reward_scales), device=self.device
+        )
+        self._reward_term_names: list[str] = list(self.cfg.reward_scales.keys())  # canonical ordering
+
         # Get body indices for contact sensing
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
+        # Verify _feet_ids[2:4] are hind feet (RL, RR) — URDF iteration order assumption
+        hind_foot_names = [self._contact_sensor.body_names[i] for i in self._feet_ids[2:4]]
+        assert all(("RL" in n) or ("RR" in n) for n in hind_foot_names), (
+            f"_feet_ids[2:4] expected to be hind feet (RL/RR), got: {hind_foot_names}"
+        )
+
+        # Gait pairing — diagonal pairs (FL+RR, FR+RL) using URDF order [FL(0), FR(1), RL(2), RR(3)]
+        self._gait_synced_pair_0 = (self._feet_ids[0], self._feet_ids[3])  # FL + RR
+        self._gait_synced_pair_1 = (self._feet_ids[1], self._feet_ids[2])  # FR + RL
 
         # Robot articulation body index for base — used to read per-env mass and COM offset.
         # Distinct from _base_id which comes from the contact sensor (same numeric value on Go2,
         # but semantically different source).
         self._robot_base_id, _ = self._robot.find_bodies("base")
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(
+            # ["base", ".*thigh", ".*hip", "Head_upper", "Head_lower"]
             ["base", ".*thigh", ".*calf", ".*hip", "Head_upper", "Head_lower"]
         )
 
@@ -1059,6 +1076,50 @@ class Go2ParkourEnv(DirectRLEnv):
         contact = torch.norm(net_contact_forces[:, 0, self._feet_ids], dim=-1) > 2.0
         # contact_filt: OR with last step to suppress 50 Hz false-negatives (matches Genesis two-sample OR).
         contact_filt = torch.logical_or(contact, self._last_contacts)
+
+        # === feet_dragging penalty — HIND FEET ONLY (RL, RR) ===
+        # Genesis-equivalent: dragging = contact_filt ∧ (xy_vel > threshold), penalized by xy_vel norm.
+        # MUST be placed BEFORE `self._last_contacts = contact` overwrite.
+        hind_feet_ids = self._feet_ids[2:4]  # URDF order: [FL(0), FR(1), RL(2), RR(3)]
+        hind_xy_vel_norm = torch.norm(
+            self._robot.data.body_lin_vel_w[:, hind_feet_ids, :2], dim=-1
+        )  # (N, 2)
+        hind_contact = contact_filt[:, 2:4]  # (N, 2) bool — debounced
+        is_dragging = hind_contact & (hind_xy_vel_norm > self.cfg.dragging_velocity_threshold)
+        feet_dragging = torch.sum(hind_xy_vel_norm * is_dragging.float(), dim=-1)  # (N,)
+
+        # === feet_gait_pairing reward — Spot GaitReward sync-only (대각 쌍 air/contact 시간 동기) ===
+        air_time     = self._contact_sensor.data.current_air_time      # (N, B)
+        contact_time = self._contact_sensor.data.current_contact_time  # (N, B)
+        std      = self.cfg.feet_gait_std
+        max_err2 = self.cfg.feet_gait_max_err ** 2
+
+        def _sync_pair(pair):
+            a, b = pair
+            se_air     = torch.clamp((air_time[:, a]     - air_time[:, b])     ** 2, max=max_err2)
+            se_contact = torch.clamp((contact_time[:, a] - contact_time[:, b]) ** 2, max=max_err2)
+            return torch.exp(-(se_air + se_contact) / std)
+
+        sync_reward = _sync_pair(self._gait_synced_pair_0) * _sync_pair(self._gait_synced_pair_1)
+
+        def _async_pair(a, b):  # a, b: single foot indices (NOT pair tuples)
+            se_0 = torch.clamp((air_time[:, a]     - contact_time[:, b]) ** 2, max=max_err2)
+            se_1 = torch.clamp((contact_time[:, a] - air_time[:, b])     ** 2, max=max_err2)
+            return torch.exp(-(se_0 + se_1) / std)
+
+        # Spot 원본 async 4항 — 다른 대각 쌍 소속 발의 cross 비교 (정지/끌기 false-positive 차단)
+        p0_0, p0_1 = self._gait_synced_pair_0   # (FL, RR)
+        p1_0, p1_1 = self._gait_synced_pair_1   # (FR, RL)
+        async_reward = (
+            _async_pair(p0_0, p1_0) *   # FL vs FR
+            _async_pair(p0_1, p1_1) *   # RR vs RL
+            _async_pair(p0_0, p1_1) *   # FL vs RL
+            _async_pair(p0_1, p1_0)     # RR vs FR
+        )
+
+        gate = (torch.norm(self._commands[:, :2], dim=-1) > self.cfg.feet_gait_velocity_threshold).float()
+        feet_gait_pairing = sync_reward * async_reward * gate * is_flat   # (N,), all in [0, 1]
+
         self._last_contacts = contact
         # feet world XY positions: (N, 4, 2)
         feet_pos_w = self._robot.data.body_pos_w[:, self._feet_ids, :]  # (N, 4, 3)
@@ -1094,15 +1155,18 @@ class Go2ParkourEnv(DirectRLEnv):
             "dof_error_l2": dof_error_l2,
             "feet_stumble": feet_stumble,
             "feet_edge": feet_edge,
+            "feet_dragging": feet_dragging,
+            "feet_gait_pairing": feet_gait_pairing,
         }
 
         # === Accumulate and scale rewards ===
         total_reward = torch.zeros(self.num_envs, device=self.device)
-        for key, value in reward_values.items():
+        for i, (key, value) in enumerate(reward_values.items()):
             scaled = self.cfg.reward_scales[key] * self.step_dt * value
             self._episode_sums[key] += scaled
             total_reward += scaled
             self._last_reward_breakdown_env0[key] = float(scaled[0].detach().item())
+            self._last_reward_breakdown_per_env[:, i] = scaled
 
         # return total_reward
         return torch.clip(total_reward, min=0.)
@@ -1135,7 +1199,7 @@ class Go2ParkourEnv(DirectRLEnv):
         failure = self._term_tilt | self._term_low_height
         grace = self.episode_length_buf < self.cfg.termination_grace_steps
         reset_all = (failure & ~grace) | self._term_goal_reached | episode_timeout
-
+        
         terminated = torch.zeros_like(reset_all)
         time_out = reset_all
         return terminated, time_out
@@ -1156,6 +1220,8 @@ class Go2ParkourEnv(DirectRLEnv):
         self._prev_joint_vel[env_ids] = 0.0
         self._current_goal_idx[env_ids] = 0
         self._last_contacts[env_ids] = False
+        # Pre-reset capture for logging (since _term_goal_reached is reset on the next line)
+        _pre_reset_term_goal_reached = self._term_goal_reached[env_ids].clone()
         self._term_goal_reached[env_ids] = False
 
         # Reset processed actions (Genesis original)
@@ -1227,7 +1293,7 @@ class Go2ParkourEnv(DirectRLEnv):
             self._term_low_height[env_ids]
         ).item()
         self.extras["log"]["Episode_Termination/cause_goal_reached"] = torch.count_nonzero(
-            self._term_goal_reached[env_ids]
+            _pre_reset_term_goal_reached
         ).item()
         # Mean episode length at reset
         self.extras["log"]["Episode_Length/mean_at_reset"] = self.episode_length_buf[env_ids].float().mean().item()

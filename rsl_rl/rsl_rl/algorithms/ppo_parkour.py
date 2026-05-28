@@ -486,6 +486,26 @@ class PPOParkour:
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
 
+        # --- F9: per-joint action statistics + policy noise std ---
+        # Compute over the full rollout buffer (storage.actions shape: [num_steps, num_envs, num_actions]).
+        # All reductions run inside no_grad; .item() prevents any graph from persisting.
+        with torch.no_grad():
+            actions = self.storage.actions  # [T, N, 12]
+            num_joints = actions.shape[-1]
+            for j in range(num_joints):
+                a_j = actions[..., j]  # [T, N]
+                loss_dict[f"action_stats/joint_{j:02d}/mean"] = a_j.mean().item()
+                loss_dict[f"action_stats/joint_{j:02d}/abs_max"] = a_j.abs().amax().item()
+                loss_dict[f"action_stats/joint_{j:02d}/sample_std"] = a_j.std().item()
+            # Policy noise std (learnable parameter) — skip gracefully if architecture
+            # uses state-dependent std (no self.std attribute on policy).
+            if hasattr(self.policy, "std"):
+                for j in range(num_joints):
+                    loss_dict[f"policy_std/joint_{j:02d}"] = self.policy.std[j].item()
+            elif hasattr(self.policy, "log_std"):
+                for j in range(num_joints):
+                    loss_dict[f"policy_std/joint_{j:02d}"] = self.policy.log_std[j].exp().item()
+
         return loss_dict
 
     def update_dagger(self):

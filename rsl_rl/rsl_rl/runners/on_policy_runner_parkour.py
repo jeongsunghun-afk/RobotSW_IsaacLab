@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import torch
 import warnings
@@ -30,6 +31,40 @@ from rsl_rl.modules.estimator import Estimator
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_obs_groups
 from rsl_rl.utils.logger import Logger
+
+
+_JOINT_KEY_RE = re.compile(r"^(action_stats|policy_std)/joint_(\d+)(/.+)?$")
+
+
+def _rename_joint_keys(stats: dict, joint_names: list[str]) -> dict:
+    """Translate index-based joint metric keys to name-based keys.
+
+    Input keys from the algo follow the pattern::
+
+        action_stats/joint_07/mean
+        action_stats/joint_07/abs_max
+        action_stats/joint_07/sample_std
+        policy_std/joint_07
+
+    Output replaces ``joint_NN`` with the actual joint name, e.g.::
+
+        action_stats/RR_calf_joint/mean
+        policy_std/RR_calf_joint
+
+    Keys that do not match the pattern are passed through unchanged.
+    """
+    out: dict = {}
+    for key, value in stats.items():
+        m = _JOINT_KEY_RE.match(key)
+        if m:
+            prefix = m.group(1)
+            idx = int(m.group(2))
+            suffix = m.group(3) or ""  # e.g. "/mean" or ""
+            name = joint_names[idx]
+            out[f"{prefix}/{name}{suffix}"] = value
+        else:
+            out[key] = value
+    return out
 
 
 class OnPolicyRunnerParkour:
@@ -68,6 +103,19 @@ class OnPolicyRunnerParkour:
         )
 
         self.current_learning_iteration = 0
+
+        # Extract joint names from the underlying env for readable metric keys.
+        # Fails loudly if unavailable or mismatched — this runner is parkour-specific
+        # and the env is guaranteed to expose _robot.data.joint_names.
+        raw_names = self.env.unwrapped._robot.data.joint_names  # type: ignore[attr-defined]
+        num_actions = self.env.num_actions
+        if len(raw_names) != num_actions:
+            raise RuntimeError(
+                f"OnPolicyRunnerParkour: expected len(joint_names) == num_actions, "
+                f"got {len(raw_names)} vs {num_actions}"
+            )
+        # Sanitize: replace any '/' in a joint name so it does not corrupt the metric group hierarchy.
+        self.joint_names: list[str] = [n.replace("/", "_") for n in raw_names]
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         # Randomize initial episode lengths (for exploration)
@@ -122,6 +170,13 @@ class OnPolicyRunnerParkour:
             learn_time = stop - start
             self.current_learning_iteration = it
 
+            # Separate per-joint stats from scalar losses so the logger does not
+            # prepend "Loss/" to them (it uses "Loss/<key>" for all loss_dict entries).
+            # Keys that contain "/" are action_stats/* and policy_std/* metrics; pull
+            # them out and write directly via the underlying writer.
+            grouped_stats = {k: v for k, v in loss_dict.items() if "/" in k}
+            scalar_loss_dict = {k: v for k, v in loss_dict.items() if "/" not in k}
+
             # Log information
             self.logger.log(
                 it=it,
@@ -129,11 +184,19 @@ class OnPolicyRunnerParkour:
                 total_it=total_it,
                 collect_time=collect_time,
                 learn_time=learn_time,
-                loss_dict=loss_dict,
+                loss_dict=scalar_loss_dict,
                 learning_rate=self.alg.learning_rate,
                 action_std=self.alg.policy.action_std,
                 rnd_weight=self.alg.rnd.weight if self.alg_cfg["rnd_cfg"] else None,
             )
+
+            # Write per-joint stats under their own group prefixes (action_stats/, policy_std/).
+            # Translate index-based keys (joint_00 …) to actual joint names from the env.
+            # Guard: writer is None when log_dir is None or disable_logs is True.
+            if self.logger.writer is not None and not self.logger.disable_logs:
+                named_stats = _rename_joint_keys(grouped_stats, self.joint_names)
+                for key, value in named_stats.items():
+                    self.logger.writer.add_scalar(key, value, it)
 
             # Save model
             if it % self.cfg["save_interval"] == 0:
