@@ -263,6 +263,30 @@ class Go2ParkourEnv(DirectRLEnv):
             _foot_first_shape_indices, dtype=torch.long, device=self.device
         )  # shape: (4,)
 
+        # Base body shape index — same _shape_offsets computed above, reused here.
+        # _shape_offsets[body_id] = cumulative shape count before that body = first shape index.
+        _base_body_ids, _base_body_names = self._robot.find_bodies("base")
+        if len(_base_body_ids) == 0:
+            raise RuntimeError(
+                "[Parkour] Could not find base body for priv_latent base_friction. "
+                "find_bodies('base') returned empty. Check robot articulation body names."
+            )
+        if len(_base_body_ids) > 1:
+            import warnings
+            warnings.warn(
+                f"[Parkour] find_bodies('base') matched multiple bodies: {_base_body_names}. "
+                f"Using first: {_base_body_names[0]}",
+                stacklevel=2,
+            )
+        _base_body_id = int(_base_body_ids[0])
+        assert _num_shapes_per_body[_base_body_id] >= 1, (
+            f"Base body (id={_base_body_id}, name={_base_body_names[0]}) has 0 collision shapes."
+        )
+        _base_first_shape_index = _shape_offsets[_base_body_id]
+        self._base_shape_index = torch.tensor(
+            [_base_first_shape_index], dtype=torch.long, device=self.device
+        )  # shape: (1,)
+
         # One-time INFO log: body names, per-body shape counts, and selected shape indices.
         print(
             f"[Parkour] Foot body→shape mapping:\n"
@@ -270,6 +294,8 @@ class Go2ParkourEnv(DirectRLEnv):
             f"  foot body ids   : {_foot_body_ids}\n"
             f"  shapes per foot : {[_num_shapes_per_body[b] for b in _foot_body_ids]}\n"
             f"  foot shape idx  : {_foot_first_shape_indices}  (first shape per foot)\n"
+            f"  base body name  : {_base_body_names[0]}  (id={_base_body_id})\n"
+            f"  base shape idx  : {_base_first_shape_index}  (first shape of base body)\n"
             f"  total shapes    : {_total_shapes} across {len(_num_shapes_per_body)} bodies"
         )
         # get_material_properties() returns (N, num_shapes, 3).
@@ -864,6 +890,10 @@ class Go2ParkourEnv(DirectRLEnv):
             self._scan_debug_printed = True
 
 
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history  # [N, hist, bodies, 3]
+        contact = torch.norm(net_contact_forces[:, 0, self._feet_ids], dim=-1) > 2.0
+        last_contacts = torch.norm(net_contact_forces[:, 1, self._feet_ids], dim=-1) > 2.0
+        contact_filt = torch.logical_or(contact, last_contacts) 
 
         # Proprioceptive observations (Task #3)
         proprio = torch.cat(
@@ -875,6 +905,7 @@ class Go2ParkourEnv(DirectRLEnv):
                 self._robot.data.joint_pos - self._robot.data.default_joint_pos,    # 12
                 self._robot.data.joint_vel * 0.05,                                  # 12 (Change A: Genesis obs_scales["dof_vel"]=0.05; raw rad/s is ~20x too large)
                 self._actions,                                                       # 12 (current actions taken this step)
+                (contact_filt.float()-0.5).to(self.device)                          # add contact_filt 4
             ],
             dim=-1,
         )
@@ -907,7 +938,7 @@ class Go2ParkourEnv(DirectRLEnv):
             .clone()
             .to(self.device)
         )  # (N, num_shapes, 3)
-        foot_friction = _mat_all[:, self._foot_shape_indices, :2].reshape(self.num_envs, -1)  # (N, 8)
+        foot_friction = _mat_all[:, self._foot_shape_indices, 0].reshape(self.num_envs, -1)  # (N, 4)
 
         # priv_explicit: privileged state directly observable from a real sensor (linear + angular vel).
         #   root_lin_vel_b * 2.0  : (N, 3)
@@ -921,9 +952,21 @@ class Go2ParkourEnv(DirectRLEnv):
         )  # (N, 6)
 
         # priv_latent: startup-randomized domain parameters (quasi-static per episode).
-        #   foot_friction : (N, 8)  — 4 feet × [static, dynamic]
-        #   base_mass     : (N, 1)  — base body mass (per-env scalar, DR-randomized at startup)
-        #   base_com      : (N, 3)  — base body COM offset in body frame (per-env, DR-randomized)
+        #   base_friction         : (N, 1)  — base body static friction (first shape of base body, looked up via _base_shape_index)
+        #   foot_friction         : (N, 8)  — 4 feet × [static, dynamic]
+        #   base_mass             : (N, 1)  — base body mass (DR-randomized at startup)
+        #   base_com              : (N, 3)  — base body COM offset in body frame (DR-randomized)
+        #   joint_stiffness_ratio : (N, 12) — (stiffness / default_stiffness) - 1.0
+        #   joint_damping_ratio   : (N, 12) — (damping / default_damping) - 1.0
+        # Total: 1 + 8 + 1 + 3 + num_joints + num_joints
+        #   Go2 has 12 joints → 1+8+1+3+12+12 = 37
+        #
+        # base_friction: B extreme_parkour style — first shape's static friction scalar.
+        # _mat_all shape: (N, num_shapes, 3); dim 2 = [static, dynamic, restitution]
+        # base_friction replaces body_friction(2): drops dynamic component — mirrors B's single scalar.
+        base_friction = _mat_all[:, self._base_shape_index, 0]  # (N, 1) — base static friction
+        assert base_friction.shape == (self.num_envs, 1), f"base_friction shape mismatch: {base_friction.shape}"
+
         # get_masses() returns a CPU tensor (N, num_bodies); index with list → (N, 1).
         # body_com_pos_b shape: (N, num_bodies, 3); index with list → (N, 1, 3), squeeze → (N, 3).
         base_mass = (
@@ -932,14 +975,28 @@ class Go2ParkourEnv(DirectRLEnv):
         base_com = (
             self._robot.data.body_com_pos_b[:, self._robot_base_id, :].squeeze(1)
         )  # (N, 3)
+
+        # Joint stiffness/damping ratio (B extreme_parkour style).
+        # Requires randomize_actuator_gains EventTerm active to have non-zero values.
+        # joint_stiffness shape: (N, num_joints) — Go2: (N, 12)
+        joint_stiffness = self._robot.data.joint_stiffness          # (N, num_joints)
+        default_joint_stiffness = self._robot.data.default_joint_stiffness  # (N, num_joints)
+        joint_damping = self._robot.data.joint_damping              # (N, num_joints)
+        default_joint_damping = self._robot.data.default_joint_damping      # (N, num_joints)
+        joint_stiffness_ratio = (joint_stiffness / default_joint_stiffness) - 1.0  # (N, num_joints)
+        joint_damping_ratio = (joint_damping / default_joint_damping) - 1.0        # (N, num_joints)
+
         priv_latent = torch.cat(
             [
-                foot_friction,   # 8  (4 feet × [static, dynamic])
-                base_mass,       # 1
-                base_com,        # 3
+                base_friction,           # (N, 1)   — base static friction scalar (B-style)
+                foot_friction,           # (N, 8)   — 4 feet × [static, dynamic]
+                base_mass,               # (N, 1)   — base mass
+                base_com,                # (N, 3)   — base COM offset
+                joint_stiffness_ratio,   # (N, 12)  — stiffness DR ratio
+                joint_damping_ratio,     # (N, 12)  — damping DR ratio
             ],
             dim=-1,
-        )  # (N, 12)
+        )  # (N, 37) — 1+8+1+3+12+12=37 for Go2 (12 joints)
 
         # Full critic observation: proprio + scan + priv_explicit + priv_latent
         critic_obs = torch.cat(
@@ -1139,7 +1196,18 @@ class Go2ParkourEnv(DirectRLEnv):
         feet_at_edge = contact_filt & feet_at_edge
         feet_edge = (self._terrain_levels > 3).float() * torch.sum(feet_at_edge.float(), dim=-1)
 
-        # === Assemble all reward terms (B-aligned 14-term set) ===
+        # === air_time_cap — graded per-foot penalty for excessive continuous air time ===
+        # Reuses air_time (N, B) already fetched for feet_gait_pairing above (line ~1149).
+        # Slice to 4 feet, compute per-foot excess beyond max_air, sum over feet.
+        # Value is always >= 0; reward_scales["air_time_cap"] is negative → contribution <= 0.
+        # Ungated by velocity: a permanently-lifted foot at any speed should be penalised.
+        # 4발 대칭: no foot-specific assumption — whichever leg stays airborne is punished equally.
+        feet_air_time = air_time[:, self._feet_ids]  # (N, 4)
+        air_time_cap = torch.sum(
+            torch.clamp(feet_air_time - self.cfg.air_time_cap_max_s, min=0.0), dim=-1
+        )  # (N,), units: seconds of excess; always >= 0
+
+        # === Assemble all reward terms (B-aligned 14-term set + air_time_cap) ===
         reward_values = {
             "tracking_goal_vel": tracking_goal_vel,
             "tracking_yaw": tracking_yaw,
@@ -1157,6 +1225,7 @@ class Go2ParkourEnv(DirectRLEnv):
             "feet_edge": feet_edge,
             "feet_dragging": feet_dragging,
             "feet_gait_pairing": feet_gait_pairing,
+            "air_time_cap": air_time_cap,
         }
 
         # === Accumulate and scale rewards ===
@@ -1776,7 +1845,7 @@ class Go2ParkourEnv(DirectRLEnv):
         step = int(self.episode_length_buf[env_idx].item())
         lines = [f"[parkour env={env_idx} step={step}] contacts:"]
         any_contact = False
-
+        print(forces)
         for b_idx, bname in enumerate(body_names):
             mag = float(magnitudes[b_idx].item())
             if mag < threshold or bname[-4:] == 'foot':

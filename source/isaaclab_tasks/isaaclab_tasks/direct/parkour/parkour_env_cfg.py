@@ -42,7 +42,7 @@ from .parkour_terrains import parkour_jump_hurdle_terrain as _parkour_jump_hurdl
 ##
 
 PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
-    size=(20.0, 4.0),
+    size=(25.0, 4.0),
     border_width=20.0,
     num_rows=11,
     num_cols=40,
@@ -60,12 +60,12 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
         # cfg.terrain_goals is populated by the terrain function at build time (used by W3 env wiring).
         "parkour_flat": terrain_gen.MeshParkourHurdleTerrainCfg(
             function=_parkour_jump_hurdle_terrain,
-            proportion=0.1,
+            proportion=0.2,
             flat=True,
             num_hurdles=8,
             num_goals=8,
             hurdle_height_range=(0.0, 0.0),
-            x_spacing_range=(1.0, 1.5),  # explicit: 2.5 + 8*(1.5+0.3)=16.9m ≤ 20m
+            x_spacing_range=(1.0, 2.4),  # explicit: 2.5 + 8*(1.5+0.3)=16.9m ≤ 20m
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
                     num_patches=2,
@@ -80,7 +80,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             num_hurdles=8,
             num_goals=8,
             hurdle_height_range=(0.05, 0.30),
-            x_spacing_range=(1.0, 1.5),  # explicit: 2.5 + 8*(1.5+0.3)=16.9m ≤ 20m
+            x_spacing_range=(1.8, 2.4),
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
                     num_patches=2,
@@ -93,7 +93,10 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.2,
             num_steps=8,
             num_goals=8,
-            x_length_range=(0.4, 0.8),
+            # x_length_range=(0.4, 0.8),
+            x_length_range=(1.2, 2.0),
+            half_valid_width_range=(0.8, 1.0),
+            # y_offset_range=(1.0, 1.0),
             step_height_range=(0.10, 0.45),
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
@@ -104,11 +107,11 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "parkour_gap": terrain_gen.MeshParkourGapTerrainCfg(
-            proportion=0.3,
+            proportion=0.2,
             num_gaps=8,
             num_goals=8,
-            gap_length_range=(0.05, 0.5),  # reduced: overflow fix (was 0.3, 0.8)
-            platform_length_range=(1.2, 1.6),  # explicit: 2.0+8*1.6+8*0.4=18.0m ≤ 20m
+            gap_length_range=(0.05, 0.6),  # reduced: overflow fix (was 0.3, 0.8)
+            platform_length_range=(1.2, 2.0),  # explicit: 2.0+8*1.6+8*0.4=18.0m ≤ 20m
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
                     num_patches=2,
@@ -120,8 +123,9 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
         "parkour_stair": terrain_gen.MeshParkourStairTerrainCfg(
             proportion=0.2,
             stair_width_range=(0.25, 0.40),
-            stair_height_range=(0.05, 0.20),
+            stair_height_range=(0.05, 0.25),
             num_goals=8,
+            num_steps_per_stair=8,
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
                     num_patches=2,
@@ -276,27 +280,30 @@ class EventCfg:
     """Configuration for environment randomization events.
 
     Standard sim-to-real DR set (RMA-style):
-      - foot_physics_material: foot static/dynamic friction (existing)
-      - body_physics_material: base body static/dynamic friction (NEW)
-      - add_base_mass: base link mass perturbation (NEW)
-      - randomize_com: base CoM xyz offset (NEW)
+      - body_physics_material: all-body static/dynamic friction
+      - add_base_mass: base link mass perturbation
+      - randomize_com: base CoM xyz offset
+      - push_robot: periodic velocity impulse for robustness
+      - randomize_actuator_gains: joint stiffness/damping ±2.5% scale (conservative)
 
-    Excluded by design (parkour-specific): randomize_actuator_gains — would conflict
-    with the weakened actuator setup (actuator_mode=2: stiffness=25, damping=0.5,
-    saturation_effort=23.5). DR over already-weak gains causes training instability.
+    Note on randomize_actuator_gains: enabled at ±2.5% (uniform scale) to provide
+    signal for joint_stiffness_ratio / joint_damping_ratio in priv_latent. Without
+    this term those dims are constant zero. Range is deliberately conservative given
+    actuator_mode=2 (stiffness=25, damping=0.5) — B extreme_parkour marks this as
+    potentially destabilizing at wider ranges; monitor training stability.
     """
 
-    foot_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*foot"),
-            "static_friction_range": (0.4, 1.5),
-            "dynamic_friction_range": (0.3, 1.2),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 64,
-        },
-    )
+    # foot_physics_material = EventTerm(
+    #     func=mdp.randomize_rigid_body_material,
+    #     mode="startup",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=".*foot"),
+    #         "static_friction_range": (0.4, 1.5),
+    #         "dynamic_friction_range": (0.3, 1.2),
+    #         "restitution_range": (0.0, 0.0),
+    #         "num_buckets": 64,
+    #     },
+    # )
 
     # NEW — base body friction (conservative range to preserve balance on narrow obstacles)
     # Reference: Go2 manager-based env (legged_robots/velocity/config/unitree_go2)
@@ -304,9 +311,9 @@ class EventCfg:
         func=mdp.randomize_rigid_body_material,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "static_friction_range": (0.6, 1.2),
-            "dynamic_friction_range": (0.5, 1.0),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.4, 1.5),
+            "dynamic_friction_range": (0.3, 1.2),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
@@ -351,6 +358,23 @@ class EventCfg:
         },
     )
 
+    # NEW — actuator gains DR: ±2.5% scale on joint stiffness and damping (startup, conservative).
+    # Provides non-zero signal for joint_stiffness_ratio / joint_damping_ratio in priv_latent.
+    # Without this term those 24 dims are constant zero (zero information for the priv_encoder).
+    # Range (0.975, 1.025) is very conservative relative to typical ±20%; monitor training stability
+    # given actuator_mode=2 (already-weakened stiffness=25 / damping=0.5 / saturation=23.5).
+    randomize_actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.975, 1.025),
+            "damping_distribution_params": (0.975, 1.025),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
 
 ##
 # Environment configuration
@@ -384,25 +408,28 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     decimation: int = 4
     action_scale: float = 0.25
     action_space: int = 12
-    # clip_actions: float = 10.0
-    clip_actions: float = 4.8
+    # clip_actions: float = 16.0
+    clip_actions: float = 10.0
+    # clip_actions: float = 4.8
 
     # Observation space (Task #3, #6 — dict-based, kept for backward compat):
     # Deprecated: observation_space is now a dict with keys {policy, critic, scan, history, priv}
-    # policy:        proprio          = 3+1+1+1+12+12+12 = 42
-    # scan:          height_scan      = 187
-    # priv_explicit: lin_vel + ang_vel = 6   (root_lin_vel_b*2.0(3) + root_ang_vel_b*0.25(3))
-    # priv_latent:   fric + mass + com = 12  (foot_friction(8) + base_mass(1) + base_com(3))
+    # policy:        proprio           = 3+1+1+1+12+12+12 = 42
+    # scan:          height_scan       = 187
+    # priv_explicit: lin_vel + ang_vel  = 6    (root_lin_vel_b*2.0(3) + root_ang_vel_b*0.25(3))
+    # priv_latent:   B-style extended   = 37   (base_friction(1) + foot_friction(8) +
+    #                                           base_mass(1) + base_com(3) +
+    #                                           joint_stiffness_ratio(12) + joint_damping_ratio(12))
     # history:       history_len * num_proprio = 10 * 42 = 420
-    # critic total:  policy + scan + priv_explicit + priv_latent = 42 + 187 + 6 + 12 = 247
+    # critic total:  policy + scan + priv_explicit + priv_latent = 42 + 187 + 6 + 37 = 272
     # Note: DirectRLEnv may still use observation_space for Space creation, but runners use dict obs.
-    observation_space: int = 42  # policy obs dim (runner overrides with dict obs_groups)
+    observation_space: int = 42 + 4 # policy obs dim (runner overrides with dict obs_groups)
     state_space: int = 0
 
     # Observation dimensions (Task #3)
-    num_proprio: int = 42  # 3+1+1+1+12+12+12
+    num_proprio: int = 42 + 4 # 3+1+1+1+12+12+12
     num_scan_obs: int = 187
-    num_priv_obs: int = 18  # priv_explicit(6): lin_vel_b(3) + ang_vel_b(3) + priv_latent(12): foot_friction(8) + base_mass(1) + base_com(3)
+    num_priv_obs: int = 43  # priv_explicit(6): lin_vel_b(3) + ang_vel_b(3) + priv_latent(37): base_friction(1)+foot_friction(8)+base_mass(1)+base_com(3)+joint_stiffness_ratio(12)+joint_damping_ratio(12)
     history_len: int = 10
 
     # simulation
@@ -440,7 +467,6 @@ class ParkourEnvCfg(DirectRLEnvCfg):
             restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
-            restitution=0.0,
         ),
         visual_material=sim_utils.MdlFileCfg(
             mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
@@ -511,6 +537,26 @@ class ParkourEnvCfg(DirectRLEnvCfg):
             }
         )
 
+    elif _actuator_mode == 3:
+        actuator_stiffness: float = 25.0
+        actuator_damping: float = 0.5
+        actuator_friction: float = 0.0
+        actuator_saturation_effort: float = 23.5
+        actuator_effort_limit: dict = field(
+            default_factory=lambda: {
+                ".*_hip_joint": 23.7,
+                ".*_thigh_joint": 23.7,
+                ".*_calf_joint": 45.43,
+            }
+        )
+        actuator_velocity_limit: dict = field(
+            default_factory=lambda: {
+                ".*_hip_joint": 30.1,
+                ".*_thigh_joint": 30.1,
+                ".*_calf_joint": 30.1,
+            }
+        )
+
     def __post_init__(self):
         # Copy actuators dict to avoid mutating the global UNITREE_GO2_CFG.actuators
         # (UNITREE_GO2_CFG is shared across multiple tasks in the same Python process).
@@ -547,7 +593,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
 
     # command configuration (Genesis original: forward-only parkour)
     command_cfg: dict = {
-        "lin_vel_x_range": [0.3, 1.0],  # forward only (Genesis original)
+        "lin_vel_x_range": [0.3, 1.5],  # forward only (Genesis original)
         "lin_vel_y_range": [0.0, 0.0],  # no lateral movement
         "ang_vel_range": [0.0, 0.0],  # no yaw turning
     }
@@ -555,7 +601,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # Time-based velocity command resampling interval (seconds).
     # Converted to policy steps in env __init__: 6.0s / 0.02s = 300 steps.
     # Policy step dt = decimation(4) / physics_rate(200 Hz) = 0.02 s.
-    resampling_time_s: float = 6.0
+    resampling_time_s: float = 4.0
 
     # reward scales (B-aligned: Isaaclab_Parkour / extreme_parkour 14-term set)
     reward_scales: dict = {
@@ -566,13 +612,22 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         "orientation_l2": -1.0,  # Genesis original
         "dof_acc_l2": -2.5e-7,  # Genesis original
         "collision": -10.0,  # Genesis original (= collision2)
-        "action_rate_l2": -0.05,  # Genesis original (WAS -0.1, 10x error)
+        "action_rate_l2": -0.1,  # Genesis original (WAS -0.1, 10x error)
         "delta_torques": -1.0e-7,  # Genesis original (NEW)
         "torques_l2": -1e-5,  # Genesis original
         "hip_pos": -0.5,  # Genesis original
         "dof_error_l2": -0.04,  # Genesis original
         "feet_stumble": -1.0,  # Genesis original (= feet_stumble2)
         "feet_edge": -1.0,  # Genesis original (= feet_edge2)
+        "feet_dragging": -0.1,   # hind feet only (RL, RR); threshold = dragging_velocity_threshold
+        "feet_gait_pairing": 0.0,   # Spot GaitReward sync-only: trot 대각 쌍 phase 동기 (양수 only)
+        # air_time_cap: per-foot graded penalty for excessive continuous air time.
+        # Rationale: 정상 발 p99=0.36s/max=1.70s(gap 도약), RL 병리 p90=1.24s/max=5.60s.
+        # max_air=1.0s anchor → 정상 도약 0.008%만 걸림, RL 병리꼬리 13.3% 처벌.
+        # weight=-0.1 선택 근거: typical-bad(0.5s 초과) → 0.001/step(ceiling의 3%, clip-safe),
+        # extreme-tail(4.6s 초과) → 0.0092/step(ceiling의 31%, clip-safe). 효과 부족 시
+        # weight→-0.25 또는 air_time_cap_max_s→0.6s로 조임.
+        "air_time_cap": -0.1,       # graded per-foot penalty (value≥0, weight<0 → contribution≤0)
     }
 
     # tracking reward parameters (Genesis original)
@@ -587,6 +642,16 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # feet dragging detection threshold (Genesis original)
     dragging_velocity_threshold: float = 0.05  # m/s — feet considered dragging if in contact + moving
 
+    # air_time_cap penalty parameter
+    # max_air=1.0s: 정상 발 max=1.70s(gap 도약)보다 낮게, RL 병리 p90=1.24s보다 낮게 잡아
+    # 정상 도약 0.008%만 걸림, 병리꼬리 13.3% 처벌. 효과 부족 시 0.6s로 조임.
+    air_time_cap_max_s: float = 1.0  # seconds; 초과분에 graded penalty
+
+    # Gait pairing reward parameters (Spot GaitReward style, sync-only)
+    feet_gait_std: float = 0.2   # error tolerance (Spot=0.1; parkour 완화)
+    feet_gait_max_err: float = 0.3   # max squared-error cap (Spot=0.2; parkour 완화)
+    feet_gait_velocity_threshold: float = 0.3   # m/s; cmd_speed gate (parkour cmd range [0.3, 1.0] lower bound)
+
     # base height reward target (used only on flat terrain; scale=0.0 by default → disabled)
     base_height_target: float = 0.34  # nominal Go2 stance height above terrain (m)
 
@@ -599,7 +664,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     goal_z: float = 0.3  # Task #2: placeholder z coordinate for goals (m)
     termination_height: float = -0.2
     termination_grace_steps: int = 5  # skip termination during first N policy steps after spawn (for physics settling)
-    max_tilt: float = 1.0
+    max_tilt: float = 1.309
     terrain_curriculum: bool = True
 
     # domain randomization (ranges) — Task #5 future work
