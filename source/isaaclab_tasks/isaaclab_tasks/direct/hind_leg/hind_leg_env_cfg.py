@@ -196,6 +196,12 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     flat_orientation_reward_scale = -1.0
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
+    termination_reward_scale = -100.0
+    # velocity-gated foot clearance: penalizes low foot height when foot has horizontal velocity
+    # (foot_z - target_height)^2 * tanh(tanh_mult * foot_v_xy); scale < 0 → penalty
+    foot_clearance_reward_scale = -0.5
+    foot_clearance_tanh_mult = 2.0
+    foot_clearance_offset = 0.05  # metres above measured rest-z to set as target clearance
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
@@ -262,14 +268,9 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
 
     penalzied_body_names = [
         "base",
-        "HL_Hip_Link",
-        "HL_Thigh_Link",
-        "HL_Calf_Link",
-        "HL_Foot_Link",
-        "HR_Hip_Link",
-        "HR_Thigh_Link",
-        "HR_Calf_Link",
-        "HR_Foot_Link_Link" # 실제로 이렇게 저장되어 있음. 오류 아님.
+        ".*hip.*",
+        ".*thigh.*",
+        ".*calf.*"
     ]
 
     # simulation
@@ -324,6 +325,11 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
     termination_reward_scale = -100.
+    # velocity-gated foot clearance: penalizes low foot height when foot has horizontal velocity
+    # (foot_z - target_height)^2 * tanh(tanh_mult * foot_v_xy); scale < 0 → penalty
+    foot_clearance_reward_scale = -0.5
+    foot_clearance_tanh_mult = 2.0
+    foot_clearance_offset = 0.05  # metres above measured rest-z to set as target clearance
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
@@ -343,11 +349,11 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     curriculum_threshold = 10.0
     curriculum_step = 0.05
     command_cfg = {
-        "lin_vel_x_range": [-2.0, 1.0],
+        "lin_vel_x_range": [-0.5, 2.0],
         "lin_vel_y_range": [-0.0, 0.0],
         "ang_vel_range": [-0.5, 0.5],
     }
-    lin_vel_x_range = [0.0, 1.0]
+    lin_vel_x_range = [-0.5, 2.0]
     lin_vel_y_range = [-0.0, 0.0]
     ang_vel_range = [-0.5, 0.5]
 
