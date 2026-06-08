@@ -44,8 +44,8 @@ class Go2ImitationEnvCfg(DirectRLEnvCfg):
         root_lin_vel(3) + root_ang_vel(3) + foot_pos_local(12) +
         root_rot_tan_norm(6)  [R4: heading-relative 6D rotation, MimicKit compute_tar_obs 방식]
 
-    AMP History (num_amp_observations = 2):
-        amp_observation_size = 49 × 2 = 98
+    AMP History (num_amp_observations = 10):
+        amp_observation_size = 49 × 10 = 490
     """
 
     # ── 에피소드 ────────────────────────────────────────────────
@@ -61,7 +61,7 @@ class Go2ImitationEnvCfg(DirectRLEnvCfg):
     action_space: int = 12
     state_space: int = 0
 
-    num_amp_observations: int = 2  # disc hist depth
+    num_amp_observations: int = 10  # disc hist depth (ablation: 2→10, MimicKit 방향)
     amp_observation_space: int = 49  # per-step disc obs (R4: +6 root_rot_tan_norm)
     include_rel_track_obs: bool = False  # 상대적 2D 궤적 포함 여부 토글
 

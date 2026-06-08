@@ -10,7 +10,7 @@
 """Go2 Imitation 환경 — MimicKit TaskSteeringEnv 기반 AMP + Steering.
 
 MimicKit에서 잘 동작한 구조를 IsaacLab DirectRLEnv에 맞게 재구현:
-  - AMP Discriminator: 49-dim obs × 2 history = 98-dim  (R4: root_rot_tan_norm 6D 추가)
+  - AMP Discriminator: 49-dim obs × 10 history = 490-dim  (R4: root_rot_tan_norm 6D 추가)
   - Task reward: steering (tar_reward 0.7 + face_reward 0.3)
   - Reset: 항상 RSI (Reference State Initialization)
   - 알고리즘: PPOAMPBase + OnPolicyRunnerAMPBase (rsl_rl)

@@ -88,9 +88,11 @@ class Go2ImitationPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         enable_replay_buffer=True,
         replay_buffer_size=200000,  # MimicKit disc_buffer_size
         # ── AMP obs 차원 (env와 일치해야 함) ──────────────────────
-        # amp_observation_space = 49 (per-step) × num_amp_observations(=2) = 98
+        # amp_observation_space = 49 (per-step) × num_amp_observations(=10) = 490
         # R4: per-step 43→49 (+6 root_rot_tan_norm), env_cfg.amp_observation_space=49
-        amp_observation_space=98,
+        # NOTE: 이 값은 fallback default일 뿐. OnPolicyRunnerAMPBase가 런타임에
+        #       env.amp_observation_space.shape[0] (=490)로 덮어쓰므로 disc input_dim은 자동 파생.
+        amp_observation_space=490,
         # ── Loss / Reward / Normalizer 방식 선택 ─────────────────
         # MimicKit 방식: disc_loss_type="bce", disc_reward_type="bce",
         #                disc_logit_reg_type="weight", disc_norm_clip=10.0
@@ -100,8 +102,8 @@ class Go2ImitationPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         # disc_reward_type="bce",        # "ls_gan" | "bce" (MimicKit 방식)
         # disc_logit_reg_type="weight",  # "logit" | "weight" (MimicKit 방식)
         # disc_norm_clip=10.0,           # None | 10.0 (MimicKit 방식)
-        disc_loss_type="ls_gan",  # "ls_gan" | "bce" (MimicKit 방식)
-        disc_reward_type="ls_gan",  # "ls_gan" | "bce" (MimicKit 방식)
-        disc_logit_reg_type="logit",  # "logit" | "weight" (MimicKit 방식)
-        disc_norm_clip=None,  # None | 10.0 (MimicKit 방식)
+        disc_loss_type="bce",  # "ls_gan" | "bce" (MimicKit 방식) — ablation: ls_gan→bce
+        disc_reward_type="bce",  # "ls_gan" | "bce" (MimicKit 방식) — ablation: ls_gan→bce
+        disc_logit_reg_type="weight",  # "logit" | "weight" (MimicKit 방식) — ablation: logit→weight
+        disc_norm_clip=10.0,  # None | 10.0 (MimicKit 방식) — ablation: None→10.0
     )
