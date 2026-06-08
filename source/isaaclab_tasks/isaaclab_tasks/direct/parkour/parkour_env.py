@@ -168,6 +168,12 @@ class Go2ParkourEnv(DirectRLEnv):
         # Contact history for edge detection
         self._last_contacts = torch.zeros(self.num_envs, 4, dtype=torch.bool, device=self.device)
 
+        # Per-foot contact duty EMA buffer — shape (num_envs, 4), one value per foot [FL, FR, RL, RR].
+        # Initialized to contact_duty_target so episode warmup does not produce spurious penalty.
+        self._foot_contact_duty = torch.full(
+            (self.num_envs, 4), self.cfg.contact_duty_target, device=self.device
+        )
+
         # Previous joint velocity for acceleration computation
         self._prev_joint_vel = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
 
@@ -1207,6 +1213,16 @@ class Go2ParkourEnv(DirectRLEnv):
             torch.clamp(feet_air_time - self.cfg.air_time_cap_max_s, min=0.0), dim=-1
         )  # (N,), units: seconds of excess; always >= 0
 
+        # === contact_duty_deficit — escape-proof per-foot contact duty EMA penalty ===
+        # feet_forces already computed at line ~1122: net_contact_forces[:, 0, self._feet_ids] (N,4,3).
+        # Reuse the same slice; torch.norm(·, dim=-1) > thr produces a bool→float with no grad.
+        foot_contact = (torch.norm(feet_forces, dim=-1) > self.cfg.contact_duty_force_thr).float()  # (N, 4)
+        alpha = self.step_dt / self.cfg.contact_duty_tau  # EMA decay per policy step
+        self._foot_contact_duty = alpha * foot_contact + (1.0 - alpha) * self._foot_contact_duty  # (N,4)
+        contact_duty_deficit = torch.sum(
+            torch.clamp(self.cfg.contact_duty_target - self._foot_contact_duty, min=0.0), dim=-1
+        )  # (N,), >= 0; reward_scales["contact_duty_deficit"] is negative → contribution <= 0
+
         # === Assemble all reward terms (B-aligned 14-term set + air_time_cap) ===
         reward_values = {
             "tracking_goal_vel": tracking_goal_vel,
@@ -1226,6 +1242,7 @@ class Go2ParkourEnv(DirectRLEnv):
             "feet_dragging": feet_dragging,
             "feet_gait_pairing": feet_gait_pairing,
             "air_time_cap": air_time_cap,
+            "contact_duty_deficit": contact_duty_deficit,
         }
 
         # === Accumulate and scale rewards ===
@@ -1289,6 +1306,7 @@ class Go2ParkourEnv(DirectRLEnv):
         self._prev_joint_vel[env_ids] = 0.0
         self._current_goal_idx[env_ids] = 0
         self._last_contacts[env_ids] = False
+        self._foot_contact_duty[env_ids] = self.cfg.contact_duty_target
         # Pre-reset capture for logging (since _term_goal_reached is reset on the next line)
         _pre_reset_term_goal_reached = self._term_goal_reached[env_ids].clone()
         self._term_goal_reached[env_ids] = False

@@ -628,6 +628,13 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         # extreme-tail(4.6s 초과) → 0.0092/step(ceiling의 31%, clip-safe). 효과 부족 시
         # weight→-0.25 또는 air_time_cap_max_s→0.6s로 조임.
         "air_time_cap": -0.1,       # graded per-foot penalty (value≥0, weight<0 → contribution≤0)
+        # contact_duty_deficit: escape-불가 EMA 기반 per-foot 접촉비율 부족분 penalty.
+        # weight 단위: Episode_Reward 측정 단위(= Σ scaled / episode_length_s, step_dt 이미 반영).
+        # 이 단위에서 deficit value≈0.28(들린 발 1개, full episode) → 기여 = |weight| × 0.28.
+        # 회피 유인 0.054를 상회하려면 |weight| > 0.19. -0.5: 기여 0.14 ≈ 2.6× 회피 유인(net escape gradient 유의미).
+        # ⚠️ step_dt 재곱 금지: env line 1251 scale×step_dt×value의 step_dt는 측정값에 이미 포함됨.
+        #    이전 -15는 step_dt 이중 곱 오류(50× 과대) → clip(min=0)(env:1259)으로 학습 gradient 소멸.
+        "contact_duty_deficit": -0.5,  # 1순위 headline fix. weight는 측정 단위(Episode_Reward, step_dt 이미 반영)에서 회피유인 0.054 대비 설정 — step_dt 재곱 금지(이전 -15는 50x 과대 오류). 검증 run 후 -0.3~-1.0 범위 조정
     }
 
     # tracking reward parameters (Genesis original)
@@ -646,6 +653,13 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # max_air=1.0s: 정상 발 max=1.70s(gap 도약)보다 낮게, RL 병리 p90=1.24s보다 낮게 잡아
     # 정상 도약 0.008%만 걸림, 병리꼬리 13.3% 처벌. 효과 부족 시 0.6s로 조임.
     air_time_cap_max_s: float = 1.0  # seconds; 초과분에 graded penalty
+
+    # contact_duty_deficit: escape-불가 per-foot 접촉비율(EMA) 기반 penalty 파라미터
+    # EMA 업데이트: duty ← α·contact + (1−α)·duty,  α = step_dt / contact_duty_tau
+    # graded deficit = Σ_feet clamp(contact_duty_target − duty, min=0)
+    contact_duty_tau: float = 1.0       # s, EMA 시상수 (≈2~3 gait cycle). alpha = step_dt/tau
+    contact_duty_target: float = 0.30   # 각 발이 평균 30% 이상 접지 요구 (trot 지지발 ~0.5-0.7 / 들린 발 ~0 분리)
+    contact_duty_force_thr: float = 2.0  # N, 접촉 판정 임계 (parkour_env.py line 1133 feet contact threshold와 일관)
 
     # Gait pairing reward parameters (Spot GaitReward style, sync-only)
     feet_gait_std: float = 0.2   # error tolerance (Spot=0.1; parkour 완화)
