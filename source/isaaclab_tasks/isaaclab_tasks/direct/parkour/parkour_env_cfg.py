@@ -658,7 +658,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # EMA 업데이트: duty ← α·contact + (1−α)·duty,  α = step_dt / contact_duty_tau
     # graded deficit = Σ_feet clamp(contact_duty_target − duty, min=0)
     contact_duty_tau: float = 1.0       # s, EMA 시상수 (≈2~3 gait cycle). alpha = step_dt/tau
-    contact_duty_target: float = 0.30   # 각 발이 평균 30% 이상 접지 요구 (trot 지지발 ~0.5-0.7 / 들린 발 ~0 분리)
+    contact_duty_target: float = 0.5   # 각 발이 평균 30% 이상 접지 요구 (trot 지지발 ~0.5-0.7 / 들린 발 ~0 분리)
     contact_duty_force_thr: float = 2.0  # N, 접촉 판정 임계 (parkour_env.py line 1133 feet contact threshold와 일관)
 
     # Gait pairing reward parameters (Spot GaitReward style, sync-only)
