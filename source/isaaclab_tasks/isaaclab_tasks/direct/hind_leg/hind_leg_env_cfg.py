@@ -55,7 +55,7 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
             "stiffness_distribution_params": (0.75, 1.5),
-            "damping_distribution_params": (0.3, 3.0),
+            "damping_distribution_params": (0.75, 1.5),
             "operation": "scale",
             "distribution": "log_uniform",
         },
@@ -194,14 +194,22 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     feet_air_time_reward_scale = 0.5
     undesired_contact_reward_scale = -1.0
     flat_orientation_reward_scale = -1.0
-    similar_to_default_reward_scale = -0.1
+    similar_to_default_reward_scale = -0.01
     base_height_reward_scale = -10.0
     termination_reward_scale = -100.0
-    # velocity-gated foot clearance: penalizes low foot height when foot has horizontal velocity
-    # (foot_z - target_height)^2 * tanh(tanh_mult * foot_v_xy); scale < 0 → penalty
-    foot_clearance_reward_scale = -0.5
-    foot_clearance_tanh_mult = 2.0
-    foot_clearance_offset = 0.05  # metres above measured rest-z to set as target clearance
+    # (A) Positive swing foot-height reward v3 — monotonic clip-ramp (scale > 0)
+    # Formula: in_swing * clamp(lift / foot_height_target_offset, 0, 1)
+    # lift = sole_z - sole_rest_z; constant gradient across 0→target eliminates Gaussian vanishing tail.
+    foot_height_reward_scale = 1.0        # > 0: bonus, commensurate with track_lin_vel (+1.0)
+    foot_height_target_offset = 0.06      # metres above sole rest-z; ramp saturates at this lift
+    # (B) Contact-gated anti-slip penalty: stance foot horizontal velocity → penalty (scale < 0)
+    # Directly targets measured stance slip of 0.93 m/s
+    foot_slip_reward_scale = -0.15        # < 0: penalty; at 0.93 m/s → ~0.13 per foot per step
+    # (C) air_time_cap — per-foot penalty for holding a foot airborne beyond cap seconds (scale < 0)
+    # Normal swing 0.2–0.35s is freely allowed; only pathological holds (v2 duty 0.42/0.67) are penalised.
+    # NOTE: uses last_air_time (frozen between touchdowns); see env comment for current_air_time upgrade path.
+    foot_air_time_cap = 0.35              # seconds; excess above this is penalised per foot
+    foot_air_time_cap_reward_scale = -0.5  # < 0: penalty
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
@@ -325,11 +333,19 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
     termination_reward_scale = -100.
-    # velocity-gated foot clearance: penalizes low foot height when foot has horizontal velocity
-    # (foot_z - target_height)^2 * tanh(tanh_mult * foot_v_xy); scale < 0 → penalty
-    foot_clearance_reward_scale = -0.5
-    foot_clearance_tanh_mult = 2.0
-    foot_clearance_offset = 0.05  # metres above measured rest-z to set as target clearance
+    # (A) Positive swing foot-height reward v3 — monotonic clip-ramp (scale > 0)
+    # Formula: in_swing * clamp(lift / foot_height_target_offset, 0, 1)
+    # lift = sole_z - sole_rest_z; constant gradient across 0→target eliminates Gaussian vanishing tail.
+    foot_height_reward_scale = 1.0        # > 0: bonus, raised from 0.5; commensurate with track_lin_vel (+1.0)
+    foot_height_target_offset = 0.06      # metres above sole rest-z; ramp saturates at this lift
+    # (B) Contact-gated anti-slip penalty: stance foot horizontal velocity → penalty (scale < 0)
+    # Directly targets measured stance slip of 0.93 m/s
+    foot_slip_reward_scale = -0.15        # < 0: penalty; at 0.93 m/s → ~0.13 per foot per step
+    # (C) air_time_cap — per-foot penalty for holding a foot airborne beyond cap seconds (scale < 0)
+    # Normal swing 0.2–0.35s is freely allowed; only pathological holds (v2 duty 0.42/0.67) are penalised.
+    # NOTE: uses last_air_time (frozen between touchdowns); see env comment for current_air_time upgrade path.
+    foot_air_time_cap = 0.35              # seconds; excess above this is penalised per foot
+    foot_air_time_cap_reward_scale = -0.5  # < 0: penalty
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(

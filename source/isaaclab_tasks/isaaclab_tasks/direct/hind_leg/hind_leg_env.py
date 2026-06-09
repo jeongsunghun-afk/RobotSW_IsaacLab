@@ -65,12 +65,30 @@ class HindLegEnv(DirectRLEnv):
                 "flat_orientation_l2",
                 "similar_to_default",
                 "base_height",
-                "termination"
+                "termination",
+                "foot_height",
+                "foot_slip",
+                "air_time_cap",
             ]
         }
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
-        self._feet_ids, _ = self._contact_sensor.find_bodies(".*_Foot_Contact_Link")
+        # Contact sensor body ids for swing/stance gating (.*foot_contact.*)
+        self._feet_ids, feet_contact_names = self._contact_sensor.find_bodies(".*foot_contact.*")
+        # Robot articulation body ids for sole position and velocity (.*foot_contact.*)
+        # These are in a different index space than _feet_ids (sensor vs. robot body indices).
+        self._sole_body_ids, sole_body_names = self._robot.find_bodies(".*foot_contact.*")
+        assert len(self._sole_body_ids) == 2, (
+            f"Expected exactly 2 sole bodies matching '.*foot_contact.*', got {len(self._sole_body_ids)}: {sole_body_names}"
+        )
+        # Verify foot ordering is consistent between contact sensor and robot body indices.
+        # A mismatch would silently swap swing/stance gating between feet, corrupting training.
+        assert [n.split("/")[-1] for n in feet_contact_names] == [n.split("/")[-1] for n in sole_body_names], (
+            f"Foot name order mismatch — contact sensor: {feet_contact_names}, sole bodies: {sole_body_names}"
+        )
+        # Sole rest-z is captured lazily on the first _get_rewards call (body_pos_w not valid in __init__).
+        # It is a flat-ground constant, reset-invariant, so it is NOT initialized in _reset_idx.
+        self._sole_rest_z: torch.Tensor | None = None
 
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalzied_body_names)
 
@@ -231,6 +249,49 @@ class HindLegEnv(DirectRLEnv):
         # termination
         termination = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1).float()
 
+        # (A) Positive swing foot-height reward — v3 monotonic clip-ramp (scale > 0)
+        # Rationale: replaces v2 Gaussian exp(-(z-H)²/σ²) whose vanishing tail left lift stuck at 0.9 cm.
+        # Monotonic ramp: gradient is constant across 0→target, so even a 0.9 cm lift gets a meaningful
+        # pull toward 6 cm (instead of 0.056 Gaussian tail that competing penalties overwhelmed).
+        # Formula: in_swing * clamp(lift / offset, 0, 1)  — lift=0→0, lift=offset→1, above→saturated at 1.
+        # sole_rest_z is captured lazily after the first physics step (body_pos_w invalid during __init__).
+        # It is a flat-ground constant and is reset-invariant; it is NOT re-zeroed in _reset_idx.
+        if self._sole_rest_z is None:
+            self._sole_rest_z = self._robot.data.body_pos_w[:, self._sole_body_ids, 2].mean(dim=0).detach()
+        # Swing gate: foot is in swing when contact force ≤ 1N (reuse net_contact_forces computed above).
+        # net_contact_forces shape: (N, history, n_contact_bodies); _feet_ids selects sole contact bodies.
+        contact_filt = (
+            torch.max(torch.norm(net_contact_forces[:, :, self._feet_ids], dim=-1), dim=1)[0] > 1.0
+        )  # (N, n_feet) — True = in contact
+        in_swing = ~contact_filt  # (N, n_feet) — True = in swing
+        # Sole world-z minus rest-z = lift above ground (absolute, reset-invariant flat-ground baseline).
+        sole_z = self._robot.data.body_pos_w[:, self._sole_body_ids, 2]  # (N, n_feet)
+        lift = sole_z - self._sole_rest_z  # (N, n_feet); _sole_rest_z broadcasts (n_feet,)
+        height_rew = torch.sum(
+            in_swing * torch.clamp(lift / self.cfg.foot_height_target_offset, 0.0, 1.0), dim=1
+        )  # (N,) ∈ [0, n_feet]; scale > 0 → bonus
+
+        # (C) air_time_cap — per-foot penalty for excessive continuous air time (scale < 0)
+        # Rationale: prevents one-foot farming where foot_height bonus rewards holding a foot up indefinitely,
+        # causing the duty asymmetry (0.42/0.67) observed in v2. Any per-foot air time beyond cap is penalised.
+        # cap = 0.35s: normal swing (0.2–0.35s) is freely allowed; only pathological holds are penalised.
+        # Implementation note: last_air_time (from contact sensor) holds the duration of the *last completed*
+        # air phase — it is frozen between touchdowns and only refreshes at the instant of contact.
+        # This means a foot that is currently held airborne is NOT penalised in real-time; the penalty only
+        # triggers at the next touchdown. For a stronger real-time signal, current_air_time (which grows
+        # live while the foot is in the air) would be more effective — flagged for v4 if duty asymmetry persists.
+        # last_air_time is already sliced at line ~227 for the feet_air_time term; reuse the same tensor.
+        air_excess = torch.clamp(last_air_time - self.cfg.foot_air_time_cap, min=0.0)  # (N, n_feet) ≥ 0
+        air_time_cap_pen = torch.sum(air_excess, dim=1)  # (N,) ≥ 0; scale < 0 → penalty
+
+        # (B) Contact-gated anti-slip penalty (scale < 0)
+        # Rationale: directly penalizes stance feet that are sliding (measured at 0.93 m/s ≈ body speed).
+        # Complementary to (A): swing → lift up, stance → stop sliding.
+        sole_vel_xy = torch.norm(
+            self._robot.data.body_lin_vel_w[:, self._sole_body_ids, :2], dim=-1
+        )  # (N, n_feet)
+        slip_pen = torch.sum(contact_filt.float() * sole_vel_xy ** 2, dim=1)  # (N,) ≥ 0; scale < 0 → penalty
+
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
             "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
@@ -244,7 +305,10 @@ class HindLegEnv(DirectRLEnv):
             "flat_orientation_l2": flat_orientation * self.cfg.flat_orientation_reward_scale * self.step_dt,
             "similar_to_default": similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
             "base_height": base_height * self.cfg.base_height_reward_scale * self.step_dt,
-            "termination": termination * self.cfg.termination_reward_scale * self.step_dt
+            "termination": termination * self.cfg.termination_reward_scale * self.step_dt,
+            "foot_height": height_rew * self.cfg.foot_height_reward_scale * self.step_dt,
+            "foot_slip": slip_pen * self.cfg.foot_slip_reward_scale * self.step_dt,
+            "air_time_cap": air_time_cap_pen * self.cfg.foot_air_time_cap_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         self.curriculum_rew_buf += reward
