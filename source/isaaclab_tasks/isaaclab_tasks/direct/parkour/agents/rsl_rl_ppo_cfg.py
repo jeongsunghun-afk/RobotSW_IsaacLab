@@ -5,7 +5,7 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
 
 
 @configclass
@@ -80,3 +80,35 @@ class Go2ParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class Go2ParkourSymmetryPPORunnerCfg(Go2ParkourPPORunnerCfg):
+    """Go2 Parkour with L/R symmetry data-augmentation (soft equivariance enforcement).
+
+    Activates ``PPOParkour``'s data-augmentation path with the parkour-specific left/right
+    mirror function.  The augmented batch doubles the effective minibatch size (``num_aug=2``),
+    so KL adaptive scheduling absorbs the change without requiring lr tuning.
+
+    Design rationale: RL (left hind leg) parks as a reward-positive local equilibrium when
+    policy equivariance is not enforced.  Mirror augmentation softly penalises L/R asymmetry
+    by including both original and mirrored (obs, action) pairs in every PPO update.
+
+    Only L/R symmetry is applied — the task is forward-only (forward command, scan offset
+    +0.375 m forward), so front-back / diagonal symmetries do NOT hold.
+
+    All PPO hyperparameters, network architecture, and encoder structure are inherited
+    unchanged from ``Go2ParkourPPORunnerCfg``.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            use_mirror_loss=False,
+            mirror_loss_coeff=0.0,
+            data_augmentation_func=(
+                "isaaclab_tasks.direct.parkour.mdp.symmetry:compute_parkour_symmetric_states"
+            ),
+        )
+        self.experiment_name = "go2_parkour_symmetry"

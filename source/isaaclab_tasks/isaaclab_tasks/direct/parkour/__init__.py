@@ -24,3 +24,14 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2ParkourPPORunnerCfg",
     },
 )
+
+
+gym.register(
+    id="Go2-Parkour-Symmetry",
+    entry_point=f"{__name__}.parkour_env:Go2ParkourEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.parkour_env_cfg:ParkourEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2ParkourSymmetryPPORunnerCfg",
+    },
+)
