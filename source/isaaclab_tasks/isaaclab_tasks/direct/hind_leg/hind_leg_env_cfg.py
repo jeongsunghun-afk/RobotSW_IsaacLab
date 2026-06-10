@@ -84,6 +84,7 @@ class EventCfg:
         },
     )
 
+
 @configclass
 class HindLegFlatEnvCfg(DirectRLEnvCfg):
     # env
@@ -197,19 +198,19 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     similar_to_default_reward_scale = -0.01
     base_height_reward_scale = -10.0
     termination_reward_scale = -100.0
-    # (A) Positive swing foot-height reward v3 — monotonic clip-ramp (scale > 0)
-    # Formula: in_swing * clamp(lift / foot_height_target_offset, 0, 1)
-    # lift = sole_z - sole_rest_z; constant gradient across 0→target eliminates Gaussian vanishing tail.
-    foot_height_reward_scale = 1.0        # > 0: bonus, commensurate with track_lin_vel (+1.0)
-    foot_height_target_offset = 0.06      # metres above sole rest-z; ramp saturates at this lift
-    # (B) Contact-gated anti-slip penalty: stance foot horizontal velocity → penalty (scale < 0)
-    # Directly targets measured stance slip of 0.93 m/s
-    foot_slip_reward_scale = -0.15        # < 0: penalty; at 0.93 m/s → ~0.13 per foot per step
-    # (C) air_time_cap — per-foot penalty for holding a foot airborne beyond cap seconds (scale < 0)
-    # Normal swing 0.2–0.35s is freely allowed; only pathological holds (v2 duty 0.42/0.67) are penalised.
-    # NOTE: uses last_air_time (frozen between touchdowns); see env comment for current_air_time upgrade path.
-    foot_air_time_cap = 0.35              # seconds; excess above this is penalised per foot
-    foot_air_time_cap_reward_scale = -0.5  # < 0: penalty
+    # (A) Phase-scheduled stance reward: bonus when scheduled-stance foot is in contact (scale > 0)
+    # (B) Phase-scheduled swing clearance reward: bonus when scheduled-swing foot is lifted (scale > 0)
+    # (C) Contact-gated anti-slip penalty: stance foot horizontal velocity → penalty (scale < 0)
+    foot_slip_reward_scale = -0.15  # < 0: penalty; at 0.93 m/s → ~0.13 per foot per step
+    # Gait clock parameters
+    gait_period = 0.6  # seconds; full gait cycle duration
+    gait_swing_height = 0.07  # metres; clearance ramp saturates at this lift above sole_rest_z
+    gait_phase_sharpness = 4.0  # tanh sharpness; higher = more square-wave swing/stance boundary
+    gait_stance_reward_scale = 1.0  # > 0: bonus
+    gait_swing_reward_scale = 1.0  # > 0: bonus
+    # Standing detection thresholds: when command magnitude is below these values, gait is suppressed
+    standing_vel_threshold = 0.1  # ‖cmd_xy‖ below this → standing candidate (matches feet_air_time gate)
+    standing_yaw_threshold = 0.1  # |yaw command| below this → standing confirmed
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
@@ -251,7 +252,7 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     ang_vel = False
     friction_terrain = True
     timing_parameter = False
-    clock_inputs = False
+    clock_inputs = True
     prev_actions = False
     history_observation = True
 
@@ -274,12 +275,7 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
 
     state_space = 0
 
-    penalzied_body_names = [
-        "base",
-        ".*hip.*",
-        ".*thigh.*",
-        ".*calf.*"
-    ]
+    penalzied_body_names = ["base", ".*hip.*", ".*thigh.*", ".*calf.*"]
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -332,20 +328,20 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     flat_orientation_reward_scale = -0.0
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
-    termination_reward_scale = -100.
-    # (A) Positive swing foot-height reward v3 — monotonic clip-ramp (scale > 0)
-    # Formula: in_swing * clamp(lift / foot_height_target_offset, 0, 1)
-    # lift = sole_z - sole_rest_z; constant gradient across 0→target eliminates Gaussian vanishing tail.
-    foot_height_reward_scale = 1.0        # > 0: bonus, raised from 0.5; commensurate with track_lin_vel (+1.0)
-    foot_height_target_offset = 0.06      # metres above sole rest-z; ramp saturates at this lift
-    # (B) Contact-gated anti-slip penalty: stance foot horizontal velocity → penalty (scale < 0)
-    # Directly targets measured stance slip of 0.93 m/s
-    foot_slip_reward_scale = -0.15        # < 0: penalty; at 0.93 m/s → ~0.13 per foot per step
-    # (C) air_time_cap — per-foot penalty for holding a foot airborne beyond cap seconds (scale < 0)
-    # Normal swing 0.2–0.35s is freely allowed; only pathological holds (v2 duty 0.42/0.67) are penalised.
-    # NOTE: uses last_air_time (frozen between touchdowns); see env comment for current_air_time upgrade path.
-    foot_air_time_cap = 0.35              # seconds; excess above this is penalised per foot
-    foot_air_time_cap_reward_scale = -0.5  # < 0: penalty
+    termination_reward_scale = -100.0
+    # (A) Phase-scheduled stance reward: bonus when scheduled-stance foot is in contact (scale > 0)
+    # (B) Phase-scheduled swing clearance reward: bonus when scheduled-swing foot is lifted (scale > 0)
+    # (C) Contact-gated anti-slip penalty: stance foot horizontal velocity → penalty (scale < 0)
+    foot_slip_reward_scale = -0.15  # < 0: penalty; at 0.93 m/s → ~0.13 per foot per step
+    # Gait clock parameters
+    gait_period = 0.6  # seconds; full gait cycle duration
+    gait_swing_height = 0.07  # metres; clearance ramp saturates at this lift above sole_rest_z
+    gait_phase_sharpness = 4.0  # tanh sharpness; higher = more square-wave swing/stance boundary
+    gait_stance_reward_scale = 1.0  # > 0: bonus
+    gait_swing_reward_scale = 1.0  # > 0: bonus
+    # Standing detection thresholds: when command magnitude is below these values, gait is suppressed
+    standing_vel_threshold = 0.1  # ‖cmd_xy‖ below this → standing candidate (matches feet_air_time gate)
+    standing_yaw_threshold = 0.1  # |yaw command| below this → standing confirmed
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(

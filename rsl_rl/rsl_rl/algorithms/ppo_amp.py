@@ -1,10 +1,15 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from rsl_rl.algorithms import PPO, PPOParkour
+from rsl_rl.algorithms.ppo import PPO
+from rsl_rl.algorithms.ppo_parkour import PPOParkour
 from rsl_rl.modules.amp_discriminator import AMPDiscriminator
-from tensordict import TensorDict
 
 
 class PPOAMPBase(PPO):
@@ -29,22 +34,35 @@ class PPOAMPBase(PPO):
         amp_obs_dim = amp_cfg.get("amp_observation_space", 105)
 
         # Loss / Reward / Regularization 방식 선택
-        self.disc_loss_type = amp_cfg.get("disc_loss_type", "ls_gan")          # "ls_gan" | "bce"
-        self.disc_logit_reg_type = amp_cfg.get("disc_logit_reg_type", "logit") # "logit" | "weight"
+        self.disc_loss_type = amp_cfg.get("disc_loss_type", "ls_gan")  # "ls_gan" | "bce" | "wgan"
+        self.disc_logit_reg_type = amp_cfg.get("disc_logit_reg_type", "logit")  # "logit" | "weight"
+        _disc_reward_type = amp_cfg.get("disc_reward_type", "ls_gan")
+
+        # WGAN 불일치 가드: loss_type=wgan인데 reward_type이 다르면 critic 출력에 잘못된 변환 적용됨.
+        if self.disc_loss_type == "wgan" and _disc_reward_type != "wgan":
+            raise AssertionError(
+                f"disc_loss_type='wgan'이지만 disc_reward_type='{_disc_reward_type}'입니다. "
+                "WGAN 사용 시 disc_reward_type도 'wgan'으로 설정해야 합니다."
+            )
+        if _disc_reward_type == "wgan" and self.disc_loss_type != "wgan":
+            import warnings
+
+            warnings.warn(
+                f"disc_reward_type='wgan'이지만 disc_loss_type='{self.disc_loss_type}'입니다. "
+                "reward 변환과 loss 종류가 불일치합니다. disc_loss_type도 'wgan'으로 설정을 권장합니다.",
+                stacklevel=2,
+            )
 
         self.discriminator = AMPDiscriminator(
             input_dim=amp_obs_dim,
             hidden_dims=amp_cfg.get("discriminator_hidden_dims", [1024, 512]),
             device=self.device,
-            disc_reward_type=amp_cfg.get("disc_reward_type", "ls_gan"),
-            norm_clip=amp_cfg.get("disc_norm_clip", None),
+            disc_reward_type=_disc_reward_type,
+            norm_clip=amp_cfg.get("disc_norm_clip"),
         )
         self.discriminator.amp_reward_coef = self.amp_reward_coef
 
-        self.disc_optimizer = optim.Adam(
-            self.discriminator.parameters(),
-            lr=self.amp_discriminator_lr
-        )
+        self.disc_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.amp_discriminator_lr)
 
         self.enable_replay_buffer = amp_cfg.get("enable_replay_buffer", True)
         self.replay_buffer_size = amp_cfg.get("replay_buffer_size", 100000)
@@ -106,12 +124,20 @@ class PPOAMPBase(PPO):
             bce = nn.BCEWithLogitsLoss()
             expert_loss = bce(expert_logits, torch.ones_like(expert_logits))
             policy_loss = bce(policy_logits, torch.zeros_like(policy_logits))
+        elif self.disc_loss_type == "wgan":
+            # WASABI(WGAN) critic loss — arXiv:2206.11693 Eq 2 / CASSI WassersteinLoss verbatim.
+            # expert critic ↑ (minimize -E[D_exp]), policy critic ↓ (minimize E[D_pol]).
+            # 0.5 스케일은 total_loss 결합식에서 흡수되어 수학적으로 일관.
+            expert_loss = -expert_logits.mean()
+            policy_loss = policy_logits.mean()
         else:
             # LS-GAN (기존): expert→+1, policy→-1
             expert_loss = nn.MSELoss()(expert_logits, torch.ones_like(expert_logits))
             policy_loss = nn.MSELoss()(policy_logits, -1 * torch.ones_like(policy_logits))
 
         # ── Gradient Penalty (expert + policy 모두) ───────────────
+        # WGAN: 논문은 expert-only coef 5.0이지만 양방향 zero-centered R1 GP 인프라를 그대로 재사용.
+        # both-sided이므로 effective penalty가 크다 — wgan 사용 시 gradient_penalty_coef=5.0 권장 (기본 10.0).
         expert_data = expert_batch.detach().requires_grad_(True)
         expert_logits_gp = self.discriminator.get_logits(expert_data)
         gradients_expert = torch.autograd.grad(
@@ -142,7 +168,7 @@ class PPOAMPBase(PPO):
         if self.disc_logit_reg_type == "weight":
             # MimicKit 방식: 출력 레이어 가중치 L2 정규화
             w = self.discriminator.get_output_layer_weights()
-            logit_reg = self.disc_logit_reg * torch.sum(w ** 2)
+            logit_reg = self.disc_logit_reg * torch.sum(w**2)
         else:
             # 기존 방식: 출력 logit 값 L2 정규화
             logit_reg = self.disc_logit_reg * (expert_logits.pow(2).mean() + policy_logits.pow(2).mean())
@@ -159,12 +185,14 @@ class PPOAMPBase(PPO):
         total_loss_val = total_loss.item()
 
         # ── Output Monitoring ─────────────────────────────────────────────
+        # wgan: raw critic값 로깅 (sigmoid 적용 금지 — unbounded critic 값이 의미 있음).
+        # bce만 sigmoid, 나머지(ls_gan/wgan)는 raw logit.
         if self.disc_loss_type == "bce":
             # sigmoid 적용하여 확률값 (0~1): expert→1, policy→0 → 수렴 시 둘 다 ~0.5
             expert_output_mean = torch.sigmoid(expert_logits).mean().item()
             policy_output_mean = torch.sigmoid(policy_logits).mean().item()
         else:
-            # LS-GAN: raw logit (+1/-1 범위): expert→+1, policy→-1 → 수렴 시 policy도 +1
+            # LS-GAN: raw logit (+1/-1 범위) / WGAN: raw critic값 (unbounded)
             expert_output_mean = expert_logits.mean().item()
             policy_output_mean = policy_logits.mean().item()
 
@@ -208,11 +236,11 @@ class PPOAMP(PPOParkour):
     def __init__(self, *args, amp_cfg=None, **kwargs):
         kwargs.pop("class_name", None)
         super().__init__(*args, **kwargs)
-        
+
         # AMP Configuration
         if amp_cfg is None:
             amp_cfg = {}
-            
+
         self.amp_task_reward_lerp = amp_cfg.get("task_reward_lerp", 0.5)
         self.amp_discriminator_lr = amp_cfg.get("discriminator_learning_rate", 1e-4)
         self.amp_gradient_penalty_coef = amp_cfg.get("gradient_penalty_coef", 10.0)
@@ -221,23 +249,36 @@ class PPOAMP(PPOParkour):
         amp_obs_dim = amp_cfg.get("amp_observation_space", 105)
 
         # Loss / Reward / Regularization 방식 선택
-        self.disc_loss_type = amp_cfg.get("disc_loss_type", "ls_gan")          # "ls_gan" | "bce"
-        self.disc_logit_reg_type = amp_cfg.get("disc_logit_reg_type", "logit") # "logit" | "weight"
+        self.disc_loss_type = amp_cfg.get("disc_loss_type", "ls_gan")  # "ls_gan" | "bce" | "wgan"
+        self.disc_logit_reg_type = amp_cfg.get("disc_logit_reg_type", "logit")  # "logit" | "weight"
+        _disc_reward_type = amp_cfg.get("disc_reward_type", "ls_gan")
+
+        # WGAN 불일치 가드: loss_type=wgan인데 reward_type이 다르면 critic 출력에 잘못된 변환 적용됨.
+        if self.disc_loss_type == "wgan" and _disc_reward_type != "wgan":
+            raise AssertionError(
+                f"disc_loss_type='wgan'이지만 disc_reward_type='{_disc_reward_type}'입니다. "
+                "WGAN 사용 시 disc_reward_type도 'wgan'으로 설정해야 합니다."
+            )
+        if _disc_reward_type == "wgan" and self.disc_loss_type != "wgan":
+            import warnings
+
+            warnings.warn(
+                f"disc_reward_type='wgan'이지만 disc_loss_type='{self.disc_loss_type}'입니다. "
+                "reward 변환과 loss 종류가 불일치합니다. disc_loss_type도 'wgan'으로 설정을 권장합니다.",
+                stacklevel=2,
+            )
 
         self.discriminator = AMPDiscriminator(
             input_dim=amp_obs_dim,
             hidden_dims=amp_cfg.get("discriminator_hidden_dims", [1024, 512]),
             device=self.device,
-            disc_reward_type=amp_cfg.get("disc_reward_type", "ls_gan"),
-            norm_clip=amp_cfg.get("disc_norm_clip", None),
+            disc_reward_type=_disc_reward_type,
+            norm_clip=amp_cfg.get("disc_norm_clip"),
         )
         self.discriminator.amp_reward_coef = self.amp_reward_coef
 
         # Discriminator Optimizer
-        self.disc_optimizer = optim.Adam(
-            self.discriminator.parameters(),
-            lr=self.amp_discriminator_lr
-        )
+        self.disc_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.amp_discriminator_lr)
 
         # Replay Buffer (catastrophic forgetting 방지)
         self.enable_replay_buffer = amp_cfg.get("enable_replay_buffer", True)
@@ -301,12 +342,20 @@ class PPOAMP(PPOParkour):
             bce = nn.BCEWithLogitsLoss()
             expert_loss = bce(expert_logits, torch.ones_like(expert_logits))
             policy_loss = bce(policy_logits, torch.zeros_like(policy_logits))
+        elif self.disc_loss_type == "wgan":
+            # WASABI(WGAN) critic loss — arXiv:2206.11693 Eq 2 / CASSI WassersteinLoss verbatim.
+            # expert critic ↑ (minimize -E[D_exp]), policy critic ↓ (minimize E[D_pol]).
+            # 0.5 스케일은 total_loss 결합식에서 흡수되어 수학적으로 일관.
+            expert_loss = -expert_logits.mean()
+            policy_loss = policy_logits.mean()
         else:
             # LS-GAN (기존): expert→+1, policy→-1
             expert_loss = nn.MSELoss()(expert_logits, torch.ones_like(expert_logits))
             policy_loss = nn.MSELoss()(policy_logits, -1 * torch.ones_like(policy_logits))
 
         # ── Gradient Penalty (expert + policy 모두) ───────────────
+        # WGAN: 논문은 expert-only coef 5.0이지만 양방향 zero-centered R1 GP 인프라를 그대로 재사용.
+        # both-sided이므로 effective penalty가 크다 — wgan 사용 시 gradient_penalty_coef=5.0 권장 (기본 10.0).
         expert_data = expert_batch.detach().requires_grad_(True)
         expert_logits_gp = self.discriminator.get_logits(expert_data)
         gradients_expert = torch.autograd.grad(
@@ -337,7 +386,7 @@ class PPOAMP(PPOParkour):
         if self.disc_logit_reg_type == "weight":
             # MimicKit 방식: 출력 레이어 가중치 L2 정규화
             w = self.discriminator.get_output_layer_weights()
-            logit_reg = self.disc_logit_reg * torch.sum(w ** 2)
+            logit_reg = self.disc_logit_reg * torch.sum(w**2)
         else:
             # 기존 방식: 출력 logit 값 L2 정규화
             logit_reg = self.disc_logit_reg * (expert_logits.pow(2).mean() + policy_logits.pow(2).mean())
@@ -355,12 +404,14 @@ class PPOAMP(PPOParkour):
         total_loss_val = total_loss.item()
 
         # ── Output Monitoring ─────────────────────────────────────────────
+        # wgan: raw critic값 로깅 (sigmoid 적용 금지 — unbounded critic 값이 의미 있음).
+        # bce만 sigmoid, 나머지(ls_gan/wgan)는 raw logit.
         if self.disc_loss_type == "bce":
             # sigmoid 적용하여 확률값 (0~1): expert→1, policy→0 → 수렴 시 둘 다 ~0.5
             expert_output_mean = torch.sigmoid(expert_logits).mean().item()
             policy_output_mean = torch.sigmoid(policy_logits).mean().item()
         else:
-            # LS-GAN: raw logit (+1/-1 범위): expert→+1, policy→-1 → 수렴 시 policy도 +1
+            # LS-GAN: raw logit (+1/-1 범위) / WGAN: raw critic값 (unbounded)
             expert_output_mean = expert_logits.mean().item()
             policy_output_mean = policy_logits.mean().item()
 
@@ -394,7 +445,7 @@ class PPOAMP(PPOParkour):
                 all_disc_grads = torch.cat(disc_grads)
                 torch.distributed.all_reduce(all_disc_grads, op=torch.distributed.ReduceOp.SUM)
                 all_disc_grads /= self.gpu_world_size
-                
+
                 offset = 0
                 for param in self.discriminator.parameters():
                     if param.grad is not None:
