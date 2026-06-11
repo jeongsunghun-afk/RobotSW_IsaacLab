@@ -3,13 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Go2-Imitation-Tracking 정책의 속도 명령 추종 결과를 플롯하는 스크립트.
+"""Go2-Imitation 정책의 속도 명령 추종 결과를 플롯하는 스크립트.
 
-MimicKit의 ``run_control_tracking_plot.py``를 IsaacLab/Go2-Imitation-Tracking
-(body-frame 속도 추종) 환경에 맞게 이식.
+MimicKit의 ``run_control_tracking_plot.py``를 IsaacLab/Go2-Imitation 환경에 맞게 이식.
 
 동작:
-  - body-frame 속도 명령을 (vx, vy=0, yaw_rate=0)으로 고정하고 vx만 0→max→0으로 ramp+hold sweep.
+  - world +x 방향으로 tar_dir/face_dir를 고정하고 tar_speed만 0→max→0으로 ramp+hold sweep.
   - 매 step 정책을 평가하며 실제 body-frame 속도 / joint torque·pos·vel을 수집.
   - 2종 플롯 저장:
       velocity_comparison.png — (vx,vy,vz)+(roll,pitch,yaw rate), 실제=실선/명령=점선.
@@ -21,7 +20,7 @@ act_inference는 내부에서 actor_obs_normalizer를 적용하므로 obs 정규
 
 실행 예시:
   ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/go2_imitation_tracking_plot.py \
-    --task Go2-Imitation-Tracking-v0 --num_envs 1 --headless \
+    --task Go2-Imitation-v0 --num_envs 1 --headless \
     --load_run 2026-05-22_11-36-30_no_pace --checkpoint model_500.pt
 """
 
@@ -36,9 +35,9 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Plot Go2-Imitation-Tracking velocity command tracking.")
+parser = argparse.ArgumentParser(description="Plot Go2-Imitation velocity command tracking.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default="Go2-Imitation-Tracking-v0", help="Name of the task.")
+parser.add_argument("--task", type=str, default="Go2-Imitation-v0", help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
@@ -146,10 +145,12 @@ def build_velocity_schedule(dt, max_speed, speed_step, ramp_duration, hold_durat
 
 
 def freeze_command(base_env, speed):
-    """body-frame 속도 명령을 (vx=speed, vy=0, yaw_rate=0)으로 고정하고 타이머를 무력화."""
-    base_env._lin_vel_cmd[:, 0] = speed   # vx command (forward sweep)
-    base_env._lin_vel_cmd[:, 1] = 0.0     # vy 항상 0
-    base_env._yaw_vel_cmd[:] = 0.0        # yaw rate = 0 (직진/고정 heading)
+    """tar_dir/face_dir를 world +x로, tar_speed를 speed로 고정하고 타이머를 무력화."""
+    base_env._tar_dir[:, 0] = 1.0
+    base_env._tar_dir[:, 1] = 0.0
+    base_env._face_dir[:, 0] = 1.0
+    base_env._face_dir[:, 1] = 0.0
+    base_env._tar_speed[:] = speed
     base_env._tar_timer[:] = float("inf")  # _post_physics_step resample 방지
 
 
@@ -228,7 +229,7 @@ def plot_velocity_comparison(data, title, out_dir):
     n = bv.shape[0]
     steps = np.arange(n)
 
-    # +x 고정 sweep: 명령은 vx 패널에만 점선(lin_vel_cmd[:,0]). 나머지 패널 명령=0.
+    # +x 고정 sweep: 명령은 vx 패널에만 점선(tar_speed). 나머지 패널 명령=0.
     cmd_vel = np.stack([data["cmd_lin_x"], np.zeros(n), np.zeros(n)], axis=1)
     cmd_ang = np.zeros((n, 3))
 
