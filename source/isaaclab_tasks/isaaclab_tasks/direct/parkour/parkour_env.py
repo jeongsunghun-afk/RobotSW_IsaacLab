@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -11,11 +11,12 @@ import numpy as np
 import torch
 
 import omni.kit.app
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
-from isaaclab.markers.config import RED_ARROW_X_MARKER_CFG, SPHERE_MARKER_CFG
+from isaaclab.markers.config import SPHERE_MARKER_CFG
 from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.terrains import TerrainImporter
 from isaaclab.terrains.trimesh import mesh_terrains as _parkour_mesh_terrains
@@ -24,17 +25,17 @@ from isaaclab.utils import math as math_utils
 from isaaclab_tasks.direct._common import DebugKeyBindingCfg, DebugViewer, DebugViewerCfg
 
 from .parkour_env_cfg import (
-    TERRAIN_CLASS_FLAT,
-    TERRAIN_CLASS_HURDLE,
-    TERRAIN_CLASS_STEP,
-    TERRAIN_CLASS_GAP,
-    TERRAIN_CLASS_STAIR,
-    TERRAIN_CLASS_STEPPING_STONES,
     TERRAIN_CLASS_BALANCE_BEAM,
     TERRAIN_CLASS_CRAWL,
-    TERRAIN_CLASS_SLOPE,
-    TERRAIN_CLASS_ZIGZAG_HURDLES,
+    TERRAIN_CLASS_FLAT,
+    TERRAIN_CLASS_GAP,
+    TERRAIN_CLASS_HURDLE,
     TERRAIN_CLASS_ROUGH_BLOCKS,
+    TERRAIN_CLASS_SLOPE,
+    TERRAIN_CLASS_STAIR,
+    TERRAIN_CLASS_STEP,
+    TERRAIN_CLASS_STEPPING_STONES,
+    TERRAIN_CLASS_ZIGZAG_HURDLES,
     ParkourEnvCfg,
 )
 
@@ -140,7 +141,7 @@ class Go2ParkourEnv(DirectRLEnv):
         # the robot to spawn on row=A while goals were computed for row=B.
         num_cols = self.cfg.terrain.terrain_generator.num_cols
         self._terrain_levels = self._terrain.terrain_levels  # shape (num_envs,), int64
-        self._terrain_types = self._terrain.terrain_types    # shape (num_envs,), int64
+        self._terrain_types = self._terrain.terrain_types  # shape (num_envs,), int64
 
         # Per-env terrain class index (0=flat, 1=hurdle, 2=step, 3=gap, 4=stair).
         # _terrain_types is a column index (0..num_cols-1); map to class via proportion-based LUT.
@@ -152,9 +153,7 @@ class Go2ParkourEnv(DirectRLEnv):
             f"sub_terrain proportions must sum to 1.0 (got {sum(_props):.4f}); "
             "env_class LUT would diverge from TerrainGenerator's column assignment."
         )
-        _cumprops = torch.tensor(
-            [sum(_props[: i + 1]) for i in range(len(_props))], device=self.device
-        )
+        _cumprops = torch.tensor([sum(_props[: i + 1]) for i in range(len(_props))], device=self.device)
         _col_vals = torch.arange(num_cols, device=self.device).float() / num_cols + 1e-3
         # self._col_to_class[c] = terrain class for column c
         self._col_to_class = (_col_vals.unsqueeze(1) >= _cumprops.unsqueeze(0)).sum(dim=1).long()
@@ -170,9 +169,7 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # Per-foot contact duty EMA buffer — shape (num_envs, 4), one value per foot [FL, FR, RL, RR].
         # Initialized to contact_duty_target so episode warmup does not produce spurious penalty.
-        self._foot_contact_duty = torch.full(
-            (self.num_envs, 4), self.cfg.contact_duty_target, device=self.device
-        )
+        self._foot_contact_duty = torch.full((self.num_envs, 4), self.cfg.contact_duty_target, device=self.device)
 
         # Previous joint velocity for acceleration computation
         self._prev_joint_vel = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
@@ -190,9 +187,7 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # Per-step scaled reward contribution for env 0 — read by external UDP debug publisher.
         # Updated every _get_rewards() call; never affects reward computation.
-        self._last_reward_breakdown_env0: dict[str, float] = {
-            key: 0.0 for key in self.cfg.reward_scales.keys()
-        }
+        self._last_reward_breakdown_env0: dict[str, float] = {key: 0.0 for key in self.cfg.reward_scales.keys()}
 
         # Per-env per-term scaled reward contribution — read by external analysis tools.
         # Updated every _get_rewards() call; never affects reward computation.
@@ -279,6 +274,7 @@ class Go2ParkourEnv(DirectRLEnv):
             )
         if len(_base_body_ids) > 1:
             import warnings
+
             warnings.warn(
                 f"[Parkour] find_bodies('base') matched multiple bodies: {_base_body_names}. "
                 f"Using first: {_base_body_names[0]}",
@@ -380,9 +376,7 @@ class Go2ParkourEnv(DirectRLEnv):
         self._camera_follow_handle = (
             omni.kit.app.get_app_interface()
             .get_post_update_event_stream()
-            .create_subscription_to_pop(
-                lambda event, obj=weakref.proxy(self): obj._camera_follow_callback(event)
-            )
+            .create_subscription_to_pop(lambda event, obj=weakref.proxy(self): obj._camera_follow_callback(event))
         )
 
         self.init_done = True
@@ -527,8 +521,10 @@ class Go2ParkourEnv(DirectRLEnv):
         )
         elapsed = time.time() - t0
         n_edges = int(edge_mask_np.sum())
-        print(f"[Parkour] Edge mask built in {elapsed:.2f}s — {n_edges:,} / {n_x * n_y:,} edge cells "
-              f"({100.0 * n_edges / (n_x * n_y):.1f}%)")
+        print(
+            f"[Parkour] Edge mask built in {elapsed:.2f}s — {n_edges:,} / {n_x * n_y:,} edge cells "
+            f"({100.0 * n_edges / (n_x * n_y):.1f}%)"
+        )
 
         self.x_edge_mask = torch.from_numpy(edge_mask_np).to(self.device)  # (n_x, n_y) bool
         self._edge_mask_height_field = torch.from_numpy(height_field_np).to(self.device, dtype=torch.float32)
@@ -540,13 +536,18 @@ class Go2ParkourEnv(DirectRLEnv):
         _em_ratio = 100.0 * _em_true / max(_em_total, 1)
         print("\n========== [EDGE-MASK DEBUG] ==========")
         print(f"x_edge_mask shape: {tuple(self.x_edge_mask.shape)}")
-        print(f"  total cells = {_em_total:,}, true (edge) cells = {_em_true:,}, "
-              f"ratio = {_em_ratio:.3f}%  (healthy: 5–15%)")
+        print(
+            f"  total cells = {_em_total:,}, true (edge) cells = {_em_true:,}, "
+            f"ratio = {_em_ratio:.3f}%  (healthy: 5–15%)"
+        )
         print(f"  origin (world LL corner): {self._edge_mask_origin.cpu().numpy()}")
-        print(f"  inv_scale (cells/m): {self._edge_mask_inv_scale:.4f}  "
-              f"(= 1 / h_scale = 1 / {self._edge_mask_scale:.4f})")
-        print(f"  height_field: min={float(self._edge_mask_height_field.min()):.4f}, "
-              f"max={float(self._edge_mask_height_field.max()):.4f}")
+        print(
+            f"  inv_scale (cells/m): {self._edge_mask_inv_scale:.4f}  (= 1 / h_scale = 1 / {self._edge_mask_scale:.4f})"
+        )
+        print(
+            f"  height_field: min={float(self._edge_mask_height_field.min()):.4f}, "
+            f"max={float(self._edge_mask_height_field.max()):.4f}"
+        )
         print("=======================================\n")
 
     def _pre_physics_step(self, actions: torch.Tensor):
@@ -585,18 +586,16 @@ class Go2ParkourEnv(DirectRLEnv):
         terrain_goals_world: torch.Tensor | None = getattr(self, "_terrain_goals_world", None)
         if terrain_goals_world is not None:
             # Use actual per-obstacle terrain goals (world frame)
-            levels = self._terrain_levels[env_ids]   # [n] — row in terrain grid
-            types = self._terrain_types[env_ids]     # [n] — col in terrain grid
+            levels = self._terrain_levels[env_ids]  # [n] — row in terrain grid
+            types = self._terrain_types[env_ids]  # [n] — col in terrain grid
             # terrain_goals_world: [num_rows, num_cols, num_goals, 3]
             self._env_goals[env_ids, : self.cfg.num_goals] = terrain_goals_world[levels, types]
         else:
             # Fallback: straight-line goals along +x from terrain origin
-            print('no')
+            print("no")
             return
             origins = self._terrain.env_origins[env_ids]  # [n, 3]
-            goal_offsets = (
-                torch.arange(1, self.cfg.num_goals + 1, device=self.device) * self.cfg.goal_distance
-            )
+            goal_offsets = torch.arange(1, self.cfg.num_goals + 1, device=self.device) * self.cfg.goal_distance
             goal_x = origins[:, 0:1] + goal_offsets[None, :]
             goal_y = origins[:, 1:2].expand(-1, self.cfg.num_goals)
             goal_z = torch.full_like(goal_x, self.cfg.goal_z)
@@ -605,9 +604,7 @@ class Go2ParkourEnv(DirectRLEnv):
         # Repeat last goal for future goal observations (lookahead)
         if self.cfg.num_future_goal_obs > 0:
             last = self._env_goals[env_ids, self.cfg.num_goals - 1 : self.cfg.num_goals]  # [n, 1, 3]
-            self._env_goals[env_ids, self.cfg.num_goals :] = last.expand(
-                -1, self.cfg.num_future_goal_obs, -1
-            )
+            self._env_goals[env_ids, self.cfg.num_goals :] = last.expand(-1, self.cfg.num_future_goal_obs, -1)
 
     def _gather_cur_goals(self, future: int = 0) -> torch.Tensor:
         """Gather current (or future) goal for each env.
@@ -686,21 +683,20 @@ class Go2ParkourEnv(DirectRLEnv):
         # (base_z + 20) - terrain_z - 0.5 ≈ 19.84 → always clipped to 1.0 (dead channel).
         # The DEBUG block below will confirm whether this saturation is occurring.
         # Fix: replace pos_w[:, 2] with root_pos_w[:, 2] once the diagnostic confirms the bug.
-        recently_reset = (self.episode_length_buf <= 1)           # [N] bool — env just reset this step
-        do_global_refresh = (self.common_step_counter % 5 == 0)  # 10 Hz cadence gate (hardware constraint)
+        recently_reset = self.episode_length_buf <= 1  # [N] bool — env just reset this step
+        do_global_refresh = self.common_step_counter % 5 == 0  # 10 Hz cadence gate (hardware constraint)
 
         if do_global_refresh or recently_reset.any():
             # Compute fresh values for ALL envs in one pass (sensor data is fresh post sim-step).
             scan_new = (
-                self._height_scanner.data.pos_w[:, 2].unsqueeze(1)
-                - self._height_scanner.data.ray_hits_w[..., 2] - 0.3
+                self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.3
             ).clip(-1.0, 1.0)
             # Change E: compute relative yaw error (target_yaw - robot_heading), wrapped to [-π, π].
             # Genesis uses delta_yaw = target_yaw - self.yaw (robot heading), giving the policy direct
             # information about how much it needs to rotate. The previous absolute world-frame yaw gave
             # no heading reference — the policy could not compute turn direction/magnitude.
             # NOTE: self._target_yaw (absolute) is preserved unchanged for reward use at line ~632.
-            yaw_raw = self._target_yaw - self._robot.data.heading_w           # [N] relative yaw error
+            yaw_raw = self._target_yaw - self._robot.data.heading_w  # [N] relative yaw error
             yaw_diff_new = torch.atan2(torch.sin(yaw_raw), torch.cos(yaw_raw))  # wrap to [-π, π]
             next_yaw_raw = self._next_target_yaw - self._robot.data.heading_w
             next_yaw_diff_new = torch.atan2(torch.sin(next_yaw_raw), torch.cos(next_yaw_raw))
@@ -729,79 +725,84 @@ class Go2ParkourEnv(DirectRLEnv):
             self._scan_debug_already_printed.add(_step)
             with torch.no_grad():
                 # ── raw tensors ──────────────────────────────────────────────
-                sensor_pos_z = self._height_scanner.data.pos_w[:, 2]       # (N,)   base_z + offset_z
-                robot_base_z = self._robot.data.root_pos_w[:, 2]           # (N,)   true base_z
-                ray_hits_w   = self._height_scanner.data.ray_hits_w        # (N, C, 3)  or (N, C) — defensive
+                sensor_pos_z = self._height_scanner.data.pos_w[:, 2]  # (N,)   base_z + offset_z
+                robot_base_z = self._robot.data.root_pos_w[:, 2]  # (N,)   true base_z
+                ray_hits_w = self._height_scanner.data.ray_hits_w  # (N, C, 3)  or (N, C) — defensive
                 if ray_hits_w.dim() == 3:
-                    ray_hit_z = ray_hits_w[..., 2]                         # (N, C)
+                    ray_hit_z = ray_hits_w[..., 2]  # (N, C)
                     # ray_starts_w is not exposed by RayCasterData.
                     # For vertical rays (attach_yaw_only=True + downward pattern),
                     # hit point xy == ray start xy, so we use hit xy as a proxy.
-                    ray_starts_xy = ray_hits_w[..., :2]                    # (N, C, 2)
+                    ray_starts_xy = ray_hits_w[..., :2]  # (N, C, 2)
                 else:
-                    ray_hit_z     = ray_hits_w                             # (N, C) already
+                    ray_hit_z = ray_hits_w  # (N, C) already
                     ray_starts_xy = None
 
-                num_cells = ray_hit_z.shape[1]                             # C (e.g. 187)
+                num_cells = ray_hit_z.shape[1]  # C (e.g. 187)
 
-                scan_raw = sensor_pos_z.unsqueeze(1) - ray_hit_z - 0.5    # (N, C) current formula pre-clip
-                scan_alt = robot_base_z.unsqueeze(1) - ray_hit_z - 0.5    # (N, C) alt formula pre-clip
+                scan_raw = sensor_pos_z.unsqueeze(1) - ray_hit_z - 0.5  # (N, C) current formula pre-clip
+                scan_alt = robot_base_z.unsqueeze(1) - ray_hit_z - 0.5  # (N, C) alt formula pre-clip
                 scan_alt_clipped = scan_alt.clip(-1.0, 1.0)
 
                 # ── inf / nan masks ──────────────────────────────────────────
-                inf_mask = torch.isinf(ray_hit_z)                          # (N, C)
-                nan_mask = torch.isnan(ray_hit_z)                          # (N, C)
-                inf_count_per_env = inf_mask.sum(dim=1)                    # (N,)
-                nan_total         = nan_mask.sum().item()
-                inf_envs          = (inf_count_per_env > 0).sum().item()   # # envs with at least 1 inf
+                inf_mask = torch.isinf(ray_hit_z)  # (N, C)
+                nan_mask = torch.isnan(ray_hit_z)  # (N, C)
+                inf_count_per_env = inf_mask.sum(dim=1)  # (N,)
+                nan_total = nan_mask.sum().item()
+                inf_envs = (inf_count_per_env > 0).sum().item()  # # envs with at least 1 inf
                 n_show = min(4, self.num_envs)
 
                 # ── safe finite statistics for ray_hit_z ─────────────────────
-                finite_mask  = ~inf_mask & ~nan_mask
+                finite_mask = ~inf_mask & ~nan_mask
                 if finite_mask.any():
                     rh_mean = ray_hit_z[finite_mask].mean().item()
-                    rh_min  = ray_hit_z[finite_mask].min().item()
-                    rh_max  = ray_hit_z[finite_mask].max().item()
+                    rh_min = ray_hit_z[finite_mask].min().item()
+                    rh_max = ray_hit_z[finite_mask].max().item()
                 else:
                     rh_mean = rh_min = rh_max = float("nan")
 
                 # ── robot status (env 0) ─────────────────────────────────────
-                base_xy_0  = self._robot.data.root_pos_w[0, :2].cpu()
+                base_xy_0 = self._robot.data.root_pos_w[0, :2].cpu()
                 goal_idx_0 = int(self._current_goal_idx[0].item())
-                goal_xy_0  = self._cur_goals[0, :2].cpu()
-                dist_0     = torch.norm(goal_xy_0 - base_xy_0).item()
+                goal_xy_0 = self._cur_goals[0, :2].cpu()
+                dist_0 = torch.norm(goal_xy_0 - base_xy_0).item()
 
                 print(f"\n========== [HEIGHT-SCAN DEBUG @ step={_step}] ==========")
                 print(f"num_envs={self.num_envs}, cells_per_env={num_cells}")
 
                 # Robot status
-                print(f"\n[Robot status — env 0]")
-                print(f"  base xy: ({base_xy_0[0]:.3f}, {base_xy_0[1]:.3f}), "
-                      f"goal idx: {goal_idx_0}, "
-                      f"goal xy: ({goal_xy_0[0]:.3f}, {goal_xy_0[1]:.3f}), "
-                      f"dist={dist_0:.3f}m")
+                print("\n[Robot status — env 0]")
+                print(
+                    f"  base xy: ({base_xy_0[0]:.3f}, {base_xy_0[1]:.3f}), "
+                    f"goal idx: {goal_idx_0}, "
+                    f"goal xy: ({goal_xy_0[0]:.3f}, {goal_xy_0[1]:.3f}), "
+                    f"dist={dist_0:.3f}m"
+                )
 
                 # Sensor z
-                print(f"\n[Sensor z]")
-                print(f"  sensor pos_w[:, 2] (base_z + offset_z): "
-                      f"mean={sensor_pos_z.mean().item():.4f}, "
-                      f"min={sensor_pos_z.min().item():.4f}, "
-                      f"max={sensor_pos_z.max().item():.4f}")
-                print(f"  robot root_pos_w[:, 2] (true base_z):   "
-                      f"mean={robot_base_z.mean().item():.4f}, "
-                      f"min={robot_base_z.min().item():.4f}, "
-                      f"max={robot_base_z.max().item():.4f}")
-                print(f"  implied offset (sensor - base):          "
-                      f"{(sensor_pos_z - robot_base_z).mean().item():.4f}")
+                print("\n[Sensor z]")
+                print(
+                    f"  sensor pos_w[:, 2] (base_z + offset_z): "
+                    f"mean={sensor_pos_z.mean().item():.4f}, "
+                    f"min={sensor_pos_z.min().item():.4f}, "
+                    f"max={sensor_pos_z.max().item():.4f}"
+                )
+                print(
+                    f"  robot root_pos_w[:, 2] (true base_z):   "
+                    f"mean={robot_base_z.mean().item():.4f}, "
+                    f"min={robot_base_z.min().item():.4f}, "
+                    f"max={robot_base_z.max().item():.4f}"
+                )
+                print(f"  implied offset (sensor - base):          {(sensor_pos_z - robot_base_z).mean().item():.4f}")
 
                 # Scanner geometry (env 0)
                 # ray_starts_xy = ray_hits_w[..., :2]: valid because rays are vertical,
                 # so hit-point xy == ray-start xy regardless of whether the ray hit or not.
-                print(f"\n[Scanner geometry — env 0]")
+                print("\n[Scanner geometry — env 0]")
                 if ray_starts_xy is not None:
-                    rs0_xy = ray_starts_xy[0].cpu()                         # (C, 2)
-                    base_xy_t = base_xy_0                                    # already cpu
-                    c0   = rs0_xy[0]
+                    rs0_xy = ray_starts_xy[0].cpu()  # (C, 2)
+                    base_xy_t = base_xy_0  # already cpu
+                    c0 = rs0_xy[0]
                     cmid = rs0_xy[num_cells // 2]
                     cend = rs0_xy[num_cells - 1]
                     rel_cx = cmid[0].item() - base_xy_t[0].item()
@@ -810,32 +811,38 @@ class Go2ParkourEnv(DirectRLEnv):
                     x_ext_max = (rs0_xy[:, 0] - base_xy_t[0]).max().item()
                     y_ext_min = (rs0_xy[:, 1] - base_xy_t[1]).min().item()
                     y_ext_max = (rs0_xy[:, 1] - base_xy_t[1]).max().item()
-                    print(f"  ray start xy [env 0]: shape={tuple(rs0_xy.shape)} "
-                          f"(derived from ray_hits_w xy — vertical rays)")
+                    print(
+                        f"  ray start xy [env 0]: shape={tuple(rs0_xy.shape)} "
+                        f"(derived from ray_hits_w xy — vertical rays)"
+                    )
                     print(f"    cell[0]           xy = ({c0[0]:.3f}, {c0[1]:.3f})")
                     print(f"    cell[{num_cells // 2}]         xy = ({cmid[0]:.3f}, {cmid[1]:.3f})  <- approx center")
                     print(f"    cell[{num_cells - 1}]       xy = ({cend[0]:.3f}, {cend[1]:.3f})")
                     print(f"  scan center offset from base: (dx={rel_cx:+.3f}, dy={rel_cy:+.3f})")
-                    print(f"  scan extent relative to base: x=[{x_ext_min:+.3f}, {x_ext_max:+.3f}], "
-                          f"y=[{y_ext_min:+.3f}, {y_ext_max:+.3f}]")
+                    print(
+                        f"  scan extent relative to base: x=[{x_ext_min:+.3f}, {x_ext_max:+.3f}], "
+                        f"y=[{y_ext_min:+.3f}, {y_ext_max:+.3f}]"
+                    )
                 else:
                     print("  ray_starts_xy not available (ray_hits_w dim mismatch)")
 
                 # Ray hits — inf/nan stats
-                print(f"\n[Ray hits — inf/nan stats]")
-                print(f"  ray_hits_w[..., 2] (finite only): "
-                      f"mean={rh_mean:.4f}, min={rh_min:.4f}, max={rh_max:.4f}")
+                print("\n[Ray hits — inf/nan stats]")
+                print(f"  ray_hits_w[..., 2] (finite only): mean={rh_mean:.4f}, min={rh_min:.4f}, max={rh_max:.4f}")
                 inf_per = inf_count_per_env[:n_show].cpu().tolist()
                 inf_per_str = ", ".join(f"env{i}={int(v)}/{num_cells}" for i, v in enumerate(inf_per))
-                print(f"  inf count: {inf_per_str}  "
-                      f"(all-env mean={inf_count_per_env.float().mean().item():.1f}, "
-                      f"max={inf_count_per_env.max().item()})")
-                print(f"  inf-containing env ratio: {inf_envs}/{self.num_envs} "
-                      f"({100.0 * inf_envs / self.num_envs:.0f}%)")
+                print(
+                    f"  inf count: {inf_per_str}  "
+                    f"(all-env mean={inf_count_per_env.float().mean().item():.1f}, "
+                    f"max={inf_count_per_env.max().item()})"
+                )
+                print(
+                    f"  inf-containing env ratio: {inf_envs}/{self.num_envs} ({100.0 * inf_envs / self.num_envs:.0f}%)"
+                )
                 print(f"  nan count (total across all envs+cells): {nan_total}")
 
                 # inf cell positions (env 0, first 10)
-                print(f"\n[inf cell positions — env 0 (first 10)]")
+                print("\n[inf cell positions — env 0 (first 10)]")
                 inf_idx_0 = inf_mask[0].nonzero(as_tuple=False).squeeze(-1)  # (K,)
                 if inf_idx_0.numel() == 0:
                     print("  none — all rays hit mesh")
@@ -851,37 +858,47 @@ class Go2ParkourEnv(DirectRLEnv):
                             cx, cy = rs0_xy[ci, 0].item(), rs0_xy[ci, 1].item()
                             dx = cx - base_xy_t[0].item()
                             dy = cy - base_xy_t[1].item()
-                            print(f"    cell[{ci:3d}]: xy=({cx:.3f}, {cy:.3f})  "
-                                  f"offset from base (dx={dx:+.3f}, dy={dy:+.3f})")
+                            print(
+                                f"    cell[{ci:3d}]: xy=({cx:.3f}, {cy:.3f})  "
+                                f"offset from base (dx={dx:+.3f}, dy={dy:+.3f})"
+                            )
 
                 # Scan statistics
-                print(f"\n[Scan statistics]")
+                print("\n[Scan statistics]")
                 # safe mean for scan_raw (may contain ±inf)
                 scan_raw_fin = scan_raw[~torch.isinf(scan_raw) & ~torch.isnan(scan_raw)]
                 scan_raw_mean = scan_raw_fin.mean().item() if scan_raw_fin.numel() > 0 else float("nan")
-                print(f"  scan_raw pre-clip (current formula, finite only): "
-                      f"mean={scan_raw_mean:.4f}, "
-                      f"min={scan_raw.min().item():.4f}, max={scan_raw.max().item():.4f}")
-                print(f"  scan post-clip:    "
-                      f"mean={self._scan.mean().item():.4f}, "
-                      f"min={self._scan.min().item():.4f}, "
-                      f"max={self._scan.max().item():.4f}, "
-                      f"unique={self._scan.unique().numel()}")
-                sat_count = (self._scan == -1.0).sum(dim=1)                # (N,)
+                print(
+                    f"  scan_raw pre-clip (current formula, finite only): "
+                    f"mean={scan_raw_mean:.4f}, "
+                    f"min={scan_raw.min().item():.4f}, max={scan_raw.max().item():.4f}"
+                )
+                print(
+                    f"  scan post-clip:    "
+                    f"mean={self._scan.mean().item():.4f}, "
+                    f"min={self._scan.min().item():.4f}, "
+                    f"max={self._scan.max().item():.4f}, "
+                    f"unique={self._scan.unique().numel()}"
+                )
+                sat_count = (self._scan == -1.0).sum(dim=1)  # (N,)
                 sat_per = sat_count[:n_show].cpu().tolist()
                 sat_per_str = ", ".join(f"env{i}={int(v)}" for i, v in enumerate(sat_per))
                 print(f"  cells saturated at -1 (post-clip): {sat_per_str}")
 
                 scan_alt_fin = scan_alt[~torch.isinf(scan_alt) & ~torch.isnan(scan_alt)]
                 scan_alt_mean = scan_alt_fin.mean().item() if scan_alt_fin.numel() > 0 else float("nan")
-                print(f"  scan_alt pre-clip  (alt formula, finite only):   "
-                      f"mean={scan_alt_mean:.4f}, "
-                      f"min={scan_alt.min().item():.4f}, max={scan_alt.max().item():.4f}")
-                print(f"  scan_alt post-clip: "
-                      f"mean={scan_alt_clipped.mean().item():.4f}, "
-                      f"min={scan_alt_clipped.min().item():.4f}, "
-                      f"max={scan_alt_clipped.max().item():.4f}, "
-                      f"unique={scan_alt_clipped.unique().numel()}")
+                print(
+                    f"  scan_alt pre-clip  (alt formula, finite only):   "
+                    f"mean={scan_alt_mean:.4f}, "
+                    f"min={scan_alt.min().item():.4f}, max={scan_alt.max().item():.4f}"
+                )
+                print(
+                    f"  scan_alt post-clip: "
+                    f"mean={scan_alt_clipped.mean().item():.4f}, "
+                    f"min={scan_alt_clipped.min().item():.4f}, "
+                    f"max={scan_alt_clipped.max().item():.4f}, "
+                    f"unique={scan_alt_clipped.unique().numel()}"
+                )
 
                 # First n_show envs sample values
                 print(f"\n[Sample cell values — first {n_show} envs, cells 0..9 post-clip (current)]")
@@ -891,27 +908,27 @@ class Go2ParkourEnv(DirectRLEnv):
                 for i in range(n_show):
                     print(f"  env[{i}] = {scan_alt_clipped[i, -50:].cpu().numpy()}")
 
-                print(f"=====================================================\n")
+                print("=====================================================\n")
             # keep legacy flag consistent
             self._scan_debug_printed = True
-
 
         net_contact_forces = self._contact_sensor.data.net_forces_w_history  # [N, hist, bodies, 3]
         contact = torch.norm(net_contact_forces[:, 0, self._feet_ids], dim=-1) > 2.0
         last_contacts = torch.norm(net_contact_forces[:, 1, self._feet_ids], dim=-1) > 2.0
-        contact_filt = torch.logical_or(contact, last_contacts) 
+        contact_filt = torch.logical_or(contact, last_contacts)
 
         # Proprioceptive observations (Task #3)
         proprio = torch.cat(
             [
-                self._yaw_diff[:, None],                                                   # 1 (delta_yaw: target - robot heading, wrapped)
-                self._next_yaw_diff[:, None],                                              # 1 (delta_next_yaw)
-                self._robot.data.projected_gravity_b,                                # 3
-                self._commands[:, 0:1],                                              # 1
-                self._robot.data.joint_pos - self._robot.data.default_joint_pos,    # 12
-                self._robot.data.joint_vel * 0.05,                                  # 12 (Change A: Genesis obs_scales["dof_vel"]=0.05; raw rad/s is ~20x too large)
-                self._actions,                                                       # 12 (current actions taken this step)
-                (contact_filt.float()-0.5).to(self.device)                          # add contact_filt 4
+                self._yaw_diff[:, None],  # 1 (delta_yaw: target - robot heading, wrapped)
+                self._next_yaw_diff[:, None],  # 1 (delta_next_yaw)
+                self._robot.data.projected_gravity_b,  # 3
+                self._commands[:, 0:1],  # 1
+                self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # 12
+                self._robot.data.joint_vel
+                * 0.05,  # 12 (Change A: Genesis obs_scales["dof_vel"]=0.05; raw rad/s is ~20x too large)
+                self._actions,  # 12 (current actions taken this step)
+                (contact_filt.float() - 0.5).to(self.device),  # add contact_filt 4
             ],
             dim=-1,
         )
@@ -939,11 +956,7 @@ class Go2ParkourEnv(DirectRLEnv):
         # in __init__ via per-link RigidBodyView.max_shapes (events.py pattern). Go2 has 27 shapes
         # across 19 bodies; indexing by body_id directly would be wrong.
         # Restitution (dim 2) excluded — EventCfg randomize range is 0 → constant, zero info.
-        _mat_all = (
-            self._robot.root_physx_view.get_material_properties()
-            .clone()
-            .to(self.device)
-        )  # (N, num_shapes, 3)
+        _mat_all = self._robot.root_physx_view.get_material_properties().clone().to(self.device)  # (N, num_shapes, 3)
         foot_friction = _mat_all[:, self._foot_shape_indices, 0].reshape(self.num_envs, -1)  # (N, 4)
 
         # priv_explicit: privileged state directly observable from a real sensor (linear + angular vel).
@@ -951,8 +964,8 @@ class Go2ParkourEnv(DirectRLEnv):
         #   root_ang_vel_b * 0.25 : (N, 3)  ← moved from priv_latent
         priv_explicit = torch.cat(
             [
-                self._robot.data.root_lin_vel_b * 2.0,    # 3
-                self._robot.data.root_ang_vel_b * 0.25,   # 3
+                self._robot.data.root_lin_vel_b * 2.0,  # 3
+                self._robot.data.root_ang_vel_b * 0.25,  # 3
             ],
             dim=-1,
         )  # (N, 6)
@@ -975,31 +988,29 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # get_masses() returns a CPU tensor (N, num_bodies); index with list → (N, 1).
         # body_com_pos_b shape: (N, num_bodies, 3); index with list → (N, 1, 3), squeeze → (N, 3).
-        base_mass = (
-            torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device)[:, self._robot_base_id]
-        )  # (N, 1)
-        base_com = (
-            self._robot.data.body_com_pos_b[:, self._robot_base_id, :].squeeze(1)
-        )  # (N, 3)
+        base_mass = torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device)[
+            :, self._robot_base_id
+        ]  # (N, 1)
+        base_com = self._robot.data.body_com_pos_b[:, self._robot_base_id, :].squeeze(1)  # (N, 3)
 
         # Joint stiffness/damping ratio (B extreme_parkour style).
         # Requires randomize_actuator_gains EventTerm active to have non-zero values.
         # joint_stiffness shape: (N, num_joints) — Go2: (N, 12)
-        joint_stiffness = self._robot.data.joint_stiffness          # (N, num_joints)
+        joint_stiffness = self._robot.data.joint_stiffness  # (N, num_joints)
         default_joint_stiffness = self._robot.data.default_joint_stiffness  # (N, num_joints)
-        joint_damping = self._robot.data.joint_damping              # (N, num_joints)
-        default_joint_damping = self._robot.data.default_joint_damping      # (N, num_joints)
+        joint_damping = self._robot.data.joint_damping  # (N, num_joints)
+        default_joint_damping = self._robot.data.default_joint_damping  # (N, num_joints)
         joint_stiffness_ratio = (joint_stiffness / default_joint_stiffness) - 1.0  # (N, num_joints)
-        joint_damping_ratio = (joint_damping / default_joint_damping) - 1.0        # (N, num_joints)
+        joint_damping_ratio = (joint_damping / default_joint_damping) - 1.0  # (N, num_joints)
 
         priv_latent = torch.cat(
             [
-                base_friction,           # (N, 1)   — base static friction scalar (B-style)
-                foot_friction,           # (N, 8)   — 4 feet × [static, dynamic]
-                base_mass,               # (N, 1)   — base mass
-                base_com,                # (N, 3)   — base COM offset
-                joint_stiffness_ratio,   # (N, 12)  — stiffness DR ratio
-                joint_damping_ratio,     # (N, 12)  — damping DR ratio
+                base_friction,  # (N, 1)   — base static friction scalar (B-style)
+                foot_friction,  # (N, 8)   — 4 feet × [static, dynamic]
+                base_mass,  # (N, 1)   — base mass
+                base_com,  # (N, 3)   — base COM offset
+                joint_stiffness_ratio,  # (N, 12)  — stiffness DR ratio
+                joint_damping_ratio,  # (N, 12)  — damping DR ratio
             ],
             dim=-1,
         )  # (N, 37) — 1+8+1+3+12+12=37 for Go2 (12 joints)
@@ -1019,9 +1030,9 @@ class Go2ParkourEnv(DirectRLEnv):
         proprio_for_history = proprio.clone()
         proprio_for_history[:, :2] = 0
         self._proprio_history = torch.where(
-                (self.episode_length_buf <= 1)[:, None, None],
-                torch.stack([proprio_for_history] * self.cfg.history_len, dim=1),
-                torch.cat([self._proprio_history[:, 1:], proprio_for_history.unsqueeze(1)], dim=1),
+            (self.episode_length_buf <= 1)[:, None, None],
+            torch.stack([proprio_for_history] * self.cfg.history_len, dim=1),
+            torch.cat([self._proprio_history[:, 1:], proprio_for_history.unsqueeze(1)], dim=1),
         )
 
         # Tick DebugViewer free-fly camera translation (no-op in headless or tracking mode).
@@ -1061,9 +1072,7 @@ class Go2ParkourEnv(DirectRLEnv):
         proj_forward = torch.sum(cur_vel_w * goal_dir, dim=-1)  # [N] velocity toward goal
         commanded_speed = torch.abs(self._commands[:, 0])  # [N] forward command magnitude
         tracking_goal_vel = torch.minimum(proj_forward, commanded_speed) / (commanded_speed + 1e-5)
-        tracking_goal_vel = torch.where(
-            commanded_speed > 1e-3, tracking_goal_vel, torch.zeros_like(tracking_goal_vel)
-        )
+        tracking_goal_vel = torch.where(commanded_speed > 1e-3, tracking_goal_vel, torch.zeros_like(tracking_goal_vel))
         # tracking_goal_vel = tracking_goal_vel.clamp(min=0.0)
 
         # tracking_yaw: exponential decay from heading error (Genesis line 1451-1454)
@@ -1088,9 +1097,7 @@ class Go2ParkourEnv(DirectRLEnv):
         orientation_l2 = orientation_l2 * is_flat
 
         # === Joint acceleration penalty (Genesis line 1465-1470) ===
-        dof_acc_l2 = torch.sum(
-            torch.square((self._robot.data.joint_vel - prev_joint_vel) / self.step_dt), dim=1
-        )
+        dof_acc_l2 = torch.sum(torch.square((self._robot.data.joint_vel - prev_joint_vel) / self.step_dt), dim=1)
 
         # === Collision penalty (Genesis line 1540-1548) ===
         is_contact = (
@@ -1110,6 +1117,16 @@ class Go2ParkourEnv(DirectRLEnv):
         # === Torque penalty (Genesis line 1511-1517) ===
         torques_l2 = torch.sum(torch.square(self._robot.data.applied_torque), dim=1)
 
+        # === Positive mechanical work (Fu et al. 2021 efficiency penalty) ===
+        # Rationale: penalising Σ max(0, τ_j·q̇_j) over 12 joints creates efficiency pressure
+        # that, according to Fu et al. 2021, is sufficient to induce natural gaits without
+        # motion references.  Only positive (motoring) work is counted; clamping at 0 prevents
+        # braking phases from contributing a spurious *bonus* under a negative weight.
+        # Stateless: no new buffer needed; reuses applied_torque (same source as torques_l2).
+        positive_work = torch.sum(
+            torch.clamp(self._robot.data.applied_torque * self._robot.data.joint_vel, min=0.0), dim=1
+        )  # shape (N,), units: W (positive mechanical power);  always >= 0
+
         # === Hip deviation penalty (Genesis line 1550-1558) ===
         hip_pos = torch.sum(
             torch.square(
@@ -1120,9 +1137,7 @@ class Go2ParkourEnv(DirectRLEnv):
         )
 
         # === Overall joint error penalty (Genesis line 1472-1486) ===
-        dof_error_l2 = torch.sum(
-            torch.square(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1
-        )
+        dof_error_l2 = torch.sum(torch.square(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1)
 
         # === Feet stumble (Genesis line 1559-1573) ===
         feet_forces = net_contact_forces[:, 0, self._feet_ids]  # [N, 4, 3]
@@ -1144,44 +1159,42 @@ class Go2ParkourEnv(DirectRLEnv):
         # Genesis-equivalent: dragging = contact_filt ∧ (xy_vel > threshold), penalized by xy_vel norm.
         # MUST be placed BEFORE `self._last_contacts = contact` overwrite.
         hind_feet_ids = self._feet_ids[2:4]  # URDF order: [FL(0), FR(1), RL(2), RR(3)]
-        hind_xy_vel_norm = torch.norm(
-            self._robot.data.body_lin_vel_w[:, hind_feet_ids, :2], dim=-1
-        )  # (N, 2)
+        hind_xy_vel_norm = torch.norm(self._robot.data.body_lin_vel_w[:, hind_feet_ids, :2], dim=-1)  # (N, 2)
         hind_contact = contact_filt[:, 2:4]  # (N, 2) bool — debounced
         is_dragging = hind_contact & (hind_xy_vel_norm > self.cfg.dragging_velocity_threshold)
         feet_dragging = torch.sum(hind_xy_vel_norm * is_dragging.float(), dim=-1)  # (N,)
 
         # === feet_gait_pairing reward — Spot GaitReward sync-only (대각 쌍 air/contact 시간 동기) ===
-        air_time     = self._contact_sensor.data.current_air_time      # (N, B)
+        air_time = self._contact_sensor.data.current_air_time  # (N, B)
         contact_time = self._contact_sensor.data.current_contact_time  # (N, B)
-        std      = self.cfg.feet_gait_std
-        max_err2 = self.cfg.feet_gait_max_err ** 2
+        std = self.cfg.feet_gait_std
+        max_err2 = self.cfg.feet_gait_max_err**2
 
         def _sync_pair(pair):
             a, b = pair
-            se_air     = torch.clamp((air_time[:, a]     - air_time[:, b])     ** 2, max=max_err2)
+            se_air = torch.clamp((air_time[:, a] - air_time[:, b]) ** 2, max=max_err2)
             se_contact = torch.clamp((contact_time[:, a] - contact_time[:, b]) ** 2, max=max_err2)
             return torch.exp(-(se_air + se_contact) / std)
 
         sync_reward = _sync_pair(self._gait_synced_pair_0) * _sync_pair(self._gait_synced_pair_1)
 
         def _async_pair(a, b):  # a, b: single foot indices (NOT pair tuples)
-            se_0 = torch.clamp((air_time[:, a]     - contact_time[:, b]) ** 2, max=max_err2)
-            se_1 = torch.clamp((contact_time[:, a] - air_time[:, b])     ** 2, max=max_err2)
+            se_0 = torch.clamp((air_time[:, a] - contact_time[:, b]) ** 2, max=max_err2)
+            se_1 = torch.clamp((contact_time[:, a] - air_time[:, b]) ** 2, max=max_err2)
             return torch.exp(-(se_0 + se_1) / std)
 
         # Spot 원본 async 4항 — 다른 대각 쌍 소속 발의 cross 비교 (정지/끌기 false-positive 차단)
-        p0_0, p0_1 = self._gait_synced_pair_0   # (FL, RR)
-        p1_0, p1_1 = self._gait_synced_pair_1   # (FR, RL)
+        p0_0, p0_1 = self._gait_synced_pair_0  # (FL, RR)
+        p1_0, p1_1 = self._gait_synced_pair_1  # (FR, RL)
         async_reward = (
-            _async_pair(p0_0, p1_0) *   # FL vs FR
-            _async_pair(p0_1, p1_1) *   # RR vs RL
-            _async_pair(p0_0, p1_1) *   # FL vs RL
-            _async_pair(p0_1, p1_0)     # RR vs FR
+            _async_pair(p0_0, p1_0)  # FL vs FR
+            * _async_pair(p0_1, p1_1)  # RR vs RL
+            * _async_pair(p0_0, p1_1)  # FL vs RL
+            * _async_pair(p0_1, p1_0)  # RR vs FR
         )
 
         gate = (torch.norm(self._commands[:, :2], dim=-1) > self.cfg.feet_gait_velocity_threshold).float()
-        feet_gait_pairing = sync_reward * async_reward * gate * is_flat   # (N,), all in [0, 1]
+        feet_gait_pairing = sync_reward * async_reward * gate * is_flat  # (N,), all in [0, 1]
 
         self._last_contacts = contact
         # feet world XY positions: (N, 4, 2)
@@ -1192,8 +1205,8 @@ class Go2ParkourEnv(DirectRLEnv):
         # floor((x - origin) / scale) = round((x - origin) / scale - 0.5)
         # Using round() with the - 0.5 correction is equivalent to floor and is Genesis-faithful.
         feet_grid_xy = (
-            (feet_xy - self._edge_mask_origin) * self._edge_mask_inv_scale - 0.5
-        ).round().long()  # (N, 4, 2)
+            ((feet_xy - self._edge_mask_origin) * self._edge_mask_inv_scale - 0.5).round().long()
+        )  # (N, 4, 2)
         feet_grid_xy[..., 0] = feet_grid_xy[..., 0].clamp(0, self.x_edge_mask.shape[0] - 1)
         feet_grid_xy[..., 1] = feet_grid_xy[..., 1].clamp(0, self.x_edge_mask.shape[1] - 1)
         # Lookup edge mask: (N, 4) bool
@@ -1219,17 +1232,17 @@ class Go2ParkourEnv(DirectRLEnv):
         foot_contact = (torch.norm(feet_forces, dim=-1) > self.cfg.contact_duty_force_thr).float()  # (N, 4)
         alpha = self.step_dt / self.cfg.contact_duty_tau  # EMA decay per policy step
         self._foot_contact_duty = alpha * foot_contact + (1.0 - alpha) * self._foot_contact_duty  # (N,4)
-        contact_duty_deficit = torch.sum(
-            torch.clamp(self.cfg.contact_duty_target - self._foot_contact_duty, min=0.0), dim=-1
+        contact_duty_deficit = (
+            torch.sum(torch.clamp(self.cfg.contact_duty_target - self._foot_contact_duty, min=0.0), dim=-1) * is_flat
         )  # (N,), >= 0; reward_scales["contact_duty_deficit"] is negative → contribution <= 0
 
         # === Assemble all reward terms (B-aligned 14-term set + air_time_cap) ===
         reward_values = {
             "tracking_goal_vel": tracking_goal_vel,
             "tracking_yaw": tracking_yaw,
-            "lin_vel_z_l2": lin_vel_z_l2,        # *= 0.1 on non-flat (applied above)
-            "ang_vel_xy_l2": ang_vel_xy_l2,       # *= 0.5 on non-flat (applied above)
-            "orientation_l2": orientation_l2,      # zero on non-flat (applied above)
+            "lin_vel_z_l2": lin_vel_z_l2,  # *= 0.1 on non-flat (applied above)
+            "ang_vel_xy_l2": ang_vel_xy_l2,  # *= 0.5 on non-flat (applied above)
+            "orientation_l2": orientation_l2,  # zero on non-flat (applied above)
             "dof_acc_l2": dof_acc_l2,
             "collision": collision,
             "action_rate_l2": action_rate_l2,
@@ -1243,6 +1256,7 @@ class Go2ParkourEnv(DirectRLEnv):
             "feet_gait_pairing": feet_gait_pairing,
             "air_time_cap": air_time_cap,
             "contact_duty_deficit": contact_duty_deficit,
+            "positive_work": positive_work,
         }
 
         # === Accumulate and scale rewards ===
@@ -1255,7 +1269,7 @@ class Go2ParkourEnv(DirectRLEnv):
             self._last_reward_breakdown_per_env[:, i] = scaled
 
         # return total_reward
-        return torch.clip(total_reward, min=0.)
+        return torch.clip(total_reward, min=0.0)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         episode_timeout = self.episode_length_buf >= self.max_episode_length - 1
@@ -1285,7 +1299,7 @@ class Go2ParkourEnv(DirectRLEnv):
         failure = self._term_tilt | self._term_low_height
         grace = self.episode_length_buf < self.cfg.termination_grace_steps
         reset_all = (failure & ~grace) | self._term_goal_reached | episode_timeout
-        
+
         terminated = torch.zeros_like(reset_all)
         time_out = reset_all
         return terminated, time_out
@@ -1341,7 +1355,7 @@ class Go2ParkourEnv(DirectRLEnv):
         # Reset robot state at terrain origin
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         # Random start state
-        joint_pos += (torch.rand_like(joint_pos) * 0.1 - 0.05)
+        joint_pos += torch.rand_like(joint_pos) * 0.1 - 0.05
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
@@ -1366,16 +1380,12 @@ class Go2ParkourEnv(DirectRLEnv):
         self.extras["log"]["Episode_Termination/base_contact"] = torch.count_nonzero(
             self.reset_terminated[env_ids]
         ).item()
-        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(
-            self.reset_time_outs[env_ids]
-        ).item()
+        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         # Decomposed termination causes (only env_ids that are being reset)
         self.extras["log"]["Episode_Termination/cause_base_contact"] = torch.count_nonzero(
             self._term_base_contact[env_ids]
         ).item()
-        self.extras["log"]["Episode_Termination/cause_tilt"] = torch.count_nonzero(
-            self._term_tilt[env_ids]
-        ).item()
+        self.extras["log"]["Episode_Termination/cause_tilt"] = torch.count_nonzero(self._term_tilt[env_ids]).item()
         self.extras["log"]["Episode_Termination/cause_low_height"] = torch.count_nonzero(
             self._term_low_height[env_ids]
         ).item()
@@ -1392,9 +1402,7 @@ class Go2ParkourEnv(DirectRLEnv):
         for _class_id, _class_name in _TERRAIN_CLASS_NAMES.items():
             _mask: torch.Tensor = _class_reset == _class_id
             if _mask.any():
-                self.extras["log"][f"curriculum/mean_terrain_level_{_class_name}"] = (
-                    _levels_reset[_mask].mean().item()
-                )
+                self.extras["log"][f"curriculum/mean_terrain_level_{_class_name}"] = _levels_reset[_mask].mean().item()
 
     def _update_terrain_curriculum(self, env_ids: torch.Tensor):
         """Game-inspired terrain curriculum: advance on success, regress on failure."""
@@ -1405,8 +1413,8 @@ class Go2ParkourEnv(DirectRLEnv):
         # Keyboard-override bypass: envs flagged by _change_terrain_for_viewer keep their
         # forced level/type.  Clear the flag unconditionally first (even if env_ids is a
         # subset) so it never carries over into subsequent normal resets.
-        skip_mask = self._skip_curriculum[env_ids]          # bool [n], True → bypass curriculum
-        self._skip_curriculum[env_ids] = False              # always clear before returning
+        skip_mask = self._skip_curriculum[env_ids]  # bool [n], True → bypass curriculum
+        self._skip_curriculum[env_ids] = False  # always clear before returning
 
         # Refresh env_origins for bypassed envs so the robot spawns on the forced patch.
         # (env_origins was already set by _change_terrain_for_viewer, but we also update
@@ -1476,9 +1484,7 @@ class Go2ParkourEnv(DirectRLEnv):
                 cur_cfg = SPHERE_MARKER_CFG.copy()
                 cur_cfg.prim_path = "/Visuals/Parkour/cur_goal"
                 cur_cfg.markers["sphere"].radius = 0.15
-                cur_cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(
-                    diffuse_color=(1.0, 0.0, 0.0)
-                )
+                cur_cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0))
                 self.cur_goal_visualizer = VisualizationMarkers(cur_cfg)
 
             if not hasattr(self, "future_goal_visualizer"):
@@ -1486,9 +1492,7 @@ class Go2ParkourEnv(DirectRLEnv):
                 fut_cfg = SPHERE_MARKER_CFG.copy()
                 fut_cfg.prim_path = "/Visuals/Parkour/future_goals"
                 fut_cfg.markers["sphere"].radius = 0.08
-                fut_cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(
-                    diffuse_color=(1.0, 0.5, 0.0)
-                )
+                fut_cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.5, 0.0))
                 self.future_goal_visualizer = VisualizationMarkers(fut_cfg)
 
             if not hasattr(self, "_heading_arrow_visualizer"):
@@ -1673,15 +1677,15 @@ class Go2ParkourEnv(DirectRLEnv):
         # ---- camera follow ------------------------------------------------
         viewer_idx = self.cfg.viewer.env_index
 
-        robot_pos = self._robot.data.root_pos_w[viewer_idx]       # (3,)
-        robot_quat = self._robot.data.root_quat_w[viewer_idx]     # (4,) wxyz
+        robot_pos = self._robot.data.root_pos_w[viewer_idx]  # (3,)
+        robot_quat = self._robot.data.root_quat_w[viewer_idx]  # (4,) wxyz
 
         # Extract yaw from quaternion (euler_xyz_from_quat returns roll, pitch, yaw)
         _, _, yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
         yaw = yaw[0]  # scalar tensor
 
         # Configured side-view offset (local robot frame): (0, -2.5, 0.8)
-        eye_cfg = self.cfg.viewer.eye    # tuple (x, y, z)
+        eye_cfg = self.cfg.viewer.eye  # tuple (x, y, z)
         look_cfg = self.cfg.viewer.lookat  # tuple (x, y, z)
 
         cos_y = torch.cos(yaw)
@@ -1724,18 +1728,16 @@ class Go2ParkourEnv(DirectRLEnv):
         if not hasattr(self, "_heading_arrow_visualizer"):
             return
 
-        arrow_num = 8        # dots per direction
-        start_offset = 0.3   # m — distance from robot to first dot
-        spacing = 0.15       # m — spacing between consecutive dots; total length = 0.3 + 7*0.15 = 1.35m
+        arrow_num = 8  # dots per direction
+        start_offset = 0.3  # m — distance from robot to first dot
+        spacing = 0.15  # m — spacing between consecutive dots; total length = 0.3 + 7*0.15 = 1.35m
 
-        base_xy = self._robot.data.root_pos_w[:, :2]   # (N, 2)
-        base_z = self._robot.data.root_pos_w[:, 2:3]   # (N, 1)
+        base_xy = self._robot.data.root_pos_w[:, :2]  # (N, 2)
+        base_z = self._robot.data.root_pos_w[:, 2:3]  # (N, 1)
 
         # Heading direction: unit vector from robot's current world-frame yaw
-        heading_yaw = self._robot.data.heading_w       # (N,) rad
-        heading_dir = torch.stack(
-            [torch.cos(heading_yaw), torch.sin(heading_yaw)], dim=-1
-        )  # (N, 2)
+        heading_yaw = self._robot.data.heading_w  # (N,) rad
+        heading_dir = torch.stack([torch.cos(heading_yaw), torch.sin(heading_yaw)], dim=-1)  # (N, 2)
 
         # Target direction: normalized target_pos_rel toward current goal
         target_norm = torch.norm(self._target_pos_rel, dim=-1, keepdim=True)
@@ -1745,12 +1747,12 @@ class Go2ParkourEnv(DirectRLEnv):
         target_dots = []
         for i in range(arrow_num):
             dist = start_offset + i * spacing
-            h_xy = base_xy + dist * heading_dir   # (N, 2)
-            t_xy = base_xy + dist * target_dir    # (N, 2)
+            h_xy = base_xy + dist * heading_dir  # (N, 2)
+            t_xy = base_xy + dist * target_dir  # (N, 2)
             heading_dots.append(torch.cat([h_xy, base_z], dim=-1))
             target_dots.append(torch.cat([t_xy, base_z], dim=-1))
 
-        heading_positions = torch.cat(heading_dots, dim=0)   # (N*arrow_num, 3)
+        heading_positions = torch.cat(heading_dots, dim=0)  # (N*arrow_num, 3)
         target_positions = torch.cat(target_dots, dim=0)
         self._heading_arrow_visualizer.visualize(translations=heading_positions)
         self._target_yaw_arrow_visualizer.visualize(translations=target_positions)
@@ -1827,10 +1829,7 @@ class Go2ParkourEnv(DirectRLEnv):
         self._reset_idx(env_ids)
 
         terrain_name = _TERRAIN_CLASS_NAMES.get(int(self._env_class[env_id].item()), "unknown")
-        print(
-            f"[parkour] env {env_id} → terrain level={new_level}/{num_rows - 1}, "
-            f"type={new_type} ({terrain_name})"
-        )
+        print(f"[parkour] env {env_id} → terrain level={new_level}/{num_rows - 1}, type={new_type} ({terrain_name})")
 
     # ------------------------------------------------------------------
     # Contact debug helper
@@ -1857,7 +1856,7 @@ class Go2ParkourEnv(DirectRLEnv):
 
         # net_forces_w shape: (num_envs, num_bodies, 3) — current step forces.
         forces = self._contact_sensor.data.net_forces_w[env_idx]  # (B, 3)
-        magnitudes = forces.norm(dim=-1)                           # (B,)
+        magnitudes = forces.norm(dim=-1)  # (B,)
 
         threshold = 1.0  # N — ignore simulation noise below this magnitude
         step = int(self.episode_length_buf[env_idx].item())
@@ -1866,15 +1865,13 @@ class Go2ParkourEnv(DirectRLEnv):
         print(forces)
         for b_idx, bname in enumerate(body_names):
             mag = float(magnitudes[b_idx].item())
-            if mag < threshold or bname[-4:] == 'foot':
+            if mag < threshold or bname[-4:] == "foot":
                 continue
-            
+
             fx = float(forces[b_idx, 0].item())
             fy = float(forces[b_idx, 1].item())
             fz = float(forces[b_idx, 2].item())
-            lines.append(
-                f"  [contact_all] {bname:<24s} F=({fx:+7.2f},{fy:+7.2f},{fz:+7.2f}) |F|={mag:7.2f} N"
-            )
+            lines.append(f"  [contact_all] {bname:<24s} F=({fx:+7.2f},{fy:+7.2f},{fz:+7.2f}) |F|={mag:7.2f} N")
             any_contact = True
 
         if any_contact:

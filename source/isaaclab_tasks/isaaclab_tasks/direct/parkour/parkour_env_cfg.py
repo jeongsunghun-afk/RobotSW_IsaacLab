@@ -97,7 +97,7 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             x_length_range=(1.2, 2.0),
             half_valid_width_range=(0.8, 1.0),
             # y_offset_range=(1.0, 1.0),
-            step_height_range=(0.10, 0.45),
+            step_height_range=(0.10, 0.6),
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
                     num_patches=2,
@@ -110,7 +110,8 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.2,
             num_gaps=8,
             num_goals=8,
-            gap_length_range=(0.05, 0.6),  # reduced: overflow fix (was 0.3, 0.8)
+            # gap_length_range=(0.05, 0.6),  # reduced: overflow fix (was 0.3, 0.8)
+            gap_length_range=(0.05, 0.8),
             platform_length_range=(1.2, 2.0),  # explicit: 2.0+8*1.6+8*0.4=18.0m ≤ 20m
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
@@ -423,11 +424,11 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # history:       history_len * num_proprio = 10 * 42 = 420
     # critic total:  policy + scan + priv_explicit + priv_latent = 42 + 187 + 6 + 37 = 272
     # Note: DirectRLEnv may still use observation_space for Space creation, but runners use dict obs.
-    observation_space: int = 42 + 4 # policy obs dim (runner overrides with dict obs_groups)
+    observation_space: int = 42 + 4  # policy obs dim (runner overrides with dict obs_groups)
     state_space: int = 0
 
     # Observation dimensions (Task #3)
-    num_proprio: int = 42 + 4 # 3+1+1+1+12+12+12
+    num_proprio: int = 42 + 4  # 3+1+1+1+12+12+12
     num_scan_obs: int = 187
     num_priv_obs: int = 43  # priv_explicit(6): lin_vel_b(3) + ang_vel_b(3) + priv_latent(37): base_friction(1)+foot_friction(8)+base_mass(1)+base_com(3)+joint_stiffness_ratio(12)+joint_damping_ratio(12)
     history_len: int = 10
@@ -619,22 +620,39 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         "dof_error_l2": -0.04,  # Genesis original
         "feet_stumble": -1.0,  # Genesis original (= feet_stumble2)
         "feet_edge": -1.0,  # Genesis original (= feet_edge2)
-        "feet_dragging": -0.1,   # hind feet only (RL, RR); threshold = dragging_velocity_threshold
-        "feet_gait_pairing": 0.0,   # Spot GaitReward sync-only: trot 대각 쌍 phase 동기 (양수 only)
+        "feet_dragging": -0.1,  # hind feet only (RL, RR); threshold = dragging_velocity_threshold
+        "feet_gait_pairing": 0.0,  # Spot GaitReward sync-only: trot 대각 쌍 phase 동기 (양수 only)
         # air_time_cap: per-foot graded penalty for excessive continuous air time.
         # Rationale: 정상 발 p99=0.36s/max=1.70s(gap 도약), RL 병리 p90=1.24s/max=5.60s.
         # max_air=1.0s anchor → 정상 도약 0.008%만 걸림, RL 병리꼬리 13.3% 처벌.
         # weight=-0.1 선택 근거: typical-bad(0.5s 초과) → 0.001/step(ceiling의 3%, clip-safe),
         # extreme-tail(4.6s 초과) → 0.0092/step(ceiling의 31%, clip-safe). 효과 부족 시
         # weight→-0.25 또는 air_time_cap_max_s→0.6s로 조임.
-        "air_time_cap": -0.1,       # graded per-foot penalty (value≥0, weight<0 → contribution≤0)
+        "air_time_cap": -0.0,  # graded per-foot penalty (value≥0, weight<0 → contribution≤0)
         # contact_duty_deficit: escape-불가 EMA 기반 per-foot 접촉비율 부족분 penalty.
         # weight 단위: Episode_Reward 측정 단위(= Σ scaled / episode_length_s, step_dt 이미 반영).
         # 이 단위에서 deficit value≈0.28(들린 발 1개, full episode) → 기여 = |weight| × 0.28.
         # 회피 유인 0.054를 상회하려면 |weight| > 0.19. -0.5: 기여 0.14 ≈ 2.6× 회피 유인(net escape gradient 유의미).
         # ⚠️ step_dt 재곱 금지: env line 1251 scale×step_dt×value의 step_dt는 측정값에 이미 포함됨.
         #    이전 -15는 step_dt 이중 곱 오류(50× 과대) → clip(min=0)(env:1259)으로 학습 gradient 소멸.
-        "contact_duty_deficit": -0.5,  # 1순위 headline fix. weight는 측정 단위(Episode_Reward, step_dt 이미 반영)에서 회피유인 0.054 대비 설정 — step_dt 재곱 금지(이전 -15는 50x 과대 오류). 검증 run 후 -0.3~-1.0 범위 조정
+        "contact_duty_deficit": -0.0,  # 1순위 headline fix. weight는 측정 단위(Episode_Reward, step_dt 이미 반영)에서 회피유인 0.054 대비 설정 — step_dt 재곱 금지(이전 -15는 50x 과대 오류). 검증 run 후 -0.3~-1.0 범위 조정
+        # positive_work: Fu et al. 2021 positive mechanical work efficiency penalty.
+        # Formula: Σ_j max(0, τ_j · q̇_j) over 12 joints  [units: W, always >= 0].
+        # Weight < 0 → penalty; default 0.0 (opt-in, causes no gradient until enabled).
+        #
+        # Calibration (pronk_cost_result.npz, 256 envs × 3000 steps, dt=0.02 s):
+        #   arr_mech_pow cross-check: flat 194,672 J / stair 307,586 J matches raw_md to <1 J.
+        #   Per-step power: flat mean=62 W p90=133 W | stair mean=101 W p90=235 W p99=857 W
+        #   tracking_goal_vel typical per-step contribution ≈ 1.5 × 0.02 × 0.70 = 0.021
+        #
+        #   weight=-3e-4:  stair mean=0.0006 (2.9%), stair p90=0.0014 (6.7%) — conservative, safe
+        #   weight=-1e-3:  stair mean=0.0020 (9.6%), stair p90=0.0047 (22%)  — moderate
+        #                  BUT stair p99=0.017 (82%), stair max=0.028 (132%) → risks total_reward
+        #                  flooring at extreme steps (clip min=0 at env.py:1261).
+        #
+        #   Recommended experiment weight: -3e-4  (conservative first run; step up to -1e-3 if
+        #   efficiency pressure appears too weak after 10k+ steps of observation).
+        "positive_work": -3e-4,  # opt-in; recommended experiment weight: -3e-4 (see calibration above)
     }
 
     # tracking reward parameters (Genesis original)
@@ -657,14 +675,14 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # contact_duty_deficit: escape-불가 per-foot 접촉비율(EMA) 기반 penalty 파라미터
     # EMA 업데이트: duty ← α·contact + (1−α)·duty,  α = step_dt / contact_duty_tau
     # graded deficit = Σ_feet clamp(contact_duty_target − duty, min=0)
-    contact_duty_tau: float = 1.0       # s, EMA 시상수 (≈2~3 gait cycle). alpha = step_dt/tau
-    contact_duty_target: float = 0.5   # 각 발이 평균 30% 이상 접지 요구 (trot 지지발 ~0.5-0.7 / 들린 발 ~0 분리)
+    contact_duty_tau: float = 1.0  # s, EMA 시상수 (≈2~3 gait cycle). alpha = step_dt/tau
+    contact_duty_target: float = 0.5  # 각 발이 평균 30% 이상 접지 요구 (trot 지지발 ~0.5-0.7 / 들린 발 ~0 분리)
     contact_duty_force_thr: float = 2.0  # N, 접촉 판정 임계 (parkour_env.py line 1133 feet contact threshold와 일관)
 
     # Gait pairing reward parameters (Spot GaitReward style, sync-only)
-    feet_gait_std: float = 0.2   # error tolerance (Spot=0.1; parkour 완화)
-    feet_gait_max_err: float = 0.3   # max squared-error cap (Spot=0.2; parkour 완화)
-    feet_gait_velocity_threshold: float = 0.3   # m/s; cmd_speed gate (parkour cmd range [0.3, 1.0] lower bound)
+    feet_gait_std: float = 0.2  # error tolerance (Spot=0.1; parkour 완화)
+    feet_gait_max_err: float = 0.3  # max squared-error cap (Spot=0.2; parkour 완화)
+    feet_gait_velocity_threshold: float = 0.3  # m/s; cmd_speed gate (parkour cmd range [0.3, 1.0] lower bound)
 
     # base height reward target (used only on flat terrain; scale=0.0 by default → disabled)
     base_height_target: float = 0.34  # nominal Go2 stance height above terrain (m)
