@@ -1,32 +1,43 @@
-import time
-import os
-import torch
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
-from rsl_rl.runners.on_policy_runner_parkour import OnPolicyRunnerParkour
-from rsl_rl.algorithms import PPOAMP, PPOAMPBase
-from rsl_rl.modules import ActorCritic, ActorCriticRMA
-from rsl_rl.storage import RolloutStorage
-from rsl_rl.utils.logger import Logger
+import os
+import time
+import torch
 from tensordict import TensorDict
+
+from rsl_rl.algorithms import PPOAMP, PPOAMPBase
+from rsl_rl.modules import ActorCritic, ActorCriticRMA, resolve_symmetry_config
+from rsl_rl.runners.on_policy_runner_parkour import OnPolicyRunnerParkour
+from rsl_rl.storage import RolloutStorage
+
 
 class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
     """AMP 학습 기능을 지원하는 OnPolicyRunner."""
-    
+
     def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
         super().__init__(env, train_cfg, log_dir, device)
         # AMP용 파라미터 체크 및 로더 연결 (환경에서 모션 추출)
         self.amp_cfg = train_cfg.get("amp", {})
-        
+
         # AMP Reward 로깅용 버퍼
         self.amp_reward_sums = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
     def _construct_algorithm(self, obs: TensorDict) -> PPOAMP:
         """PPOAMP 알고리즘 생성"""
+        # Resolve symmetry config if used (inject env into symmetry_cfg["_env"]).
+        # NOTE: this override previously dropped the parent's resolve call, causing
+        # KeyError '_env' in PPOParkour.update() when symmetry_cfg was set.
+        # resolve_symmetry_config leaves symmetry_cfg as None when it is None/absent,
+        # so the non-symmetry path (Go2-ParkourImitation-v0) is unaffected.
+        self.alg_cfg = resolve_symmetry_config(self.alg_cfg, self.env)
         # AMP 특화 알고리즘
         actor_critic_class = ActorCriticRMA
-        actor_critic = actor_critic_class(
-            obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
+        actor_critic = actor_critic_class(obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg).to(
+            self.device
+        )
 
         storage = RolloutStorage(
             "rl", self.env.num_envs, self.cfg["num_steps_per_env"], obs, [self.env.num_actions], self.device
@@ -39,8 +50,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             amp_cfg["amp_observation_space"] = self.env.amp_observation_space.shape[0]
 
         alg = PPOAMP(
-            actor_critic, storage, device=self.device, amp_cfg=amp_cfg,
-            **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
+            actor_critic, storage, device=self.device, amp_cfg=amp_cfg, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
         return alg
 
@@ -50,7 +60,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
-            
+
         obs = self.env.get_observations().to(self.device)
         self.train_mode()
 
@@ -76,7 +86,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
                 self.alg.amp_task_reward_lerp = _lerp_start + (_lerp_end - _lerp_start) * progress
 
             start = time.time()
-            hist_encoding = it % 20 == 0 # dagger_update_freq
+            hist_encoding = it % 20 == 0  # dagger_update_freq
             amp_obs_buffer.clear()
 
             with torch.inference_mode():
@@ -85,11 +95,11 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
                     actions = self.alg.act(obs, hist_encoding=hist_encoding)
                     # Step the environment
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
-                    
+
                     obs = obs.to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
-                    
+
                     # AMP: Extract discriminator rewards & append buffer
                     if "amp_obs" in extras:
                         agent_amp_obs = extras["amp_obs"].to(self.device)
@@ -107,7 +117,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
 
                         amp_obs_buffer.append(corrected_amp_obs.detach())
 
-                        amp_reward = self.alg.discriminator.compute_amp_reward(corrected_amp_obs)
+                        amp_reward = self.alg.discriminator.compute_amp_reward(corrected_amp_obs).detach()
                         # 로깅 버퍼 합산
                         self.amp_reward_sums += amp_reward
 
@@ -174,7 +184,6 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
                         amp_loss_dict = self.alg.update_amp(expert_pool[batch_ids], policy_pool[batch_ids])
             else:
                 amp_loss_dict = {}
-            
 
             # Update Policy & Critic
             loss_dict = self.alg.update()
@@ -219,7 +228,12 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
         loaded_dict = torch.load(path, map_location=map_location)
         self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
-        self.alg.discriminator.load_state_dict(loaded_dict["discriminator_state_dict"])
+        disc_missing, disc_unexpected = self.alg.discriminator.load_state_dict(
+            loaded_dict["discriminator_state_dict"], strict=False
+        )
+        non_normalizer_missing = [k for k in disc_missing if "reward_normalizer" not in k]
+        if non_normalizer_missing:
+            print(f"[WARNING] discriminator load: unexpected missing keys: {non_normalizer_missing}")
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
             self.alg.disc_optimizer.load_state_dict(loaded_dict["disc_optimizer_state_dict"])
@@ -248,9 +262,7 @@ class OnPolicyRunnerAMPBase(OnPolicyRunnerAMP):
 
     def _construct_algorithm(self, obs) -> PPOAMPBase:
         """ActorCritic + PPOAMPBase 조합으로 알고리즘 생성."""
-        actor_critic = ActorCritic(
-            obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
+        actor_critic = ActorCritic(obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg).to(self.device)
 
         storage = RolloutStorage(
             "rl", self.env.num_envs, self.cfg["num_steps_per_env"], obs, [self.env.num_actions], self.device
@@ -263,8 +275,7 @@ class OnPolicyRunnerAMPBase(OnPolicyRunnerAMP):
             amp_cfg["amp_observation_space"] = self.env.amp_observation_space.shape[0]
 
         alg = PPOAMPBase(
-            actor_critic, storage, device=self.device, amp_cfg=amp_cfg,
-            **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
+            actor_critic, storage, device=self.device, amp_cfg=amp_cfg, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
         return alg
 
@@ -325,7 +336,7 @@ class OnPolicyRunnerAMPBase(OnPolicyRunnerAMP):
 
                         amp_obs_buffer.append(corrected_amp_obs.detach())
 
-                        amp_reward = self.alg.discriminator.compute_amp_reward(corrected_amp_obs)
+                        amp_reward = self.alg.discriminator.compute_amp_reward(corrected_amp_obs).detach()
                         self.amp_reward_sums += amp_reward
 
                         task_reward_lerp = self.alg.amp_task_reward_lerp
