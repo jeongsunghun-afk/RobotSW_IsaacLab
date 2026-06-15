@@ -410,9 +410,19 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
     def _update_flat_env_mask(self, env_ids: torch.Tensor | None = None) -> None:
         """Update the per-env flat terrain boolean mask.
 
+        When ``cfg.apply_amp_on_terrain`` is True every environment is treated as
+        "flat" so the AMP reward and discriminator gradient apply to all envs
+        regardless of actual terrain class.  This is equivalent to disabling the
+        flat-only gate in the runner without touching runner code.
+
         Args:
             env_ids: If None, refresh the full mask.  Otherwise refresh only those envs.
         """
+        if getattr(self.cfg, "apply_amp_on_terrain", False):
+            # Apply AMP to every env — fill the whole mask unconditionally.
+            self._flat_env_mask[:] = True
+            return
+
         if env_ids is None:
             self._flat_env_mask = self._env_class == TERRAIN_CLASS_FLAT
         else:

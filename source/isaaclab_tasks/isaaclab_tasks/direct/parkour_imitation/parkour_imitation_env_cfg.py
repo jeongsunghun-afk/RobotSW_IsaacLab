@@ -63,7 +63,7 @@ class ParkourImitationEnvCfg(ParkourEnvCfg):
     # If a directory, Go2MotionLib auto-discovers all *.pkl entries (sorted) and
     # samples from them with uniform weighting by default. See motion_lib.py:243-247.
     # Backward-compat: set to "imitation/go2/go2_trot0.pkl" to use a single file.
-    amp_motion_pkl: str = "imitation/go2"
+    amp_motion_pkl: str = "imitation/go2_jump"
 
     # amp_weight is the runner's reward fusion coefficient and is configured exclusively
     # in agents/rsl_rl_amp_cfg.py::Go2ParkourImitationPPOAMPRunnerCfg.amp["amp_weight"].
@@ -82,6 +82,11 @@ class ParkourImitationEnvCfg(ParkourEnvCfg):
     # Spawn distribution: parkour's default uniform terrain assignment is used unchanged.
     # AMP applies only to envs spawned on parkour_flat (flat_env_mask) — both reward and
     # discriminator gradient are masked. See parkour_imitation_env.py:_flat_env_mask.
+
+    # True면 평지뿐 아니라 모든 지형 env에도 AMP(discriminator/style reward)를 적용.
+    # False(기본)면 기존처럼 `_flat_env_mask`로 평지 env에만 적용.
+    # default=False → 기존 Go2-ParkourImitation-v0 동작 100% 보존.
+    apply_amp_on_terrain: bool = True
 
     # Inherits parkour reward_scales entirely — regularization penalties (torque, action_rate,
     # joint_acc, collision, stumble, edge, ...) all retained for sim-to-real safety.
@@ -163,3 +168,24 @@ class ParkourImitationEnvCfg(ParkourEnvCfg):
 
         # Apply max_init_terrain_level to the TerrainImporterCfg wrapper.
         self.terrain.max_init_terrain_level = self.terrain_max_init_level
+
+
+@configclass
+class ParkourImitationTerrainStyleEnvCfg(ParkourImitationEnvCfg):
+    """Configuration for ParkourImitationTerrainStyleEnv.
+
+    Inherits all fields from ParkourImitationEnvCfg and overrides amp_obs_dim
+    to match the terrain-invariant 37-dim AMP observation layout:
+
+        dof_pos(12) + dof_vel(12) + root_lin_vel_b_xy(2) + root_ang_vel_b(3) +
+        foot_pos_local_xy(8) = 37
+
+    All other parkour/AMP fields (terrain, rewards, sensors, history length, etc.)
+    are inherited unchanged. amp_history_length=10 → flat AMP dim = 370.
+
+    Removed vs parent (49-dim):
+        root_height(1), root_lin_vel_b_z(1), foot_pos_local_z×4(4), root_rot_tan_norm(6)
+    """
+
+    # Override amp_obs_dim: 37-dim terrain-invariant frame (parent default is 49).
+    amp_obs_dim: int = 37

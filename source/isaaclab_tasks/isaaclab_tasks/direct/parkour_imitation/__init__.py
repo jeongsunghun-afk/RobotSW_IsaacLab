@@ -37,3 +37,13 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_amp_cfg:Go2ParkourImitationSymmetryPPOAMPRunnerCfg",
     },
 )
+
+gym.register(
+    id="Go2-ParkourImitation-TerrainStyle-v0",
+    entry_point=f"{__name__}.parkour_imitation_terrain_style_env:ParkourImitationTerrainStyleEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.parkour_imitation_env_cfg:ParkourImitationTerrainStyleEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_amp_cfg:Go2ParkourImitationTerrainStylePPOAMPRunnerCfg",
+    },
+)

@@ -1,15 +1,18 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
 import copy
 import os
+
 import torch
 import torch.nn as nn
 
 
-def export_policy_as_jit_parkour(policy: object, normalizer: object | None, path: str, filename="policy.pt"):
+def export_policy_as_jit_parkour(
+    policy: object, normalizer: object | None, path: str, filename="policy.pt", estimator=None
+):
     """Export policy into a Torch JIT file.
 
     Args:
@@ -17,13 +20,21 @@ def export_policy_as_jit_parkour(policy: object, normalizer: object | None, path
         normalizer: The empirical normalizer module. If None, Identity is used.
         path: The path to the saving directory.
         filename: The name of exported JIT file. Defaults to "policy.pt".
+        estimator: Optional estimator module. If provided and the policy uses a priv_explicit
+            slot (ActorCriticRMA pattern), the estimator is bundled into the exported graph
+            and predicts priv_explicit from raw proprio.
     """
-    policy_exporter = _TorchPolicyExporter(policy, normalizer)
+    policy_exporter = _TorchPolicyExporter(policy, normalizer, estimator=estimator)
     policy_exporter.export(path, filename)
 
 
 def export_policy_as_onnx_parkour(
-    policy: object, path: str, normalizer: object | None = None, filename="policy.onnx", verbose=False
+    policy: object,
+    path: str,
+    normalizer: object | None = None,
+    filename="policy.onnx",
+    verbose=False,
+    estimator=None,
 ):
     """Export policy into a Torch ONNX file.
 
@@ -33,10 +44,11 @@ def export_policy_as_onnx_parkour(
         path: The path to the saving directory.
         filename: The name of exported ONNX file. Defaults to "policy.onnx".
         verbose: Whether to print the model summary. Defaults to False.
+        estimator: Optional estimator module. See `export_policy_as_jit_parkour` for details.
     """
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
-    policy_exporter = _OnnxPolicyExporter(policy, normalizer, verbose)
+    policy_exporter = _OnnxPolicyExporter(policy, normalizer, verbose, estimator=estimator)
     policy_exporter.export(path, filename)
 
 
@@ -70,7 +82,7 @@ class _TorchPolicyExporter(nn.Module):
     Scan is NOT normalized (mirrors ActorCriticRMA.act_inference which skips scan_obs_normalizer).
     """
 
-    def __init__(self, policy, normalizer=None):
+    def __init__(self, policy, normalizer=None, estimator=None):
         super().__init__()
         self.is_recurrent = policy.is_recurrent
 
@@ -111,7 +123,9 @@ class _TorchPolicyExporter(nn.Module):
 
         # --- Dynamic encoder detection (non-recurrent multi-encoder path) ---
         # History encoder: present in ActorCriticRMA
-        self._has_history = (not self.is_recurrent) and hasattr(policy, "history_encoder") and policy.history_encoder is not None
+        self._has_history = (
+            (not self.is_recurrent) and hasattr(policy, "history_encoder") and policy.history_encoder is not None
+        )
         if self._has_history:
             self.history_encoder = copy.deepcopy(policy.history_encoder)
             if hasattr(policy, "history_obs_normalizer"):
@@ -119,17 +133,17 @@ class _TorchPolicyExporter(nn.Module):
             else:
                 self.history_obs_normalizer = nn.Identity()
             # Dim: history_encoder is StateHistoryEncoder; input is proprio * tsteps (flattened)
-            self._history_dim = _infer_dim(
-                self.history_obs_normalizer,
-                fallback=self.history_encoder.encoder[0].in_features * self.history_encoder.tsteps,
+            self._history_dim = int(
+                _infer_dim(
+                    self.history_obs_normalizer,
+                    fallback=self.history_encoder.encoder[0].in_features * self.history_encoder.tsteps,
+                )
             )
 
         # Scan encoder: present in ActorCriticRMA when num_scan_obs > 0
         # scandot_encoder is set to None when no scan, so check both attribute existence and non-None
         self._has_scan = (
-            (not self.is_recurrent)
-            and hasattr(policy, "scandot_encoder")
-            and policy.scandot_encoder is not None
+            (not self.is_recurrent) and hasattr(policy, "scandot_encoder") and policy.scandot_encoder is not None
         )
         if self._has_scan:
             self.scandot_encoder = copy.deepcopy(policy.scandot_encoder)
@@ -137,7 +151,7 @@ class _TorchPolicyExporter(nn.Module):
             # The normalizer is only used during training update_normalization. We mirror that behavior
             # here: scan goes directly into scandot_encoder without normalization.
             # Dim: scandot_encoder is an MLP; first Linear's in_features
-            self._scan_dim = self.scandot_encoder[0].in_features
+            self._scan_dim = int(self.scandot_encoder[0].in_features)
 
         # priv_only fallback: policy has priv_encoder but no history_encoder (unusual but handled)
         self._has_priv_only = (
@@ -152,23 +166,50 @@ class _TorchPolicyExporter(nn.Module):
                 self.priv_obs_normalizer = copy.deepcopy(policy.priv_obs_normalizer)
             else:
                 self.priv_obs_normalizer = nn.Identity()
-            self._priv_dim = _infer_dim(
-                self.priv_obs_normalizer,
-                fallback=self.priv_encoder[0].in_features,
+            self._priv_dim = int(
+                _infer_dim(
+                    self.priv_obs_normalizer,
+                    fallback=self.priv_encoder[0].in_features,
+                )
             )
 
+        # priv_explicit slot detection (ActorCriticRMA parkour pattern):
+        # Some policies feed priv_explicit directly into the actor (not encoded). Detected by
+        # the presence of priv_explicit_obs_normalizer on the policy.
+        self._has_priv_explicit = (not self.is_recurrent) and hasattr(policy, "priv_explicit_obs_normalizer")
+        if self._has_priv_explicit:
+            self.priv_explicit_obs_normalizer = copy.deepcopy(policy.priv_explicit_obs_normalizer)
+
+        # Estimator bundling: only meaningful when priv_explicit slot exists.
+        # Estimator predicts priv_explicit from raw proprio (input = obs["policy"]).
+        self._has_estimator = (estimator is not None) and self._has_priv_explicit
+        # Always store as Optional[nn.Module] so type checkers can narrow correctly.
+        self.estimator: nn.Module | None = copy.deepcopy(estimator) if self._has_estimator else None
+
+        if self._has_priv_explicit:
+            fallback_dim = -1
+            if self.estimator is not None and hasattr(self.estimator, "output_dim"):
+                fallback_dim = int(self.estimator.output_dim)
+            # AMP path: estimator is None and normalizer is Identity (no _mean).
+            # Fall back to num_priv_explicit stored on the policy by ActorCriticRMA.__init__.
+            if fallback_dim == -1:
+                fallback_dim = int(getattr(policy, "num_priv_explicit", -1))
+            self._priv_explicit_dim = int(_infer_dim(self.priv_explicit_obs_normalizer, fallback=fallback_dim))
+
         # Infer proprio dim for dummy input construction
-        self._proprio_dim = _infer_dim(self.actor_obs_normalizer, fallback=None)
-        if self._proprio_dim is None:
-            # Identity normalizer with no _mean: try to infer from actor input and encoder output dims
-            actor_in = self.actor[0].in_features
+        self._proprio_dim = int(_infer_dim(self.actor_obs_normalizer, fallback=-1))
+        if self._proprio_dim == -1:
+            # Identity normalizer with no _mean: reverse-compute from actor input dim and encoder outputs.
+            actor_in = int(self.actor[0].in_features)
             encoder_out = 0
+            if self._has_priv_explicit and self._priv_explicit_dim > 0:
+                encoder_out += self._priv_explicit_dim
             if self._has_history:
-                encoder_out += self.history_encoder.linear_output[-2].out_features  # StateHistoryEncoder output
+                encoder_out += int(self.history_encoder.linear_output[-2].out_features)
             if self._has_scan:
-                encoder_out += self.scandot_encoder[-1].out_features
+                encoder_out += int(self.scandot_encoder[-1].out_features)
             if self._has_priv_only:
-                encoder_out += self.priv_encoder[-1].out_features
+                encoder_out += int(self.priv_encoder[-1].out_features)
             self._proprio_dim = actor_in - encoder_out
 
     def forward_lstm(self, x):
@@ -188,12 +229,25 @@ class _TorchPolicyExporter(nn.Module):
 
     def forward(self, proprio, *extras):
         """Dynamic forward mirroring ActorCriticRMA.act_inference order:
-        proprio_normed -> history_latent -> scan_latent.
+        proprio_normed -> priv_explicit_normed -> history_latent (or priv_latent) -> scan_latent.
 
-        For simple ActorCritic (no encoders), extras is empty and only proprio is used.
+        priv_explicit handling:
+          - If estimator is bundled (self._has_estimator): priv_explicit = estimator(proprio_raw),
+            then normalized. No external input needed.
+          - Else if policy has priv_explicit slot but no estimator: priv_explicit is taken from
+            the next `extras` argument.
+        Scan is NOT normalized (mirrors ActorCriticRMA.act_inference).
         """
         actor_input_parts = [self.actor_obs_normalizer(proprio)]
         extras_idx = 0
+
+        if self._has_priv_explicit:
+            if self._has_estimator and self.estimator is not None:
+                priv_explicit_raw = self.estimator(proprio)
+            else:
+                priv_explicit_raw = extras[extras_idx]
+                extras_idx += 1
+            actor_input_parts.append(self.priv_explicit_obs_normalizer(priv_explicit_raw))
 
         if self._has_history:
             history = extras[extras_idx]
@@ -227,8 +281,10 @@ class _TorchPolicyExporter(nn.Module):
         os.makedirs(path, exist_ok=True)
         path = os.path.join(path, filename)
         self.to("cpu")
-        # Build dummy inputs to trace
+        # Build dummy inputs to trace (order MUST match forward signature)
         dummy_inputs = [torch.zeros(1, self._proprio_dim)]
+        if self._has_priv_explicit and not self._has_estimator:
+            dummy_inputs.append(torch.zeros(1, self._priv_explicit_dim))
         if self._has_history:
             dummy_inputs.append(torch.zeros(1, self._history_dim))
         elif self._has_priv_only:
@@ -251,7 +307,7 @@ class _OnnxPolicyExporter(nn.Module):
     Scan is NOT normalized (mirrors ActorCriticRMA.act_inference which skips scan_obs_normalizer).
     """
 
-    def __init__(self, policy, normalizer=None, verbose=False):
+    def __init__(self, policy, normalizer=None, verbose=False, estimator=None):
         super().__init__()
         self.verbose = verbose
         self.is_recurrent = policy.is_recurrent
@@ -289,7 +345,9 @@ class _OnnxPolicyExporter(nn.Module):
 
         # --- Dynamic encoder detection (non-recurrent multi-encoder path) ---
         # History encoder: present in ActorCriticRMA
-        self._has_history = (not self.is_recurrent) and hasattr(policy, "history_encoder") and policy.history_encoder is not None
+        self._has_history = (
+            (not self.is_recurrent) and hasattr(policy, "history_encoder") and policy.history_encoder is not None
+        )
         if self._has_history:
             self.history_encoder = copy.deepcopy(policy.history_encoder)
             if hasattr(policy, "history_obs_normalizer"):
@@ -297,22 +355,22 @@ class _OnnxPolicyExporter(nn.Module):
             else:
                 self.history_obs_normalizer = nn.Identity()
             # Dim: history_encoder is StateHistoryEncoder; input is proprio * tsteps (flattened)
-            self._history_dim = _infer_dim(
-                self.history_obs_normalizer,
-                fallback=self.history_encoder.encoder[0].in_features * self.history_encoder.tsteps,
+            self._history_dim = int(
+                _infer_dim(
+                    self.history_obs_normalizer,
+                    fallback=self.history_encoder.encoder[0].in_features * self.history_encoder.tsteps,
+                )
             )
 
         # Scan encoder: present in ActorCriticRMA when num_scan_obs > 0
         self._has_scan = (
-            (not self.is_recurrent)
-            and hasattr(policy, "scandot_encoder")
-            and policy.scandot_encoder is not None
+            (not self.is_recurrent) and hasattr(policy, "scandot_encoder") and policy.scandot_encoder is not None
         )
         if self._has_scan:
             self.scandot_encoder = copy.deepcopy(policy.scandot_encoder)
             # NOTE: scan_obs_normalizer is NOT applied at inference in ActorCriticRMA.act_inference.
             # Dim: scandot_encoder is an MLP; first Linear's in_features
-            self._scan_dim = self.scandot_encoder[0].in_features
+            self._scan_dim = int(self.scandot_encoder[0].in_features)
 
         # priv_only fallback: policy has priv_encoder but no history_encoder
         self._has_priv_only = (
@@ -327,22 +385,49 @@ class _OnnxPolicyExporter(nn.Module):
                 self.priv_obs_normalizer = copy.deepcopy(policy.priv_obs_normalizer)
             else:
                 self.priv_obs_normalizer = nn.Identity()
-            self._priv_dim = _infer_dim(
-                self.priv_obs_normalizer,
-                fallback=self.priv_encoder[0].in_features,
+            self._priv_dim = int(
+                _infer_dim(
+                    self.priv_obs_normalizer,
+                    fallback=self.priv_encoder[0].in_features,
+                )
             )
 
+        # priv_explicit slot detection (ActorCriticRMA parkour pattern):
+        # Some policies feed priv_explicit directly into the actor (not encoded). Detected by
+        # the presence of priv_explicit_obs_normalizer on the policy.
+        self._has_priv_explicit = (not self.is_recurrent) and hasattr(policy, "priv_explicit_obs_normalizer")
+        if self._has_priv_explicit:
+            self.priv_explicit_obs_normalizer = copy.deepcopy(policy.priv_explicit_obs_normalizer)
+
+        # Estimator bundling: only meaningful when priv_explicit slot exists.
+        # Estimator predicts priv_explicit from raw proprio (input = obs["policy"]).
+        self._has_estimator = (estimator is not None) and self._has_priv_explicit
+        # Always store as Optional[nn.Module] so type checkers can narrow correctly.
+        self.estimator: nn.Module | None = copy.deepcopy(estimator) if self._has_estimator else None
+
+        if self._has_priv_explicit:
+            fallback_dim = -1
+            if self.estimator is not None and hasattr(self.estimator, "output_dim"):
+                fallback_dim = int(self.estimator.output_dim)
+            # AMP path: estimator is None and normalizer is Identity (no _mean).
+            # Fall back to num_priv_explicit stored on the policy by ActorCriticRMA.__init__.
+            if fallback_dim == -1:
+                fallback_dim = int(getattr(policy, "num_priv_explicit", -1))
+            self._priv_explicit_dim = int(_infer_dim(self.priv_explicit_obs_normalizer, fallback=fallback_dim))
+
         # Infer proprio dim
-        self._proprio_dim = _infer_dim(self.actor_obs_normalizer, fallback=None)
-        if self._proprio_dim is None:
-            actor_in = self.actor[0].in_features
+        self._proprio_dim = int(_infer_dim(self.actor_obs_normalizer, fallback=-1))
+        if self._proprio_dim == -1:
+            actor_in = int(self.actor[0].in_features)
             encoder_out = 0
+            if self._has_priv_explicit and self._priv_explicit_dim > 0:
+                encoder_out += self._priv_explicit_dim
             if self._has_history:
-                encoder_out += self.history_encoder.linear_output[-2].out_features
+                encoder_out += int(self.history_encoder.linear_output[-2].out_features)
             if self._has_scan:
-                encoder_out += self.scandot_encoder[-1].out_features
+                encoder_out += int(self.scandot_encoder[-1].out_features)
             if self._has_priv_only:
-                encoder_out += self.priv_encoder[-1].out_features
+                encoder_out += int(self.priv_encoder[-1].out_features)
             self._proprio_dim = actor_in - encoder_out
 
     def forward_lstm(self, x_in, h_in, c_in):
@@ -359,12 +444,25 @@ class _OnnxPolicyExporter(nn.Module):
 
     def forward(self, proprio, *extras):
         """Dynamic forward mirroring ActorCriticRMA.act_inference order:
-        proprio_normed -> history_latent -> scan_latent.
+        proprio_normed -> priv_explicit_normed -> history_latent (or priv_latent) -> scan_latent.
 
-        For simple ActorCritic (no encoders), extras is empty and only proprio is used.
+        priv_explicit handling:
+          - If estimator is bundled (self._has_estimator): priv_explicit = estimator(proprio_raw),
+            then normalized. No external input needed.
+          - Else if policy has priv_explicit slot but no estimator: priv_explicit is taken from
+            the next `extras` argument.
+        Scan is NOT normalized (mirrors ActorCriticRMA.act_inference).
         """
         actor_input_parts = [self.actor_obs_normalizer(proprio)]
         extras_idx = 0
+
+        if self._has_priv_explicit:
+            if self._has_estimator and self.estimator is not None:
+                priv_explicit_raw = self.estimator(proprio)
+            else:
+                priv_explicit_raw = extras[extras_idx]
+                extras_idx += 1
+            actor_input_parts.append(self.priv_explicit_obs_normalizer(priv_explicit_raw))
 
         if self._has_history:
             history = extras[extras_idx]
@@ -422,9 +520,13 @@ class _OnnxPolicyExporter(nn.Module):
             else:
                 raise NotImplementedError(f"Unsupported RNN type: {self.rnn_type}")
         else:
-            # Build dynamic dummy inputs + input_names
+            # Build dynamic dummy inputs + input_names (order MUST match forward signature)
             dummy_inputs = [torch.zeros(1, self._proprio_dim)]
             input_names = ["proprio"]
+
+            if self._has_priv_explicit and not self._has_estimator:
+                dummy_inputs.append(torch.zeros(1, self._priv_explicit_dim))
+                input_names.append("priv_explicit")
 
             if self._has_history:
                 dummy_inputs.append(torch.zeros(1, self._history_dim))

@@ -131,6 +131,7 @@ class ActorCriticRMA(nn.Module):
         for obs_group in obs_groups["priv_explicit"]:
             assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
             num_priv_explicit += obs[obs_group].shape[-1]
+        self.num_priv_explicit = num_priv_explicit
 
         # Actor
         self.state_dependent_std = state_dependent_std
@@ -344,6 +345,63 @@ class ActorCriticRMA(nn.Module):
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def get_actor_input(self, obs: TensorDict) -> torch.Tensor:
+        """Build the immediate MLP input tensor (post-norm, post-concat) using the *priv_latent* path.
+
+        This reproduces the same composition used by ``act()`` during PPO update (``hist_encoding=False``):
+          actor_input = [norm_proprio, norm_priv_explicit, priv_latent, (scandot_latent)]
+
+        The history encoder is **not** used here — that is intentional (spec scope caveat: LCP bounds
+        the Lipschitz constant of the actor MLP w.r.t. its immediate input, leaving encoders out of the
+        gradient path for simplicity).  Encoders are detached via ``torch.no_grad()`` at call site.
+
+        Returns:
+            Tensor of shape ``[batch, actor_input_dim]`` (same dim as ``self.actor`` first layer input).
+        """
+        obs_actor = self.actor_obs_normalizer(self.get_actor_obs(obs))
+        priv_explicit = self.priv_explicit_obs_normalizer(self.get_priv_explicit_obs(obs))
+        priv_latent = self.get_priv_latent(obs)
+        actor_input = torch.cat([obs_actor, priv_explicit, priv_latent], dim=-1)
+        if self.scandot_encoder is not None:
+            obs_scan = self.scan_obs_normalizer(self.get_scan_obs(obs))
+            scandot_latent = self.scandot_encoder(obs_scan)
+            actor_input = torch.cat([actor_input, scandot_latent], dim=-1)
+        return actor_input
+
+    def log_prob_from_actor_input(self, actor_input: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Compute log π(a | actor_input) from a grad-enabled, post-concat MLP input leaf.
+
+        Used by the LCP gradient penalty in PPOParkour.  Must NOT modify ``self.distribution``.
+        Mirrors ``log_prob_from_actor_obs`` in ActorCritic (actor_critic.py:182) but takes the
+        already-normalized-and-concatenated tensor directly (no further normalization applied here).
+
+        Args:
+            actor_input: Grad-enabled leaf tensor, shape ``[batch, actor_input_dim]``.
+            actions:     Sampled actions (detached), shape ``[batch, num_actions]``.
+
+        Returns:
+            Per-sample log-probabilities summed over action dim, shape ``[batch]``.
+        """
+        if self.state_dependent_std:
+            mean_and_std = self.actor(actor_input)
+            if self.noise_std_type == "scalar":
+                mean, std = torch.unbind(mean_and_std, dim=-2)
+            elif self.noise_std_type == "log":
+                mean, log_std = torch.unbind(mean_and_std, dim=-2)
+                std = torch.exp(log_std)
+            else:
+                raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        else:
+            mean = self.actor(actor_input)
+            if self.noise_std_type == "scalar":
+                std = self.std.expand_as(mean)
+            elif self.noise_std_type == "log":
+                std = torch.exp(self.log_std).expand_as(mean)
+            else:
+                raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        dist = Normal(mean, std)
+        return dist.log_prob(actions).sum(dim=-1)
 
     def update_normalization(self, obs: TensorDict) -> None:
         if self.actor_obs_normalization:

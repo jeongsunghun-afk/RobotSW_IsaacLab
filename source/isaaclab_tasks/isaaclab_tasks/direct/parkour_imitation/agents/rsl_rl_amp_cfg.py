@@ -118,7 +118,7 @@ class Go2ParkourImitationPPOAMPRunnerCfg(RslRlOnPolicyRunnerCfg):
         # ── Discriminator 학습 ────────────────────────────────────────────
         discriminator_learning_rate=2.5e-4,
         gradient_penalty_coef=5.0,
-        reward_coef=2.0 * 0.02,
+        reward_coef=2.0 * 0.02, # 2 vs 10
         discriminator_hidden_dims=[1024, 512],
         disc_num_epochs=2,
         disc_mini_batch_size=4096,
@@ -167,3 +167,21 @@ class Go2ParkourImitationSymmetryPPOAMPRunnerCfg(Go2ParkourImitationPPOAMPRunner
             ),
         )
         self.experiment_name = "parkour_imitation_go2_symmetry"
+
+
+@configclass
+class Go2ParkourImitationTerrainStylePPOAMPRunnerCfg(Go2ParkourImitationPPOAMPRunnerCfg):
+    """Go2 ParkourImitation with terrain-invariant AMP discriminator observations.
+
+    AMP obs per frame is 37-dim (dof_pos/vel + lin_vel_xy + ang_vel + foot_xy).
+    History length 10 → flat AMP dim = 370.
+
+    amp_observation_space is overwritten at runner construction from
+    env.unwrapped.amp_observation_space (370). The literal 370 here is documentation only.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Override AMP obs dim to match ParkourImitationTerrainStyleEnv (37-dim/frame × 10).
+        self.amp["amp_observation_space"] = 370  # 37 per-step × 10 history frames
+        self.experiment_name = "parkour_imitation_go2_terrain_style"

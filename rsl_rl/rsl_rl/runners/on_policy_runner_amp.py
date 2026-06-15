@@ -10,6 +10,7 @@ from tensordict import TensorDict
 
 from rsl_rl.algorithms import PPOAMP, PPOAMPBase
 from rsl_rl.modules import ActorCritic, ActorCriticRMA, resolve_symmetry_config
+from rsl_rl.modules.estimator import Estimator
 from rsl_rl.runners.on_policy_runner_parkour import OnPolicyRunnerParkour
 from rsl_rl.storage import RolloutStorage
 
@@ -49,8 +50,32 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
         elif hasattr(self.env, "amp_observation_space"):
             amp_cfg["amp_observation_space"] = self.env.amp_observation_space.shape[0]
 
+        # Estimator 빌드: estimator_cfg가 있을 때만 빌드하여 PPOAMP에 주입한다.
+        # - actor는 배포 시 실제 lin_vel을 측정할 수 없으므로 estimator 추정값을 써야 한다.
+        # - discriminator는 학습 시 실제 priv_explicit 사용이 의도이므로 이 경로를 변경하지 않는다.
+        # - estimator_cfg가 None(go2_imitation 계열 등)이면 estimator를 빌드하지 않아
+        #   PPOParkour.__init__의 else 브랜치(train_with_estimated_states=False)로 자동 낙하한다.
+        estimator = None
+        estimator_cfg = getattr(self, "estimator_cfg", None)
+        if estimator_cfg is not None:
+            estimator_input_dim = obs["policy"].shape[-1]
+            estimator_output_dim = sum(obs[k].shape[-1] for k in self.cfg["obs_groups"]["priv_explicit"])
+            estimator = Estimator(
+                input_dim=estimator_input_dim,
+                output_dim=estimator_output_dim,
+                hidden_dims=estimator_cfg["hidden_dims"],
+                activation=self.policy_cfg.get("activation", "elu"),
+            ).to(self.device)
+
         alg = PPOAMP(
-            actor_critic, storage, device=self.device, amp_cfg=amp_cfg, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
+            actor_critic,
+            storage,
+            device=self.device,
+            amp_cfg=amp_cfg,
+            estimator=estimator,
+            estimator_cfg=estimator_cfg,
+            **self.alg_cfg,
+            multi_gpu_cfg=self.multi_gpu_cfg,
         )
         return alg
 
@@ -222,6 +247,10 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+        # estimator가 빌드된 경우(parkour-imitation 경로) 가중치와 optimizer 저장
+        if self.alg.estimator is not None:
+            saved_dict["estimator_state_dict"] = self.alg.estimator.state_dict()
+            saved_dict["estimator_optimizer_state_dict"] = self.alg.estimator_optimizer.state_dict()
         torch.save(saved_dict, path)
         self.logger.save_model(path, self.current_learning_iteration)
 
@@ -234,9 +263,14 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
         non_normalizer_missing = [k for k in disc_missing if "reward_normalizer" not in k]
         if non_normalizer_missing:
             print(f"[WARNING] discriminator load: unexpected missing keys: {non_normalizer_missing}")
+        # estimator가 빌드된 경우 저장된 가중치 복원 (키 없으면 무시 — 기존 체크포인트 호환)
+        if self.alg.estimator is not None and "estimator_state_dict" in loaded_dict:
+            self.alg.estimator.load_state_dict(loaded_dict["estimator_state_dict"])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
             self.alg.disc_optimizer.load_state_dict(loaded_dict["disc_optimizer_state_dict"])
+            if self.alg.estimator_optimizer is not None and "estimator_optimizer_state_dict" in loaded_dict:
+                self.alg.estimator_optimizer.load_state_dict(loaded_dict["estimator_optimizer_state_dict"])
         self.current_learning_iteration = loaded_dict.get("iter", 0)
         return loaded_dict.get("infos", {})
 
