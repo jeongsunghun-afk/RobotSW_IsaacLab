@@ -118,21 +118,21 @@ class Go2ParkourImitationPPOAMPRunnerCfg(RslRlOnPolicyRunnerCfg):
         # ── Discriminator 학습 ────────────────────────────────────────────
         discriminator_learning_rate=2.5e-4,
         gradient_penalty_coef=5.0,
-        reward_coef=2.0 * 0.02, # 2 vs 10
+        reward_coef=4.0 * 0.02,  # 2 vs 4
         discriminator_hidden_dims=[1024, 512],
         disc_num_epochs=2,
         disc_mini_batch_size=4096,
         disc_logit_reg=0.01,
         # ── Loss / Reward / Regularizer 방식 ─────────────────────────────
-        disc_loss_type="bce",          # "ls_gan" | "bce"  (go2_imitation 방식)
-        disc_reward_type="bce",        # "ls_gan" | "bce"  (go2_imitation 방식)
+        disc_loss_type="bce",  # "ls_gan" | "bce"  (go2_imitation 방식)
+        disc_reward_type="bce",  # "ls_gan" | "bce"  (go2_imitation 방식)
         disc_logit_reg_type="weight",  # "logit" | "weight"  (MimicKit 방식)
-        disc_norm_clip=10.0,           # None | float  (go2_imitation 방식)
+        disc_norm_clip=10.0,  # None | float  (go2_imitation 방식)
         # ── Replay buffer ─────────────────────────────────────────────────
         enable_replay_buffer=True,
         replay_buffer_size=200000,
         # ── AMP obs 차원 (env와 일치; 런너 초기화 시 자동 덮어씀) ─────────
-        amp_observation_space=490,    # 49 per-step × 10 history frames
+        amp_observation_space=490,  # 49 per-step × 10 history frames
         # ── Motion 파일 (env_cfg가 소유; 러너 미사용) ─────────────────────
         motion_files=None,
     )
@@ -162,8 +162,7 @@ class Go2ParkourImitationSymmetryPPOAMPRunnerCfg(Go2ParkourImitationPPOAMPRunner
             use_mirror_loss=False,
             mirror_loss_coeff=0.0,
             data_augmentation_func=(
-                "isaaclab_tasks.direct.parkour_imitation.mdp.symmetry"
-                ":compute_parkour_imitation_symmetric_states"
+                "isaaclab_tasks.direct.parkour_imitation.mdp.symmetry:compute_parkour_imitation_symmetric_states"
             ),
         )
         self.experiment_name = "parkour_imitation_go2_symmetry"
@@ -182,6 +181,35 @@ class Go2ParkourImitationTerrainStylePPOAMPRunnerCfg(Go2ParkourImitationPPOAMPRu
 
     def __post_init__(self):
         super().__post_init__()
+        # Mirror data-augmentation: same symmetry_cfg as Go2ParkourImitationSymmetryPPOAMPRunnerCfg.
+        # AMP obs travels via env.extras["amp_obs"] (separate path) and is NOT mirrored.
+        # Policy obs/action mirror is therefore safe and fully compatible with this env.
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            use_mirror_loss=False,
+            mirror_loss_coeff=0.0,
+            data_augmentation_func=(
+                "isaaclab_tasks.direct.parkour_imitation.mdp.symmetry:compute_parkour_imitation_symmetric_states"
+            ),
+        )
         # Override AMP obs dim to match ParkourImitationTerrainStyleEnv (37-dim/frame × 10).
         self.amp["amp_observation_space"] = 370  # 37 per-step × 10 history frames
         self.experiment_name = "parkour_imitation_go2_terrain_style"
+
+
+@configclass
+class Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg(Go2ParkourImitationSymmetryPPOAMPRunnerCfg):
+    """Go2 ParkourImitation + L/R symmetry data-aug + 360° random-goal curriculum.
+
+    Inherits ``Go2ParkourImitationSymmetryPPOAMPRunnerCfg`` in full:
+    - PPO + AMP discriminator (BCE loss, WGAN disabled)
+    - L/R mirror data-augmentation (``symmetry_cfg``, ``num_aug=2``)
+    - AMP obs 49-dim/frame × 10 history = 490-dim (unchanged)
+
+    Only ``experiment_name`` is changed so that WandB/TensorBoard logs are
+    written to a separate run directory from the plain-symmetry task.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_symmetry_random_goal"
