@@ -237,14 +237,24 @@ class Go2ParkourImitationRandomGoalEnv(Go2ParkourImitationEnv):
     def _sample_random_goal(self, env_ids: torch.Tensor) -> None:
         """Sample a random goal around each env's current robot base XY.
 
-        Samples angle ~ U(0, 2π) and distance ~ U(dist_min, dist_max) to generate
-        candidate XY positions in world frame.  Each candidate is validated against
-        the global height field:
+        Samples angle within the robot's forward cone and distance ~ U(dist_min, dist_max)
+        to generate candidate XY positions in world frame.
+
+        Direction sampling:
+            angle = heading_w[env] + U(-half_cone, +half_cone)
+            where half_cone = radians(cfg.random_goal_forward_cone_deg) * 0.5.
+            heading_w is the world-frame yaw scalar [N] from RigidBodyData.
+            When cfg.random_goal_forward_cone_deg == 360, this reduces to omnidirectional.
+
+        Each candidate is validated against the global height field:
             1. Must lie within the height field grid bounds.
             2. |terrain_height(candidate_xy) - terrain_height(robot_xy)| ≤ max_height_diff.
 
-        On failure after max_sample_tries, the last candidate (ignoring height diff) is
-        used as a fallback (distance is already within range; only height diff relaxed).
+        The offset is re-sampled inside the rejection loop on every attempt, so
+        rejected candidates cannot drift outside the forward cone on retry.
+
+        On fallback (all attempts exhausted): a fresh cone-constrained sample is taken
+        ignoring the height-diff constraint — the direction stays within the forward cone.
 
         Writes result directly into:
             self._env_goals[env_ids, 0]   ← goal world position [x, y, terrain_h + z_offset]
@@ -262,10 +272,16 @@ class Go2ParkourImitationRandomGoalEnv(Go2ParkourImitationEnv):
         max_h_diff = self.cfg.random_goal_max_height_diff
         max_tries = self.cfg.random_goal_max_sample_tries
 
+        # Forward-cone half-angle [rad].  360° → full circle (backward compatible).
+        half_cone = math.radians(self.cfg.random_goal_forward_cone_deg) * 0.5
+
         # Robot base XY in world frame — use current positions (post-physics, pre-reset robot write).
         # After super()._reset_idx(), robot has been repositioned to env_origins.
         # We use env_origins as the robot's known spawn position.
         robot_xy = self._terrain.env_origins[env_ids, :2]  # [n, 2] world frame
+
+        # Robot world-frame yaw (scalar, radians) — same source as _update_goals/_target_yaw.
+        robot_heading = self._robot.data.heading_w[env_ids]  # [n]
 
         # Height field metadata (built during __init__ by grandparent).
         origin = self._edge_mask_origin  # [2] (x, y) world coords of grid cell (0,0)
@@ -292,12 +308,15 @@ class Go2ParkourImitationRandomGoalEnv(Go2ParkourImitationEnv):
 
             # Sub-batch for pending envs only.
             n_pending = pending.numel()
-            # Re-use robot_xy for pending subset.
+            # Re-use robot_xy / heading for pending subset.
             pend_robot_xy = robot_xy[pending]  # [n_p, 2]
             pend_robot_h = robot_h[pending]  # [n_p]
+            pend_heading = robot_heading[pending]  # [n_p]
 
-            # Sample candidates for pending batch.
-            angles = torch.rand(n_pending, device=self.device) * (2.0 * math.pi)
+            # Sample forward-cone direction for pending batch.
+            # offset is re-sampled every attempt so rejected envs stay within the cone.
+            offsets = (torch.rand(n_pending, device=self.device) * 2.0 - 1.0) * half_cone
+            angles = pend_heading + offsets  # world-frame angle [n_p]
             dists = dist_min + torch.rand(n_pending, device=self.device) * (dist_max - dist_min)
             dx = dists * torch.cos(angles)
             dy = dists * torch.sin(angles)
@@ -330,14 +349,17 @@ class Go2ParkourImitationRandomGoalEnv(Go2ParkourImitationEnv):
                 goal_z[newly_accepted] = cand_h[ok] + z_offset
                 accepted[newly_accepted] = True
 
-            # On last attempt: fallback — accept in-bounds regardless of height diff.
+            # On last attempt: fallback — cone-constrained sample, height-diff relaxed.
             if _attempt == max_tries - 1:
                 still_pending = (~accepted).nonzero(as_tuple=False).squeeze(-1)
                 if still_pending.numel() > 0:
                     n_fb = still_pending.numel()
                     fb_robot_xy = robot_xy[still_pending]
                     fb_robot_h = robot_h[still_pending]
-                    fb_angles = torch.rand(n_fb, device=self.device) * (2.0 * math.pi)
+                    fb_heading = robot_heading[still_pending]
+                    # Direction stays within the forward cone — no backward fallback.
+                    fb_offsets = (torch.rand(n_fb, device=self.device) * 2.0 - 1.0) * half_cone
+                    fb_angles = fb_heading + fb_offsets
                     fb_dists = dist_min + torch.rand(n_fb, device=self.device) * (dist_max - dist_min)
                     fb_dx = fb_dists * torch.cos(fb_angles)
                     fb_dy = fb_dists * torch.sin(fb_angles)

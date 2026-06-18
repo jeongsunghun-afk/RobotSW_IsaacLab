@@ -92,3 +92,8 @@ class ParkourImitationRandomGoalEnvCfg(ParkourImitationEnvCfg):
 
     # Max rejection-sampling tries before falling back to unconstrained placement.
     random_goal_max_sample_tries: int = 20
+
+    # Forward cone total angle [degrees] for random goal direction sampling.
+    # Goals are sampled within ±(cone/2) of the robot's current heading.
+    # 120 = ±60°.  Set to 360 to restore the original omnidirectional behaviour.
+    random_goal_forward_cone_deg: float = 120.0
