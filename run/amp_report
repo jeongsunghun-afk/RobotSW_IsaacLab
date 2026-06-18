@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# run/amp_report — AMP Discriminator 관측치 검증 래퍼
+#
+# Discriminator가 사용하는 시뮬레이션 obs(Sim Obs)와
+# 모션 데이터셋 참조 obs(Ref Obs)를 차원별로 직접 비교하는 디버깅 스크립트.
+# headless + enable_cameras=False 자동 설정.
+#
+# 사용법:
+#   ./run/amp_report --task Go2-Imitation-v0 --checkpoint logs/.../model_1000.pt
+#   ./run/amp_report --task Go2-ParkourImitation-v0 \
+#       --commands_file scripts/reinforcement_learning/rsl_rl/commands.yaml
+#
+# 주요 인자:
+#   --task <id>              태스크 이름 (필수, AMP 계열: Go2-Imitation-v0 등)
+#   --checkpoint <path>      체크포인트 경로
+#   --commands_file <path>   커맨드 YAML (기본: scripts/.../commands.yaml)
+#   --seed <N>               환경 시드 (기본: 1234)
+#   [rsl_rl 공통 인자]        --load_run, --experiment_name 등
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate isaac-5.1
+
+cd "$REPO"
+
+exec ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/amp_report.py "$@"

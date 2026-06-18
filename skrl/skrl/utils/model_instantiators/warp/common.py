@@ -1,14 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-from typing import Any
-
 import ast
-from gymnasium import spaces
+from typing import Any
 
 import warp as wp
 import warp_nn.nn as nn  # noqa
-
-from skrl.utils.framework.warp import concatenate
+from gymnasium import spaces
 
 
 def one_hot_encoding(space: spaces.Space, x: wp.array) -> wp.array:
@@ -267,7 +269,7 @@ def generate_containers(
             output_modules = []
         # define a Sequential container
         if indent < 0:
-            container["sequential"] = f'nn.Sequential({", ".join(container["modules"])})'
+            container["sequential"] = f"nn.Sequential({', '.join(container['modules'])})"
         else:
             container["sequential"] = "nn.Sequential("
             for item in container["modules"]:

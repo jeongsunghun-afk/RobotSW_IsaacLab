@@ -1,13 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import functools
 from typing import Any
 
-import functools
 import gymnasium
-
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from skrl import config, logger
 from skrl.agents.jax import Agent
@@ -144,7 +147,7 @@ class TD3(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.jax.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
             if self.critic_1 is not None:
@@ -409,7 +412,6 @@ class TD3(Agent):
 
         # gradient steps
         for gradient_step in range(self.cfg.gradient_steps):
-
             # sample a batch from memory
             (
                 sampled_observations,
@@ -477,7 +479,6 @@ class TD3(Agent):
             # delayed update
             self._update_counter += 1
             if not self._update_counter % self.cfg.policy_delay:
-
                 # compute policy (actor) loss
                 grad, policy_loss = _update_policy(
                     self.policy.act, self.critic_1.act, self.policy.state_dict, self.critic_1.state_dict, inputs

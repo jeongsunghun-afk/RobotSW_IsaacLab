@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [start-isaaclab-envs-parameters-torch]
 # import the environment loader
 from skrl.envs.loaders.torch import load_isaaclab_env

@@ -1,6 +1,9 @@
-from __future__ import annotations
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Literal
+from __future__ import annotations
 
 import csv
 import datetime
@@ -8,8 +11,9 @@ import functools
 import operator
 import os
 from abc import ABC, abstractmethod
-import gymnasium
+from typing import Literal
 
+import gymnasium
 import numpy as np
 import torch
 

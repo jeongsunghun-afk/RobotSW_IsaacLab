@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [start-definition-torch]
 class MultivariateGaussianModel(MultivariateGaussianMixin, Model):
     def __init__(
@@ -35,7 +40,6 @@ class MultivariateGaussianModel(MultivariateGaussianMixin, Model):
 # [start-mlp-sequential-torch]
 import torch
 import torch.nn as nn
-
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
 
@@ -99,10 +103,7 @@ policy = MLP(
 # [end-mlp-sequential-torch]
 
 # [start-mlp-functional-torch]
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
 
@@ -168,8 +169,6 @@ policy = MLP(
 # =============================================================================
 
 # [start-cnn-sequential-torch]
-import torch
-import torch.nn as nn
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
@@ -248,9 +247,6 @@ policy = CNN(
 # [end-cnn-sequential-torch]
 
 # [start-cnn-functional-torch]
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
@@ -335,8 +331,6 @@ policy = CNN(
 # =============================================================================
 
 # [start-rnn-sequential-torch]
-import torch
-import torch.nn as nn
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
@@ -475,9 +469,6 @@ policy = RNN(
 # [end-rnn-sequential-torch]
 
 # [start-rnn-functional-torch]
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
@@ -619,8 +610,6 @@ policy = RNN(
 # =============================================================================
 
 # [start-gru-sequential-torch]
-import torch
-import torch.nn as nn
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
@@ -759,9 +748,6 @@ policy = GRU(
 # [end-gru-sequential-torch]
 
 # [start-gru-functional-torch]
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
@@ -903,8 +889,6 @@ policy = GRU(
 # =============================================================================
 
 # [start-lstm-sequential-torch]
-import torch
-import torch.nn as nn
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 
@@ -1052,9 +1036,6 @@ policy = LSTM(
 # [end-lstm-sequential-torch]
 
 # [start-lstm-functional-torch]
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from skrl.models.torch import Model, MultivariateGaussianMixin
 

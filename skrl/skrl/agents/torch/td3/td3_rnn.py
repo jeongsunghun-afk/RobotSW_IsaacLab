@@ -1,14 +1,18 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
-import itertools
 import gymnasium
-from packaging import version
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging import version
 
 from skrl import config, logger
 from skrl.agents.torch import Agent
@@ -75,7 +79,7 @@ class TD3_RNN(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.torch.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
             if self.critic_1 is not None:
@@ -367,7 +371,6 @@ class TD3_RNN(Agent):
 
         # gradient steps
         for gradient_step in range(self.cfg.gradient_steps):
-
             # sample a batch from memory
             (
                 sampled_observations,
@@ -380,9 +383,7 @@ class TD3_RNN(Agent):
                 sampled_truncated,
             ) = self.memory.sample(
                 names=self._tensors_names, batch_size=self.cfg.batch_size, sequence_length=self._rnn_sequence_length
-            )[
-                0
-            ]
+            )[0]
 
             rnn_policy = {}
             if self._rnn:
@@ -456,7 +457,6 @@ class TD3_RNN(Agent):
             # delayed update
             self._update_counter += 1
             if not self._update_counter % self.cfg.policy_delay:
-
                 with torch.autocast(device_type=self._device_type, enabled=self.cfg.mixed_precision):
                     # compute policy (actor) loss
                     actions, _ = self.policy.act(inputs, role="policy")

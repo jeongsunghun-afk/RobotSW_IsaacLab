@@ -1,10 +1,15 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import threading
 import time
+
 import frankx
 import gym
-from packaging import version
-
 import numpy as np
+from packaging import version
 
 
 class ReachingFranka(gym.Env):
@@ -45,7 +50,7 @@ class ReachingFranka(gym.Env):
             raise ValueError("Invalid control space:", self.control_space)
 
         # init real franka
-        print("Connecting to robot at {}...".format(robot_ip))
+        print(f"Connecting to robot at {robot_ip}...")
         self.robot = frankx.Robot(robot_ip)
         self.robot.set_default_behavior()
         self.robot.recover_from_errors()

@@ -1,11 +1,13 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
 
 import flax.linen as nn
 import jax.numpy as jnp
-
-# import the skrl components to build the RL system
-from skrl import logger
 from skrl.agents.jax.ppo import PPO, PPO_CFG
 from skrl.envs.loaders.jax import load_playground_env
 from skrl.envs.wrappers.jax import wrap_env
@@ -16,6 +18,8 @@ from skrl.resources.schedulers.jax import KLAdaptiveLR
 from skrl.trainers.jax import SequentialTrainer
 from skrl.utils import set_seed
 
+# import the skrl components to build the RL system
+from skrl import logger
 
 # parse arguments (some arguments are already defined by the loader)
 parser = argparse.ArgumentParser()

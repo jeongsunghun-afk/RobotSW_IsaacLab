@@ -1,7 +1,7 @@
 # Parkour Phase 0 — Patch Draft (골격 패치 초안)
 
-> **작성일**: 2026-05-07  
-> **목적**: 신규 6종 지형 추가 사전 골격 패치 초안. **실제 코드 변경 금지.**  
+> **작성일**: 2026-05-07
+> **목적**: 신규 6종 지형 추가 사전 골격 패치 초안. **실제 코드 변경 금지.**
 > **원칙**: "즉시 적용(Patch A·C)"과 "Phase 1B 이후 적용(Patch B)"을 분리.
 
 ---
@@ -126,7 +126,7 @@ Patch B는 mesh 함수 없이 단독 머지 불가 (import error). PR-0은 로�
 
 ## §6. 검증 방법
 
-**Patch A + C 적용 후**: `train.py --task Go2-Parkour-Direct-v0 --num_envs 256 --max_iterations 5 --headless`  
+**Patch A + C 적용 후**: `train.py --task Go2-Parkour-Direct-v0 --num_envs 256 --max_iterations 5 --headless`
 확인: assertion error 없음 / import 오류 없음 / 5 iteration 정상 완주.
 
 **Patch B 적용 후 (Phase 1B)**: `--max_iterations 50`. `print(self._col_to_class[:20])`으로 LUT 8-class 확인, episode_sums 로그에서 신규 terrain goal 생성 확인.

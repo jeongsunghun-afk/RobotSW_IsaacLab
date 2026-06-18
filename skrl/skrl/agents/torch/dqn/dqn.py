@@ -1,12 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import gymnasium
-from packaging import version
-
 import torch
 import torch.nn.functional as F
+from packaging import version
 
 from skrl import config, logger
 from skrl.agents.torch import Agent
@@ -64,7 +68,7 @@ class DQN(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.torch.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.q_network is not None:
                 self.q_network.broadcast_parameters()
 
@@ -273,7 +277,6 @@ class DQN(Agent):
 
         # gradient steps
         for gradient_step in range(self.cfg.gradient_steps):
-
             # sample a batch from memory
             (
                 sampled_observations,

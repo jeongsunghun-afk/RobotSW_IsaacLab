@@ -1,18 +1,22 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any, Literal
 
 import gymnasium
-from gymnasium import spaces
-
 import numpy as np
 import warp as wp
+from gymnasium import spaces
 
 from skrl import config
 from skrl.utils.framework.warp import concatenate
 
 
-def convert_gym_space(space: "gym.Space" | None, *, squeeze_batch_dimension: bool = False) -> gymnasium.Space | None:
+def convert_gym_space(space: gym.Space | None, *, squeeze_batch_dimension: bool = False) -> gymnasium.Space | None:
     """Converts a gym space to a gymnasium space.
 
     :param space: Gym space to convert to.
@@ -136,7 +140,7 @@ def untensorize_space(space: spaces.Space | None, x: Any, *, squeeze_batch_dimen
             return array.reshape((-1, *space.shape))
         raise ValueError(f"Unsupported type ({type(x)}) for the given space ({space})")
     # - Discrete
-    elif isinstance(space, spaces.Discrete):
+    if isinstance(space, spaces.Discrete):
         if isinstance(x, wp.array):
             array = np.array(x.numpy(), dtype=space.dtype)
             if squeeze_batch_dimension and array.shape[0] == 1:
@@ -144,7 +148,7 @@ def untensorize_space(space: spaces.Space | None, x: Any, *, squeeze_batch_dimen
             return array.reshape((-1, 1))
         raise ValueError(f"Unsupported type ({type(x)}) for the given space ({space})")
     # - MultiDiscrete
-    elif isinstance(space, spaces.MultiDiscrete):
+    if isinstance(space, spaces.MultiDiscrete):
         if isinstance(x, wp.array):
             array = np.array(x.numpy(), dtype=space.dtype)
             if squeeze_batch_dimension and array.shape[0] == 1:
@@ -153,7 +157,7 @@ def untensorize_space(space: spaces.Space | None, x: Any, *, squeeze_batch_dimen
         raise ValueError(f"Unsupported type ({type(x)}) for the given space ({space})")
     # composite spaces
     # - Tuple
-    elif isinstance(space, spaces.Tuple):
+    if isinstance(space, spaces.Tuple):
         return tuple(
             [untensorize_space(s, _x, squeeze_batch_dimension=squeeze_batch_dimension) for s, _x in zip(space, x)]
         )

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -14,15 +14,17 @@ from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg, GaussianNoiseCfg
+from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 ##
 # Pre-defined configs
 ##
 # from isaaclab_assets.robots.rga import MOTION_JIG_CFG  # isort: skip
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
+
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
 from isaaclab_assets.robots.rga import RGA_GO2_CFG
+
 
 @configclass
 class EventCfg:
@@ -63,11 +65,11 @@ class EventCfg:
         func=mdp.randomize_actuator_gains,
         mode="reset",
         params={
-          "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-          "stiffness_distribution_params": (0.75, 1.5),
-          "damping_distribution_params": (0.3, 3.0),
-          "operation": "scale",
-          "distribution": "log_uniform",
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.75, 1.5),
+            "damping_distribution_params": (0.3, 3.0),
+            "operation": "scale",
+            "distribution": "log_uniform",
         },
     )
 
@@ -100,7 +102,7 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         num_prio_obs += 1
     if clock_inputs:
         num_prio_obs += 4
-    
+
     num_heights = 0
 
     num_priv = 3 if priv_explicit else 0
@@ -112,8 +114,8 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
 
     state_space = 0
 
-    penalized_body_names = ['base', '.*thigh', '.*calf', '.*hip']
-    
+    penalized_body_names = ["base", ".*thigh", ".*calf", ".*hip"]
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=dt,
@@ -152,10 +154,9 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.005, track_air_time=True
     )
 
-
-    gait_force_sigma = 100.
-    gait_vel_sigma = 10.
-    tracking_sigma = 0.25 # 0.25, 0.125 사용함
+    gait_force_sigma = 100.0
+    gait_vel_sigma = 10.0
+    tracking_sigma = 0.25  # 0.25, 0.125 사용함
     base_height_target = 0.34
     sigma_rew_neg = 0.02
     # reward scales
@@ -168,11 +169,11 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     joint_accel_reward_scale = -2.5e-7
     action_rate_reward_scale = -0.005
     undesired_contact_reward_scale = -10.0
-    jump_reward_scale = 10.
-    raibert_heuristic_reward_scale = -10.
-    feet_clearance_cmd_linear_reward_scale = -1.0    # 목표 발 높이 추종 (swing phase)
-    feet_clearance_bezier_reward_scale = 0.0         # 3차 베지에 추종 (ablation: 3차 실험 시 -5.0으로 활성화)
-    feet_clearance_bezier_5th_reward_scale = -0.0     # 비활성화 (ablation: 5차 실험 시 -5.0으로 활성화)
+    jump_reward_scale = 10.0
+    raibert_heuristic_reward_scale = -10.0
+    feet_clearance_cmd_linear_reward_scale = -1.0  # 목표 발 높이 추종 (swing phase)
+    feet_clearance_bezier_reward_scale = 0.0  # 3차 베지에 추종 (ablation: 3차 실험 시 -5.0으로 활성화)
+    feet_clearance_bezier_5th_reward_scale = -0.0  # 비활성화 (ablation: 5차 실험 시 -5.0으로 활성화)
     orientation_control_reward_scale = -5
     tracking_contacts_shaped_force_reward_scale = 1.0
     tracking_contacts_shaped_vel_reward_scale = 1.0
@@ -180,22 +181,20 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
     action_smoothness1_reward_scale = -0.1
     action_smoothness2_reward_scale = -0.1
     foot_landing_vel_reward_scale = -3.0
-    foot_landing_vel_xy_reward_scale = -2.0          # 착지 순간 수평 속도 패널티 (발 구르기 방지)
-    landing_impact_reward_scale = 0.0    # Force 노이즈 기반 → 비활성화 (foot_landing_vel로 대체)
+    foot_landing_vel_xy_reward_scale = -2.0  # 착지 순간 수평 속도 패널티 (발 구르기 방지)
+    landing_impact_reward_scale = 0.0  # Force 노이즈 기반 → 비활성화 (foot_landing_vel로 대체)
     feet_vel_5th_late_reward_scale = -0.0  # 5차 베지에 Z velocity target 추종 (swing 후반 s>0.7), 비교용
-
-
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="add"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="add"),
     )
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="add"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="add"),
     )
 
     # Command Definition
@@ -215,9 +214,9 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         "gait_duration_cmd_range": [0.5, 0.5],
         "footswing_height_range": [0.05, 0.35],
         "body_pitch_range": [-0.4, 0.4],
-        "body_roll_range": [-0., 0.],
+        "body_roll_range": [-0.0, 0.0],
         "stance_width_range": [0.10, 0.45],
-        "stance_length_range": [0.35, 0.45]
+        "stance_length_range": [0.35, 0.45],
     }
 
     command_cfg = {
@@ -232,9 +231,9 @@ class Go2FlatEnvCfg(DirectRLEnvCfg):
         "gait_duration_cmd_range": [0.3, 0.7],
         "footswing_height_range": [0.05, 0.35],
         "body_pitch_range": [-0.3, 0.3],
-        "body_roll_range": [-0., 0.],
+        "body_roll_range": [-0.0, 0.0],
         "stance_width_range": [0.1, 0.45],
-        "stance_length_range": [0.35, 0.45]
+        "stance_length_range": [0.35, 0.45],
     }
 
 
@@ -280,26 +279,26 @@ class Go2RoughEnvCfg(Go2FlatEnvCfg):
 class Go2NeckFlatEnvCfg(Go2FlatEnvCfg):
     # env
     whole_body_control: bool = False
-    
-    action_space = 19 # 12 (legs) + 7 (neck)
-    
+
+    action_space = 19  # 12 (legs) + 7 (neck)
+
     clock_inputs = True
     # observation
     # num_prio_obs = 3 (lin_vel) + 14 (projected_gravity + commands) + 19 (joint_pos) + 19 (joint_vel) + 19 (actions)
-    num_prio_obs = 3 + 14 + action_space * 3 # 74
+    num_prio_obs = 3 + 14 + action_space * 3  # 74
 
     if clock_inputs:
         num_prio_obs += 4
-    
+
     history_len = 20
 
-    observation_space = num_prio_obs + (num_prio_obs * history_len) # 74 + 74 * 20 = 1554
-    
+    observation_space = num_prio_obs + (num_prio_obs * history_len)  # 74 + 74 * 20 = 1554
+
     # robot
     robot = RGA_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    
+
     # update penalized body names to include neck if necessary
-    penalized_body_names = ['base', '.*thigh', '.*calf', '.*hip', '.*neck_p', '.*neck_r', '.*neck_y']
+    penalized_body_names = ["base", ".*thigh", ".*calf", ".*hip", ".*neck_p", ".*neck_r", ".*neck_y"]
     # neck action smoothness
     neck_alpha = 0.1
 

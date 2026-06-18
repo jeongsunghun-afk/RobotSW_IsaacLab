@@ -310,7 +310,7 @@ class RingBuffer:
         self.timestamps = np.zeros(capacity, dtype=np.float64)
         self.write_idx = 0
         self.size = 0
-    
+
     def push(self, step_data):
         """Append one step; overwrites oldest if full."""
         self.rewards[self.write_idx] = step_data["rewards"]
@@ -318,7 +318,7 @@ class RingBuffer:
         self.timestamps[self.write_idx] = step_data["t"]
         self.write_idx = (self.write_idx + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
-    
+
     def get_latest(self, env_id, lookback_steps=500):
         """Return the most recent `lookback_steps` for env_id."""
         if self.size == 0:

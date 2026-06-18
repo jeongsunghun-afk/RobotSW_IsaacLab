@@ -52,7 +52,6 @@ from isaaclab.utils.math import quat_apply_inverse
 from .parkour_imitation_env import Go2ParkourImitationEnv
 from .parkour_imitation_env_cfg import ParkourImitationEnvCfg
 
-
 # Per-frame AMP obs dim for terrain-invariant variant.
 # dof_pos(12) + dof_vel(12) + root_lin_vel_b_xy(2) + root_ang_vel_b(3) + foot_pos_local_xy(8) = 37
 _TERRAIN_STYLE_AMP_DIM = 37
@@ -130,14 +129,14 @@ class ParkourImitationTerrainStyleEnv(Go2ParkourImitationEnv):
 
         Ring-buffer: oldest at index 0, newest at index -1 (same as parent).
         """
-        root_pos_w = self._robot.data.root_pos_w          # [N, 3]
-        root_quat_w = self._robot.data.root_quat_w        # [N, 4]  wxyz
+        root_pos_w = self._robot.data.root_pos_w  # [N, 3]
+        root_quat_w = self._robot.data.root_quat_w  # [N, 4]  wxyz
         root_lin_vel_b = self._robot.data.root_lin_vel_b  # [N, 3]
         root_ang_vel_b = self._robot.data.root_ang_vel_b  # [N, 3]
 
         # Foot positions in base-local frame: [N, 4, 3] → [FL,FR,RL,RR]×xyz
         foot_pos_w = self._robot.data.body_pos_w[:, self._amp_foot_body_ids, :]  # [N, 4, 3]
-        rel_pos = foot_pos_w - root_pos_w.unsqueeze(1)                           # [N, 4, 3]
+        rel_pos = foot_pos_w - root_pos_w.unsqueeze(1)  # [N, 4, 3]
         N, K = rel_pos.shape[:2]
         local_foot_pos = quat_apply_inverse(
             root_quat_w.unsqueeze(1).expand(-1, K, -1).reshape(-1, 4),
@@ -150,11 +149,11 @@ class ParkourImitationTerrainStyleEnv(Go2ParkourImitationEnv):
         # Build 37-dim terrain-invariant AMP frame
         current_frame = torch.cat(
             [
-                self._robot.data.joint_pos,          # 12  rad
-                self._robot.data.joint_vel,          # 12  rad/s
-                root_lin_vel_b[:, :2],               #  2  m/s  (x, y only — z removed)
-                root_ang_vel_b,                      #  3  rad/s
-                foot_pos_local_xy,                   #  8  m    (xy only — z removed)
+                self._robot.data.joint_pos,  # 12  rad
+                self._robot.data.joint_vel,  # 12  rad/s
+                root_lin_vel_b[:, :2],  #  2  m/s  (x, y only — z removed)
+                root_ang_vel_b,  #  3  rad/s
+                foot_pos_local_xy,  #  8  m    (xy only — z removed)
             ],
             dim=-1,
         )  # [N, 37]
@@ -196,6 +195,7 @@ class ParkourImitationTerrainStyleEnv(Go2ParkourImitationEnv):
         Shape: (amp_history_length * 37,) = (10 * 37,) = (370,).
         """
         import gymnasium as gym
+
         dim = self.cfg.amp_history_length * _TERRAIN_STYLE_AMP_DIM  # 10 * 37 = 370
         return gym.spaces.Box(low=-np.inf, high=np.inf, shape=(dim,), dtype=np.float32)
 
@@ -246,15 +246,15 @@ class ParkourImitationTerrainStyleEnv(Go2ParkourImitationEnv):
         # Build 37-dim terrain-invariant frame (same layout as live _update_amp_obs_buf)
         frame = torch.cat(
             [
-                dp,                     # 12  rad
-                dv,                     # 12  rad/s
-                lv[:, :2],             #  2  m/s  (x, y only — z removed)
-                av,                     #  3  rad/s
-                foot_pos_local_xy,      #  8  m    (xy only — z removed)
+                dp,  # 12  rad
+                dv,  # 12  rad/s
+                lv[:, :2],  #  2  m/s  (x, y only — z removed)
+                av,  #  3  rad/s
+                foot_pos_local_xy,  #  8  m    (xy only — z removed)
             ],
             dim=-1,
         )  # [N*H, 37]
 
         # Reshape to [N, H, 37] then flatten to [N, H*37]
         base_buf = frame.view(num_samples, H, _TERRAIN_STYLE_AMP_DIM)  # [N, H, 37]
-        return base_buf.flatten(start_dim=1)                            # [N, 370]
+        return base_buf.flatten(start_dim=1)  # [N, 370]

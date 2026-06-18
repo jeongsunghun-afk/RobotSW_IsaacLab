@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 import atexit
@@ -5,6 +10,7 @@ import contextlib
 import dataclasses
 import sys
 from abc import ABC
+
 import tqdm
 
 from skrl import config, logger
@@ -198,7 +204,6 @@ class Trainer(ABC):
         states = self.env.state()
 
         for timestep in tqdm.tqdm(range(self.cfg.timesteps), disable=self.cfg.disable_progressbar, file=sys.stdout):
-
             # pre-interaction
             self.agents.pre_interaction(timestep=timestep, timesteps=self.cfg.timesteps)
 
@@ -285,7 +290,6 @@ class Trainer(ABC):
         states = self.env.state()
 
         for timestep in tqdm.tqdm(range(self.cfg.timesteps), disable=self.cfg.disable_progressbar, file=sys.stdout):
-
             # pre-interaction
             self.agents.pre_interaction(timestep=timestep, timesteps=self.cfg.timesteps)
 

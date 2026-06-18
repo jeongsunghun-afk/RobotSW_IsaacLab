@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -29,12 +34,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
-
-import numpy as np
 
 # motion_lib.py의 Go2 FK / 변환 유틸리티 재사용
 import pickle  # noqa: E402
+import sys
+
+import numpy as np
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _GO2_IMITATION_DIR = os.path.dirname(_SCRIPT_DIR)
@@ -53,18 +58,24 @@ from motion_lib import (  # noqa: E402
 # ──────────────────────────────────────────────────────────────────────────
 
 DOF_NAMES = [
-    "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
-    "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
-    "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
-    "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+    "FL_hip_joint",
+    "FL_thigh_joint",
+    "FL_calf_joint",
+    "FR_hip_joint",
+    "FR_thigh_joint",
+    "FR_calf_joint",
+    "RL_hip_joint",
+    "RL_thigh_joint",
+    "RL_calf_joint",
+    "RR_hip_joint",
+    "RR_thigh_joint",
+    "RR_calf_joint",
 ]
 
 BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot", "base"]
 
 _DEFAULT_PKL_DIR = os.path.join(_SCRIPT_DIR, "go2")
-_DEFAULT_OUT_DIR = os.path.join(
-    _DIRECT_DIR, "go2_skrl_amp", "motions", "npz_dataset"
-)
+_DEFAULT_OUT_DIR = os.path.join(_DIRECT_DIR, "go2_skrl_amp", "motions", "npz_dataset")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -82,9 +93,9 @@ def _load_pkl_data(pkl_path: str):
     frames = np.array(data["frames"], dtype=np.float32)  # (N, 18)
     assert frames.shape[1] == 18, f"프레임 크기 불일치: {frames.shape[1]} != 18 ({pkl_path})"
 
-    root_pos = frames[:, 0:3]    # (N, 3)
+    root_pos = frames[:, 0:3]  # (N, 3)
     root_euler = frames[:, 3:6]  # (N, 3) roll/pitch/yaw
-    dof_pos = frames[:, 6:18]    # (N, 12)
+    dof_pos = frames[:, 6:18]  # (N, 12)
 
     root_quat = _euler_to_quat_wxyz(root_euler)
     lin_vel_world = _finite_diff(root_pos, dt)
@@ -171,9 +182,7 @@ def main():
     )
     args = parser.parse_args()
 
-    pkl_files = sorted(
-        f for f in os.listdir(args.pkl_dir) if f.endswith(".pkl")
-    )
+    pkl_files = sorted(f for f in os.listdir(args.pkl_dir) if f.endswith(".pkl"))
     if not pkl_files:
         print(f"[ERROR] PKL 파일 없음: {args.pkl_dir}")
         sys.exit(1)
@@ -193,17 +202,12 @@ def main():
         total_frames += N
         fps = int(d["fps"])
         dur = (N - 1) / fps
-        print(
-            f"  {fname} → {os.path.basename(out_path)}"
-            f"  frames={N}, fps={fps}, dur={dur:.2f}s"
-        )
+        print(f"  {fname} → {os.path.basename(out_path)}  frames={N}, fps={fps}, dur={dur:.2f}s")
 
     print(f"\n완료: 총 {total_frames}프레임 → {args.out_dir}")
 
     # NPZ 키 구조 검증 (첫 번째 파일)
-    first_out = os.path.join(
-        args.out_dir, os.path.splitext(pkl_files[0])[0] + ".npz"
-    )
+    first_out = os.path.join(args.out_dir, os.path.splitext(pkl_files[0])[0] + ".npz")
     d = np.load(first_out)
     print("\n[구조 검증 — 첫 번째 NPZ]")
     for k, v in d.items():

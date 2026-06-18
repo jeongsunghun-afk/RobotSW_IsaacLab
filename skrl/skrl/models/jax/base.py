@@ -1,14 +1,18 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-from typing import Any, Callable
-
 from abc import ABC, abstractmethod
-import gymnasium
+from collections.abc import Callable
+from typing import Any
 
 import flax
+import gymnasium
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from skrl import config, logger
 from skrl.utils.spaces.jax import compute_space_size, flatten_tensorized_space, sample_space

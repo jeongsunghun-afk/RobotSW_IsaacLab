@@ -1,10 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import copy
 from typing import Any
 
-import copy
 import gymnasium
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -247,7 +251,7 @@ class TRPO_RNN(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.torch.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
             if self.value is not None:
@@ -567,9 +571,7 @@ class TRPO_RNN(Agent):
             sampled_advantages,
         ) = self.memory.sample_all(
             names=self._tensors_names_policy, mini_batches=1, sequence_length=self._rnn_sequence_length
-        )[
-            0
-        ]
+        )[0]
         sampled_rnn_batches = self.memory.sample_all(
             names=self._rnn_tensors_names, mini_batches=1, sequence_length=self._rnn_sequence_length
         )[0]
@@ -692,7 +694,6 @@ class TRPO_RNN(Agent):
 
         # learning epochs
         for epoch in range(self.cfg.learning_epochs):
-
             # mini-batches loop
             for i, (
                 sampled_observations,
@@ -701,7 +702,6 @@ class TRPO_RNN(Agent):
                 sampled_truncated,
                 sampled_returns,
             ) in enumerate(sampled_batches):
-
                 if self._rnn:
                     if self.policy is self.value:
                         rnn_value = {

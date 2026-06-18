@@ -1,15 +1,15 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-import contextlib
-import copy
 import dataclasses
-import sys
-import tqdm
 
 from skrl.agents.warp import Agent
 from skrl.envs.wrappers.warp import Wrapper
 from skrl.trainers.warp import Trainer, TrainerCfg
-from skrl.utils import ScopedTimer
 
 
 @dataclasses.dataclass(kw_only=True)

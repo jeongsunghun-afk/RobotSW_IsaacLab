@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """R_Skeleton 모션 파일 로더.
 
 DeepMimic JSON 형식의 txt 파일을 파싱하여 Isaac Lab skrl AMP 학습에 사용할 수 있는
@@ -17,7 +22,6 @@ DeepMimic JSON 형식의 txt 파일을 파싱하여 Isaac Lab skrl AMP 학습에
 import glob
 import json
 import os
-from typing import Optional
 
 import numpy as np
 import torch
@@ -40,9 +44,9 @@ class SkeletonMotionLoader:
     ROOT_ROT_START = 3
     ROOT_ROT_END = 7
     JOINT_POS_START = 7
-    JOINT_POS_END = 45   # 38개
+    JOINT_POS_END = 45  # 38개
     TOE_POS_START = 45
-    TOE_POS_END = 57     # 4 × 3
+    TOE_POS_END = 57  # 4 × 3
     LIN_VEL_START = 57
     LIN_VEL_END = 60
     ANG_VEL_START = 60
@@ -50,7 +54,7 @@ class SkeletonMotionLoader:
     JOINT_VEL_START = 63
     JOINT_VEL_END = 101  # 38개
     TOE_VEL_START = 101
-    TOE_VEL_END = 113    # 4 × 3
+    TOE_VEL_END = 113  # 4 × 3
 
     NUM_JOINTS = 38
     NUM_TOES = 4
@@ -136,8 +140,8 @@ class SkeletonMotionLoader:
         all_root_rot_wxyz: list[np.ndarray] = []
         all_lin_vel: list[np.ndarray] = []
         all_ang_vel: list[np.ndarray] = []
-        all_toe_pos: list[np.ndarray] = []    # (N, 4, 3)
-        all_toe_vel: list[np.ndarray] = []    # (N, 4, 3)
+        all_toe_pos: list[np.ndarray] = []  # (N, 4, 3)
+        all_toe_vel: list[np.ndarray] = []  # (N, 4, 3)
 
         total_dt = None
 
@@ -157,19 +161,17 @@ class SkeletonMotionLoader:
                 )
 
             # --- 슬라이싱 (113개 포맷) ---
-            root_pos = frames[:, self.ROOT_POS_START : self.ROOT_POS_END]   # (N,3)
+            root_pos = frames[:, self.ROOT_POS_START : self.ROOT_POS_END]  # (N,3)
             root_rot_xyzw = frames[:, self.ROOT_ROT_START : self.ROOT_ROT_END]  # (N,4) xyzw
-            joint_pos = frames[:, self.JOINT_POS_START : self.JOINT_POS_END]   # (N,38)
-            toe_pos_flat = frames[:, self.TOE_POS_START : self.TOE_POS_END]     # (N,12)
-            lin_vel = frames[:, self.LIN_VEL_START : self.LIN_VEL_END]         # (N,3)
-            ang_vel = frames[:, self.ANG_VEL_START : self.ANG_VEL_END]         # (N,3)
-            joint_vel = frames[:, self.JOINT_VEL_START : self.JOINT_VEL_END]   # (N,38)
-            toe_vel_flat = frames[:, self.TOE_VEL_START : self.TOE_VEL_END]    # (N,12)
+            joint_pos = frames[:, self.JOINT_POS_START : self.JOINT_POS_END]  # (N,38)
+            toe_pos_flat = frames[:, self.TOE_POS_START : self.TOE_POS_END]  # (N,12)
+            lin_vel = frames[:, self.LIN_VEL_START : self.LIN_VEL_END]  # (N,3)
+            ang_vel = frames[:, self.ANG_VEL_START : self.ANG_VEL_END]  # (N,3)
+            joint_vel = frames[:, self.JOINT_VEL_START : self.JOINT_VEL_END]  # (N,38)
+            toe_vel_flat = frames[:, self.TOE_VEL_START : self.TOE_VEL_END]  # (N,12)
 
             # xyzw → wxyz (Isaac Lab 쿼터니언 순서)
-            root_rot_wxyz = np.concatenate(
-                [root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1
-            )  # (N,4)
+            root_rot_wxyz = np.concatenate([root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1)  # (N,4)
 
             # 발끝 (N,12) → (N,4,3)
             # rskeleton_retarget_motion.py의 SIM_TOE_JOINT_IDS = [20, 37, 13, 30]
@@ -208,8 +210,8 @@ class SkeletonMotionLoader:
         root_rot_all = np.concatenate(all_root_rot_wxyz, axis=0)
         lin_vel_all = np.concatenate(all_lin_vel, axis=0)
         ang_vel_all = np.concatenate(all_ang_vel, axis=0)
-        toe_pos_all = np.concatenate(all_toe_pos, axis=0)   # (N,4,3)
-        toe_vel_all = np.concatenate(all_toe_vel, axis=0)   # (N,4,3)
+        toe_pos_all = np.concatenate(all_toe_pos, axis=0)  # (N,4,3)
+        toe_vel_all = np.concatenate(all_toe_vel, axis=0)  # (N,4,3)
 
         # 텐서 변환 (dof_positions 등 humanoid_amp MotionLoader 와 동일한 attribute)
         self.dof_positions = torch.tensor(joint_pos_all, dtype=torch.float32, device=device)
@@ -235,9 +237,7 @@ class SkeletonMotionLoader:
         root_lin = lin_vel_t.unsqueeze(1)
         root_ang = ang_vel_t.unsqueeze(1)
         self.body_linear_velocities = torch.cat([toe_vel_t, root_lin], dim=1)  # (N,5,3)
-        self.body_angular_velocities = torch.cat(
-            [torch.zeros_like(toe_vel_t), root_ang], dim=1
-        )  # (N,5,3)
+        self.body_angular_velocities = torch.cat([torch.zeros_like(toe_vel_t), root_ang], dim=1)  # (N,5,3)
 
         self._dof_names = self.DOF_NAMES
         self._body_names = self.BODY_NAMES
@@ -246,10 +246,7 @@ class SkeletonMotionLoader:
         self.num_frames = self.dof_positions.shape[0]
         self.duration = self.dt * (self.num_frames - 1)
 
-        print(
-            f"SkeletonMotionLoader: 총 {self.num_frames} 프레임 "
-            f"({self.duration:.2f}s, dt={self.dt:.4f}s)"
-        )
+        print(f"SkeletonMotionLoader: 총 {self.num_frames} 프레임 ({self.duration:.2f}s, dt={self.dt:.4f}s)")
 
     # ------------------------------------------------------------------
     # Properties
@@ -283,10 +280,10 @@ class SkeletonMotionLoader:
         self,
         a: torch.Tensor,
         *,
-        b: Optional[torch.Tensor] = None,
-        blend: Optional[torch.Tensor] = None,
-        start: Optional[np.ndarray] = None,
-        end: Optional[np.ndarray] = None,
+        b: torch.Tensor | None = None,
+        blend: torch.Tensor | None = None,
+        start: np.ndarray | None = None,
+        end: np.ndarray | None = None,
     ) -> torch.Tensor:
         if start is not None and end is not None:
             return self._interpolate(a=a[start], b=a[end], blend=blend)
@@ -300,10 +297,10 @@ class SkeletonMotionLoader:
         self,
         q0: torch.Tensor,
         *,
-        q1: Optional[torch.Tensor] = None,
-        blend: Optional[torch.Tensor] = None,
-        start: Optional[np.ndarray] = None,
-        end: Optional[np.ndarray] = None,
+        q1: torch.Tensor | None = None,
+        blend: torch.Tensor | None = None,
+        start: np.ndarray | None = None,
+        end: np.ndarray | None = None,
     ) -> torch.Tensor:
         if start is not None and end is not None:
             return self._slerp(q0=q0[start], q1=q0[end], blend=blend)
@@ -341,22 +338,18 @@ class SkeletonMotionLoader:
     # 공개 API (humanoid_amp MotionLoader 와 동일)
     # ------------------------------------------------------------------
 
-    def sample_times(self, num_samples: int, duration: Optional[float] = None) -> np.ndarray:
+    def sample_times(self, num_samples: int, duration: float | None = None) -> np.ndarray:
         """랜덤 시간 샘플링."""
         duration = self.duration if duration is None else duration
-        assert duration <= self.duration, (
-            f"요청 duration({duration}) > 모션 duration({self.duration})"
-        )
+        assert duration <= self.duration, f"요청 duration({duration}) > 모션 duration({self.duration})"
         return duration * np.random.uniform(low=0.0, high=1.0, size=num_samples)
 
     def sample(
         self,
         num_samples: int,
-        times: Optional[np.ndarray] = None,
-        duration: Optional[float] = None,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-    ]:
+        times: np.ndarray | None = None,
+        duration: float | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """모션 데이터 샘플링.
 
         Returns:
@@ -377,36 +370,36 @@ class SkeletonMotionLoader:
 
     def get_dof_index(self, dof_names: list[str]) -> list[int]:
         """DOF 이름으로 인덱스를 반환합니다.
-        
-        R_Skeleton 로봇의 실제 조인트 이름(예: FL_joint_1_shoulder_y)을 
+
+        R_Skeleton 로봇의 실제 조인트 이름(예: FL_joint_1_shoulder_y)을
         txt 파일의 38개 조인트 인덱스로 자동 매핑합니다.
         txt 파일에 존재하는 4개의 발가락(toe) 인덱스(13, 20, 30, 37)는 제외됩니다.
         """
         indexes = []
         for name in dof_names:
-            if name.startswith('N_joint'):
+            if name.startswith("N_joint"):
                 # N_joint1 ~ N_joint7 -> 0 ~ 6
-                j = int(name.split('_')[1].replace('joint', '')) - 1
+                j = int(name.split("_")[1].replace("joint", "")) - 1
                 idx = 0 + j
-            elif name.startswith('FL_joint'):
+            elif name.startswith("FL_joint"):
                 # FL_joint1 ~ FL_joint6 -> 7 ~ 12
-                j = int(name.split('_')[1].replace('joint', '')) - 1
+                j = int(name.split("_")[1].replace("joint", "")) - 1
                 idx = 7 + j
-            elif name.startswith('FR_joint'):
+            elif name.startswith("FR_joint"):
                 # FR_joint1 ~ FR_joint6 -> 14 ~ 19
-                j = int(name.split('_')[1].replace('joint', '')) - 1
+                j = int(name.split("_")[1].replace("joint", "")) - 1
                 idx = 14 + j
-            elif name.startswith('W_joint'):
+            elif name.startswith("W_joint"):
                 # W_joint1 ~ W_joint3 -> 21 ~ 23
-                j = int(name.split('_')[1].replace('joint', '')) - 1
+                j = int(name.split("_")[1].replace("joint", "")) - 1
                 idx = 21 + j
-            elif name.startswith('HL_joint') or name.startswith('RL_joint'):
+            elif name.startswith("HL_joint") or name.startswith("RL_joint"):
                 # HL_joint1 ~ HL_joint6 -> 24 ~ 29
-                j = int(name.split('_')[1].replace('joint', '')) - 1
+                j = int(name.split("_")[1].replace("joint", "")) - 1
                 idx = 24 + j
-            elif name.startswith('HR_joint') or name.startswith('RR_joint'):
+            elif name.startswith("HR_joint") or name.startswith("RR_joint"):
                 # HR_joint1 ~ HR_joint6 -> 31 ~ 36
-                j = int(name.split('_')[1].replace('joint', '')) - 1
+                j = int(name.split("_")[1].replace("joint", "")) - 1
                 idx = 31 + j
             else:
                 idx = 0
@@ -414,15 +407,13 @@ class SkeletonMotionLoader:
         # [7, 14, 0, 21, 8, 15, 1, 22, 9, 16, 2, 23, 10, 17, 3, 24, 31, 11, 18, 4, 25, 32, 12, 19, 5, 26, 33, 6, 27, 34, 28, 35, 29, 36]
         # ['FL_joint1_shoulder_y', 'FR_joint1_shoulder_y', 'N_joint1_neck_y', 'W_joint1_waist_p', 'FL_joint2_shoulder_r', 'FR_joint2_shoulder_r', 'N_joint2_neck_p', 'W_joint2_waist_y', 'FL_joint3_shoulder_p', 'FR_joint3_shoulder_p', 'N_joint3_neck_y', 'W_joint3_waist_r', 'FL_joint4_elbow_p', 'FR_joint4_elbow_p', 'N_joint
         # 4_neck_r', 'HL_joint1_thigh_y', 'HR_joint1_thigh_y', 'FL_joint5_wrist_p', 'FR_joint5_wrist_p', 'N_joint5_neck_y', 'HL_joint2_thigh_r', 'HR_joint2_thigh_r', 'FL_joint6_wrist_r', 'FR_joint6_wrist_r', 'N_joint6_neck_p', 'HL_joint3_thigh_p', 'HR_joint3_thigh_p', 'N_joint7_neck_y', 'HL_joint4_knee_p', 'HR_joint4_kne
-        # e_p', 'HL_joint5_ankle_p', 'HR_joint5_ankle_p', 'HL_joint6_ankle_r', 'HR_joint6_ankle_r'] 
+        # e_p', 'HL_joint5_ankle_p', 'HR_joint5_ankle_p', 'HL_joint6_ankle_r', 'HR_joint6_ankle_r']
         return indexes
 
     def get_body_index(self, body_names: list[str]) -> list[int]:
         """Body 이름으로 인덱스를 반환합니다."""
         indexes = []
         for name in body_names:
-            assert name in self._body_names, (
-                f"Body 이름 '{name}'이 존재하지 않습니다: {self._body_names}"
-            )
+            assert name in self._body_names, f"Body 이름 '{name}'이 존재하지 않습니다: {self._body_names}"
             indexes.append(self._body_names.index(name))
         return indexes

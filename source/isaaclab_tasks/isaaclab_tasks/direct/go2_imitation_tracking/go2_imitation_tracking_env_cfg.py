@@ -71,20 +71,20 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     reset_strategy: str = "random"  # "random" | "random_start"
 
     # ── 속도추종 command 범위 ────────────────────────────────────
-    lin_vel_x_min: float = -1.0  # vx 최소 (m/s)
-    lin_vel_x_max: float = 3.0   # vx 최대 (m/s)
-    lin_vel_y_min: float = 0.0   # vy 항상 0
-    lin_vel_y_max: float = 0.0   # vy 항상 0
-    yaw_vel_min: float = -1.5    # yaw rate 최소 (rad/s)
-    yaw_vel_max: float = 1.5     # yaw rate 최대 (rad/s)
+    lin_vel_x_min: float = 0.0  # vx 최소 (m/s)
+    lin_vel_x_max: float = 4.0  # vx 최대 (m/s)
+    lin_vel_y_min: float = 0.0  # vy 항상 0
+    lin_vel_y_max: float = 0.0  # vy 항상 0
+    yaw_vel_min: float = -1.5  # yaw rate 최소 (rad/s)
+    yaw_vel_max: float = 1.5  # yaw rate 최대 (rad/s)
     tar_change_time_min: float = 4.0  # 목표 명령 변경 최소 주기 (s)
     tar_change_time_max: float = 7.0  # 목표 명령 변경 최대 주기 (s)
 
     # ── 보상 가중치 ─────────────────────────────────────────────
     # Task reward = lin_vel_reward_w * lin_vel_reward + yaw_vel_reward_w * yaw_vel_reward
-    lin_vel_reward_w: float = 0.7   # 선속도 추종 가중치
-    yaw_vel_reward_w: float = 0.3   # yaw 속도 추종 가중치
-    vel_err_scale: float = 0.5      # lin_vel reward 지수 스케일
+    lin_vel_reward_w: float = 0.7  # 선속도 추종 가중치
+    yaw_vel_reward_w: float = 0.3  # yaw 속도 추종 가중치
+    vel_err_scale: float = 0.5  # lin_vel reward 지수 스케일
     yaw_vel_err_scale: float = 0.5  # yaw_vel reward 지수 스케일
 
     # ── 조기 종료 ───────────────────────────────────────────────

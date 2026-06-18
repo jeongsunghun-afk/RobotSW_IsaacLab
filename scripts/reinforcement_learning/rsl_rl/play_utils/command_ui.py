@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 command_ui.py
 =============
@@ -46,9 +51,7 @@ class CommandControlUI:
 
         # 초기값 설정
         if initial_values is None:
-            self.initial_values = [
-                round((lo + hi) / 2.0, 4) for lo, hi in ranges
-            ]
+            self.initial_values = [round((lo + hi) / 2.0, 4) for lo, hi in ranges]
         else:
             self.initial_values = list(initial_values)
 

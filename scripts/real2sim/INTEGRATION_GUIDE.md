@@ -99,16 +99,16 @@ python scripts/real2sim/controller.py
 
 1. **Slider 조작** (Controller GUI)
    - 슬라이더 이동 → setpoint 송신 (ZMQ PUSH)
-   
+
 2. **시뮬레이션 업데이트** (sim_runner)
    - Setpoint 수신 (ZMQ PULL)
    - Slew rate 적용
    - 물리 시뮬레이션 (50Hz)
-   
+
 3. **State 피드백** (sim_runner)
    - State 발행 (ZMQ PUB)
    - pos/vel/torque + timestamp
-   
+
 4. **GUI 업데이트** (Controller)
    - State 수신 (ZMQ SUB)
    - 링 버퍼에 저장
@@ -129,15 +129,15 @@ bench = BenchmarkSession(session_name="sim_runner")
 
 while simulation_app.is_running():
     ts_recv = time.perf_counter()
-    
+
     # ... setpoint 수신, action dispatch
-    
+
     ts_dispatch = time.perf_counter()
-    
+
     # ... state 발행
-    
+
     ts_send = time.perf_counter()
-    
+
     metrics = FrameMetrics(
         timestamp=time.time(),
         frame_id=frame_count,
@@ -146,7 +146,7 @@ while simulation_app.is_running():
         state_send_time=ts_send,
     )
     bench.record_frame(metrics)
-    
+
     if frame_count % 250 == 0:  # 5초마다
         print(bench.print_summary())
 
@@ -164,9 +164,9 @@ bench = BenchmarkSession(session_name="controller")
 
 def _on_state(self, state):
     ts_recv = time.perf_counter()
-    
+
     # ... state 처리
-    
+
     metrics = FrameMetrics(
         timestamp=time.time(),
         frame_id=frame_count,
@@ -341,4 +341,3 @@ python -c "import sys; print(sys.version)"
 ---
 
 **지원:** gb.lee@rgarobot.com
-

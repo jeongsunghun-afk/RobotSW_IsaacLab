@@ -582,9 +582,7 @@ class Go2ImitationEnv(DirectRLEnv):
         motion_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """레퍼런스 모션 AMP 관측값 수집. (상대 궤적 피처 + R4 root_rot_tan_norm 포함)"""
-        amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(
-            num_samples, current_times, motion_ids
-        )
+        amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(num_samples, current_times, motion_ids)
         curr_root_quat = quat_hist[:, 0, :]  # [N, 4]
         n_hist = self.cfg.num_amp_observations
 
@@ -703,7 +701,7 @@ def _apply_root_rot_tan_norm(
     norm_ref = torch.zeros(num_envs * n_hist, 3, dtype=quat_buf.dtype, device=quat_buf.device)
     norm_ref[:, 2] = 1.0  # [0, 0, 1]
 
-    tan = quat_apply(rel_quat, tan_ref)   # [N*H, 3]
+    tan = quat_apply(rel_quat, tan_ref)  # [N*H, 3]
     norm = quat_apply(rel_quat, norm_ref)  # [N*H, 3]
 
     tan_norm = torch.cat([tan, norm], dim=-1)  # [N*H, 6]

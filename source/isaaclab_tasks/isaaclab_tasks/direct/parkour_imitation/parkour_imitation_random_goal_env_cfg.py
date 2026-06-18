@@ -75,7 +75,7 @@ class ParkourImitationRandomGoalEnvCfg(ParkourImitationEnvCfg):
     random_goal_graduated_ratio: float = 0.2
 
     # Distance range [m] from robot base for random goal sampling (min, max).
-    random_goal_dist_range: tuple[float, float] = (1.5, 3.0)
+    random_goal_dist_range: tuple[float, float] = (1.0, 3.0)
 
     # Number of successive goal-reaches to count as episode success.
     num_random_goals: int = 6

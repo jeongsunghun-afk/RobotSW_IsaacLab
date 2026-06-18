@@ -30,7 +30,9 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
-parser.add_argument("--wbc", action="store_true", default=False, help="Enable whole body control (19 DoF instead of 12 DoF).")
+parser.add_argument(
+    "--wbc", action="store_true", default=False, help="Enable whole body control (19 DoF instead of 12 DoF)."
+)
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--ray-proc-id", "-rid", type=int, default=None, help="Automatically configured by Ray integration, otherwise None."
@@ -85,6 +87,7 @@ import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP, OnPolicyRunnerAMPBase
+from rsl_rl.runners.on_policy_runner_parkour_amp import OnPolicyRunnerParkourAMP
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -121,7 +124,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
-    
+
     # Process WBC flag
     if hasattr(args_cli, "wbc") and hasattr(env_cfg, "whole_body_control"):
         env_cfg.whole_body_control = args_cli.wbc
@@ -174,6 +177,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
+    # Force-disable debug visualization during training (performance critical).
+    # All flags are guarded by hasattr() so this is a no-op for envs without them.
+    if hasattr(env_cfg, "debug_vis"):
+        env_cfg.debug_vis = False
+    if hasattr(env_cfg, "debug_vis_edge_mask"):
+        env_cfg.debug_vis_edge_mask = False
+    if hasattr(env_cfg.scene, "height_scanner") and hasattr(env_cfg.scene.height_scanner, "debug_vis"):
+        env_cfg.scene.height_scanner.debug_vis = False
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -211,6 +223,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = OnPolicyRunnerAMP(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "OnPolicyRunnerAMPBase":
         runner = OnPolicyRunnerAMPBase(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
+        runner = OnPolicyRunnerParkourAMP(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:

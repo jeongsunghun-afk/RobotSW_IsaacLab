@@ -1,9 +1,13 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import gymnasium
-
 import numpy as np
 import warp as wp
 from warp_nn.optimizers import Adam
@@ -347,7 +351,6 @@ class DDPG(Agent):
 
         # gradient steps
         for gradient_step in range(self.cfg.gradient_steps):
-
             # sample a batch from memory
             (
                 sampled_observations,

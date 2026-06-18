@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
@@ -10,48 +15,32 @@
 
 from __future__ import annotations
 
-import math
 import os
-from typing import TYPE_CHECKING
 
 import gymnasium as gym
-import numpy as np
 import pandas as pd
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, ArticulationCfg
-from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensor, ContactSensorCfg
-from isaaclab.markers import VisualizationMarkers, SPHERE_MARKER_CFG
-from isaaclab.sim import SimulationCfg
-from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.utils import configclass
+from isaaclab.assets import Articulation
+from isaaclab.envs import DirectRLEnv
+from isaaclab.markers import SPHERE_MARKER_CFG, VisualizationMarkers
+from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import (
     euler_xyz_from_quat,
     quat_apply,
-    quat_conjugate,
-    quat_from_euler_xyz,
-    quat_rotate_inverse,
     quat_apply_inverse,
-    subtract_frame_transforms,
 )
-from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
-
-import isaaclab.envs.mdp as mdp
 
 ##
 # Pre-defined configs
 ##
-from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 
 
 # ---------------------------------------------------------------------------
 # 헬퍼 함수
 # ---------------------------------------------------------------------------
+
 
 def torch_rand_float(lower: float, upper: float, shape: tuple, device: str) -> torch.Tensor:
     """균일 분포에서 랜덤 float 텐서를 샘플링합니다."""
@@ -60,10 +49,10 @@ def torch_rand_float(lower: float, upper: float, shape: tuple, device: str) -> t
 
 from .go2_interaction_cfg import Go2InteractionCfg
 
-
 # ---------------------------------------------------------------------------
 # 환경 클래스
 # ---------------------------------------------------------------------------
+
 
 class Go2InteractionEnv(DirectRLEnv):
     """Go2 상호작용 학습 환경.
@@ -100,16 +89,12 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         # Interaction 커맨드: 모션 ID (0~3)
         # ------------------------------------------------------------------ #
-        self._interaction_command = torch.zeros(
-            self.num_envs, 1, dtype=torch.long, device=self.device
-        )
+        self._interaction_command = torch.zeros(self.num_envs, 1, dtype=torch.long, device=self.device)
 
         # ------------------------------------------------------------------ #
         # 모션 프레임 카운터
         # ------------------------------------------------------------------ #
-        self._current_frames = torch.zeros(
-            self.num_envs, 1, dtype=torch.long, device=self.device
-        )
+        self._current_frames = torch.zeros(self.num_envs, 1, dtype=torch.long, device=self.device)
 
         # ------------------------------------------------------------------ #
         # 관측 히스토리 버퍼 [num_envs, history_len, num_prio_obs]
@@ -124,9 +109,7 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         # 토크 버퍼 (이전 토크 추적)
         # ------------------------------------------------------------------ #
-        self._prev_torques = torch.zeros(
-            self.num_envs, self.cfg.action_space, device=self.device
-        )
+        self._prev_torques = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
 
         # ------------------------------------------------------------------ #
         # 참조 위치 (target_world_positions)
@@ -163,9 +146,7 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(
-            self.cfg.penalized_body_names
-        )
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
 
         # ------------------------------------------------------------------ #
         # 로봇 바디 ID 조회 (world position용)
@@ -187,32 +168,34 @@ class Go2InteractionEnv(DirectRLEnv):
         right_names = ["FR_hip", "FR_thigh", "FR_calf", "RR_hip", "RR_thigh", "RR_calf"]
         self._left_joint_ids = torch.tensor(
             [i for i, n in enumerate(all_joint_names) if any(ln in n for ln in left_names)],
-            dtype=torch.long, device=self.device,
+            dtype=torch.long,
+            device=self.device,
         )
         self._right_joint_ids = torch.tensor(
             [i for i, n in enumerate(all_joint_names) if any(rn in n for rn in right_names)],
-            dtype=torch.long, device=self.device,
+            dtype=torch.long,
+            device=self.device,
         )
 
         self._hip_joint_ids = torch.tensor(
             [i for i, n in enumerate(all_joint_names) if "hip" in n],
-            dtype=torch.long, device=self.device,
+            dtype=torch.long,
+            device=self.device,
         )
 
         # 앞다리(FL, FR) 관절 인덱스 (stand 진동 억제용)
         front_names = ["FL_hip", "FL_thigh", "FL_calf", "FR_hip", "FR_thigh", "FR_calf"]
         self._front_joint_ids = torch.tensor(
             [i for i, n in enumerate(all_joint_names) if any(fn in n for fn in front_names)],
-            dtype=torch.long, device=self.device,
+            dtype=torch.long,
+            device=self.device,
         )
 
         # ------------------------------------------------------------------ #
         # 모션 데이터 로딩
         # ------------------------------------------------------------------ #
         self.all_preprocessed_data: dict = {}
-        self._motion_lengths_tensor = torch.zeros(
-            len(self.cfg.motion_files), dtype=torch.long, device=self.device
-        )
+        self._motion_lengths_tensor = torch.zeros(len(self.cfg.motion_files), dtype=torch.long, device=self.device)
         self._preload_all_motions()
 
     # ---------------------------------------------------------------------- #
@@ -246,16 +229,11 @@ class Go2InteractionEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         """액션을 클리핑하고 목표 관절 위치를 계산합니다."""
-        self._actions = actions.clone().clamp(
-            -self.cfg.clip_actions, self.cfg.clip_actions
-        )
+        self._actions = actions.clone().clamp(-self.cfg.clip_actions, self.cfg.clip_actions)
         actions = self._actions.clone()
         if self.cfg.hip_scale_reduction:
             actions[:, self._hip_joint_ids] *= 0.5
-        self._processed_actions = (
-            self.cfg.action_scale * actions
-            + self._robot.data.default_joint_pos
-        )
+        self._processed_actions = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
 
     def _apply_action(self):
         """목표 관절 위치를 로봇에 적용합니다."""
@@ -291,12 +269,13 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         prio_obs = torch.cat(
             [
-                self._robot.data.projected_gravity_b,                                           # 3
-                self._interaction_command.float(),                                               # 1
-                (self._robot.data.joint_pos - self._robot.data.default_joint_pos) * self.cfg.obs_scales["dof_pos"],  # 12
-                self._robot.data.joint_vel * self.cfg.obs_scales["dof_vel"],                   # 12
-                self._actions,                                                                   # 12
-                base_euler[:, :2],                                                              # 2 (roll, pitch)
+                self._robot.data.projected_gravity_b,  # 3
+                self._interaction_command.float(),  # 1
+                (self._robot.data.joint_pos - self._robot.data.default_joint_pos)
+                * self.cfg.obs_scales["dof_pos"],  # 12
+                self._robot.data.joint_vel * self.cfg.obs_scales["dof_vel"],  # 12
+                self._actions,  # 12
+                base_euler[:, :2],  # 2 (roll, pitch)
             ],
             dim=-1,
         )  # [N, 42]
@@ -314,11 +293,11 @@ class Go2InteractionEnv(DirectRLEnv):
         priv_latent = torch.cat(
             [
                 self._robot.data.root_link_pos_w[:, 2:3],  # base height (1)
-                base_lin_vel_b,                            # lin_vel (3)
-                base_ang_vel_b,                            # ang_vel (3)
-                self._robot.data.joint_pos[:, :6],         # dof_pos[:6] (6)
-                self._robot.data.joint_vel[:, :6],         # dof_vel[:6] (6)
-                current_torques[:, :3],                    # torques[:3] (3)
+                base_lin_vel_b,  # lin_vel (3)
+                base_ang_vel_b,  # ang_vel (3)
+                self._robot.data.joint_pos[:, :6],  # dof_pos[:6] (6)
+                self._robot.data.joint_vel[:, :6],  # dof_vel[:6] (6)
+                current_torques[:, :3],  # torques[:3] (3)
             ],
             dim=-1,
         )  # [N, 22]
@@ -337,9 +316,9 @@ class Go2InteractionEnv(DirectRLEnv):
         self._prev_torques = current_torques.clone()
 
         return {
-            "policy": prio_obs,             # [N, 42]
-            "priv": priv_latent,            # [N, 22]
-            "history": history_obs,         # [N, 10, 42]
+            "policy": prio_obs,  # [N, 42]
+            "priv": priv_latent,  # [N, 22]
+            "history": history_obs,  # [N, 10, 42]
         }
 
     # ---------------------------------------------------------------------- #
@@ -356,8 +335,8 @@ class Go2InteractionEnv(DirectRLEnv):
         base_euler = torch.stack([roll, pitch, yaw], dim=-1)
 
         # Hip / Foot world positions
-        hip_positions = self._robot.data.body_pos_w[:, self._hip_body_ids, :]   # [N, 4, 3]
-        foot_positions = self._robot.data.body_pos_w[:, self._foot_body_ids, :] # [N, 4, 3]
+        hip_positions = self._robot.data.body_pos_w[:, self._hip_body_ids, :]  # [N, 4, 3]
+        foot_positions = self._robot.data.body_pos_w[:, self._foot_body_ids, :]  # [N, 4, 3]
 
         # 현재 토크
         current_torques = self._robot.data.applied_torque  # [N, 12]
@@ -368,7 +347,7 @@ class Go2InteractionEnv(DirectRLEnv):
         self._calculate_reference_positions()
 
         cmd = self._interaction_command.squeeze(-1)  # [N]
-        mask_default = (cmd == 0)
+        mask_default = cmd == 0
 
         # ------------------------------------------------------------------ #
         # 1. Hip/Foot 위치 추적 보상 (기준 좌표계 선택)
@@ -376,18 +355,18 @@ class Go2InteractionEnv(DirectRLEnv):
         if self.cfg.reward_frame == "base":
             # [Base Frame] 현재 로봇 부위를 body frame으로 변환하고 body-frame 타겟과 비교
             root_pos = self._robot.data.root_link_pos_w.unsqueeze(1)  # [N, 1, 3]
-            root_quat = self._robot.data.root_link_quat_w             # [N, 4]
-            root_quat_rep = root_quat.unsqueeze(1).repeat(1, 4, 1)    # [N, 4, 4]
+            root_quat = self._robot.data.root_link_quat_w  # [N, 4]
+            root_quat_rep = root_quat.unsqueeze(1).repeat(1, 4, 1)  # [N, 4, 4]
 
             # 현재 hip/foot를 로봇 body frame으로 변환
-            cur_hip_local  = quat_apply_inverse(root_quat_rep, hip_positions  - root_pos)  # [N, 4, 3]
+            cur_hip_local = quat_apply_inverse(root_quat_rep, hip_positions - root_pos)  # [N, 4, 3]
             cur_foot_local = quat_apply_inverse(root_quat_rep, foot_positions - root_pos)  # [N, 4, 3]
 
             # 타겟은 이미 body-frame 상대 오프셋이므로 그대로 사용
-            target_hip_local  = self._target_reference_positions["hip_local"]   # [N, 4, 3]
+            target_hip_local = self._target_reference_positions["hip_local"]  # [N, 4, 3]
             target_foot_local = self._target_reference_positions["foot_local"]  # [N, 4, 3]
 
-            hip_pos_error  = torch.norm(cur_hip_local  - target_hip_local,  dim=2)
+            hip_pos_error = torch.norm(cur_hip_local - target_hip_local, dim=2)
             foot_pos_error = torch.norm(cur_foot_local - target_foot_local, dim=2)
         else:
             # [World Frame] 기존 방식
@@ -435,21 +414,24 @@ class Go2InteractionEnv(DirectRLEnv):
         # 5. Feet contact 보상 (stand_up 시 앞발 들기)
         # ------------------------------------------------------------------ #
         net_forces_w = self._contact_sensor.data.net_forces_w  # [N, num_bodies, 3]
-        foot_contact_z = net_forces_w[:, self._feet_ids, 2]    # [N, 4]
+        foot_contact_z = net_forces_w[:, self._feet_ids, 2]  # [N, 4]
         in_contact = foot_contact_z > 1.0  # [N, 4]
 
         # stand_up(3)인 경우 앞발(FL=0, FR=1)은 떼야 함, 나머지는 붙어야 함
-        fl_target = torch.where(cmd == 3,
-                                torch.zeros_like(cmd, dtype=torch.bool),
-                                torch.ones_like(cmd, dtype=torch.bool))
+        fl_target = torch.where(
+            cmd == 3, torch.zeros_like(cmd, dtype=torch.bool), torch.ones_like(cmd, dtype=torch.bool)
+        )
         fr_target = fl_target.clone()
-        contact_mask = torch.stack([
-            fl_target,
-            fr_target,
-            torch.ones_like(fl_target, dtype=torch.bool),  # RL 항상 접촉
-            torch.ones_like(fl_target, dtype=torch.bool),  # RR 항상 접촉
-        ], dim=1)  # [N, 4]
-        
+        contact_mask = torch.stack(
+            [
+                fl_target,
+                fr_target,
+                torch.ones_like(fl_target, dtype=torch.bool),  # RL 항상 접촉
+                torch.ones_like(fl_target, dtype=torch.bool),  # RR 항상 접촉
+            ],
+            dim=1,
+        )  # [N, 4]
+
         # Smooth contact reward: 0.25 per correct foot
         correct_contacts = torch.where(contact_mask, in_contact, ~in_contact)
         rew_contact = torch.sum(correct_contacts.float(), dim=1) * 0.25
@@ -458,7 +440,7 @@ class Go2InteractionEnv(DirectRLEnv):
         # 6. Stand-up 특정 강한 페널티 (앞발 접촉 시)
         # ------------------------------------------------------------------ #
         rew_stand_penalty = torch.zeros(self.num_envs, device=self.device)
-        mask_stand = (cmd == 3)
+        mask_stand = cmd == 3
         # 앞발(0, 1) 중 하나라도 닿아있으면 강력한 음수 보상 부여
         front_contact = in_contact[:, 0] | in_contact[:, 1]
         rew_stand_penalty[mask_stand & front_contact] = -2.0  # 강한 페널티
@@ -470,32 +452,21 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         # 정규화 보상들
         # ------------------------------------------------------------------ #
-        rew_dof_acc = torch.sum(
-            torch.square(self._robot.data.joint_acc), dim=1
-        )
-        rew_action_rate = torch.sum(
-            torch.square(self._actions - self._previous_actions), dim=1
-        )
-        rew_delta_torques = torch.sum(
-            torch.square(current_torques - self._prev_torques), dim=1
-        )
+        rew_dof_acc = torch.sum(torch.square(self._robot.data.joint_acc), dim=1)
+        rew_action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
+        rew_delta_torques = torch.sum(torch.square(current_torques - self._prev_torques), dim=1)
         rew_torques = torch.sum(torch.square(current_torques), dim=1)
 
         # interaction_command == 0(기본 자세)일 때만 default 유사도 보상
         rew_similar_to_default = torch.zeros(self.num_envs, device=self.device)
         diff_abs = torch.sum(
-            torch.abs(
-                self._robot.data.joint_pos[mask_default]
-                - self._robot.data.default_joint_pos[mask_default]
-            ),
+            torch.abs(self._robot.data.joint_pos[mask_default] - self._robot.data.default_joint_pos[mask_default]),
             dim=1,
         )
         rew_similar_to_default[mask_default] = torch.exp(-diff_abs / self.cfg.reward_sigma)
 
         rew_lin_vel_z = torch.square(self._robot.data.root_lin_vel_b[:, 2])
-        rew_ang_vel_xy = torch.sum(
-            torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1
-        )
+        rew_ang_vel_xy = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
 
         # 좌/우 토크 밸런스
         if len(self._left_joint_ids) > 0 and len(self._right_joint_ids) > 0:
@@ -511,9 +482,7 @@ class Go2InteractionEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         rew_stand_front_vel = torch.zeros(self.num_envs, device=self.device)
         if mask_stand.any():
-            front_vel_sq = torch.sum(
-                torch.square(self._robot.data.joint_vel[:, self._front_joint_ids]), dim=1
-            )  # [N]
+            front_vel_sq = torch.sum(torch.square(self._robot.data.joint_vel[:, self._front_joint_ids]), dim=1)  # [N]
             rew_stand_front_vel[mask_stand] = front_vel_sq[mask_stand]
 
         # ------------------------------------------------------------------ #
@@ -527,31 +496,29 @@ class Go2InteractionEnv(DirectRLEnv):
             front_near = (foot_pos_error[:, 0] < 0.08) & (foot_pos_error[:, 1] < 0.08)
             active = mask_stand & front_near
             if active.any():
-                front_vel_mag = torch.norm(
-                    self._robot.data.joint_vel[:, self._front_joint_ids], dim=1
-                )  # [N]
+                front_vel_mag = torch.norm(self._robot.data.joint_vel[:, self._front_joint_ids], dim=1)  # [N]
                 rew_front_stillness[active] = torch.exp(-front_vel_mag[active] / 0.5)
 
         # ------------------------------------------------------------------ #
         # 보상 합산 (스케일 × step_dt 처리)
         # ------------------------------------------------------------------ #
         rewards = {
-            "hip_positions":    rew_hip             * self.cfg.hip_positions_reward_scale    * self.step_dt,
-            "foot_positions":   rew_foot            * self.cfg.foot_positions_reward_scale   * self.step_dt,
-            "base_height":      rew_height          * self.cfg.base_height_reward_scale      * self.step_dt,
-            "base_pitch":       rew_pitch           * self.cfg.base_pitch_reward_scale       * self.step_dt,
-            "feet_contact":     rew_contact         * self.cfg.feet_contact_reward_scale     * self.step_dt,
-            "stand_penalty":    rew_stand_penalty   * self.cfg.stand_penalty_reward_scale    * self.step_dt,
-            "dof_acc":          rew_dof_acc         * self.cfg.dof_acc_reward_scale          * self.step_dt,
-            "action_rate":      rew_action_rate     * self.cfg.action_rate_reward_scale      * self.step_dt,
-            "delta_torques":    rew_delta_torques   * self.cfg.delta_torques_reward_scale    * self.step_dt,
-            "torques":          rew_torques         * self.cfg.torques_reward_scale          * self.step_dt,
+            "hip_positions": rew_hip * self.cfg.hip_positions_reward_scale * self.step_dt,
+            "foot_positions": rew_foot * self.cfg.foot_positions_reward_scale * self.step_dt,
+            "base_height": rew_height * self.cfg.base_height_reward_scale * self.step_dt,
+            "base_pitch": rew_pitch * self.cfg.base_pitch_reward_scale * self.step_dt,
+            "feet_contact": rew_contact * self.cfg.feet_contact_reward_scale * self.step_dt,
+            "stand_penalty": rew_stand_penalty * self.cfg.stand_penalty_reward_scale * self.step_dt,
+            "dof_acc": rew_dof_acc * self.cfg.dof_acc_reward_scale * self.step_dt,
+            "action_rate": rew_action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
+            "delta_torques": rew_delta_torques * self.cfg.delta_torques_reward_scale * self.step_dt,
+            "torques": rew_torques * self.cfg.torques_reward_scale * self.step_dt,
             "similar_to_default": rew_similar_to_default * self.cfg.similar_to_default_reward_scale * self.step_dt,
-            "lin_vel_z":        rew_lin_vel_z       * self.cfg.lin_vel_z_reward_scale        * self.step_dt,
-            "ang_vel_xy":       rew_ang_vel_xy      * self.cfg.ang_vel_xy_reward_scale       * self.step_dt,
-            "torques_balance":  rew_torques_balance * self.cfg.torques_balance_reward_scale  * self.step_dt,
-            "stand_front_vel":  rew_stand_front_vel * self.cfg.stand_front_vel_reward_scale  * self.step_dt,
-            "front_stillness":  rew_front_stillness * self.cfg.front_stillness_reward_scale  * self.step_dt,
+            "lin_vel_z": rew_lin_vel_z * self.cfg.lin_vel_z_reward_scale * self.step_dt,
+            "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale * self.step_dt,
+            "torques_balance": rew_torques_balance * self.cfg.torques_balance_reward_scale * self.step_dt,
+            "stand_front_vel": rew_stand_front_vel * self.cfg.stand_front_vel_reward_scale * self.step_dt,
+            "front_stillness": rew_front_stillness * self.cfg.front_stillness_reward_scale * self.step_dt,
         }
         total_reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
@@ -571,10 +538,7 @@ class Go2InteractionEnv(DirectRLEnv):
         # Base 접촉 종료
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         base_contact = torch.any(
-            torch.max(
-                torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1
-            )[0]
-            > 1.0,
+            torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0,
             dim=1,
         )
 
@@ -600,9 +564,7 @@ class Go2InteractionEnv(DirectRLEnv):
 
         # 에피소드 길이 분산 (초기 스파이크 방지)
         if len(env_ids) == self.num_envs:
-            self.episode_length_buf[:] = torch.randint_like(
-                self.episode_length_buf, high=int(self.max_episode_length)
-            )
+            self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         # 액션 리셋
         self._actions[env_ids] = 0.0
@@ -634,9 +596,7 @@ class Go2InteractionEnv(DirectRLEnv):
             extras[f"Episode_Reward/{key}"] = episodic_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
         self.extras["log"] = extras
-        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(
-            self.reset_time_outs[env_ids]
-        ).item()
+        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"]["Episode_Termination/base_contact"] = torch.count_nonzero(
             self.reset_terminated[env_ids]
         ).item()
@@ -687,9 +647,7 @@ class Go2InteractionEnv(DirectRLEnv):
             for i in range(len(self.cfg.motion_files))
             if str(i) in self.all_preprocessed_data
         ]
-        self._motion_lengths_tensor = torch.tensor(
-            motion_lengths, dtype=torch.long, device=self.device
-        )
+        self._motion_lengths_tensor = torch.tensor(motion_lengths, dtype=torch.long, device=self.device)
         print(f"[Go2InteractionEnv] 모션 길이: {motion_lengths}")
 
     def _preprocess_motion_data(self, motion_data: pd.DataFrame) -> dict:
@@ -704,7 +662,7 @@ class Go2InteractionEnv(DirectRLEnv):
             row = frame0[frame0["joint_idx"] == foot_idx]
             if not row.empty:
                 hind_foot_x.append(float(row["base_rel_x"].values[0]) * self.cfg.size_prop + self.cfg.x_offset)
-        
+
         target_default_hind_x = self.cfg.target_default_hind_x
         if len(hind_foot_x) > 0:
             current_hind_x = sum(hind_foot_x) / len(hind_foot_x)
@@ -719,9 +677,9 @@ class Go2InteractionEnv(DirectRLEnv):
             # Base rotation & height
             base_row = frame_data[frame_data["joint_idx"] == 0]
             if not base_row.empty:
-                preprocessed[frame]["roll"]        = float(base_row["roll"].values[0])
-                preprocessed[frame]["pitch"]       = float(base_row["pitch"].values[0])
-                preprocessed[frame]["yaw"]         = float(base_row["yaw"].values[0])
+                preprocessed[frame]["roll"] = float(base_row["roll"].values[0])
+                preprocessed[frame]["pitch"] = float(base_row["pitch"].values[0])
+                preprocessed[frame]["yaw"] = float(base_row["yaw"].values[0])
                 preprocessed[frame]["base_height"] = float(base_row["base_frame_z"].values[0])
 
             # Hip positions
@@ -770,12 +728,12 @@ class Go2InteractionEnv(DirectRLEnv):
     def _get_target_reference_data(self) -> dict:
         """각 환경의 현재 프레임/모션 ID에 해당하는 참조 데이터를 반환합니다."""
         motion_ids = self._interaction_command.squeeze(-1).tolist()  # [N]
-        frames     = self._current_frames.squeeze(-1).tolist()       # [N]
+        frames = self._current_frames.squeeze(-1).tolist()  # [N]
 
         motion_data_list = []
         for mid, f in zip(motion_ids, frames):
             mid_str = str(int(mid))
-            f_int   = int(f)
+            f_int = int(f)
             if mid_str in self.all_preprocessed_data and f_int in self.all_preprocessed_data[mid_str]:
                 motion_data_list.append(self.all_preprocessed_data[mid_str][f_int])
             else:
@@ -789,72 +747,80 @@ class Go2InteractionEnv(DirectRLEnv):
         # Hip positions [N, 4, 3]
         hip_pos_local = torch.tensor(
             [[_safe_xyz(md, hi) for hi in self.cfg.ref_hip_indices] for md in motion_data_list],
-            device=self.device, dtype=torch.float,
+            device=self.device,
+            dtype=torch.float,
         )
 
         # Foot positions [N, 4, 3]
         foot_pos_local = torch.tensor(
             [[_safe_xyz(md, fi) for fi in self.cfg.ref_foot_indices] for md in motion_data_list],
-            device=self.device, dtype=torch.float,
+            device=self.device,
+            dtype=torch.float,
         )
 
         # root에 더해서 world 좌표로 변환
         root_pos = self._robot.data.root_link_pos_w.unsqueeze(1)  # [N, 1, 3]
-        hip_pos_world  = root_pos + hip_pos_local
+        hip_pos_world = root_pos + hip_pos_local
         foot_pos_world = root_pos + foot_pos_local
 
         # Base rotation [N, 3]
         base_rot = torch.tensor(
             [[md.get("roll", 0.0), -md.get("pitch", 0.0), md.get("yaw", 0.0)] for md in motion_data_list],
-            device=self.device, dtype=torch.float,
+            device=self.device,
+            dtype=torch.float,
         )
 
         # Base height [N]
         base_height = torch.tensor(
             [md.get("base_height", 0.34) for md in motion_data_list],
-            device=self.device, dtype=torch.float,
+            device=self.device,
+            dtype=torch.float,
         )
 
         return {
-            "hip_positions":  hip_pos_world,
+            "hip_positions": hip_pos_world,
             "foot_positions": foot_pos_world,
-            "hip_positions_local":  hip_pos_local,
+            "hip_positions_local": hip_pos_local,
             "foot_positions_local": foot_pos_local,
-            "base_rotation":  base_rot,
-            "base_height":    base_height,
+            "base_rotation": base_rot,
+            "base_height": base_height,
         }
 
     # Stand-up 자세 body-frame 타겟 (뒷발 지지, 앞발 들기)
     # 순서: FL, FR, RL, RR  /  x=전후, y=좌우, z=상하
     STAND_HIP_LOCAL = [
-        [ 0.18,  0.07,  0.03],   # FL hip: 앞-상
-        [ 0.18, -0.07,  0.03],   # FR hip: 앞-상
-        [-0.18,  0.07, -0.03],   # RL hip: 뒤-하
-        [-0.18, -0.07, -0.03],   # RR hip: 뒤-하
+        [0.18, 0.07, 0.03],  # FL hip: 앞-상
+        [0.18, -0.07, 0.03],  # FR hip: 앞-상
+        [-0.18, 0.07, -0.03],  # RL hip: 뒤-하
+        [-0.18, -0.07, -0.03],  # RR hip: 뒤-하
     ]
     STAND_FOOT_LOCAL = [
-        [ 0.15,  0.09,  0.28],   # FL foot: 들어올림
-        [ 0.15, -0.09,  0.28],   # FR foot: 들어올림
-        [-0.10,  0.09, -0.48],   # RL foot: 땅에 닿도록
-        [-0.10, -0.09, -0.48],   # RR foot: 땅에 닿도록
+        [0.15, 0.09, 0.28],  # FL foot: 들어올림
+        [0.15, -0.09, 0.28],  # FR foot: 들어올림
+        [-0.10, 0.09, -0.48],  # RL foot: 땅에 닿도록
+        [-0.10, -0.09, -0.48],  # RR foot: 땅에 닿도록
     ]
-    STAND_BASE_HEIGHT = 0.65     # 기립 시 base 높이 (m)
-    STAND_BASE_PITCH  = 1.1      # 기립 시 pitch (rad, ~63도)
+    STAND_BASE_HEIGHT = 0.65  # 기립 시 base 높이 (m)
+    STAND_BASE_PITCH = 1.1  # 기립 시 pitch (rad, ~63도)
 
     def _calculate_reference_positions(self):
         """참조 위치(월드 및 로컬)를 계산하고 내부 버퍼에 저장합니다."""
         ref = self._get_target_reference_data()
 
         # Stand 커맨드(cmd=3): CSV 모션 대신 하드코딩된 body-frame 기립 자세 타겟 사용
-        mask_stand = (self._interaction_command.squeeze(-1) == 3)
+        mask_stand = self._interaction_command.squeeze(-1) == 3
         if mask_stand.any():
             n_stand = int(mask_stand.sum().item())
-            stand_hip = torch.tensor(
-                self.STAND_HIP_LOCAL, device=self.device, dtype=torch.float
-            ).unsqueeze(0).expand(n_stand, -1, -1)  # [n_stand, 4, 3]
-            stand_foot = torch.tensor(
-                self.STAND_FOOT_LOCAL, device=self.device, dtype=torch.float
-            ).unsqueeze(0).expand(n_stand, -1, -1)  # [n_stand, 4, 3]
+            stand_hip = (
+                torch.tensor(self.STAND_HIP_LOCAL, device=self.device, dtype=torch.float)
+                .unsqueeze(0)
+                .expand(n_stand, -1, -1)
+            )  # [n_stand, 4, 3]
+            stand_foot = (
+                torch.tensor(self.STAND_FOOT_LOCAL, device=self.device, dtype=torch.float)
+                .unsqueeze(0)
+                .expand(n_stand, -1, -1)
+            )  # [n_stand, 4, 3]
 
             ref["hip_positions_local"][mask_stand] = stand_hip
             ref["foot_positions_local"][mask_stand] = stand_foot
@@ -863,16 +829,16 @@ class Go2InteractionEnv(DirectRLEnv):
 
             # world 좌표도 갱신 (root_pos 기준 단순 오프셋 – world 모드용)
             root_pos_stand = self._robot.data.root_link_pos_w[mask_stand].unsqueeze(1)
-            ref["hip_positions"][mask_stand]  = root_pos_stand + stand_hip
+            ref["hip_positions"][mask_stand] = root_pos_stand + stand_hip
             ref["foot_positions"][mask_stand] = root_pos_stand + stand_foot
 
         self._target_reference_positions = {
-            "hip":           ref["hip_positions"],
-            "foot":          ref["foot_positions"],
-            "hip_local":     ref["hip_positions_local"],
-            "foot_local":    ref["foot_positions_local"],
+            "hip": ref["hip_positions"],
+            "foot": ref["foot_positions"],
+            "hip_local": ref["hip_positions_local"],
+            "foot_local": ref["foot_positions_local"],
             "base_rotation": ref["base_rotation"],
-            "base_height":   ref["base_height"],
+            "base_height": ref["base_height"],
         }
 
         # ---- 디버그 시각화 (hip/foot 부위별 4색, base 흰색) ----
@@ -884,19 +850,19 @@ class Go2InteractionEnv(DirectRLEnv):
                 # base frame 타겟을 world space로 변환하여 시각화
                 # hip_local / foot_local 은 이미 로봇 body frame 상대 오프셋이므로
                 # 현재 로봇 회전을 적용한 뒤 world 위치를 더하면 됩니다
-                root_pos_w = self._robot.data.root_link_pos_w    # [N, 3]
-                root_quat = self._robot.data.root_link_quat_w    # [N, 4]
+                root_pos_w = self._robot.data.root_link_pos_w  # [N, 3]
+                root_quat = self._robot.data.root_link_quat_w  # [N, 4]
 
-                hip_local = ref["hip_positions_local"]           # [N, 4, 3]
-                foot_local = ref["foot_positions_local"]         # [N, 4, 3]
+                hip_local = ref["hip_positions_local"]  # [N, 4, 3]
+                foot_local = ref["foot_positions_local"]  # [N, 4, 3]
 
                 root_quat_rep = root_quat.unsqueeze(1).repeat(1, 4, 1)  # [N, 4, 4]
 
                 # body frame offset → world frame
-                vis_hip_world  = root_pos_w.unsqueeze(1) + quat_apply(root_quat_rep, hip_local)   # [N, 4, 3]
+                vis_hip_world = root_pos_w.unsqueeze(1) + quat_apply(root_quat_rep, hip_local)  # [N, 4, 3]
                 vis_foot_world = root_pos_w.unsqueeze(1) + quat_apply(root_quat_rep, foot_local)  # [N, 4, 3]
             else:
-                vis_hip_world = ref["hip_positions"]    # [N, 4, 3]
+                vis_hip_world = ref["hip_positions"]  # [N, 4, 3]
                 vis_foot_world = ref["foot_positions"]  # [N, 4, 3]
 
             for i in range(4):
@@ -918,9 +884,7 @@ class Go2InteractionEnv(DirectRLEnv):
         if len(self._motion_lengths_tensor) == 0:
             return
         # 각 env의 interaction_command에 해당하는 모션 길이로 mod
-        motion_len = self._motion_lengths_tensor[
-            self._interaction_command.squeeze(-1)
-        ].unsqueeze(-1)  # [N, 1]
+        motion_len = self._motion_lengths_tensor[self._interaction_command.squeeze(-1)].unsqueeze(-1)  # [N, 1]
         self._current_frames = (self._current_frames + 1) % motion_len
 
     # ---------------------------------------------------------------------- #
@@ -998,7 +962,7 @@ class Go2InteractionEnv(DirectRLEnv):
                 self._base_target_vis.set_visibility(False)
 
     def _debug_vis_callback(self, event):
-        """디버그 마커를 렌더 스텝마다 업데이트하기 위한 콜백. 
+        """디버그 마커를 렌더 스텝마다 업데이트하기 위한 콜백.
         실제 마커 위치는 _calculate_world_positions 내부에서 매 물리 스텝마다 갱신되므로 여기서는 추가 작업 불필요.
         """
         pass

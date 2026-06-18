@@ -1,23 +1,24 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
 from __future__ import annotations
 
+import json
+import socket
+
 import gymnasium as gym
 import torch
 
-from isaaclab.envs import DirectRLEnv
-from isaaclab.assets import Articulation
 import isaaclab.sim as sim_utils
-from isaaclab.sensors import ContactSensor, RayCaster, FrameTransformer
+from isaaclab.assets import Articulation
+from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import RED_ARROW_X_MARKER_CFG
-import socket
-import json
+from isaaclab.sensors import ContactSensor, FrameTransformer, RayCaster
 
-from .skeleton_env_cfg import SkeletonEnvCfg, SkeletonHistoryEnvCfg, SkeletonRoughEnvCfg, SkeletonHistoryFixedEnvCfg
+from .skeleton_env_cfg import SkeletonEnvCfg, SkeletonHistoryEnvCfg, SkeletonHistoryFixedEnvCfg, SkeletonRoughEnvCfg
 
 
 def torch_rand_float(lower, upper, shape, device):
@@ -283,7 +284,6 @@ class SkeletonEnv(DirectRLEnv):
         # base height
         base_height = torch.square(self._robot.data.root_link_pos_w[:, 2] - self._robot.data.default_root_state[:, 2])
 
-
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
             "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
@@ -312,10 +312,9 @@ class SkeletonEnv(DirectRLEnv):
 
         # Linear combination + Survival Bonus
 
-        
         # Scale down penalties severely for initial learning (can be tuned later)
-        penalty_scale = 0.1 
-        
+        penalty_scale = 0.1
+
         reward = self.rew_buf_pos + (self.rew_buf_neg * penalty_scale)
         self.curriculum_rew_buf += reward
         return reward
@@ -428,19 +427,21 @@ class SkeletonEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        died_base = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        died_base = torch.any(
+            torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1
+        )
         died_neck = torch.any(
             torch.max(torch.norm(net_contact_forces[:, :, self._neck_ids], dim=-1), dim=1)[0] > 1.0, dim=1
         )
         # Base roll/pitch termination (if projected gravity Z > -0.5, means angle > 60 degrees)
         died_ang = self._robot.data.projected_gravity_b[:, 2] > -0.5
-        
+
         died = died_base | died_neck | died_ang
-        
+
         # # Debugging death condition for env 0
         # if died[0] and not time_out[0]:
         #     print(f"[DEBUG] Env 0 Died. Base: {died_base[0].item()}, Neck: {died_neck[0].item()}, Ang: {died_ang[0].item()}")
-        
+
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):

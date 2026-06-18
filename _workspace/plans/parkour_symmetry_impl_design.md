@@ -123,7 +123,7 @@ obs_groups 매핑(`rsl_rl_ppo_cfg.py:48-55`): policy←[policy], critic←[polic
 - lateral offset이 0 (`pos=(0.375, 0.0, ...)` → y-offset 0)이므로 미러축이 깨끗(좌우 대칭 중심이 grid 중앙). x-offset 0.375는 forward 축이라 좌우 미러에 무관. **[추정→검증방법]**: scan 한 프레임을 `flip(dims=[1])` 후 좌우 평탄지형에서 동일해야 함 — smoke 학습 전 단위 assert 권장.
 
 ### B.4 joint/action 순서 (12 DOF) **[검증됨 부분 / 미검증-실행]**
-- `_robot.data.joint_names` 순서 = PhysX articulation DOF 순서. **GPU 포화로 실행 검증 실패**(섹션 D). 
+- `_robot.data.joint_names` 순서 = PhysX articulation DOF 순서. **GPU 포화로 실행 검증 실패**(섹션 D).
 - action 순서 = joint 순서와 동일 **[검증됨]**: `parkour_env.py:573` `self._processed_actions = action_scale*scaled + default_joint_pos` → `set_joint_position_target` (`:576`). action[j]가 joint[j]에 직접 매핑.
 - hip joint 인덱스는 **런타임 name-match로 동적 산정** **[검증됨]** (`parkour_env.py:311-316`: `[i for i,n in enumerate(joint_names) if "hip" in n]`). 즉 코드가 순서에 비의존적. → **aug 함수도 하드코딩 대신 `env.unwrapped._robot.data.joint_names`에서 swap 인덱스를 구성하면 순서 ambiguity를 완전히 회피**(권장).
 - feet 순서 **[검증됨, 런타임 assert로 보증]**: `parkour_env.py:1146` 주석 `[FL(0), FR(1), RL(2), RR(3)]`, `:207-210`이 매 실행 `_feet_ids[2:4]`가 RL/RR인지 assert. contact_filt(proprio 42:46)는 이 feet 순서.

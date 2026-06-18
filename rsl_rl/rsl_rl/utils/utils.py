@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
@@ -146,7 +151,8 @@ def unpad_trajectories(trajectories: torch.Tensor | TensorDict, masks: torch.Ten
     """Do the inverse operation of `split_and_pad_trajectories()`."""
     # Need to transpose before and after the masking to have proper reshaping
     return (
-        trajectories.transpose(1, 0)[masks.transpose(1, 0)]
+        trajectories
+        .transpose(1, 0)[masks.transpose(1, 0)]
         .view(-1, trajectories.shape[0], trajectories.shape[-1])
         .transpose(1, 0)
     )

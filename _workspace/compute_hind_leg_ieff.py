@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Compute per-joint effective inertia I_eff for hind_leg analytically from USD.
 
 Launches a minimal headless kit app ONLY to get `pxr` (USD libs). Does NOT build a

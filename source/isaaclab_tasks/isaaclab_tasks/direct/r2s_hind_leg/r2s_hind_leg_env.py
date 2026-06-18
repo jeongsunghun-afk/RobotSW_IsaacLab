@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -8,8 +13,9 @@ from __future__ import annotations
 
 import math
 
-import isaaclab.sim as sim_utils
 import torch
+
+import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
@@ -33,9 +39,7 @@ class R2SHindLegEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # 관절 인덱스 매핑 (USD 로드 순서 독립)
-        self._joint_ids, found_names = self.robot.find_joints(
-            JOINT_NAME_PATTERNS, preserve_order=True
-        )
+        self._joint_ids, found_names = self.robot.find_joints(JOINT_NAME_PATTERNS, preserve_order=True)
         assert len(self._joint_ids) == NUM_JOINTS, (
             f"관절 {NUM_JOINTS}개 필요, {len(self._joint_ids)}개 발견.\n"
             f"찾은 이름: {found_names}\n"
@@ -45,9 +49,7 @@ class R2SHindLegEnv(DirectRLEnv):
 
         # slew rate 한계 (rad per control step = 1/50 s)
         control_freq = 1.0 / (self.cfg.sim.dt * self.cfg.decimation)
-        self._max_step = torch.tensor(
-            [v / control_freq for v in V_MAX_RAD], device=self.device, dtype=torch.float32
-        )
+        self._max_step = torch.tensor([v / control_freq for v in V_MAX_RAD], device=self.device, dtype=torch.float32)
 
         # 새 버퍼 — _reset_idx에서 초기화 필수
         self._setpoint = torch.zeros(self.num_envs, NUM_JOINTS, device=self.device)

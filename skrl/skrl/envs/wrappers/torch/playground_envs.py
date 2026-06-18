@@ -1,22 +1,25 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import gymnasium
-import mujoco
-from packaging import version
-
 import jax
 import jax.dlpack as jax_dlpack
 import jax.numpy as jnp
+import mujoco
 import numpy as np
 import torch
 import torch.utils.dlpack as torch_dlpack
+from packaging import version
 
 from skrl import config, logger
 from skrl.envs.wrappers.torch.base import Wrapper
 from skrl.utils.spaces.torch import flatten_tensorized_space, tensorize_space, unflatten_tensorized_space
-
 
 # ML frameworks conversion utilities
 # jaxlib.xla_extension.XlaRuntimeError: INVALID_ARGUMENT: DLPack tensor is on GPU, but no GPU backend was provided.
@@ -148,7 +151,7 @@ class PlaygroundWrapper(Wrapper):
         """Render the environment."""
         if self.num_envs > 1:
             logger.warning("Rendering is not supported for parallel environments. Rendering will be skipped")
-            return
+            return None
 
         # render frame
         scene_option = mujoco.MjvOption()

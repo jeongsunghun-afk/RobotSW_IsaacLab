@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -77,9 +82,7 @@ class ZMQSimBridge:
 
     def send_state(self, state: dict) -> None:
         """관절 state를 JSON으로 발행."""
-        payload = json.dumps(
-            {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in state.items()}
-        )
+        payload = json.dumps({k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in state.items()})
         self._state_sock.send_string(payload, zmq.NOBLOCK)
 
     def close(self) -> None:

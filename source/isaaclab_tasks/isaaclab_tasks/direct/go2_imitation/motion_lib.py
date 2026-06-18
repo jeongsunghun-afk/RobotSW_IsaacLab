@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -33,17 +38,24 @@ import pickle
 import numpy as np
 import torch
 
-
 # ──────────────────────────────────────────────────────────────
 # Go2 FK / 변환 유틸리티 (Go2MotionLoader에서 검증된 코드)
 # ──────────────────────────────────────────────────────────────
 
 # 관절 이름 (Isaac Sim 순서 = MuJoCo go2.xml 순서)
 DOF_NAMES = [
-    "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
-    "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
-    "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
-    "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+    "FL_hip_joint",
+    "FL_thigh_joint",
+    "FL_calf_joint",
+    "FR_hip_joint",
+    "FR_thigh_joint",
+    "FR_calf_joint",
+    "RL_hip_joint",
+    "RL_thigh_joint",
+    "RL_calf_joint",
+    "RR_hip_joint",
+    "RR_thigh_joint",
+    "RR_calf_joint",
 ]
 
 # Go2 운동학 파라미터 (표준 Unitree Go2 URDF 기준, 오차 < 0.5 mm)
@@ -105,9 +117,9 @@ def _go2_fk_foot_pos(joint_pos: np.ndarray) -> np.ndarray:
         hip_base = _HIP_BASE[leg]
         thigh_ofs = np.array([0.0, _THIGH_OFS_Y[leg], 0.0], dtype=np.float32)
 
-        R_hip = _Rx(hip_a)    # (N, 3, 3)
-        R_th = _Ry(thigh_a)   # (N, 3, 3)
-        R_ca = _Ry(calf_a)    # (N, 3, 3)
+        R_hip = _Rx(hip_a)  # (N, 3, 3)
+        R_th = _Ry(thigh_a)  # (N, 3, 3)
+        R_ca = _Ry(calf_a)  # (N, 3, 3)
 
         # thigh pivot = hip_base + R_hip @ thigh_ofs
         thigh_pivot = hip_base + np.einsum("nij,j->ni", R_hip, thigh_ofs)
@@ -149,9 +161,21 @@ def _finite_diff(arr: np.ndarray, dt: float) -> np.ndarray:
 def _world_vel_to_body(vel_world: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
     """World frame 속도 → body frame 속도 (quaternion inverse 적용)."""
     w, x, y, z = quat_wxyz[:, 0], quat_wxyz[:, 1], quat_wxyz[:, 2], quat_wxyz[:, 3]
-    vx = (1 - 2*(y*y + z*z)) * vel_world[:, 0] + (2*(x*y + w*z)) * vel_world[:, 1] + (2*(x*z - w*y)) * vel_world[:, 2]
-    vy = (2*(x*y - w*z))     * vel_world[:, 0] + (1 - 2*(x*x + z*z)) * vel_world[:, 1] + (2*(y*z + w*x)) * vel_world[:, 2]
-    vz = (2*(x*z + w*y))     * vel_world[:, 0] + (2*(y*z - w*x)) * vel_world[:, 1] + (1 - 2*(x*x + y*y)) * vel_world[:, 2]
+    vx = (
+        (1 - 2 * (y * y + z * z)) * vel_world[:, 0]
+        + (2 * (x * y + w * z)) * vel_world[:, 1]
+        + (2 * (x * z - w * y)) * vel_world[:, 2]
+    )
+    vy = (
+        (2 * (x * y - w * z)) * vel_world[:, 0]
+        + (1 - 2 * (x * x + z * z)) * vel_world[:, 1]
+        + (2 * (y * z + w * x)) * vel_world[:, 2]
+    )
+    vz = (
+        (2 * (x * z + w * y)) * vel_world[:, 0]
+        + (2 * (y * z - w * x)) * vel_world[:, 1]
+        + (1 - 2 * (x * x + y * y)) * vel_world[:, 2]
+    )
     return np.stack([vx, vy, vz], axis=-1).astype(np.float32)
 
 
@@ -160,7 +184,7 @@ def _euler_rates_to_body_angvel(euler: np.ndarray, euler_rates: np.ndarray) -> n
     roll, pitch = euler[:, 0], euler[:, 1]
     dr, dp, dy = euler_rates[:, 0], euler_rates[:, 1], euler_rates[:, 2]
     wx = dr - np.sin(pitch) * dy
-    wy =  np.cos(roll) * dp + np.sin(roll) * np.cos(pitch) * dy
+    wy = np.cos(roll) * dp + np.sin(roll) * np.cos(pitch) * dy
     wz = -np.sin(roll) * dp + np.cos(roll) * np.cos(pitch) * dy
     return np.stack([wx, wy, wz], axis=-1).astype(np.float32)
 
@@ -187,6 +211,7 @@ def _slerp_torch(q0: torch.Tensor, q1: torch.Tensor, blend: torch.Tensor) -> tor
 # ──────────────────────────────────────────────────────────────
 # Go2MotionLib 클래스
 # ──────────────────────────────────────────────────────────────
+
 
 class Go2MotionLib:
     """Go2 PKL 모션 라이브러리.
@@ -251,7 +276,7 @@ class Go2MotionLib:
             all_foot_pos.append(fp)
             num_frames_list.append(n)
             fps_list.append(fps)
-            print(f"[Go2MotionLib] 로드: {os.path.basename(path)} — {n} 프레임 ({(n-1)/fps:.2f}s @ {fps:.0f}fps)")
+            print(f"[Go2MotionLib] 로드: {os.path.basename(path)} — {n} 프레임 ({(n - 1) / fps:.2f}s @ {fps:.0f}fps)")
 
         # ── 모션별 메타데이터 ───────────────────────────────────────
         num_frames_arr = np.array(num_frames_list, dtype=np.int64)
@@ -314,9 +339,7 @@ class Go2MotionLib:
         phase = torch.rand(motion_ids.shape, device=self._device)
         return phase * motion_len
 
-    def calc_motion_frame(
-        self, motion_ids: torch.Tensor, times: torch.Tensor
-    ) -> tuple[torch.Tensor, ...]:
+    def calc_motion_frame(self, motion_ids: torch.Tensor, times: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """지정 시간의 모션 프레임을 보간하여 반환합니다.
 
         Args:
@@ -333,7 +356,7 @@ class Go2MotionLib:
             foot_pos_local[N, 4, 3] 발 위치 (base-local frame, [FL, FR, RL, RR])
         """
         idx0, idx1, blend = self._calc_frame_blend(motion_ids, times)  # blend: [N]
-        b = blend.unsqueeze(-1)                 # [N, 1] for broadcasting
+        b = blend.unsqueeze(-1)  # [N, 1] for broadcasting
 
         root_pos = (1 - b) * self._frame_root_pos[idx0] + b * self._frame_root_pos[idx1]
         root_quat = _slerp_torch(self._frame_root_quat[idx0], self._frame_root_quat[idx1], blend)
@@ -366,10 +389,7 @@ class Go2MotionLib:
         """
         indexes = []
         for name in dof_names:
-            assert name in DOF_NAMES, (
-                f"DOF 이름 '{name}'이 motion data에 없습니다. "
-                f"사용 가능: {DOF_NAMES}"
-            )
+            assert name in DOF_NAMES, f"DOF 이름 '{name}'이 motion data에 없습니다. 사용 가능: {DOF_NAMES}"
             indexes.append(DOF_NAMES.index(name))
         return indexes
 
@@ -413,17 +433,17 @@ class Go2MotionLib:
         frames = np.array(data["frames"], dtype=np.float32)  # (N, 18)
         assert frames.shape[1] == 18, f"프레임 크기 불일치: {frames.shape[1]} != 18 ({path})"
 
-        root_pos = frames[:, 0:3]    # (N, 3)
+        root_pos = frames[:, 0:3]  # (N, 3)
         root_euler = frames[:, 3:6]  # (N, 3) roll/pitch/yaw
-        dof_pos = frames[:, 6:18]    # (N, 12)
+        dof_pos = frames[:, 6:18]  # (N, 12)
 
-        root_quat = _euler_to_quat_wxyz(root_euler)   # (N, 4) wxyz
-        lin_vel_world = _finite_diff(root_pos, dt)    # (N, 3) world frame
-        euler_rates = _finite_diff(root_euler, dt)    # (N, 3)
-        dof_vel = _finite_diff(dof_pos, dt)           # (N, 12)
+        root_quat = _euler_to_quat_wxyz(root_euler)  # (N, 4) wxyz
+        lin_vel_world = _finite_diff(root_pos, dt)  # (N, 3) world frame
+        euler_rates = _finite_diff(root_euler, dt)  # (N, 3)
+        dof_vel = _finite_diff(dof_pos, dt)  # (N, 12)
 
-        lin_vel = _world_vel_to_body(lin_vel_world, root_quat)         # body frame
-        ang_vel = _euler_rates_to_body_angvel(root_euler, euler_rates) # body frame
+        lin_vel = _world_vel_to_body(lin_vel_world, root_quat)  # body frame
+        ang_vel = _euler_rates_to_body_angvel(root_euler, euler_rates)  # body frame
 
         foot_pos = _go2_fk_foot_pos(dof_pos)  # (N, 4, 3) body-local
 

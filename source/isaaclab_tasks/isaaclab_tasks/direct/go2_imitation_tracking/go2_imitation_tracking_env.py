@@ -104,8 +104,8 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
 
         # ── Velocity tracking command state ─────────────────────
         self._lin_vel_cmd = torch.zeros(self.num_envs, 2, device=self.device)  # (vx, vy) — vy 항상 0
-        self._yaw_vel_cmd = torch.zeros(self.num_envs, device=self.device)     # yaw rate [rad/s]
-        self._tar_timer = torch.zeros(self.num_envs, device=self.device)       # [N] seconds to change
+        self._yaw_vel_cmd = torch.zeros(self.num_envs, device=self.device)  # yaw rate [rad/s]
+        self._tar_timer = torch.zeros(self.num_envs, device=self.device)  # [N] seconds to change
 
         # ── AMP 관측 버퍼 ─────────────────────────────────────────
         # amp_observation_space (cfg=49) = base(43) + root_rot_tan_norm(6)  [R4]
@@ -259,14 +259,14 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # ── Policy 관측 (48-dim) — body-frame 속도 명령을 그대로 삽입 ──
         policy_obs = torch.cat(
             [
-                root_lin_vel_b,                                               # 3
-                root_ang_vel_b,                                               # 3
-                self._robot.data.projected_gravity_b,                         # 3
-                self._lin_vel_cmd,                                            # 2 (vx, vy)
-                self._yaw_vel_cmd.unsqueeze(-1),                              # 1
+                root_lin_vel_b,  # 3
+                root_ang_vel_b,  # 3
+                self._robot.data.projected_gravity_b,  # 3
+                self._lin_vel_cmd,  # 2 (vx, vy)
+                self._yaw_vel_cmd.unsqueeze(-1),  # 1
                 self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # 12
-                self._robot.data.joint_vel,                                   # 12
-                self.actions,                                                  # 12
+                self._robot.data.joint_vel,  # 12
+                self.actions,  # 12
             ],
             dim=-1,
         )  # total = 48
@@ -275,7 +275,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         # ── (1) lin_vel tracking — body frame 직접 비교 ──────────
-        lin_vel_b = self._robot.data.root_lin_vel_b[:, :2]          # (vx, vy) actual
+        lin_vel_b = self._robot.data.root_lin_vel_b[:, :2]  # (vx, vy) actual
         lin_vel_err = torch.sum((self._lin_vel_cmd - lin_vel_b) ** 2, dim=-1)
         lin_vel_reward = torch.exp(-self.cfg.vel_err_scale * lin_vel_err)
 
@@ -486,8 +486,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
 
         # yaw rate: [yaw_vel_min, yaw_vel_max]
         self._yaw_vel_cmd[env_ids] = (
-            torch.rand(n, device=self.device) * (self.cfg.yaw_vel_max - self.cfg.yaw_vel_min)
-            + self.cfg.yaw_vel_min
+            torch.rand(n, device=self.device) * (self.cfg.yaw_vel_max - self.cfg.yaw_vel_min) + self.cfg.yaw_vel_min
         )
 
         # 다음 변경까지 남은 시간

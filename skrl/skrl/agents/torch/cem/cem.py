@@ -1,12 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import gymnasium
-from packaging import version
-
 import torch
 import torch.nn.functional as F
+from packaging import version
 
 from skrl import logger
 from skrl.agents.torch import Agent
@@ -285,7 +289,6 @@ class CEM(Agent):
             elite_actions = torch.cat([sampled_actions[limits[i][0] : limits[i][1]] for i in indexes[:, 0]], dim=0)
 
         with torch.autocast(device_type=self._device_type, enabled=self.cfg.mixed_precision):
-
             # compute scores for the elite observations/states
             _, outputs = self.policy.act({"observations": elite_observations, "states": elite_states}, role="policy")
             scores = outputs["net_output"]

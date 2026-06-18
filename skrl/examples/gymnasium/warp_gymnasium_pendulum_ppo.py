@@ -1,12 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
-import gymnasium as gym
 
+import gymnasium as gym
 import warp as wp
 import warp_nn.nn as nn
-
-# import the skrl components to build the RL system
-from skrl import logger
 from skrl.agents.warp.ppo import PPO, PPO_CFG
 from skrl.envs.wrappers.warp import wrap_env
 from skrl.memories.warp import RandomMemory
@@ -17,6 +19,8 @@ from skrl.trainers.warp import SequentialTrainer
 from skrl.utils import set_seed
 from skrl.utils.framework.warp import scalar_mul
 
+# import the skrl components to build the RL system
+from skrl import logger
 
 # parse arguments
 parser = argparse.ArgumentParser()

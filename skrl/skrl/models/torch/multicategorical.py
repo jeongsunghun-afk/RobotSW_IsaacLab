@@ -1,10 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any, Literal
 
 import torch
 from torch.distributions import Categorical
-
 
 # speed up distribution construction by disabling checking
 Categorical.set_default_validate_args(False)
@@ -38,7 +42,11 @@ class MultiCategoricalMixin:
         self._mc_reduction = (
             torch.mean
             if reduction == "mean"
-            else torch.sum if reduction == "sum" else torch.prod if reduction == "prod" else None
+            else torch.sum
+            if reduction == "sum"
+            else torch.prod
+            if reduction == "prod"
+            else None
         )
 
     def act(self, inputs: dict[str, Any], *, role: str = "") -> tuple[torch.Tensor, dict[str, Any]]:

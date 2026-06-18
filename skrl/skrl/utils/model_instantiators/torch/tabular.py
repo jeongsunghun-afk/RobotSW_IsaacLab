@@ -1,14 +1,20 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any, Literal
 
 import gymnasium
-
 import torch
 import torch.nn as nn  # noqa
 
-from skrl.models.torch import TabularMixin  # noqa
-from skrl.models.torch import Model
+from skrl.models.torch import (
+    Model,
+    TabularMixin,  # noqa
+)
 
 
 def tabular_model(

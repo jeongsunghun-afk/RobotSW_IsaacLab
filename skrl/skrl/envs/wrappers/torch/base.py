@@ -1,10 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import Any
 
-from abc import ABC, abstractmethod
 import gymnasium
-
 import torch
 
 from skrl import config
@@ -172,7 +176,9 @@ class MultiAgentEnvWrapper(ABC):
         pass
 
     @abstractmethod
-    def step(self, actions: dict[str, torch.Tensor]) -> tuple[
+    def step(
+        self, actions: dict[str, torch.Tensor]
+    ) -> tuple[
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],

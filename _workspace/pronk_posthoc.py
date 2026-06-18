@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Post-hoc validity checks on pronk_cost_result.npz (numpy only, no Isaac).
 
 Confirms: (1) tilt/low_height fire anywhere across ALL steps (real vs capture artifact),

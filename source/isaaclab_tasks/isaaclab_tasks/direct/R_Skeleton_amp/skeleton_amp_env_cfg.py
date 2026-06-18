@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -6,7 +11,6 @@
 
 from __future__ import annotations
 
-import glob
 import os
 
 from isaaclab.assets import ArticulationCfg
@@ -32,7 +36,7 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
 
     AMP 관측 벡터 구성 (amp_observation_space = 99):
         dof_pos(34) + dof_vel(34) + root_height(1) +
-        lin_vel(3) + ang_vel(3) + 
+        lin_vel(3) + ang_vel(3) +
         key_body_pos(12) + key_body_lin_vel(12)
     """
 
@@ -41,27 +45,27 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
     decimation = 4
 
     # 공간
-    observation_space = 108      
-    action_space = 34            # R_Skeleton DOF 수
+    observation_space = 108
+    action_space = 34  # R_Skeleton DOF 수
     state_space = 0
     num_amp_observations = 2
     amp_observation_space = 99
-    
+
     # History & Privileged
     history_observation = True
     history_len = 50
     priv_latent = True
-    num_priv_obs = 114           # lin_vel(3)+ang_vel(3)+projected_gravity(3)+commands(3)+joint_pos(34)+joint_vel(34)+actions(34)+mass(1) + material_props = 적절히 분배됨 (아래 obs_groups에서 114 예상)
+    num_priv_obs = 114  # lin_vel(3)+ang_vel(3)+projected_gravity(3)+commands(3)+joint_pos(34)+joint_vel(34)+actions(34)+mass(1) + material_props = 적절히 분배됨 (아래 obs_groups에서 114 예상)
 
     # 조기 종료
     early_termination = True
-    termination_height = 0.3     # base 높이가 이 값 이하이면 넘어짐으로 판정
+    termination_height = 0.3  # base 높이가 이 값 이하이면 넘어짐으로 판정
     action_scale = 0.25
 
     # 모션
     motion_file: str = MOTION_FILES_DIR
     reference_body = "base"
-    reset_strategy = "random"    # {"default", "random", "random-start"}
+    reset_strategy = "random"  # {"default", "random", "random-start"}
 
     # 시뮬레이션 (200 Hz physics, 50 Hz policy)
     # 시뮬레이션 (240 Hz physics, 60 Hz policy)
@@ -75,9 +79,7 @@ class SkeletonAmpEnvCfg(DirectRLEnvCfg):
     )
 
     # 씬
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=5.0, replicate_physics=True
-    )
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=5.0, replicate_physics=True)
 
     # 로봇
     robot: ArticulationCfg = R_SKELETON_CFG.replace(

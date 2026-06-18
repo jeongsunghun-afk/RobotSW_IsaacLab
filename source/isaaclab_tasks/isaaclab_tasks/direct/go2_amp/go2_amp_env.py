@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -25,8 +30,8 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_apply_inverse
 from isaaclab.utils.math import sample_uniform as torch_rand_float
 
-from .go2_motion_loader import Go2MotionLoader
 from .go2_amp_env_cfg import Go2AmpEnvCfg
+from .go2_motion_loader import Go2MotionLoader
 
 
 class Go2AmpEnv(DirectRLEnv):
@@ -64,9 +69,7 @@ class Go2AmpEnv(DirectRLEnv):
 
         # 로봇에서 body/joint 인덱스 구하기
         self.ref_body_index = self._robot.data.body_names.index(self.cfg.reference_body)
-        self.key_body_indexes = [
-            self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES
-        ]
+        self.key_body_indexes = [self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES]
 
         # X/Y linear velocity and yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
@@ -89,14 +92,12 @@ class Go2AmpEnv(DirectRLEnv):
 
         # Go2MotionLoader.BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot", "base"]
         # KEY_BODY_NAMES = [FL, FR, RL, RR] 와 완전히 대응됨
-        self.motion_ref_body_index = 4           # base = index 4
+        self.motion_ref_body_index = 4  # base = index 4
         self.motion_key_body_indexes = [0, 1, 2, 3]  # FL, FR, RL, RR
 
         # AMP 관측 버퍼
         self.amp_observation_size = self.cfg.num_amp_observations * self.cfg.amp_observation_space
-        self.amp_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.amp_observation_size,)
-        )
+        self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
         self.amp_observation_buffer = torch.zeros(
             (self.num_envs, self.cfg.num_amp_observations, self.cfg.amp_observation_space),
             dtype=torch.float32,
@@ -106,8 +107,11 @@ class Go2AmpEnv(DirectRLEnv):
         # History Buffer
         if self.cfg.history_observation:
             self.obs_history_buf = torch.zeros(
-                self.num_envs, self.cfg.history_len, self.cfg.observation_space,
-                device=self.device, dtype=torch.float,
+                self.num_envs,
+                self.cfg.history_len,
+                self.cfg.observation_space,
+                device=self.device,
+                dtype=torch.float,
             )
 
     # ------------------------------------------------------------------
@@ -157,9 +161,8 @@ class Go2AmpEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         # In-episode command 재샘플링 (curriculum delta 기반)
         if self.cfg.command_resample_interval > 0:
-            resample_mask = (
-                (self.episode_length_buf % self.cfg.command_resample_interval == 0)
-                & (self.episode_length_buf > 0)
+            resample_mask = (self.episode_length_buf % self.cfg.command_resample_interval == 0) & (
+                self.episode_length_buf > 0
             )
             resample_ids = resample_mask.nonzero(as_tuple=False).flatten()
             if len(resample_ids) > 0:
@@ -196,18 +199,16 @@ class Go2AmpEnv(DirectRLEnv):
             self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]
         self.amp_observation_buffer[:, 0] = obs.clone()
 
-        self.extras = {
-            "amp_obs": self.amp_observation_buffer.view(-1, self.amp_observation_size)
-        }
+        self.extras = {"amp_obs": self.amp_observation_buffer.view(-1, self.amp_observation_size)}
 
         # Policy 관측치
         policy_obs = torch.cat(
             [
-                self._robot.data.projected_gravity_b,                             # 3
-                self._commands,                                                    # 3
+                self._robot.data.projected_gravity_b,  # 3
+                self._commands,  # 3
                 self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # 12
-                self._robot.data.joint_vel,                                        # 12
-                self.actions,                                                      # 12
+                self._robot.data.joint_vel,  # 12
+                self.actions,  # 12
             ],
             dim=-1,
         )
@@ -227,12 +228,16 @@ class Go2AmpEnv(DirectRLEnv):
         if self.cfg.priv_latent:
             priv_obs = torch.cat(
                 [
-                    self._robot.data.root_lin_vel_b,                                                              # 3
-                    self._robot.data.root_ang_vel_b,                                                              # 3
+                    self._robot.data.root_lin_vel_b,  # 3
+                    self._robot.data.root_ang_vel_b,  # 3
                     # self._robot.root_physx_view.get_masses().reshape(self.num_envs, -1),
                     # self._robot.root_physx_view.get_material_properties().reshape(self.num_envs, -1),
-                    torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device).reshape(self.num_envs, -1),
-                    torch.tensor(self._robot.root_physx_view.get_material_properties(), device=self.device).reshape(self.num_envs, -1),
+                    torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device).reshape(
+                        self.num_envs, -1
+                    ),
+                    torch.tensor(self._robot.root_physx_view.get_material_properties(), device=self.device).reshape(
+                        self.num_envs, -1
+                    ),
                 ],
                 dim=-1,
             )
@@ -282,7 +287,9 @@ class Go2AmpEnv(DirectRLEnv):
                 if contact_forces is not None and contact_forces.numel() > 0:
                     body_names = self._robot.data.body_names
                     bad_contacts = self._get_body_contact(
-                        contact_forces, body_names, "base",
+                        contact_forces,
+                        body_names,
+                        "base",
                         threshold=self.cfg.contact_force_threshold,
                     )
                     died = died | bad_contacts
@@ -309,7 +316,7 @@ class Go2AmpEnv(DirectRLEnv):
 
                 body_diff = ref_key_pos - local_key_pos
                 max_dist_sq = torch.sum(body_diff * body_diff, dim=-1).max(dim=-1).values
-                pose_fail = (max_dist_sq > self.cfg.pose_termination_dist ** 2) & self._rsi_active
+                pose_fail = (max_dist_sq > self.cfg.pose_termination_dist**2) & self._rsi_active
                 died = died | pose_fail
 
             # MimicKit과 동일: 첫 스텝 직후부터만 termination 적용 (physics 정착 시간 확보)
@@ -341,9 +348,7 @@ class Go2AmpEnv(DirectRLEnv):
 
         # pose termination 추적용 모션 시간 초기화
         if rsi_times is not None:
-            self._episode_motion_times[env_ids] = torch.tensor(
-                rsi_times, dtype=torch.float32, device=self.device
-            )
+            self._episode_motion_times[env_ids] = torch.tensor(rsi_times, dtype=torch.float32, device=self.device)
             self._rsi_active[env_ids] = True
         else:
             self._episode_motion_times[env_ids] = 0.0
@@ -368,9 +373,7 @@ class Go2AmpEnv(DirectRLEnv):
     # 리셋 전략
     # ------------------------------------------------------------------
 
-    def _reset_strategy_default(
-        self, env_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _reset_strategy_default(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         root_state = self._robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] += self.scene.env_origins[env_ids]
         joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
@@ -394,9 +397,7 @@ class Go2AmpEnv(DirectRLEnv):
         ) = self._motion_loader.sample(num_samples=num_samples, times=times)
 
         root_state = self._robot.data.default_root_state[env_ids].clone()
-        root_state[:, 0:3] = (
-            body_positions[:, self.motion_ref_body_index] + self.scene.env_origins[env_ids]
-        )
+        root_state[:, 0:3] = body_positions[:, self.motion_ref_body_index] + self.scene.env_origins[env_ids]
         # root_state[:, 2] += 0.05  # 지면 충돌 방지
         root_rot = body_rotations[:, self.motion_ref_body_index]
         root_state[:, 3:7] = root_rot
@@ -412,9 +413,7 @@ class Go2AmpEnv(DirectRLEnv):
         joint_vel[:, :n_dofs] = dof_velocities[:, self.motion_dof_indexes[:n_dofs]]
 
         amp_observations = self.collect_reference_motions(num_samples, times)
-        self.amp_observation_buffer[env_ids] = amp_observations.view(
-            num_samples, self.cfg.num_amp_observations, -1
-        )
+        self.amp_observation_buffer[env_ids] = amp_observations.view(num_samples, self.cfg.num_amp_observations, -1)
 
         return root_state, joint_pos, joint_vel, times
 
@@ -422,16 +421,13 @@ class Go2AmpEnv(DirectRLEnv):
     # AMP 인터페이스
     # ------------------------------------------------------------------
 
-    def collect_reference_motions(
-        self, num_samples: int, current_times: np.ndarray | None = None
-    ) -> torch.Tensor:
+    def collect_reference_motions(self, num_samples: int, current_times: np.ndarray | None = None) -> torch.Tensor:
         """레퍼런스 모션 AMP 관측값 수집."""
         if current_times is None:
             current_times = self._motion_loader.sample_times(num_samples)
 
         times = (
-            np.expand_dims(current_times, axis=-1)
-            - self.step_dt * np.arange(0, self.cfg.num_amp_observations)
+            np.expand_dims(current_times, axis=-1) - self.step_dt * np.arange(0, self.cfg.num_amp_observations)
         ).flatten()
         times = np.maximum(times, 0.0)
 
@@ -468,21 +464,19 @@ class Go2AmpEnv(DirectRLEnv):
                         lower, upper = self.cfg.command_cfg[key]
                         if i == 0:
                             if not hasattr(self, "curriculum_lin_vel_x"):
-                                self.curriculum_lin_vel_x = torch.full(
-                                    (self.num_envs,), lower, device=self.device
-                                )
+                                self.curriculum_lin_vel_x = torch.full((self.num_envs,), lower, device=self.device)
                             curr = self.curriculum_lin_vel_x[env_ids]
                             use_curriculum = curr < upper
-                            low = torch.where(use_curriculum, curr - self.cfg.curriculum_step, torch.full_like(curr, lower))
+                            low = torch.where(
+                                use_curriculum, curr - self.cfg.curriculum_step, torch.full_like(curr, lower)
+                            )
                             high = torch.where(use_curriculum, curr, torch.full_like(curr, upper))
                             self._commands[env_ids, i] = torch.lerp(
                                 low, high, torch.rand(len(env_ids), device=self.device)
                             )
                         else:
                             if not hasattr(self, "curriculum_ang_vel"):
-                                self.curriculum_ang_vel = torch.full(
-                                    (self.num_envs,), lower, device=self.device
-                                )
+                                self.curriculum_ang_vel = torch.full((self.num_envs,), lower, device=self.device)
                             curr = self.curriculum_ang_vel[env_ids]
                             use_curriculum = curr < upper
                             direction = torch.randint(0, 2, (len(env_ids),), device=self.device) * 2 - 1
@@ -498,17 +492,20 @@ class Go2AmpEnv(DirectRLEnv):
             self._commands[env_ids, 0] = torch_rand_float(
                 self.cfg.command_cfg["lin_vel_x_range"][0],
                 self.cfg.command_cfg["lin_vel_x_range"][1],
-                (len(env_ids),), self.device,
+                (len(env_ids),),
+                self.device,
             )
             self._commands[env_ids, 1] = torch_rand_float(
                 self.cfg.command_cfg["lin_vel_y_range"][0],
                 self.cfg.command_cfg["lin_vel_y_range"][1],
-                (len(env_ids),), self.device,
+                (len(env_ids),),
+                self.device,
             )
             self._commands[env_ids, 2] = torch_rand_float(
                 self.cfg.command_cfg["ang_vel_range"][0],
                 self.cfg.command_cfg["ang_vel_range"][1],
-                (len(env_ids),), self.device,
+                (len(env_ids),),
+                self.device,
             )
 
     # ------------------------------------------------------------------
@@ -554,12 +551,12 @@ def compute_obs(
     """
     obs = torch.cat(
         (
-            dof_positions,               # 12
-            dof_velocities,              # 12
-            root_positions[:, 2:3],      # 1 (root 높이)
-            root_linear_velocities,      # 3
-            root_angular_velocities,     # 3
-            local_key_body_positions.view(local_key_body_positions.shape[0], -1),   # 4×3=12
+            dof_positions,  # 12
+            dof_velocities,  # 12
+            root_positions[:, 2:3],  # 1 (root 높이)
+            root_linear_velocities,  # 3
+            root_angular_velocities,  # 3
+            local_key_body_positions.view(local_key_body_positions.shape[0], -1),  # 4×3=12
         ),
         dim=-1,
     )

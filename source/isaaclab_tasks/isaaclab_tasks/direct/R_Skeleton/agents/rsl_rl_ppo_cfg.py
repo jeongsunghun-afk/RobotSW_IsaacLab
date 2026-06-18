@@ -1,8 +1,9 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 from isaaclab.utils import configclass
+
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
 
@@ -36,6 +37,7 @@ class SkeletonFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+
 @configclass
 class SkeletonHistoryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
@@ -45,11 +47,11 @@ class SkeletonHistoryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     clip_actions = 10.0
     class_name = "OnPolicyRunnerParkour"
     obs_groups = {
-            "policy": ["policy"],
-            "critic": ["policy", "priv"],
-            # "scan": ["scan"],
-            "history": ["history"],
-            "priv": ["priv"]
+        "policy": ["policy"],
+        "critic": ["policy", "priv"],
+        # "scan": ["scan"],
+        "history": ["history"],
+        "priv": ["priv"],
     }
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
@@ -74,8 +76,9 @@ class SkeletonHistoryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOParkour"
+        class_name="PPOParkour",
     )
+
 
 @configclass
 class SkeletonFixedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -86,11 +89,11 @@ class SkeletonFixedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     clip_actions = 1.0
     class_name = "OnPolicyRunnerParkour"
     obs_groups = {
-            "policy": ["policy"],
-            "critic": ["policy", "priv"],
-            # "scan": ["scan"],
-            "history": ["history"],
-            "priv": ["priv"]
+        "policy": ["policy"],
+        "critic": ["policy", "priv"],
+        # "scan": ["scan"],
+        "history": ["history"],
+        "priv": ["priv"],
     }
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
@@ -116,7 +119,7 @@ class SkeletonFixedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOParkour"
+        class_name="PPOParkour",
     )
 
 
@@ -150,6 +153,7 @@ class SkeletonRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+
 @configclass
 class SkeletonAmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
@@ -158,12 +162,7 @@ class SkeletonAmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "skeleton_amp_direct"
     clip_actions = 1.0
     class_name = "OnPolicyRunnerAMP"
-    obs_groups = {
-            "policy": ["policy"],
-            "critic": ["policy", "priv"],
-            "history": ["history"],
-            "priv": ["priv"]
-    }
+    obs_groups = {"policy": ["policy"], "critic": ["policy", "priv"], "history": ["history"], "priv": ["priv"]}
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
         init_noise_std=0.25,
@@ -186,15 +185,16 @@ class SkeletonAmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOAMP"
+        class_name="PPOAMP",
     )
     amp = dict(
         task_reward_lerp=0.5,
         discriminator_learning_rate=1e-4,
         gradient_penalty_coef=10.0,
         reward_coef=2.0 / 6.0,
-        discriminator_hidden_dims=[1024, 512]
+        discriminator_hidden_dims=[1024, 512],
     )
+
 
 @configclass
 class SkeletonWtwPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -203,12 +203,7 @@ class SkeletonWtwPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 100
     experiment_name = "skeleton_wtw_direct"
     class_name = "OnPolicyRunnerParkour"
-    obs_groups = {
-            "policy": ["policy"],
-            "critic": ["policy", "priv"],
-            "history": ["history"],
-            "priv": ["priv"]
-    }
+    obs_groups = {"policy": ["policy"], "critic": ["policy", "priv"], "history": ["history"], "priv": ["priv"]}
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
         init_noise_std=0.25,
@@ -231,5 +226,5 @@ class SkeletonWtwPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOParkour"
+        class_name="PPOParkour",
     )

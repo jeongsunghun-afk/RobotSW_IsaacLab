@@ -12,7 +12,7 @@
 *   **MimicKit**: `DeepMimicEnv` 기반이며 `_kin_char_model`을 주입받아 사용하는 범용적인 환경입니다. 로봇의 종류에 구애받지 않고 다양한 캐릭터 형태에 재사용이 가능하도록 설계되어 있습니다.
 
 ### AMP 관측 (Observation) 구성
-*   **IsaacLab**: 43차원의 조밀한 1D 벡터를 사용합니다. 
+*   **IsaacLab**: 43차원의 조밀한 1D 벡터를 사용합니다.
     *   구성: `dof_pos(12)`, `dof_vel(12)`, `root_height(1)`, `lin_vel(3)`, `ang_vel(3)`, `key_body_pos(12)`(발 4개의 로컬 위치)
     *   `num_amp_observations` 변수를 통해 이전 프레임의 상태를 스택으로 누적하여 PyTorch Tensor 버퍼 내에서 직접 History를 관리합니다.
 *   **MimicKit**: `compute_disc_obs` 함수를 통해 동적으로 상태를 추출합니다.
@@ -29,9 +29,9 @@
 **대상 파일**: `ppo_amp.py` (IsaacLab) vs `amp_agent.py` (MimicKit)
 
 ### Discriminator 손실 함수 (Loss Function) 형태
-*   **IsaacLab**: **LS-GAN (Least Squares GAN)** 방식을 사용합니다. 
+*   **IsaacLab**: **LS-GAN (Least Squares GAN)** 방식을 사용합니다.
     *   Expert 데이터에 대한 목표값을 `+1`로, Policy 데이터에 대한 목표값을 `-1`로 설정하고 `MSELoss`를 적용하여 수렴 속도와 안정성을 높였습니다.
-*   **MimicKit**: **Standard GAN** 방식을 사용합니다. 
+*   **MimicKit**: **Standard GAN** 방식을 사용합니다.
     *   `BCEWithLogitsLoss`를 통해 Expert는 `1`, Policy는 `0`의 라벨을 갖도록 이진 분류 모델로 학습합니다.
 
 ### 정규화 (Regularization) 및 Gradient Penalty
@@ -61,7 +61,7 @@
 *   **MimicKit**: `_kin_char_model.forward_kinematics()`를 호출합니다. 구조가 파라미터화된 일반화 모델이므로 다른 로봇에 적용 시 코드를 뜯어고칠 필요가 없습니다.
 
 ### 샘플링 (Sampling) 전략 및 모션 연속성 (Looping)
-*   **IsaacLab (Velocity-balanced Sampling)**: 
+*   **IsaacLab (Velocity-balanced Sampling)**:
     *   보행/달리기 등 속도 변화가 큰 로봇의 특성을 반영하여, 전체 프레임을 전진 속도(Speed Bins) 단위로 나눕니다. 빠른 속도의 모션 프레임 개수가 적더라도, 느린 속도 구간과 동일한 확률로 샘플링되게 가중치를 조정(`_build_velocity_sample_weights`)하여 고속 이동 모션의 모방 성능을 끌어올립니다.
 *   **MimicKit (Spatial Wrap & YAML Weights)**:
     *   사용자가 YAML에 명시한 `weight`에 따라 모션을 선택합니다.

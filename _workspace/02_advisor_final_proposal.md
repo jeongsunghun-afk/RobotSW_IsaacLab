@@ -21,7 +21,7 @@
 Research Advisor의 코드베이스(IsaacLab, RSL-RL) 기반 검토 결과는 다음과 같습니다.
 
 ### Hierarchical AMP 모델의 한계
-- **문제점:** RSL-RL의 기본 Actor-Critic 아키텍처를 계층적 구조(High-level / Low-level)로 분리하고 제어 주기(update frequency)를 다르게 가져가는 것은 RSL-RL 핵심 코어(PPO 로직)를 대대적으로 수정해야 합니다. 
+- **문제점:** RSL-RL의 기본 Actor-Critic 아키텍처를 계층적 구조(High-level / Low-level)로 분리하고 제어 주기(update frequency)를 다르게 가져가는 것은 RSL-RL 핵심 코어(PPO 로직)를 대대적으로 수정해야 합니다.
 - **결론:** 단기 적용에 부적합(난이도 '하', 500줄 이상 수정 및 구조 재설계 필요).
 
 ### BCAMP의 탁월한 적용 가능성

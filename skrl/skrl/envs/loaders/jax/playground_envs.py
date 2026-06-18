@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import textwrap
 
@@ -62,10 +67,10 @@ def load_playground_env(
         The task configuration does not provide a default episode length.
     """
     import functools
-    from mujoco_playground import registry
-    from mujoco_playground._src import wrapper
 
     import jax
+    from mujoco_playground import registry
+    from mujoco_playground._src import wrapper
 
     # parse arguments
     if parser is None:
@@ -138,11 +143,11 @@ def load_playground_env(
 
     # print config
     if show_cfg:
-        print(f"\nMuJoCo Playground environment")
+        print("\nMuJoCo Playground environment")
         print(f"  task: {task_name}")
-        print(f"  task config:")
+        print("  task config:")
         print(textwrap.indent(str(env_cfg).strip(), prefix=" " * 4))
-        print(f"  loading config:")
+        print("  loading config:")
         print(f"    num_envs: {num_envs}")
         print(f"    episode_length: {episode_length}")
         print(f"    action_repeat: {action_repeat}")

@@ -1,14 +1,17 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-from typing import Any, Literal
-
 import math
+from typing import Any, Literal
 
 import warp as wp
 
 from skrl import config
 from skrl.utils.spaces.warp import compute_space_limits
-
 
 LOG_SQRT_2_PI = wp.constant(math.log(math.sqrt(2 * math.pi)))
 HALF_LOG_2_PI_PLUS = wp.constant(0.5 + 0.5 * math.log(2 * math.pi))

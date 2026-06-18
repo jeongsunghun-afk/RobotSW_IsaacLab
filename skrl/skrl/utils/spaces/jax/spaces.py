@@ -1,18 +1,22 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any, Literal
 
 import gymnasium
-from gymnasium import spaces
-
 import jax
 import jax.numpy as jnp
 import numpy as np
+from gymnasium import spaces
 
 from skrl import config
 
 
-def convert_gym_space(space: "gym.Space" | None, *, squeeze_batch_dimension: bool = False) -> gymnasium.Space | None:
+def convert_gym_space(space: gym.Space | None, *, squeeze_batch_dimension: bool = False) -> gymnasium.Space | None:
     """Converts a gym space to a gymnasium space.
 
     :param space: Gym space to convert to.

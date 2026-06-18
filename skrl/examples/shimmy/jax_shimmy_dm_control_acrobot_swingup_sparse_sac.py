@@ -1,13 +1,15 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
-import gymnasium as gym
-import shimmy  # needed to re-register the correct environment entry_point (requires: `pip install "shimmy[dm-control]"`)
 
 import flax.linen as nn
+import gymnasium as gym
 import jax.numpy as jnp
-
-# import the skrl components to build the RL system
-from skrl import config, logger
+import shimmy  # needed to re-register the correct environment entry_point (requires: `pip install "shimmy[dm-control]"`)
 from skrl.agents.jax.sac import SAC, SAC_DEFAULT_CONFIG
 from skrl.envs.wrappers.jax import wrap_env
 from skrl.memories.jax import RandomMemory
@@ -15,6 +17,8 @@ from skrl.models.jax import DeterministicMixin, GaussianMixin, Model
 from skrl.trainers.jax import SequentialTrainer
 from skrl.utils import set_seed
 
+# import the skrl components to build the RL system
+from skrl import config, logger
 
 config.jax.backend = "numpy"  # or "jax"
 

@@ -1,6 +1,9 @@
-from __future__ import annotations
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any, Literal
+from __future__ import annotations
 
 import collections
 import copy
@@ -9,9 +12,10 @@ import datetime
 import os
 import pickle
 from abc import ABC, abstractmethod
-import gymnasium
+from typing import Any, Literal
 
 import flax
+import gymnasium
 import jax
 import numpy as np
 
@@ -374,7 +378,6 @@ class Agent(ABC):
             # check ended episodes
             finished_episodes = (terminated + truncated).nonzero()[0]
             if finished_episodes.size:
-
                 # storage cumulative rewards and timesteps
                 self._track_rewards.extend(self._cumulative_rewards[finished_episodes][:, 0].reshape(-1).tolist())
                 self._track_timesteps.extend(self._cumulative_timesteps[finished_episodes][:, 0].reshape(-1).tolist())

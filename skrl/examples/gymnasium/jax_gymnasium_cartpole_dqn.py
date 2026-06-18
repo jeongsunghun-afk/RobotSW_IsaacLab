@@ -1,10 +1,13 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import math
 import os
-import gymnasium as gym
 
-# import the skrl components to build the RL system
-from skrl import config, logger
+import gymnasium as gym
 from skrl.agents.jax.dqn import DQN, DQN_CFG
 from skrl.envs.wrappers.jax import wrap_env
 from skrl.memories.jax import RandomMemory
@@ -12,6 +15,8 @@ from skrl.trainers.jax import SequentialTrainer
 from skrl.utils import set_seed
 from skrl.utils.model_instantiators.jax import deterministic_model
 
+# import the skrl components to build the RL system
+from skrl import config, logger
 
 config.jax.backend = "numpy"  # or "jax"
 

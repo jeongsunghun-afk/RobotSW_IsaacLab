@@ -82,8 +82,8 @@ import time
 from datetime import datetime
 
 import gymnasium as gym
+
 import skrl
-from packaging import version
 
 # check for minimum supported skrl version
 # SKRL_VERSION = "1.4.3"

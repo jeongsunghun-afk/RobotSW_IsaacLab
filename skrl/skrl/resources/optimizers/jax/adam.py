@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 import functools
@@ -32,7 +37,7 @@ def _step_with_scale(transformation, grad, state, state_dict, scale):
 
 
 class Adam:
-    def __new__(cls, *, model: Model, lr: float = 1e-3, grad_norm_clip: float = 0, scale: bool = True) -> "Optimizer":
+    def __new__(cls, *, model: Model, lr: float = 1e-3, grad_norm_clip: float = 0, scale: bool = True) -> Optimizer:
         """Adam optimizer.
 
         Adapted from `Optax's Adam <https://optax.readthedocs.io/en/latest/api/optimizers.html#optax.adam>`_
@@ -75,7 +80,7 @@ class Adam:
             def _create(cls, *, transformation, state, **kwargs):
                 return cls(transformation=transformation, state=state, **kwargs)
 
-            def step(self, *, grad: jax.Array, model: Model, lr: float | None = None) -> "Optimizer":
+            def step(self, *, grad: jax.Array, model: Model, lr: float | None = None) -> Optimizer:
                 """Performs a single optimization step.
 
                 :param grad: Gradients.

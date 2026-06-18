@@ -6,14 +6,14 @@
 
 ### 진단 내역
 1. **[발견된 문제]** `extras["amp_obs"]` 반환 시 `.clone()` 누락으로 인한 메모리 공유(Aliasing) 및 Policy 배치 모드 붕괴 (go2_imitation_env.py:155)
-   - 원인: `_get_observations`에서 `self.extras["amp_obs"] = self.amp_observation_buffer.view(-1, self.amp_observation_size)`를 통해 반환하는데, 이는 버퍼의 View(참조)입니다. 러너(`OnPolicyRunnerAMPBase`) 루프에서 이를 `detach()`하여 `amp_obs_buffer` 리스트에 24번 누적하지만, `detach()`는 메모리를 복사하지 않습니다. 
-   매 스텝마다 환경 버퍼가 `self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]`로 In-place 업데이트 되므로, 러너에 누적된 24개의 관측치들이 모두 마지막 24번째 스텝의 상태(또는 RSI 리셋 상태)로 덮어씌워지게 됩니다. 
+   - 원인: `_get_observations`에서 `self.extras["amp_obs"] = self.amp_observation_buffer.view(-1, self.amp_observation_size)`를 통해 반환하는데, 이는 버퍼의 View(참조)입니다. 러너(`OnPolicyRunnerAMPBase`) 루프에서 이를 `detach()`하여 `amp_obs_buffer` 리스트에 24번 누적하지만, `detach()`는 메모리를 복사하지 않습니다.
+   매 스텝마다 환경 버퍼가 `self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]`로 In-place 업데이트 되므로, 러너에 누적된 24개의 관측치들이 모두 마지막 24번째 스텝의 상태(또는 RSI 리셋 상태)로 덮어씌워지게 됩니다.
    결과적으로 Discriminator가 학습하는 Policy 배치(`24 * N`)는 실제로는 `N`개의 샘플이 24번 중복된 심각한 Mode Collapse 상태가 되며, 다채로운 Expert 데이터와 너무나 쉽게 구분(Perfect separation)되어 Policy Loss가 즉시 0으로 고착됩니다.
    - 심각도: critical
    - 권장 조치: `go2_imitation_env.py`의 `_get_observations` 마지막 부분에서 `self.amp_observation_buffer.view(...).clone()`을 호출하여 독립된 메모리 텐서로 반환하도록 수정하세요. (필요 시 `go2_amp_env.py`에도 동일하게 적용)
 
 2. **[발견된 문제]** AMP Observation 차원 및 관절/발(Foot) 순서 검증 (정상)
-   - 원인: 
+   - 원인:
      - shape 계산: `43(per step) × 10(history) = 430`으로 config와 완벽히 일치.
      - `dof_pos`, `dof_vel`: `_motion_dof_indices`를 사용해 Expert 모션 데이터를 IsaacLab의 알파벳 관절 순서와 일치시킴.
      - `foot_pos`: Policy는 `KEY_BODY_NAMES = ["FL_foot", "FR_foot", ...]`를 사용하고, Expert(`motion_lib.py`의 `_go2_fk_foot_pos`)도 동일한 `["FL", "FR", "RL", "RR"]` 순서로 역기구학을 연산하여 불일치 없음.

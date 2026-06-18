@@ -1,6 +1,10 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import torch
 import torch.nn as nn
-
 from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
 from skrl.envs.torch import wrap_env
 from skrl.memories.torch import RandomMemory
@@ -12,7 +16,6 @@ from skrl.resources.schedulers.torch import KLAdaptiveRL
 from skrl.trainers.torch import SequentialTrainer
 from skrl.utils import set_seed
 from skrl.utils.omniverse_isaacgym_utils import get_env_instance
-
 
 # Seed for reproducibility
 seed = set_seed()  # e.g. `set_seed(42)` for fixed seed
@@ -75,7 +78,6 @@ env = get_env_instance(headless=headless)
 
 from omniisaacgymenvs.utils.config_utils.sim_config import SimConfig
 from reaching_iiwa_omniverse_isaacgym_env import TASK_CFG, ReachingIiwaTask
-
 
 TASK_CFG["seed"] = seed
 TASK_CFG["headless"] = headless

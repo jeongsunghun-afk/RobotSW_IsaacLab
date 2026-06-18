@@ -257,8 +257,9 @@ def _test_skrl_device_separation(sim_device: str, rl_device: str):
         rl_device: Device for RL agent (e.g., "cuda:0", "cpu")
     """
     try:
-        import skrl
         from skrl.envs.wrappers.torch import wrap_env
+
+        import skrl
     except ImportError:
         pytest.skip("skrl not installed")
 

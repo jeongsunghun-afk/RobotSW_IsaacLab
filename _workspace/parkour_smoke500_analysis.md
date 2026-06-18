@@ -153,6 +153,6 @@ log_interval: 50      # TensorBoard 기록 빈도 조정
 
 ---
 
-**생성 시각**: 2026-04-30 13:26 (학습 완료)  
-**로그 경로**: `/home/lgb/IsaacLab/logs/rsl_rl/go2_parkour/2026-04-30_12-53-47`  
+**생성 시각**: 2026-04-30 13:26 (학습 완료)
+**로그 경로**: `/home/lgb/IsaacLab/logs/rsl_rl/go2_parkour/2026-04-30_12-53-47`
 **모델**: ActorCriticRMA + PPOParkour (skrl)

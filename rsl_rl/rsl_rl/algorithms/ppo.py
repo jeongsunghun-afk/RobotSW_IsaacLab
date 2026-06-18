@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
@@ -47,6 +52,11 @@ class PPO:
         symmetry_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
+        # SPO surrogate parameters
+        surrogate_type: str = "ppo",
+        spo_epsilon: float = 0.2,
+        # LCP gradient penalty parameters
+        lcp_cfg: dict | None = None,
     ) -> None:
         # Device-related parameters
         self.device = device
@@ -123,6 +133,18 @@ class PPO:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
+        # SPO parameters
+        self.surrogate_type = surrogate_type
+        self.spo_epsilon = spo_epsilon
+
+        # LCP parameters
+        if lcp_cfg is not None:
+            self.lcp_lambda_gp = lcp_cfg["lambda_gp"]
+            self.lcp_penalize = lcp_cfg.get("penalize", "log_prob")
+        else:
+            self.lcp_lambda_gp = None
+            self.lcp_penalize = None
+
     def act(self, obs: TensorDict) -> torch.Tensor:
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
@@ -198,6 +220,8 @@ class PPO:
         mean_rnd_loss = 0 if self.rnd else None
         # Symmetry loss
         mean_symmetry_loss = 0 if self.symmetry else None
+        # LCP gradient penalty loss
+        mean_lcp_loss = 0 if self.lcp_lambda_gp is not None else None
 
         # Get mini batch generator
         if self.policy.is_recurrent:
@@ -292,11 +316,17 @@ class PPO:
 
             # Surrogate loss
             ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-            surrogate = -torch.squeeze(advantages_batch) * ratio
-            surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-            )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            adv = torch.squeeze(advantages_batch)
+
+            if self.surrogate_type == "spo":
+                # Simple Policy Optimization (arXiv:2401.16025), Eq.16:
+                #   f_spo = r·A − (|A| / 2ε)·(r − 1)^2      (maximize)
+                surrogate_obj = ratio * adv - torch.abs(adv) * torch.square(ratio - 1.0) / (2.0 * self.spo_epsilon)
+                surrogate_loss = -surrogate_obj.mean()  # maximize → minimize negative
+            else:  # "ppo" — original ratio-clip (default, backward-compatible)
+                surrogate = -adv * ratio
+                surrogate_clipped = -adv * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -310,6 +340,50 @@ class PPO:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+
+            # LCP gradient penalty: λ_gp · E[‖∇_obs log π(a|obs)‖²]  (arXiv:2410.11825, Eq.7)
+            # Penalizes the Lipschitz constant of the policy w.r.t. observations.
+            # Inserted here (after loss assembly, before symmetry) so obs_batch is still the
+            # exact batch used by the surrogate and has not been re-augmented by the symmetry block.
+            if self.lcp_lambda_gp is not None:
+                # Build a grad-enabled leaf from the pre-normalizer actor observation.
+                # actor_obs_normalizer is applied inside log_prob_from_actor_obs, so we
+                # pass the raw concatenated actor obs and mark it as the grad input.
+                actor_obs_raw = self.policy.get_actor_obs(obs_batch[:original_batch_size])
+                obs_in = actor_obs_raw.detach().requires_grad_(True)
+                # Normalize inside the helper path (mirrors act() internals)
+                obs_in_norm = self.policy.actor_obs_normalizer(obs_in)
+
+                if self.lcp_penalize == "mean":
+                    # Cheaper variant: penalize ‖∇_obs μ(obs)‖² (no actions needed).
+                    # Note: grad(μ.sum()) sums partials across output dims — an approximation
+                    # of the full Frobenius norm of the Jacobian; the default "log_prob" mode
+                    # is paper-faithful (arXiv:2410.11825 Eq.7).
+                    # Re-compute mean from the grad-enabled leaf so the graph connects
+                    if self.policy.state_dependent_std:
+                        mean_from_leaf = self.policy.actor(obs_in_norm)[..., 0, :]
+                    else:
+                        mean_from_leaf = self.policy.actor(obs_in_norm)
+                    grads = torch.autograd.grad(
+                        outputs=mean_from_leaf.sum(),
+                        inputs=obs_in,
+                        create_graph=True,
+                        retain_graph=True,
+                        only_inputs=True,
+                    )[0]
+                else:  # "log_prob" — paper-faithful (default)
+                    actions_for_gp = actions_batch[:original_batch_size].detach()
+                    logp = self.policy.log_prob_from_actor_obs(obs_in_norm, actions_for_gp)
+                    grads = torch.autograd.grad(
+                        outputs=logp.sum(),
+                        inputs=obs_in,
+                        create_graph=True,
+                        retain_graph=True,
+                        only_inputs=True,
+                    )[0]
+
+                lcp_loss = grads.norm(2, dim=-1).pow(2).mean()
+                loss = loss + self.lcp_lambda_gp * lcp_loss
 
             # Symmetry loss
             if self.symmetry:
@@ -388,6 +462,9 @@ class PPO:
             # Symmetry loss
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
+            # LCP loss
+            if mean_lcp_loss is not None:
+                mean_lcp_loss += lcp_loss.item()
 
         # Divide the losses by the number of updates
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -398,6 +475,8 @@ class PPO:
             mean_rnd_loss /= num_updates
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
+        if mean_lcp_loss is not None:
+            mean_lcp_loss /= num_updates
 
         # Clear the storage
         self.storage.clear()
@@ -412,6 +491,8 @@ class PPO:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if mean_lcp_loss is not None:
+            loss_dict["lipschitz"] = mean_lcp_loss
 
         return loss_dict
 

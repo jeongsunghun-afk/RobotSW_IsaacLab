@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Real2Sim 시뮬레이션 러너.
 
 R_Skeleton Hind Leg를 IsaacLab에 올리고 ZMQ로 외부 컨트롤러와 통신.
@@ -16,9 +21,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="R2S Hind Leg 시뮬레이션 러너")
 parser.add_argument("--num_envs", type=int, default=1, help="환경 수 (기본값: 1)")
-parser.add_argument(
-    "--disable_fabric", action="store_true", default=False, help="Fabric 비활성화"
-)
+parser.add_argument("--disable_fabric", action="store_true", default=False, help="Fabric 비활성화")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 sys.argv = [sys.argv[0]]
@@ -33,9 +36,10 @@ import threading
 from pathlib import Path
 
 import gymnasium as gym
-import isaaclab_tasks.direct.r2s_hind_leg  # noqa: F401
 import numpy as np
 import torch
+
+import isaaclab_tasks.direct.r2s_hind_leg  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 # 로컬 유틸 (scripts/real2sim/ 기준 실행)

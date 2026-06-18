@@ -76,10 +76,7 @@ def _build_perm(names: list[str], device: torch.device) -> torch.Tensor:
     for n in names:
         mirrored = _mirror_name(n)
         if mirrored not in name_to_idx:
-            raise ValueError(
-                f"[parkour symmetry] no L/R mirror match for '{n}' (expected '{mirrored}'). "
-                f"names={names}"
-            )
+            raise ValueError(f"[parkour symmetry] no L/R mirror match for '{n}' (expected '{mirrored}'). names={names}")
         perm.append(name_to_idx[mirrored])
     perm_t = torch.tensor(perm, dtype=torch.long, device=device)
     # validate permutation integrity (catches silent index-shift / duplicate matches)
@@ -103,9 +100,7 @@ def _build_cache(env) -> dict:
     joint_names = list(u._robot.data.joint_names)
     # joint swap permutation (12 DOF) + hip mask (abduction joints: L/R sign-reversed)
     joint_swap = _build_perm(joint_names, device)
-    hip_idx = torch.tensor(
-        [i for i, n in enumerate(joint_names) if "hip" in n], dtype=torch.long, device=device
-    )
+    hip_idx = torch.tensor([i for i, n in enumerate(joint_names) if "hip" in n], dtype=torch.long, device=device)
     if hip_idx.numel() == 0:
         raise ValueError(f"[parkour symmetry] no hip joints found in {joint_names}")
 
@@ -188,9 +183,7 @@ def _mirror_priv_explicit(pe: torch.Tensor) -> torch.Tensor:
     return m
 
 
-def _mirror_priv_latent(
-    pl: torch.Tensor, joint_swap: torch.Tensor, friction_foot_swap: torch.Tensor
-) -> torch.Tensor:
+def _mirror_priv_latent(pl: torch.Tensor, joint_swap: torch.Tensor, friction_foot_swap: torch.Tensor) -> torch.Tensor:
     """Mirror priv_latent (B, 33).
 
     Layout: [0] base_friction | [1:5] foot_friction(4) | [5] base_mass | [6:9] base_com |

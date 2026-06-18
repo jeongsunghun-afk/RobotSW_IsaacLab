@@ -1,18 +1,26 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import textwrap
 from typing import Any
 
-import textwrap
 import gymnasium
-
 import warp as wp
 import warp_nn.nn as nn  # noqa
 
 import skrl.utils.framework.warp as warp_utils  # noqa
-from skrl.models.warp import DeterministicMixin  # noqa
-from skrl.models.warp import Model
-from skrl.utils.model_instantiators.warp.common import one_hot_encoding  # noqa
-from skrl.utils.model_instantiators.warp.common import generate_containers
+from skrl.models.warp import (
+    DeterministicMixin,  # noqa
+    Model,
+)
+from skrl.utils.model_instantiators.warp.common import (
+    generate_containers,
+    one_hot_encoding,  # noqa
+)
 from skrl.utils.spaces.warp import unflatten_tensorized_space  # noqa
 
 
@@ -48,16 +56,16 @@ def deterministic_model(
     networks = []
     forward: list[str] = []
     for container in containers:
-        networks.append(f'self.{container["name"]}_container = {container["sequential"]}')
-        forward.append(f'{container["name"]} = self.{container["name"]}_container({container["input"]})')
+        networks.append(f"self.{container['name']}_container = {container['sequential']}")
+        forward.append(f"{container['name']} = self.{container['name']}_container({container['input']})")
     # process output
     if output["modules"]:
-        networks.append(f'self.output_layer = {output["modules"][0]}')
-        forward.append(f'output = self.output_layer({container["name"]})')
+        networks.append(f"self.output_layer = {output['modules'][0]}")
+        forward.append(f"output = self.output_layer({container['name']})")
     if output["output"]:
-        forward.append(f'output = {output["output"]}')
+        forward.append(f"output = {output['output']}")
     else:
-        forward[-1] = forward[-1].replace(f'{container["name"]} =', "output =", 1)
+        forward[-1] = forward[-1].replace(f"{container['name']} =", "output =", 1)
 
     # build substitutions and indent content
     networks = textwrap.indent("\n".join(networks), prefix=" " * 8)[8:]

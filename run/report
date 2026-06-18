@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# run/report — 다중 커맨드 일괄 평가 + 데이터 저장 래퍼
+#
+# commands.yaml에 정의된 커맨드 개수만큼 병렬 env를 띄워 500스텝 실행 후
+# 관절 토크/위치/속도, 베이스 속도, 발 속도, 접촉력 등을 results/에 저장.
+# video, save_data, headless 는 자동 활성화됨.
+#
+# 사용법:
+#   ./run/report --task Go2WTW --checkpoint logs/.../model_1000.pt
+#   ./run/report --task Go2-Imitation-v0 --checkpoint logs/.../model_1000.pt
+#   ./run/report --task Go2WTW --commands_file scripts/reinforcement_learning/rsl_rl/commands.yaml
+#
+# 주요 인자:
+#   --task <id>              태스크 이름 (필수)
+#   --checkpoint <path>      체크포인트 경로 (없으면 최신 run 자동 탐색)
+#   --commands_file <path>   커맨드 YAML 파일 (기본: scripts/.../commands.yaml)
+#   --video_length <N>       녹화 길이 스텝 (기본: 500)
+#   --wbc                    Whole body control 모드
+#   [rsl_rl 공통 인자]        --load_run, --experiment_name 등
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate isaac-5.1
+
+cd "$REPO"
+
+exec ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/report.py "$@"

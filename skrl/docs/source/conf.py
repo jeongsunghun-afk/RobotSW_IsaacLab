@@ -1,16 +1,19 @@
-import os
-import sys
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import inspect
 import logging
 import operator
-
+import os
+import sys
 
 # skrl library
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-print("[DOCS] skrl library path: {}".format(sys.path[0]))
+print(f"[DOCS] skrl library path: {sys.path[0]}")
 
 import skrl
-
 
 # project information
 project = "skrl"

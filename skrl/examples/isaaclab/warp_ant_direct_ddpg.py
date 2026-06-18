@@ -1,10 +1,12 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
 
 import warp_nn.nn as nn
-
-# import the skrl components to build the RL system
-from skrl import logger
 from skrl.agents.warp.ddpg import DDPG, DDPG_CFG
 from skrl.envs.loaders.warp import load_isaaclab_env
 from skrl.envs.wrappers.warp import wrap_env
@@ -16,6 +18,8 @@ from skrl.trainers.warp import SequentialTrainer
 from skrl.utils import set_seed
 from skrl.utils.framework.warp import concatenate
 
+# import the skrl components to build the RL system
+from skrl import logger
 
 # parse arguments
 parser = argparse.ArgumentParser()

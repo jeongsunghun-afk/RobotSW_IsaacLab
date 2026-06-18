@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
@@ -7,15 +12,17 @@ from __future__ import annotations
 
 import torch
 
-from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from isaaclab.markers import VisualizationMarkers, SPHERE_MARKER_CFG
 import isaaclab.utils.math as math_utils
+from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
+from isaaclab.markers import SPHERE_MARKER_CFG, VisualizationMarkers
 
 from .go2_interaction_env import Go2InteractionEnv
 from .go2_neck_interaction_cfg import Go2NeckInteractionCfg
 
+
 def torch_rand_float(lower: float, upper: float, shape: tuple, device: str) -> torch.Tensor:
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
+
 
 class Go2NeckInteractionEnv(Go2InteractionEnv):
     """Go2 로봇에 7-DOF 목 모듈이 부착된 상호작용 환경."""
@@ -80,9 +87,7 @@ class Go2NeckInteractionEnv(Go2InteractionEnv):
         root_pos_w = self._robot.data.root_link_pos_w
         root_quat_w = self._robot.data.root_link_quat_w
 
-        ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(
-            root_pos_w, root_quat_w, ee_pos_w, ee_quat_w
-        )
+        ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
 
         self._ik_controller.set_command(
             self._ik_target_pos_b,
@@ -113,12 +118,12 @@ class Go2NeckInteractionEnv(Go2InteractionEnv):
 
         # action vector에 반영
         applied_actions = torch.zeros(self.num_envs, 19, device=self.device)
-        
+
         if self.cfg.whole_body_control:
             applied_actions = self._actions.clone()
         else:
             applied_actions[:, self._non_neck_ids] = self._actions.clone()
-            
+
             neck_default = self._robot.data.default_joint_pos[:, self._neck_joint_ids]
             neck_action = (self._current_neck_q - neck_default) / self.cfg.action_scale
             applied_actions[:, self._action_neck_ids] = neck_action

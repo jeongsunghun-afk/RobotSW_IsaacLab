@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 csv_utils.py
 ===========
@@ -32,10 +37,7 @@ def save_obs_data_to_csv(obs_history: list, save_path: str, num_obs: int) -> Non
 
     num_timesteps, num_observations = obs_data.shape
     if num_observations != num_obs:
-        print(
-            f"[csv_utils] Warning: 관측 차원 불일치 "
-            f"(데이터={num_observations}, 기대값={num_obs}). 실제 차원 사용."
-        )
+        print(f"[csv_utils] Warning: 관측 차원 불일치 (데이터={num_observations}, 기대값={num_obs}). 실제 차원 사용.")
         num_obs = num_observations
 
     column_names = [f"obs_{i}" for i in range(num_obs)]

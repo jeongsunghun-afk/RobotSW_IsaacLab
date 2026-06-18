@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# run/parkour_demo_test — test 지형 관찰(goal 기반 자동 수행, 패널로 종류/난이도 선택)
+#
+# 사용법:
+#   ./run/parkour_demo_test                             # GUI (디스플레이 연결 환경)
+#   ./run/parkour_demo_test --livestream 2 --enable_cameras   # WebRTC 원격
+#   ./run/parkour_demo_test --checkpoint <다른.pt>
+#
+# 공통으로 박혀있는 것: conda(isaac-5.1) + Go2-ParkourDemo-v0 + --mode test
+set -euo pipefail
+
+# run/ 한 단계 위가 저장소 루트
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_CKPT="${PARKOUR_CKPT:-$REPO/logs/rsl_rl/parkour_imitation_go2_symmetry/2026-06-15_18-06-15_amp_4.0/model_12600.pt}"
+
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate isaac-5.1
+
+cd "$REPO"
+
+EXTRA=()
+if [[ " $* " != *" --checkpoint "* ]]; then
+    EXTRA+=(--checkpoint "$DEFAULT_CKPT")
+fi
+
+exec ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play_parkour_demo.py \
+    --task Go2-ParkourDemo-v0 --mode test \
+    "${EXTRA[@]}" "$@"

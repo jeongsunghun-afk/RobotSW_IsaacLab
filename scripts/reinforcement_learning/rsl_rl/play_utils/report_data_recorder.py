@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 report_data_recorder.py
 ================
@@ -26,6 +31,7 @@ import pathlib
 import shutil
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,11 +47,11 @@ def _rms_no_outlier(arr: np.ndarray) -> float:
     filtered = arr[(arr >= lo) & (arr <= hi)]
     if filtered.size == 0:
         return float("nan")
-    return float(np.sqrt(np.mean(filtered ** 2)))
+    return float(np.sqrt(np.mean(filtered**2)))
 
 
 def _plot_grid(
-    data: np.ndarray,          # [steps, channels]
+    data: np.ndarray,  # [steps, channels]
     labels: list[str],
     title: str,
     ylabel: str,
@@ -56,7 +62,7 @@ def _plot_grid(
     n = len(labels)
     if n == 0:
         return
-    
+
     nrows = max(1, (n + ncols - 1) // ncols)
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 2.8))
@@ -192,10 +198,7 @@ class ReportMultiDataRecorder:
             # Contact force magnitude per body: (num_envs, num_bodies)
             # 환경마다 contact_sensor 속성명이 다를 수 있으므로 여러 이름을 시도
             curr_contact_forces = None
-            contact_sensor = (
-                getattr(base_env, "contact_sensor", None)
-                or getattr(base_env, "_contact_sensor", None)
-            )
+            contact_sensor = getattr(base_env, "contact_sensor", None) or getattr(base_env, "_contact_sensor", None)
             if contact_sensor is None:
                 # scene.sensors dict에서도 탐색
                 scene_sensors = getattr(getattr(base_env, "scene", None), "sensors", {})
@@ -256,7 +259,9 @@ class ReportMultiDataRecorder:
                 if curr_foot_lin_vels is not None:
                     self._foot_lin_vels[i].append(curr_foot_lin_vels[i].copy())
                 else:
-                    self._foot_lin_vels[i].append(np.zeros((len(foot_body_ids), 3), dtype=np.float32) if foot_body_ids else np.array([]))
+                    self._foot_lin_vels[i].append(
+                        np.zeros((len(foot_body_ids), 3), dtype=np.float32) if foot_body_ids else np.array([])
+                    )
 
         except Exception as e:
             print(f"[ReportMultiDataRecorder] 데이터 수집 오류 (스텝 {self._step}): {e}", flush=True)
@@ -303,7 +308,7 @@ class ReportMultiDataRecorder:
         idx_left = []
         idx_right = []
         idx_other = []
-        
+
         for i, name in enumerate(joint_names):
             n_lower = name.lower()
             if "l_" in n_lower or "left" in n_lower or "fl_" in n_lower or "rl_" in n_lower:
@@ -312,7 +317,7 @@ class ReportMultiDataRecorder:
                 idx_right.append(i)
             else:
                 idx_other.append(i)
-                
+
         # 각 환경별 데이터 저장 루프
         for env_id in range(self._num_envs):
             cmd_label = command_labels[env_id] if env_id < len(command_labels) else f"cmd_{env_id}"
@@ -330,24 +335,49 @@ class ReportMultiDataRecorder:
             foot_lin_vels = np.array(self._foot_lin_vels[env_id]) if self._foot_lin_vels[env_id] else None
 
             self._save_csv(
-                env_dir, joint_names, torques, joint_pos, joint_vel, proc_actions, lin_vel, ang_vel,
-                contact_forces, self._body_names, foot_lin_vels, foot_body_names,
+                env_dir,
+                joint_names,
+                torques,
+                joint_pos,
+                joint_vel,
+                proc_actions,
+                lin_vel,
+                ang_vel,
+                contact_forces,
+                self._body_names,
+                foot_lin_vels,
+                foot_body_names,
             )
 
             # 조인트 파트별 그래프 생성 헬퍼
             def save_split_plots(data, title_prefix, ylabel, file_prefix):
                 # Left
                 if len(idx_left) > 0:
-                    _plot_grid(data[:, idx_left], [joint_names[i] for i in idx_left],
-                               f"{title_prefix} (Left Leg)", ylabel, env_dir / f"{file_prefix}_left_leg.png")
+                    _plot_grid(
+                        data[:, idx_left],
+                        [joint_names[i] for i in idx_left],
+                        f"{title_prefix} (Left Leg)",
+                        ylabel,
+                        env_dir / f"{file_prefix}_left_leg.png",
+                    )
                 # Right
                 if len(idx_right) > 0:
-                    _plot_grid(data[:, idx_right], [joint_names[i] for i in idx_right],
-                               f"{title_prefix} (Right Leg)", ylabel, env_dir / f"{file_prefix}_right_leg.png")
+                    _plot_grid(
+                        data[:, idx_right],
+                        [joint_names[i] for i in idx_right],
+                        f"{title_prefix} (Right Leg)",
+                        ylabel,
+                        env_dir / f"{file_prefix}_right_leg.png",
+                    )
                 # Other (Waist/Neck)
                 if len(idx_other) > 0:
-                    _plot_grid(data[:, idx_other], [joint_names[i] for i in idx_other],
-                               f"{title_prefix} (Waist/Neck)", ylabel, env_dir / f"{file_prefix}_waist_neck.png")
+                    _plot_grid(
+                        data[:, idx_other],
+                        [joint_names[i] for i in idx_other],
+                        f"{title_prefix} (Waist/Neck)",
+                        ylabel,
+                        env_dir / f"{file_prefix}_waist_neck.png",
+                    )
 
             # Torques, Positions, Velocities, Actions 분할 저장
             save_split_plots(torques, "Joint Torques", "Torque [Nm]", "joint_torques")
@@ -374,8 +404,12 @@ class ReportMultiDataRecorder:
         self,
         save_dir: pathlib.Path,
         joint_names: list[str],
-        torques, joint_pos, joint_vel, proc_actions,
-        lin_vel, ang_vel,
+        torques,
+        joint_pos,
+        joint_vel,
+        proc_actions,
+        lin_vel,
+        ang_vel,
         contact_forces=None,
         body_names=None,
         foot_lin_vels=None,
@@ -393,12 +427,17 @@ class ReportMultiDataRecorder:
                 f"vel_{jn_s}",
                 f"action_{jn_s}",
             ]
-        headers += ["lin_vel_x", "lin_vel_y", "lin_vel_z",
-                    "ang_vel_x", "ang_vel_y", "ang_vel_z"]
+        headers += ["lin_vel_x", "lin_vel_y", "lin_vel_z", "ang_vel_x", "ang_vel_y", "ang_vel_z"]
 
         # foot linear velocity 헤더
         has_foot = foot_lin_vels is not None and foot_lin_vels.ndim == 3 and foot_lin_vels.shape[1] > 0
-        foot_names = foot_body_names if (foot_body_names and len(foot_body_names) == foot_lin_vels.shape[1]) else [f"foot_{f}" for f in range(foot_lin_vels.shape[1])] if has_foot else []
+        foot_names = (
+            foot_body_names
+            if (foot_body_names and len(foot_body_names) == foot_lin_vels.shape[1])
+            else [f"foot_{f}" for f in range(foot_lin_vels.shape[1])]
+            if has_foot
+            else []
+        )
         if has_foot:
             for fn in foot_names:
                 fn_s = fn.replace(",", "_")
@@ -408,7 +447,9 @@ class ReportMultiDataRecorder:
         has_contact = contact_forces is not None and contact_forces.ndim == 2 and contact_forces.shape[1] > 0
         if has_contact:
             n_bodies = contact_forces.shape[1]
-            cf_names = body_names if (body_names and len(body_names) == n_bodies) else [f"body_{b}" for b in range(n_bodies)]
+            cf_names = (
+                body_names if (body_names and len(body_names) == n_bodies) else [f"body_{b}" for b in range(n_bodies)]
+            )
             headers += [f"contact_{bn.replace(',', '_')}" for bn in cf_names]
 
         csv_path = save_dir / "robot_data.csv"
@@ -437,15 +478,23 @@ class ReportMultiDataRecorder:
             writer = csv.writer(f)
             writer.writerow(["joint", "torque_rms", "pos_rms", "vel_rms", "action_rms"])
             for j, jn in enumerate(joint_names):
-                writer.writerow([
-                    jn,
-                    _rms_no_outlier(torques[:, j]),
-                    _rms_no_outlier(joint_pos[:, j]),
-                    _rms_no_outlier(joint_vel[:, j]),
-                    _rms_no_outlier(proc_actions[:, j]),
-                ])
-            for ax_name, idx in [("lin_vel_x", 0), ("lin_vel_y", 1), ("lin_vel_z", 2),
-                                  ("ang_vel_x", 0), ("ang_vel_y", 1), ("ang_vel_z", 2)]:
+                writer.writerow(
+                    [
+                        jn,
+                        _rms_no_outlier(torques[:, j]),
+                        _rms_no_outlier(joint_pos[:, j]),
+                        _rms_no_outlier(joint_vel[:, j]),
+                        _rms_no_outlier(proc_actions[:, j]),
+                    ]
+                )
+            for ax_name, idx in [
+                ("lin_vel_x", 0),
+                ("lin_vel_y", 1),
+                ("lin_vel_z", 2),
+                ("ang_vel_x", 0),
+                ("ang_vel_y", 1),
+                ("ang_vel_z", 2),
+            ]:
                 arr = lin_vel[:, idx] if ax_name.startswith("lin") else ang_vel[:, idx]
                 writer.writerow([ax_name, _rms_no_outlier(arr), "", "", ""])
             if has_foot:
@@ -462,12 +511,14 @@ class ReportMultiDataRecorder:
                 writer.writerow(["body", "max_force_N", "mean_force_N", "contact_ratio"])
                 for b, bn in enumerate(cf_names):
                     col = contact_forces[:, b]
-                    writer.writerow([
-                        bn,
-                        float(col.max()),
-                        float(col.mean()),
-                        float((col > 1.0).mean()),  # 1N 초과 비율
-                    ])
+                    writer.writerow(
+                        [
+                            bn,
+                            float(col.max()),
+                            float(col.mean()),
+                            float((col > 1.0).mean()),  # 1N 초과 비율
+                        ]
+                    )
 
     def _plot_base_velocity(
         self,
@@ -477,8 +528,9 @@ class ReportMultiDataRecorder:
     ) -> None:
         lin_labels = ["lin_vel_x", "lin_vel_y", "lin_vel_z"]
         ang_labels = ["ang_vel_x", "ang_vel_y", "ang_vel_z"]
-        all_data   = list(zip(lin_labels, [lin_vel[:, i] for i in range(3)])) + \
-                     list(zip(ang_labels, [ang_vel[:, i] for i in range(3)]))
+        all_data = list(zip(lin_labels, [lin_vel[:, i] for i in range(3)])) + list(
+            zip(ang_labels, [ang_vel[:, i] for i in range(3)])
+        )
 
         fig, axes = plt.subplots(2, 3, figsize=(13, 6))
         axes = axes.reshape(-1)
@@ -540,7 +592,7 @@ class ReportMultiDataRecorder:
 
     def _plot_contact_forces(
         self,
-        contact_forces: np.ndarray,   # [steps, num_bodies]
+        contact_forces: np.ndarray,  # [steps, num_bodies]
         body_names: list[str],
         save_path: pathlib.Path,
         threshold: float = 1.0,
@@ -557,10 +609,7 @@ class ReportMultiDataRecorder:
 
         # foot vs non-foot 분류
         foot_keywords = ["toe", "foot", "link7"]
-        is_foot = [
-            any(kw in name.lower() for kw in foot_keywords)
-            for name in body_names
-        ]
+        is_foot = [any(kw in name.lower() for kw in foot_keywords) for name in body_names]
 
         nrows = max(1, (n_bodies + ncols - 1) // ncols)
         fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 2.8))
@@ -581,8 +630,7 @@ class ReportMultiDataRecorder:
                     ax.axvspan(s, e, color="tomato", alpha=0.25)
 
             ax.plot(steps, y, linewidth=0.9, color=color)
-            ax.axhline(threshold, color="tomato", linewidth=1.0, linestyle="--",
-                       label=f"thr={threshold:.1f}N")
+            ax.axhline(threshold, color="tomato", linewidth=1.0, linestyle="--", label=f"thr={threshold:.1f}N")
             max_f = float(y.max())
             ratio = float((y > threshold).mean()) * 100.0
             ax.set_title(f"{name}\nmax={max_f:.1f}N  hit={ratio:.1f}%", fontsize=7)
@@ -595,8 +643,11 @@ class ReportMultiDataRecorder:
         for ax in axes[n_bodies:]:
             ax.set_visible(False)
 
-        fig.suptitle("Contact Forces per Body  (green=foot / blue=other / red bg=above threshold)",
-                     fontsize=10, fontweight="bold")
+        fig.suptitle(
+            "Contact Forces per Body  (green=foot / blue=other / red bg=above threshold)",
+            fontsize=10,
+            fontweight="bold",
+        )
         plt.tight_layout()
         plt.savefig(save_path, dpi=130)
         plt.close(fig)

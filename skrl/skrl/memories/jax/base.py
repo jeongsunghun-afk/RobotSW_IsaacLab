@@ -1,15 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import Literal
 
-import csv
-import datetime
-import functools
-import operator
-import os
-from abc import ABC, abstractmethod
 import gymnasium
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -249,10 +248,7 @@ class Memory(ABC):
                     self.tensors[name] = _copyto_i(self.tensors[name], tensor, self.memory_index)
             self.memory_index += 1
         # multi environment (current_num_envs < num_envs)
-        elif dim == 2 and shape[0] < self.num_envs:
-            raise NotImplementedError  # TODO: implement
-        # single environment - multi sample (num_envs = 1, current_num_envs > 1)
-        elif dim == 2 and self.num_envs == 1:
+        elif dim == 2 and shape[0] < self.num_envs or dim == 2 and self.num_envs == 1:
             raise NotImplementedError  # TODO: implement
         # single environment (current_num_envs = 1, implicit)
         elif dim == 1:

@@ -1,20 +1,23 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import gymnasium
-from packaging import version
-
 import jax
 import jax.dlpack as jax_dlpack
 import numpy as np
 import torch
 import torch.utils.dlpack as torch_dlpack
+from packaging import version
 
 from skrl import config, logger
 from skrl.envs.wrappers.jax.base import MultiAgentEnvWrapper, Wrapper
 from skrl.utils.spaces.torch import flatten_tensorized_space, tensorize_space, unflatten_tensorized_space
-
 
 # ML frameworks conversion utilities
 # jaxlib.xla_extension.XlaRuntimeError: INVALID_ARGUMENT: DLPack tensor is on GPU, but no GPU backend was provided.
@@ -135,7 +138,7 @@ class IsaacLabWrapper(Wrapper):
 
     def render(self, *args, **kwargs) -> None:
         """Render the environment."""
-        return None
+        return
 
     def close(self) -> None:
         """Close the environment."""
@@ -216,7 +219,7 @@ class IsaacLabMultiAgentWrapper(MultiAgentEnvWrapper):
 
     def render(self, *args, **kwargs) -> None:
         """Render the environment."""
-        return None
+        return
 
     def close(self) -> None:
         """Close the environment."""

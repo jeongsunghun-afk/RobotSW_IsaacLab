@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [torch-start-a2c]
 # import the agent and its default configuration
 from skrl.agents.torch.a2c import A2C, A2C_CFG
@@ -54,7 +59,8 @@ agent = A2C(
 
 # [torch-start-a2c-rnn]
 # import the agent and its default configuration
-from skrl.agents.torch.a2c import A2C_RNN as A2C, A2C_CFG
+from skrl.agents.torch.a2c import A2C_CFG
+from skrl.agents.torch.a2c import A2C_RNN as A2C
 
 # instantiate the agent's models
 models = {}
@@ -228,7 +234,8 @@ agent = DDPG(
 
 # [torch-start-ddpg-rnn]
 # import the agent and its default configuration
-from skrl.agents.torch.ddpg import DDPG_RNN as DDPG, DDPG_CFG
+from skrl.agents.torch.ddpg import DDPG_CFG
+from skrl.agents.torch.ddpg import DDPG_RNN as DDPG
 
 # instantiate the agent's models
 models = {}
@@ -422,7 +429,8 @@ agent = PPO(
 
 # [torch-start-ppo-rnn]
 # import the agent and its default configuration
-from skrl.agents.torch.ppo import PPO_RNN as PPO, PPO_CFG
+from skrl.agents.torch.ppo import PPO_CFG
+from skrl.agents.torch.ppo import PPO_RNN as PPO
 
 # instantiate the agent's models
 models = {}
@@ -610,7 +618,8 @@ agent = RPO(
 
 # [torch-start-rpo-rnn]
 # import the agent and its default configuration
-from skrl.agents.torch.rpo import RPO_RNN as RPO, RPO_CFG
+from skrl.agents.torch.rpo import RPO_CFG
+from skrl.agents.torch.rpo import RPO_RNN as RPO
 
 # instantiate the agent's models
 models = {}
@@ -698,7 +707,8 @@ agent = SAC(
 
 # [torch-start-sac-rnn]
 # import the agent and its default configuration
-from skrl.agents.torch.sac import SAC_RNN as SAC, SAC_CFG
+from skrl.agents.torch.sac import SAC_CFG
+from skrl.agents.torch.sac import SAC_RNN as SAC
 
 # instantiate the agent's models
 models = {}
@@ -818,7 +828,8 @@ agent = TD3(
 
 # [torch-start-td3-rnn]
 # import the agent and its default configuration
-from skrl.agents.torch.td3 import TD3_RNN as TD3, TD3_CFG
+from skrl.agents.torch.td3 import TD3_CFG
+from skrl.agents.torch.td3 import TD3_RNN as TD3
 
 # instantiate the agent's models
 models = {}
@@ -877,7 +888,8 @@ agent = TRPO(
 
 # [torch-start-trpo-rnn]
 # import the agent and its default configuration
-from skrl.agents.torch.trpo import TRPO_RNN as TRPO, TRPO_CFG
+from skrl.agents.torch.trpo import TRPO_CFG
+from skrl.agents.torch.trpo import TRPO_RNN as TRPO
 
 # instantiate the agent's models
 models = {}

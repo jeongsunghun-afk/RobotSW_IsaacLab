@@ -1,10 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import torch
 from torch.distributions import Categorical
-
 
 # speed up distribution construction by disabling checking
 Categorical.set_default_validate_args(False)

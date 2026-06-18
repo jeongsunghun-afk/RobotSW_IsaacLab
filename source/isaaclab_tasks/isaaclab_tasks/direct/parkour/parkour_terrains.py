@@ -42,7 +42,7 @@ import trimesh
 
 from isaaclab.terrains.sub_terrain_cfg import SubTerrainBaseCfg
 from isaaclab.terrains.trimesh.mesh_terrains import PARKOUR_GOALS_REGISTRY
-from isaaclab.terrains.trimesh.mesh_terrains_cfg import MeshParkourHurdleTerrainCfg
+from isaaclab.terrains.trimesh.mesh_terrains_cfg import MeshParkourHurdleTerrainCfg, MeshParkourStairTerrainCfg
 from isaaclab.terrains.trimesh.utils import make_border, make_plane
 from isaaclab.utils import configclass
 from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
@@ -1258,3 +1258,162 @@ class MeshParkourRoughBlocksTerrainCfg(SubTerrainBaseCfg):
 
     num_goals: int = 8
     """Number of goal waypoints per terrain tile. Defaults to 8."""
+
+
+def parkour_stair_with_midgoals_terrain(
+    difficulty: float, cfg: MeshParkourStairWithMidGoalsTerrainCfg
+) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate a parkour stair terrain with intermediate ascend/descend goals and a run-out last goal.
+
+    Geometry is identical to the core ``parkour_stair_terrain`` (mesh_terrains.py:1043):
+    a start platform followed by ``num_stairs`` cycles of
+    ``ascending steps -> flat top -> descending steps -> flat bottom``.
+
+    Goal-list changes vs core (mesh geometry is unchanged):
+
+    1. Intermediate goals — each cycle emits 4 goals instead of 2, in the order
+       ``[ascend-mid, top, descend-mid, bottom]``:
+
+       * ``ascend-mid``: centre of the mid ascending step (index ``num_steps_per_stair // 2``),
+         placed on that step's *top surface* (z = ``(m + 1) * sh``).
+       * ``top``: centre of the flat top section (z = ``num_steps_per_stair * sh``) — same as core.
+       * ``descend-mid``: centre of the mid descending step (index ``num_steps_per_stair // 2``),
+         placed on that step's *top surface* (z = ``(num_steps_per_stair - m - 1) * sh``).
+       * ``bottom``: centre of the flat bottom section (z = 0) — same as core, except the
+         final cycle (see #2).
+
+       With ``num_stairs = 2`` this yields exactly ``4 * 2 = 8`` goals, matching
+       ``num_goals = 8`` so the core padding branch is never taken.
+
+    2. Run-out last goal — the final bottom goal is pushed away from the stairs by
+       ``last_goal_runout`` metres so the robot has room to reach it instead of u-turning
+       on top of it.  The full tile ground plane already covers this run-out region
+       (bottom flats are at z = 0), so no extra mesh box is required.  Only the final
+       cycle's bottom goal is moved; intermediate cycles keep the flat-centre bottom goal.
+
+    Args:
+        difficulty: The difficulty of the terrain. This is a value between 0 and 1.
+        cfg: The configuration for the terrain. Uses all fields from
+            :class:`MeshParkourStairWithMidGoalsTerrainCfg` (a subclass of the core
+            ``MeshParkourStairTerrainCfg`` with the extra ``last_goal_runout`` field).
+
+    Returns:
+        A tuple containing the tri-mesh list of the terrain and the origin of the terrain (in m).
+    """
+    # resolve difficulty-dependent parameters (identical to core)
+    sw = float(np.random.uniform(cfg.stair_width_range[0], cfg.stair_width_range[1]))
+    sh = cfg.stair_height_range[0] + difficulty * (cfg.stair_height_range[1] - cfg.stair_height_range[0])
+
+    terrain_w = cfg.size[1]
+    mid_y = terrain_w / 2.0
+
+    meshes_list: list[trimesh.Trimesh] = []
+
+    # ground plane (covers the full tile at z=0 — also provides the run-out floor)
+    meshes_list.append(make_plane(cfg.size, height=0.0, center_zero=False))
+
+    goals_list: list[list[float]] = []
+
+    # mid-step index (same for ascending and descending sections)
+    m = cfg.num_steps_per_stair // 2
+
+    current_x = cfg.platform_length
+
+    for cycle in range(cfg.num_stairs):
+        # ── ascending steps ───────────────────────────────────────────────────
+        asc_start_x = current_x
+        for k in range(cfg.num_steps_per_stair):
+            step_top = (k + 1) * sh
+            if step_top > 1e-3 and sw > 1e-3:
+                dim = (sw, terrain_w, step_top)
+                pos = (current_x + sw / 2.0, mid_y, step_top / 2.0)
+                meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+            current_x += sw
+
+        # goal (ascend-mid): centre of the mid ascending step, on its top surface
+        ascend_mid_x = asc_start_x + m * sw + sw / 2.0
+        ascend_mid_z = (m + 1) * sh
+        goals_list.append([ascend_mid_x, mid_y, ascend_mid_z])
+
+        # ── flat top section ──────────────────────────────────────────────────
+        top_h = cfg.num_steps_per_stair * sh
+        # goal (top): centre of the flat top (landing after ascent) — same as core
+        goals_list.append([current_x + cfg.flat_section_length / 2.0, mid_y, top_h])
+        if top_h > 1e-3 and cfg.flat_section_length > 1e-3:
+            dim = (cfg.flat_section_length, terrain_w, top_h)
+            pos = (current_x + cfg.flat_section_length / 2.0, mid_y, top_h / 2.0)
+            meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+        current_x += cfg.flat_section_length
+
+        # ── descending steps ──────────────────────────────────────────────────
+        desc_start_x = current_x
+        for k in range(cfg.num_steps_per_stair):
+            step_top = (cfg.num_steps_per_stair - k - 1) * sh
+            if step_top > 1e-3 and sw > 1e-3:
+                dim = (sw, terrain_w, step_top)
+                pos = (current_x + sw / 2.0, mid_y, step_top / 2.0)
+                meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
+            current_x += sw
+
+        # goal (descend-mid): centre of the mid descending step, on its top surface
+        descend_mid_x = desc_start_x + m * sw + sw / 2.0
+        descend_mid_z = (cfg.num_steps_per_stair - m - 1) * sh
+        goals_list.append([descend_mid_x, mid_y, descend_mid_z])
+
+        # ── flat bottom section (ground level — no box needed, advance x only) ─
+        last_step_end_x = current_x
+        if cycle == cfg.num_stairs - 1:
+            # run-out: push the final bottom goal away from the stairs so the robot
+            # has room to reach it instead of u-turning on top of it.
+            bottom_x = last_step_end_x + cfg.last_goal_runout
+        else:
+            # intermediate cycles keep the flat-centre bottom goal (core behaviour)
+            bottom_x = last_step_end_x + cfg.flat_section_length / 2.0
+        goals_list.append([bottom_x, mid_y, 0.0])
+        current_x += cfg.flat_section_length
+
+    # border walls
+    if cfg.border_width > 0.0:
+        inner_size = (cfg.size[0] - 2 * cfg.border_width, cfg.size[1] - 2 * cfg.border_width)
+        border_center = (cfg.size[0] / 2.0, cfg.size[1] / 2.0, cfg.border_height / 2.0)
+        meshes_list += make_border(cfg.size, inner_size, cfg.border_height, border_center)
+
+    # origin at center of start platform (ground level)
+    origin = np.array([cfg.platform_length / 2.0, cfg.size[1] / 2.0, 0.0])
+
+    # build goals array: pad with last goal if needed, truncate to num_goals.
+    # With num_stairs cycles × 4 goals == num_goals (8 == 8) the padding branch is
+    # never taken; it is retained for robustness against cfg changes.
+    _raw = np.array(goals_list, dtype=float) if goals_list else origin.reshape(1, 3)
+    if len(_raw) < cfg.num_goals:
+        _raw = np.vstack([_raw, np.tile(_raw[-1:], (cfg.num_goals - len(_raw), 1))])
+    goals = _raw[: cfg.num_goals]
+
+    # publish to module-level registry (consumed by parkour_env after terrain build)
+    PARKOUR_GOALS_REGISTRY.append((goals.copy(), origin.copy()))
+
+    return meshes_list, origin
+
+
+@configclass
+class MeshParkourStairWithMidGoalsTerrainCfg(MeshParkourStairTerrainCfg):
+    """Configuration for :func:`parkour_stair_with_midgoals_terrain`.
+
+    Inherits every field from the core :class:`MeshParkourStairTerrainCfg`
+    (platform_length, stair_width_range, stair_height_range, flat_section_length,
+    num_steps_per_stair, num_stairs, border_width, border_height, num_goals) and only
+
+    1. swaps ``function`` to the task-level mid-goal stair generator, and
+    2. adds the ``last_goal_runout`` parameter (run-out distance for the final goal).
+    """
+
+    function = parkour_stair_with_midgoals_terrain
+
+    last_goal_runout: float = 1.0
+    """Distance (m) past the final descending step at which the final bottom goal is placed.
+
+    Pushes the last goal away from the stairs so the robot has room to reach it instead of
+    u-turning on top of it.  The full tile ground plane already covers this run-out region
+    (bottom flats are at z = 0), so no extra mesh is added.  Must keep the final goal x inside
+    the tile ``size[0]``.  Defaults to 1.0.
+    """

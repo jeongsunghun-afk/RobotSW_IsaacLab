@@ -1,8 +1,8 @@
 # [HYP-REWARD] Reward Terms Analysis: Calf Extension/Flexion Incentives
 
-**Date**: 2026-05-26  
-**Task**: #3 — reward-investigator  
-**Scope**: Go2 Parkour environment reward function analysis  
+**Date**: 2026-05-26
+**Task**: #3 — reward-investigator
+**Scope**: Go2 Parkour environment reward function analysis
 **Files Analyzed**:
 - `source/isaaclab_tasks/isaaclab_tasks/direct/parkour/parkour_env.py` (`_get_rewards()`, lines 970–1164)
 - `source/isaaclab_tasks/isaaclab_tasks/direct/parkour/parkour_env_cfg.py` (`reward_scales`, lines 566–583)
@@ -277,7 +277,7 @@ The `hip_pos` term creates a **13.5× stronger** restoring force for hip joints 
 > **Note**: This section lists implications only. Code changes are outside this task's scope.
 
 1. **Add `joint_pos_limits` penalty** (most targeted fix):
-   - Add to `reward_scales`: `"joint_pos_limits": -X.X` 
+   - Add to `reward_scales`: `"joint_pos_limits": -X.X`
    - Add corresponding computation in `_get_rewards()` using soft limits
    - Formula: `sum(max(q - q_soft_upper, 0)² + max(q_soft_lower - q, 0)²)`
 

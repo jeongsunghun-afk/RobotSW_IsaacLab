@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
@@ -5,7 +10,6 @@ from typing import Any
 import flax
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from skrl.utils.spaces.jax import compute_space_limits
 

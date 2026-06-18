@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """50Hz 벤치마킹 및 성능 측정 모듈.
 
 Latency, throughput, jitter를 측정하여 동시 운영 성능 검증.
@@ -10,29 +15,28 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
 class FrameMetrics:
     """단일 프레임의 성능 지표."""
 
-    timestamp: float                    # 절대 시간 (unix)
-    frame_id: int                       # 프레임 번호
-    setpoint_receive_time: Optional[float] = None  # Setpoint 수신 시간
-    action_dispatch_time: Optional[float] = None   # Action 발행 시간
-    state_send_time: Optional[float] = None        # State 발행 시간
-    state_recv_time: Optional[float] = None        # State 수신 시간 (controller)
+    timestamp: float  # 절대 시간 (unix)
+    frame_id: int  # 프레임 번호
+    setpoint_receive_time: float | None = None  # Setpoint 수신 시간
+    action_dispatch_time: float | None = None  # Action 발행 시간
+    state_send_time: float | None = None  # State 발행 시간
+    state_recv_time: float | None = None  # State 수신 시간 (controller)
 
     @property
-    def e2e_latency(self) -> Optional[float]:
+    def e2e_latency(self) -> float | None:
         """End-to-end latency (setpoint receive → action dispatch, ms)."""
         if self.setpoint_receive_time and self.action_dispatch_time:
             return (self.action_dispatch_time - self.setpoint_receive_time) * 1000
         return None
 
     @property
-    def state_latency(self) -> Optional[float]:
+    def state_latency(self) -> float | None:
         """State transmission latency (send → receive, ms)."""
         if self.state_send_time and self.state_recv_time:
             return (self.state_recv_time - self.state_send_time) * 1000
@@ -80,7 +84,7 @@ class FrequencyMonitor:
             return 0.0
         intervals = []
         for i in range(1, len(self._timestamps)):
-            dt = (self._timestamps[i] - self._timestamps[i-1]) * 1000
+            dt = (self._timestamps[i] - self._timestamps[i - 1]) * 1000
             intervals.append(dt)
         return sum(intervals) / len(intervals) if intervals else 0.0
 
@@ -91,12 +95,12 @@ class FrequencyMonitor:
             return 0.0
         intervals = []
         for i in range(1, len(self._timestamps)):
-            dt = (self._timestamps[i] - self._timestamps[i-1]) * 1000
+            dt = (self._timestamps[i] - self._timestamps[i - 1]) * 1000
             intervals.append(dt)
 
         mean = sum(intervals) / len(intervals)
         variance = sum((x - mean) ** 2 for x in intervals) / len(intervals)
-        return variance ** 0.5
+        return variance**0.5
 
 
 class LatencyTracker:
@@ -139,7 +143,7 @@ class LatencyTracker:
 class BenchmarkSession:
     """전체 벤치마킹 세션 관리."""
 
-    def __init__(self, output_dir: Optional[str] = None, session_name: str = "bench"):
+    def __init__(self, output_dir: str | None = None, session_name: str = "bench"):
         self.output_dir = Path(output_dir or "logs")
         self.session_name = session_name
         self.output_dir.mkdir(parents=True, exist_ok=True)

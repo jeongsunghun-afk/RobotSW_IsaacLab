@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# run/play_hind_leg — HindLeg-Direct-v0 전용 play + 관절 텔레메트리 플롯 래퍼
+#
+# 체크포인트를 로드하고 inference를 실행한 뒤,
+# 관절별 position / velocity / torque 플롯을 <run>/plots/hind_leg_joint_data.png 에 저장.
+# 카메라가 로봇 base를 자동 추적.
+#
+# 사용법:
+#   ./run/play_hind_leg                                      # 기본 HindLeg-Direct-v0, 최신 체크포인트
+#   ./run/play_hind_leg --checkpoint logs/.../model_1000.pt
+#   ./run/play_hind_leg --steps 1000 --video --video_length 400
+#   ./run/play_hind_leg --real-time
+#
+# 주요 인자:
+#   --task <id>              태스크 이름 (기본: HindLeg-Direct-v0)
+#   --num_envs <N>           환경 수 (기본: 1)
+#   --checkpoint <path>      체크포인트 경로
+#   --load_run <run_name>    특정 run 이름으로 탐색
+#   --steps <N>              inference 스텝 수 (기본: 500)
+#   --video                  영상 녹화
+#   --video_length <N>       녹화 길이 (스텝, 기본 400)
+#   --real-time              실시간 모드
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate isaac-5.1
+
+cd "$REPO"
+
+exec ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play_hind_leg.py "$@"

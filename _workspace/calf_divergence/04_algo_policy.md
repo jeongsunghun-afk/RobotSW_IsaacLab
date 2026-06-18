@@ -1,5 +1,5 @@
 # Task #4 — [HYP-ALGO] PPO Action Distribution Analysis
-**Date**: 2026-05-26  
+**Date**: 2026-05-26
 **Scope**: ActorCriticRMA + PPOParkour — action distribution parameters and gradient flow
 
 ---
@@ -54,7 +54,7 @@ scan_latent = scandot_encoder(scan_obs[187])          # line 284  → dim=32 (sc
 obs_actor = cat([obs_actor(68), scan_latent(32)], dim=-1)  # line 285 → dim=100
 ```
 
-**Total actor input**: 42 + 6 + 20 + 32 = **100 dims**  
+**Total actor input**: 42 + 6 + 20 + 32 = **100 dims**
 (Actor hidden: 512→256→128; output: 12 = num_actions)
 
 ### 2.2 Actor MLP Output (`rsl_rl/networks/mlp.py:66-68`)

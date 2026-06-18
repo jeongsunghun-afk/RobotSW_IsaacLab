@@ -1,8 +1,10 @@
-import isaacgym
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
 import torch
 import torch.nn as nn
-
 from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
 from skrl.envs.torch import wrap_env
 
@@ -46,7 +48,6 @@ class Policy(GaussianMixin, Model):
 headless = True  # set headless to False for rendering
 
 from reaching_franka_isaacgym_env import TASK_CFG, ReachingFrankaTask
-
 
 TASK_CFG["headless"] = headless
 TASK_CFG["env"]["numEnvs"] = 64

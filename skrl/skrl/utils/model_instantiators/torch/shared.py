@@ -1,23 +1,29 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import textwrap
 from typing import Any
 
-import textwrap
 import gymnasium
-
 import torch
 import torch.nn as nn  # noqa
 
-from skrl.models.torch import Model  # noqa
 from skrl.models.torch import (  # noqa
     CategoricalMixin,
     DeterministicMixin,
     GaussianMixin,
+    Model,  # noqa
     MultiCategoricalMixin,
     MultivariateGaussianMixin,
 )
-from skrl.utils.model_instantiators.torch.common import one_hot_encoding  # noqa
-from skrl.utils.model_instantiators.torch.common import generate_containers
+from skrl.utils.model_instantiators.torch.common import (
+    generate_containers,
+    one_hot_encoding,  # noqa
+)
 from skrl.utils.spaces.torch import unflatten_tensorized_space  # noqa
 
 
@@ -87,39 +93,33 @@ def shared_model(
         raise ValueError(f"Unknown class: {class_name}")
 
     def get_return(class_name):
-        if class_name.lower() == "categoricalmixin":
+        if (
+            class_name.lower() == "categoricalmixin"
+            or class_name.lower() == "multicategoricalmixin"
+            or class_name.lower() == "deterministicmixin"
+        ):
             return r"output, {}"
-        elif class_name.lower() == "multicategoricalmixin":
-            return r"output, {}"
-        elif class_name.lower() == "deterministicmixin":
-            return r"output, {}"
-        elif class_name.lower() == "gaussianmixin":
-            return r'output, {"log_std": self.log_std_parameter}'
-        elif class_name.lower() == "multivariategaussianmixin":
+        elif class_name.lower() == "gaussianmixin" or class_name.lower() == "multivariategaussianmixin":
             return r'output, {"log_std": self.log_std_parameter}'
         raise ValueError(f"Unknown class: {class_name}")
 
     def get_extra(class_name, parameter, role, model):
-        if class_name.lower() == "categoricalmixin":
+        if (
+            class_name.lower() == "categoricalmixin"
+            or class_name.lower() == "multicategoricalmixin"
+            or class_name.lower() == "deterministicmixin"
+        ):
             return ""
-        elif class_name.lower() == "multicategoricalmixin":
-            return ""
-        elif class_name.lower() == "deterministicmixin":
-            return ""
-        elif class_name.lower() == "gaussianmixin":
+        elif class_name.lower() == "gaussianmixin" or class_name.lower() == "multivariategaussianmixin":
             initial_log_std = float(parameter.get("initial_log_std", 0))
             fixed_log_std = parameter.get("fixed_log_std", False)
-            return f'self.log_std_parameter = nn.Parameter(torch.full(size=({model["output"]["size"]},), fill_value={initial_log_std}, dtype=torch.float32), requires_grad={not fixed_log_std})'
-        elif class_name.lower() == "multivariategaussianmixin":
-            initial_log_std = float(parameter.get("initial_log_std", 0))
-            fixed_log_std = parameter.get("fixed_log_std", False)
-            return f'self.log_std_parameter = nn.Parameter(torch.full(size=({model["output"]["size"]},), fill_value={initial_log_std}, dtype=torch.float32), requires_grad={not fixed_log_std})'
+            return f"self.log_std_parameter = nn.Parameter(torch.full(size=({model['output']['size']},), fill_value={initial_log_std}, dtype=torch.float32), requires_grad={not fixed_log_std})"
         raise ValueError(f"Unknown class: {class_name}")
 
     # checking
-    assert (
-        len(structure) == len(roles) == len(parameters)
-    ), f"Invalid configuration: structures ({len(structure)}), roles ({len(roles)}) and parameters ({len(parameters)}) have different lengths"
+    assert len(structure) == len(roles) == len(parameters), (
+        f"Invalid configuration: structures ({len(structure)}), roles ({len(roles)}) and parameters ({len(parameters)}) have different lengths"
+    )
 
     models = [{"class": item} for item in structure]
 
@@ -135,8 +135,8 @@ def shared_model(
     networks_common = []
     forward_common = []
     for container in models[0]["containers"]:
-        networks_common.append(f'self.{container["name"]}_container = {container["sequential"]}')
-        forward_common.append(f'{container["name"]} = self.{container["name"]}_container({container["input"]})')
+        networks_common.append(f"self.{container['name']}_container = {container['sequential']}")
+        forward_common.append(f"{container['name']} = self.{container['name']}_container({container['input']})")
     forward_common.insert(
         0, 'taken_actions = unflatten_tensorized_space(self.action_space, inputs.get("taken_actions"))'
     )
@@ -147,22 +147,22 @@ def shared_model(
 
     # process output
     if models[0]["output"]["modules"]:
-        models[0]["networks"].append(f'self.{roles[0]}_layer = {models[0]["output"]["modules"][0]}')
-        models[0]["forward"].append(f'output = self.{roles[0]}_layer({container["name"]})')
+        models[0]["networks"].append(f"self.{roles[0]}_layer = {models[0]['output']['modules'][0]}")
+        models[0]["forward"].append(f"output = self.{roles[0]}_layer({container['name']})")
     if models[0]["output"]["output"]:
-        models[0]["forward"].append(f'output = {models[0]["output"]["output"]}')
+        models[0]["forward"].append(f"output = {models[0]['output']['output']}")
     else:
-        models[0]["forward"][-1] = models[0]["forward"][-1].replace(f'{container["name"]} =', "output =", 1)
+        models[0]["forward"][-1] = models[0]["forward"][-1].replace(f"{container['name']} =", "output =", 1)
 
     if models[1]["output"]["modules"]:
-        models[1]["networks"].append(f'self.{roles[1]}_layer = {models[1]["output"]["modules"][0]}')
+        models[1]["networks"].append(f"self.{roles[1]}_layer = {models[1]['output']['modules'][0]}")
         models[1]["forward"].append(
-            f'output = self.{roles[1]}_layer({"shared_output" if single_forward_pass else container["name"]})'
+            f"output = self.{roles[1]}_layer({'shared_output' if single_forward_pass else container['name']})"
         )
     if models[1]["output"]["output"]:
-        models[1]["forward"].append(f'output = {models[1]["output"]["output"]}')
+        models[1]["forward"].append(f"output = {models[1]['output']['output']}")
     else:
-        models[1]["forward"][-1] = models[1]["forward"][-1].replace(f'{container["name"]} =', "output =", 1)
+        models[1]["forward"][-1] = models[1]["forward"][-1].replace(f"{container['name']} =", "output =", 1)
 
     # build substitutions and indent content
     networks_common = textwrap.indent("\n".join(networks_common), prefix=" " * 8)[8:]
@@ -182,14 +182,14 @@ def shared_model(
             ]
             + ["    " + item for item in forward_common]
             + [
-                f'    shared_output = {container["name"]}',
+                f"    shared_output = {container['name']}",
                 "else:",
                 "    shared_output = self._shared_output",
                 "self._shared_output = None",
             ]
             + models[1]["forward"]
         )
-        forward_common.append(f'self._shared_output = {container["name"]}')
+        forward_common.append(f"self._shared_output = {container['name']}")
         forward_common = textwrap.indent("\n".join(forward_common), prefix=" " * 12)[12:]
     else:
         forward_common = textwrap.indent("\n".join(forward_common), prefix=" " * 8)[8:]

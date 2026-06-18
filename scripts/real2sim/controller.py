@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Real2Sim 컨트롤러 GUI.
 
 PyQt5 슬라이더로 R_Skeleton Hind Leg 관절을 실시간 제어.
@@ -32,7 +37,6 @@ except ImportError as e:
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 from utils.data_logger import DataLogger  # noqa: E402
-
 from utils.zmq_bridge import ControllerTransport, ZMQControllerBridge  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -46,21 +50,19 @@ JOINT_LIMITS_DEG: list[tuple[float, float]] = [
     (-45.0, 45.0),
     (-30.0, 30.0),
 ]
-JOINT_LIMITS_RAD: list[tuple[float, float]] = [
-    (math.radians(lo), math.radians(hi)) for lo, hi in JOINT_LIMITS_DEG
-]
+JOINT_LIMITS_RAD: list[tuple[float, float]] = [(math.radians(lo), math.radians(hi)) for lo, hi in JOINT_LIMITS_DEG]
 NUM_JOINTS = 5
 
 # ---------------------------------------------------------------------------
 # 모션 데이터셋 파라미터
 # ---------------------------------------------------------------------------
 DATASET_DIR = Path(__file__).parent / "smr_hind_leg" / "new_dataset"
-FRAME_JOINT_POS_SLICE = slice(7, 12)   # 29차원 프레임에서 joint_pos (rad)
+FRAME_JOINT_POS_SLICE = slice(7, 12)  # 29차원 프레임에서 joint_pos (rad)
 FRAME_JOINT_VEL_SLICE = slice(21, 26)  # 29차원 프레임에서 joint_vel (rad/s)
 
 # 그래프 설정
-HISTORY_LEN = 150   # 3초 × 50Hz
-RENDER_HZ = 30      # GUI 갱신 주파수
+HISTORY_LEN = 150  # 3초 × 50Hz
+RENDER_HZ = 30  # GUI 갱신 주파수
 COLORS = ["#e74c3c", "#2ecc71", "#3498db", "#f39c12", "#9b59b6"]
 
 

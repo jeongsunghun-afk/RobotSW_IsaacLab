@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 data_recorder.py
 ================
@@ -33,14 +38,15 @@ import pathlib
 import shutil
 
 import matplotlib
-matplotlib.use("Agg")          # 헤드리스 환경용, GUI 불필요
+
+matplotlib.use("Agg")  # 헤드리스 환경용, GUI 불필요
 import matplotlib.pyplot as plt
 import numpy as np
-
 
 # ──────────────────────────────────────────────────────────────────────
 # 헬퍼
 # ──────────────────────────────────────────────────────────────────────
+
 
 def _rms_no_outlier(arr: np.ndarray) -> float:
     """IQR 방법으로 outlier를 제거한 뒤 RMS를 계산합니다."""
@@ -52,11 +58,11 @@ def _rms_no_outlier(arr: np.ndarray) -> float:
     filtered = arr[(arr >= lo) & (arr <= hi)]
     if filtered.size == 0:
         return float("nan")
-    return float(np.sqrt(np.mean(filtered ** 2)))
+    return float(np.sqrt(np.mean(filtered**2)))
 
 
 def _plot_grid(
-    data: np.ndarray,          # [steps, channels]
+    data: np.ndarray,  # [steps, channels]
     labels: list[str],
     title: str,
     ylabel: str,
@@ -98,6 +104,7 @@ def _plot_grid(
 # DataRecorder 클래스
 # ──────────────────────────────────────────────────────────────────────
 
+
 class DataRecorder:
     """시뮬레이션 루프에서 스텝마다 데이터를 수집합니다.
 
@@ -132,7 +139,7 @@ class DataRecorder:
         self._ang_vel: list[np.ndarray] = []
 
         self._step = 0
-        self._saved = False      # 이번 세그먼트 저장 완료 여부
+        self._saved = False  # 이번 세그먼트 저장 완료 여부
 
     # ------------------------------------------------------------------
 
@@ -172,31 +179,17 @@ class DataRecorder:
             return
 
         try:
-            self._torques.append(
-                robot.data.applied_torque[0].detach().cpu().numpy().copy()
-            )
-            self._joint_pos.append(
-                robot.data.joint_pos[0].detach().cpu().numpy().copy()
-            )
-            self._joint_vel.append(
-                robot.data.joint_vel[0].detach().cpu().numpy().copy()
-            )
+            self._torques.append(robot.data.applied_torque[0].detach().cpu().numpy().copy())
+            self._joint_pos.append(robot.data.joint_pos[0].detach().cpu().numpy().copy())
+            self._joint_vel.append(robot.data.joint_vel[0].detach().cpu().numpy().copy())
             # processed actions (없으면 zeros 대체)
             proc = getattr(base_env, "_processed_actions", None)
             if proc is not None:
-                self._proc_actions.append(
-                    proc[0].detach().cpu().numpy().copy()
-                )
+                self._proc_actions.append(proc[0].detach().cpu().numpy().copy())
             else:
-                self._proc_actions.append(
-                    np.zeros(robot.data.joint_pos.shape[1])
-                )
-            self._lin_vel.append(
-                robot.data.root_lin_vel_b[0].detach().cpu().numpy().copy()
-            )
-            self._ang_vel.append(
-                robot.data.root_ang_vel_b[0].detach().cpu().numpy().copy()
-            )
+                self._proc_actions.append(np.zeros(robot.data.joint_pos.shape[1]))
+            self._lin_vel.append(robot.data.root_lin_vel_b[0].detach().cpu().numpy().copy())
+            self._ang_vel.append(robot.data.root_ang_vel_b[0].detach().cpu().numpy().copy())
         except Exception as e:
             print(f"[DataRecorder] 데이터 수집 오류 (스텝 {self._step}): {e}")
             return
@@ -224,23 +217,18 @@ class DataRecorder:
 
         # ── 저장 디렉토리 생성 ───────────────────────────────────────
         # command_label에 파일명으로 불가능한 문자 제거
-        safe_label = (
-            command_label
-            .replace(" ", "_")
-            .replace("/", "-")
-            .replace("\\", "-")
-        )
+        safe_label = command_label.replace(" ", "_").replace("/", "-").replace("\\", "-")
         # 폴더 구조: results / task_name / model_name / command_label
         save_dir = self._results_root / self._task_name / self._load_run_name / safe_label
         save_dir.mkdir(parents=True, exist_ok=True)
 
         # numpy 배열로 변환
-        torques       = np.array(self._torques)        # [500, J]
-        joint_pos     = np.array(self._joint_pos)
-        joint_vel     = np.array(self._joint_vel)
-        proc_actions  = np.array(self._proc_actions)
-        lin_vel       = np.array(self._lin_vel)        # [500, 3]
-        ang_vel       = np.array(self._ang_vel)
+        torques = np.array(self._torques)  # [500, J]
+        joint_pos = np.array(self._joint_pos)
+        joint_vel = np.array(self._joint_vel)
+        proc_actions = np.array(self._proc_actions)
+        lin_vel = np.array(self._lin_vel)  # [500, 3]
+        ang_vel = np.array(self._ang_vel)
 
         n_joints = torques.shape[1]
         if joint_names is None or len(joint_names) != n_joints:
@@ -250,20 +238,21 @@ class DataRecorder:
 
         # ── CSV 저장 ─────────────────────────────────────────────────
         self._save_csv(
-            save_dir, joint_names,
-            torques, joint_pos, joint_vel, proc_actions,
-            lin_vel, ang_vel,
+            save_dir,
+            joint_names,
+            torques,
+            joint_pos,
+            joint_vel,
+            proc_actions,
+            lin_vel,
+            ang_vel,
         )
 
         # ── Plot 저장 ────────────────────────────────────────────────
-        _plot_grid(torques,      joint_names, "Joint Torques",
-                   "Torque [Nm]",  save_dir / "joint_torques.png")
-        _plot_grid(joint_pos,    joint_names, "Joint Positions",
-                   "Pos [rad]",    save_dir / "joint_positions.png")
-        _plot_grid(joint_vel,    joint_names, "Joint Velocities",
-                   "Vel [rad/s]",  save_dir / "joint_velocities.png")
-        _plot_grid(proc_actions, joint_names, "Processed Actions",
-                   "Pos cmd [rad]", save_dir / "processed_actions.png")
+        _plot_grid(torques, joint_names, "Joint Torques", "Torque [Nm]", save_dir / "joint_torques.png")
+        _plot_grid(joint_pos, joint_names, "Joint Positions", "Pos [rad]", save_dir / "joint_positions.png")
+        _plot_grid(joint_vel, joint_names, "Joint Velocities", "Vel [rad/s]", save_dir / "joint_velocities.png")
+        _plot_grid(proc_actions, joint_names, "Processed Actions", "Pos cmd [rad]", save_dir / "processed_actions.png")
 
         self._plot_base_velocity(lin_vel, ang_vel, save_dir / "base_velocity.png")
 
@@ -285,8 +274,12 @@ class DataRecorder:
         self,
         save_dir: pathlib.Path,
         joint_names: list[str],
-        torques, joint_pos, joint_vel, proc_actions,
-        lin_vel, ang_vel,
+        torques,
+        joint_pos,
+        joint_vel,
+        proc_actions,
+        lin_vel,
+        ang_vel,
     ) -> None:
         """모든 데이터를 단일 CSV로 저장합니다."""
         import csv
@@ -303,8 +296,7 @@ class DataRecorder:
                 f"action_{jn_s}",
             ]
         # base velocity
-        headers += ["lin_vel_x", "lin_vel_y", "lin_vel_z",
-                    "ang_vel_x", "ang_vel_y", "ang_vel_z"]
+        headers += ["lin_vel_x", "lin_vel_y", "lin_vel_z", "ang_vel_x", "ang_vel_y", "ang_vel_z"]
 
         csv_path = save_dir / "robot_data.csv"
         with open(csv_path, "w", newline="") as f:
@@ -328,16 +320,24 @@ class DataRecorder:
             writer = csv.writer(f)
             writer.writerow(["joint", "torque_rms", "pos_rms", "vel_rms", "action_rms"])
             for j, jn in enumerate(joint_names):
-                writer.writerow([
-                    jn,
-                    _rms_no_outlier(torques[:, j]),
-                    _rms_no_outlier(joint_pos[:, j]),
-                    _rms_no_outlier(joint_vel[:, j]),
-                    _rms_no_outlier(proc_actions[:, j]),
-                ])
+                writer.writerow(
+                    [
+                        jn,
+                        _rms_no_outlier(torques[:, j]),
+                        _rms_no_outlier(joint_pos[:, j]),
+                        _rms_no_outlier(joint_vel[:, j]),
+                        _rms_no_outlier(proc_actions[:, j]),
+                    ]
+                )
             # base velocity RMS
-            for ax_name, idx in [("lin_vel_x", 0), ("lin_vel_y", 1), ("lin_vel_z", 2),
-                                  ("ang_vel_x", 0), ("ang_vel_y", 1), ("ang_vel_z", 2)]:
+            for ax_name, idx in [
+                ("lin_vel_x", 0),
+                ("lin_vel_y", 1),
+                ("lin_vel_z", 2),
+                ("ang_vel_x", 0),
+                ("ang_vel_y", 1),
+                ("ang_vel_z", 2),
+            ]:
                 arr = lin_vel[:, idx] if ax_name.startswith("lin") else ang_vel[:, idx]
                 writer.writerow([ax_name, _rms_no_outlier(arr), "", "", ""])
 
@@ -345,15 +345,16 @@ class DataRecorder:
 
     def _plot_base_velocity(
         self,
-        lin_vel: np.ndarray,   # [500, 3]
-        ang_vel: np.ndarray,   # [500, 3]
+        lin_vel: np.ndarray,  # [500, 3]
+        ang_vel: np.ndarray,  # [500, 3]
         save_path: pathlib.Path,
     ) -> None:
         """Base 선속도 + 각속도를 2행 3열로 플롯합니다."""
         lin_labels = ["lin_vel_x", "lin_vel_y", "lin_vel_z"]
         ang_labels = ["ang_vel_x", "ang_vel_y", "ang_vel_z"]
-        all_data   = list(zip(lin_labels, [lin_vel[:, i] for i in range(3)])) + \
-                     list(zip(ang_labels, [ang_vel[:, i] for i in range(3)]))
+        all_data = list(zip(lin_labels, [lin_vel[:, i] for i in range(3)])) + list(
+            zip(ang_labels, [ang_vel[:, i] for i in range(3)])
+        )
 
         fig, axes = plt.subplots(2, 3, figsize=(13, 6))
         axes = axes.reshape(-1)

@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 asset_path: /home/lgb/RobotSW_Genesis/genesis/assets/urdf/R.skeleton_v10_URDF_v3/urdf/R.skeleton_v10_URDF_v3_1_fixed_collision2.urdf
 usd_dir: /home/lgb/IsaacLab/source/isaaclab/data/Robots/R_Skeleton_Collision2
 usd_file_name: R_skeleton.usd

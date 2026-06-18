@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -34,22 +39,29 @@ parser = argparse.ArgumentParser(description="RSL-RL 인터랙티브 Inference �
 parser.add_argument("--video", action="store_true", default=False, help="영상 녹화 여부.")
 parser.add_argument("--video_length", type=int, default=200, help="녹화 길이 (스텝).")
 parser.add_argument(
-    "--disable_fabric", action="store_true", default=False,
+    "--disable_fabric",
+    action="store_true",
+    default=False,
     help="Fabric 비활성화 (USD I/O 사용).",
 )
 parser.add_argument("--num_envs", type=int, default=None, help="환경 수.")
 parser.add_argument("--task", type=str, default=None, help="태스크 이름.")
 parser.add_argument(
-    "--agent", type=str, default="rsl_rl_cfg_entry_point",
+    "--agent",
+    type=str,
+    default="rsl_rl_cfg_entry_point",
     help="RL 에이전트 설정 엔트리포인트 이름.",
 )
 parser.add_argument("--seed", type=int, default=None, help="환경 시드.")
 parser.add_argument(
-    "--use_pretrained_checkpoint", action="store_true",
+    "--use_pretrained_checkpoint",
+    action="store_true",
     help="Nucleus에서 사전학습 체크포인트 사용.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="실시간 평가 모드.")
-parser.add_argument("--wbc", action="store_true", default=False, help="Enable whole body control (19 DoF instead of 12 DoF).")
+parser.add_argument(
+    "--wbc", action="store_true", default=False, help="Enable whole body control (19 DoF instead of 12 DoF)."
+)
 
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
@@ -66,12 +78,15 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+# ── play_utils 임포트 (절대 파일 경로 기반 로드 — sys.path 무관) ─────────────
+import importlib.util as _ilu
+import inspect as _inspect
 import os
+import pathlib as _pl
 import time
 
 import gymnasium as gym
 import torch
-
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
 
 from isaaclab.envs import (
@@ -88,8 +103,8 @@ from isaaclab_rl.rsl_rl import (
     RslRlBaseRunnerCfg,
     RslRlVecEnvWrapper,
     export_policy_as_jit,
-    export_policy_as_onnx,
     export_policy_as_jit_parkour,
+    export_policy_as_onnx,
     export_policy_as_onnx_parkour,
 )
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -98,14 +113,8 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-# ── play_utils 임포트 (절대 파일 경로 기반 로드 — sys.path 무관) ─────────────
-import importlib.util as _ilu
-import inspect as _inspect
-import pathlib as _pl
-
 _THIS_FILE = _pl.Path(
-    __file__ if (__file__ is not None and _pl.Path(__file__).exists())
-    else _inspect.getfile(_inspect.currentframe())
+    __file__ if (__file__ is not None and _pl.Path(__file__).exists()) else _inspect.getfile(_inspect.currentframe())
 ).resolve()
 _PLAY_UTILS_DIR = _THIS_FILE.parent / "play_utils"
 
@@ -121,20 +130,20 @@ def _load_module(name: str, filename: str):
     return mod
 
 
-_csv_mod      = _load_module("play_utils.csv_utils",      "csv_utils.py")
-_env_mod      = _load_module("play_utils.env_utils",      "env_utils.py")
-_gait_mod     = _load_module("play_utils.gait_commands",  "gait_commands.py")
+_csv_mod = _load_module("play_utils.csv_utils", "csv_utils.py")
+_env_mod = _load_module("play_utils.env_utils", "env_utils.py")
+_gait_mod = _load_module("play_utils.gait_commands", "gait_commands.py")
 _terminal_mod = _load_module("play_utils.terminal_input", "terminal_input.py")
 _data_recorder_mod = _load_module("play_utils.data_recorder", "data_recorder.py")
 
-save_obs_data_to_csv       = _csv_mod.save_obs_data_to_csv
-save_actions_to_csv        = _csv_mod.save_actions_to_csv
+save_obs_data_to_csv = _csv_mod.save_obs_data_to_csv
+save_actions_to_csv = _csv_mod.save_actions_to_csv
 print_action_joint_mapping = _env_mod.print_action_joint_mapping
-get_env_command_info       = _env_mod.get_env_command_info
-get_env_interaction_info   = _env_mod.get_env_interaction_info
-build_go2wtw_command       = _gait_mod.build_go2wtw_command
-TerminalCommandInput       = _terminal_mod.TerminalCommandInput
-DataRecorder               = _data_recorder_mod.DataRecorder
+get_env_command_info = _env_mod.get_env_command_info
+get_env_interaction_info = _env_mod.get_env_interaction_info
+build_go2wtw_command = _gait_mod.build_go2wtw_command
+TerminalCommandInput = _terminal_mod.TerminalCommandInput
+DataRecorder = _data_recorder_mod.DataRecorder
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -185,6 +194,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     video_state = {"record_video_now": True, "last_video_step": 0}
 
     if args_cli.video:
+
         def custom_step_trigger(step):
             if video_state.get("record_video_now", False):
                 video_state["record_video_now"] = False
@@ -274,7 +284,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     }
 
     if has_interaction:
-        command_state["cmd_str"] = motion_labels[init_interaction_cmd] if init_interaction_cmd < len(motion_labels) else f"motion_{init_interaction_cmd}"
+        command_state["cmd_str"] = (
+            motion_labels[init_interaction_cmd]
+            if init_interaction_cmd < len(motion_labels)
+            else f"motion_{init_interaction_cmd}"
+        )
     elif num_commands == 3:
         command_state["cmd_str"] = f"vel_{init_cmds[0]:.2f}_{init_cmds[1]:.2f}_{init_cmds[2]:.2f}"
     elif num_commands > 3:
@@ -321,7 +335,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     action_history: list = []
 
     while simulation_app.is_running():
-
         # quit 요청 시 루프 탈출
         if command_state.get("quit_requested", False):
             print("[INFO] 사용자 quit 요청으로 종료합니다.")
@@ -330,7 +343,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         start_time = time.time()
 
         with torch.inference_mode():
-
             # ── 매 스텝 커맨드 강제 적용 (내부 resampling 방지) ────
             if num_commands > 0 and not has_interaction:
                 current_values = command_state["values"]
@@ -352,7 +364,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if command_state["reset_requested"]:
                 data_recorder.reset()
                 video_state["record_video_now"] = True
-                
+
                 all_env_ids = torch.arange(env.unwrapped.num_envs, device=env.unwrapped.device)
                 env.unwrapped._reset_idx(all_env_ids)
                 # 리셋 이후에도 커맨드 재적용 (resampling 덮어쓰기)

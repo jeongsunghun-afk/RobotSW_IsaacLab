@@ -1,15 +1,19 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
-import itertools
 import gymnasium
-from packaging import version
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging import version
 
 from skrl import config, logger
 from skrl.agents.torch import Agent
@@ -73,7 +77,7 @@ class SAC(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.torch.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
             if self.critic_1 is not None:
@@ -302,7 +306,6 @@ class SAC(Agent):
 
         # gradient steps
         for gradient_step in range(self.cfg.gradient_steps):
-
             # sample a batch from memory
             (
                 sampled_observations,

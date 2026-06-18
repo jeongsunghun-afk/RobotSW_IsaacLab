@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 asset_path: /home/lgb/RobotSW_Genesis/genesis/assets/urdf/URDF_neck_v3/go2_neck_v5.urdf
 usd_dir: /home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Go2Neck2
 usd_file_name: go2_neck.usd

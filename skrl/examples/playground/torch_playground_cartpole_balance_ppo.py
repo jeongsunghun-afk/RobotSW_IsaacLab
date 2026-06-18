@@ -1,12 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# import the skrl components to build the RL system
-from skrl import logger
 from skrl.agents.torch.ppo import PPO, PPO_CFG
 from skrl.envs.loaders.torch import load_playground_env
 from skrl.envs.wrappers.torch import wrap_env
@@ -17,6 +19,8 @@ from skrl.resources.schedulers.torch import KLAdaptiveLR
 from skrl.trainers.torch import SequentialTrainer
 from skrl.utils import set_seed
 
+# import the skrl components to build the RL system
+from skrl import logger
 
 # parse arguments (some arguments are already defined by the loader)
 parser = argparse.ArgumentParser()

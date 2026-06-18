@@ -1,6 +1,6 @@
 # AMP (Adversarial Motion Priors) 구현 비교 분석
 
-**분석 일자**: 2026-04-02  
+**분석 일자**: 2026-04-02
 **비교 대상**:
 - **현재 구현** (IsaacLab Go2AMP): `/home/lgb/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/go2_amp/`
 - **참조 구현** (MimicKit): `/home/lgb/MimicKit/`

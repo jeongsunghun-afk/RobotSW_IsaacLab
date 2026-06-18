@@ -211,6 +211,7 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     # Standing detection thresholds: when command magnitude is below these values, gait is suppressed
     standing_vel_threshold = 0.1  # ‖cmd_xy‖ below this → standing candidate (matches feet_air_time gate)
     standing_yaw_threshold = 0.1  # |yaw command| below this → standing confirmed
+    rel_standing_envs: float = 0.05  # fraction of resampled envs forced to cmd=0 (standing) each resample step
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
@@ -342,6 +343,7 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     # Standing detection thresholds: when command magnitude is below these values, gait is suppressed
     standing_vel_threshold = 0.1  # ‖cmd_xy‖ below this → standing candidate (matches feet_air_time gate)
     standing_yaw_threshold = 0.1  # |yaw command| below this → standing confirmed
+    rel_standing_envs: float = 0.1  # fraction of resampled envs forced to cmd=0 (standing) each resample step
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(

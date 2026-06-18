@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# run/go2_imitation_plot — Go2-Imitation-v0 속도 추종 플롯 래퍼
+#
+# vx를 0→max→0으로 sweep하며 실제 body-frame 속도 / 관절 데이터를 수집해
+# velocity_comparison.png + joints.png 를 run 디렉토리에 저장.
+#
+# 사용법:
+#   ./run/go2_imitation_plot --checkpoint logs/.../model_1000.pt
+#   ./run/go2_imitation_plot --task Go2-Imitation-v0 --max_speed 3.0 --hold_duration 2.0
+#   ./run/go2_imitation_plot --checkpoint logs/.../model.pt --video --headless
+#
+# 주요 인자:
+#   --task <id>              태스크 이름 (기본: Go2-Imitation-v0)
+#   --num_envs <N>           환경 수 (기본: 1)
+#   --checkpoint <path>      체크포인트 경로
+#   --load_run <run_name>    특정 run 이름으로 탐색
+#   --out_dir <path>         PNG 저장 경로 (기본: <run>/results)
+#   --max_speed <f>          sweep 최대 속도 m/s (기본: 3.0)
+#   --speed_step <f>         속도 증분 m/s (기본: 0.5)
+#   --ramp_duration <f>      ramp 시간 s (기본: 0.5)
+#   --hold_duration <f>      hold 시간 s (기본: 2.0)
+#   --settle_duration <f>    초기 정착 시간 s (기본: 2.0)
+#   --debug_fast             빠른 smoke 실행용 축소 스케줄
+#   --video                  mp4 녹화
+#   --headless               headless 모드
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate isaac-5.1
+
+cd "$REPO"
+
+exec ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/go2_imitation_plot.py "$@"

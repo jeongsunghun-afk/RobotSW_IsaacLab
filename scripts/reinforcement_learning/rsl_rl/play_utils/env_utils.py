@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 env_utils.py
 ===========
@@ -36,10 +41,7 @@ def print_action_joint_mapping(env) -> None:
         print(f"  {idx:02d}: {name}")
 
     if action_dim is not None and action_dim != len(joint_names):
-        print(
-            f"[env_utils] WARN: 액션 차원({action_dim})과 관절 수({len(joint_names)})가"
-            " 일치하지 않습니다."
-        )
+        print(f"[env_utils] WARN: 액션 차원({action_dim})과 관절 수({len(joint_names)})가 일치하지 않습니다.")
 
 
 def get_env_command_info(env) -> tuple[list[str], list[tuple[float, float]]]:
@@ -118,8 +120,6 @@ def get_env_interaction_info(env) -> tuple[bool, int, list[str]]:
         2: "lie_down",
         3: "stand_up",
     }
-    motion_labels = [
-        default_labels.get(i, f"motion_{i}") for i in range(num_motions)
-    ]
+    motion_labels = [default_labels.get(i, f"motion_{i}") for i in range(num_motions)]
 
     return True, num_motions, motion_labels

@@ -1,11 +1,15 @@
-from __future__ import annotations
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any
+from __future__ import annotations
 
 import collections
 import csv
 import glob
 import os
+from typing import Any
 
 import numpy as np
 
@@ -39,7 +43,7 @@ class MemoryFileIterator:
         self.n = 0
         self.file_paths = sorted(glob.glob(pathname))
 
-    def __iter__(self) -> "MemoryFileIterator":
+    def __iter__(self) -> MemoryFileIterator:
         """Return self to make iterable."""
         return self
 
@@ -91,7 +95,7 @@ class MemoryFileIterator:
         """
         filename = os.path.basename(self.file_paths[self.n])
 
-        with open(self.file_paths[self.n], "r") as f:
+        with open(self.file_paths[self.n]) as f:
             reader = csv.reader(f)
 
             # parse header
@@ -139,7 +143,7 @@ class TensorboardFileIterator:
         self.file_paths = sorted(glob.glob(pathname))
         self.tags = [tags] if isinstance(tags, str) else tags
 
-    def __iter__(self) -> "TensorboardFileIterator":
+    def __iter__(self) -> TensorboardFileIterator:
         """Return self to make iterable."""
         return self
 
@@ -166,10 +170,10 @@ class TensorboardFileIterator:
                     value = event.summary.value[0].simple_value
                     # record data
                     if tag in self.tags:
-                        if not tag in data:
+                        if tag not in data:
                             data[tag] = []
                         data[tag].append([step, value])
-                except Exception as e:
+                except Exception:
                     pass
         except Exception as e:
             logger.warning(str(e))

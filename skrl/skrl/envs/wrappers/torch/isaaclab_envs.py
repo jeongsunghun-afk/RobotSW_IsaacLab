@@ -1,9 +1,13 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import gymnasium
-
 import torch
 
 from skrl import config
@@ -95,7 +99,7 @@ class IsaacLabWrapper(Wrapper):
 
     def render(self, *args, **kwargs) -> None:
         """Render the environment."""
-        return None
+        return
 
     def close(self) -> None:
         """Close the environment."""
@@ -115,7 +119,9 @@ class IsaacLabMultiAgentWrapper(MultiAgentEnvWrapper):
         self._observations = None
         self._info = {}
 
-    def step(self, actions: dict[str, torch.Tensor]) -> tuple[
+    def step(
+        self, actions: dict[str, torch.Tensor]
+    ) -> tuple[
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
@@ -172,7 +178,7 @@ class IsaacLabMultiAgentWrapper(MultiAgentEnvWrapper):
 
     def render(self, *args, **kwargs) -> None:
         """Render the environment."""
-        return None
+        return
 
     def close(self) -> None:
         """Close the environment."""

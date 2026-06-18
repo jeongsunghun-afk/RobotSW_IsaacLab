@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -14,7 +14,7 @@ from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg, GaussianNoiseCfg
+from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 ##
 # Pre-defined configs
@@ -53,11 +53,11 @@ class EventCfg:
         func=mdp.randomize_actuator_gains,
         mode="reset",
         params={
-          "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-          "stiffness_distribution_params": (0.75, 1.5),
-          "damping_distribution_params": (0.3, 3.0),
-          "operation": "scale",
-          "distribution": "log_uniform",
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.75, 1.5),
+            "damping_distribution_params": (0.3, 3.0),
+            "operation": "scale",
+            "distribution": "log_uniform",
         },
     )
 
@@ -69,7 +69,7 @@ class MotionJigFlatEnvCfg(DirectRLEnvCfg):
     decimation = 1
     action_scale = 0.25
     action_space = 26
-    
+
     priv_explicit = False
     priv_latent = False
     ang_vel = False
@@ -85,7 +85,7 @@ class MotionJigFlatEnvCfg(DirectRLEnvCfg):
         num_prio_obs += 1
     if clock_inputs:
         num_prio_obs += 4
-    
+
     num_heights = 0
 
     num_priv = 3 if priv_explicit else 0
@@ -97,12 +97,32 @@ class MotionJigFlatEnvCfg(DirectRLEnvCfg):
 
     state_space = 0
 
-    penalzied_body_names = ['base',
-        'FL_link_1', 'FL_link_2', 'FL_link_3', 'FL_link_4', 'FL_link_5', 'FL_link_6',
-        'FR_link_1', 'FR_link_2', 'FR_link_3', 'FR_link_4', 'FR_link_5', 'FR_link_6',
-        'HL_link_1', 'HL_link_2', 'HL_link_3', 'HL_link_4', 'HL_link_5',
-        'HR_link_1','HR_link_2', 'HR_link_3', 'HR_link_4', 'HR_link_5']
-    
+    penalzied_body_names = [
+        "base",
+        "FL_link_1",
+        "FL_link_2",
+        "FL_link_3",
+        "FL_link_4",
+        "FL_link_5",
+        "FL_link_6",
+        "FR_link_1",
+        "FR_link_2",
+        "FR_link_3",
+        "FR_link_4",
+        "FR_link_5",
+        "FR_link_6",
+        "HL_link_1",
+        "HL_link_2",
+        "HL_link_3",
+        "HL_link_4",
+        "HL_link_5",
+        "HR_link_1",
+        "HR_link_2",
+        "HR_link_3",
+        "HR_link_4",
+        "HR_link_5",
+    ]
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 40,
@@ -155,18 +175,16 @@ class MotionJigFlatEnvCfg(DirectRLEnvCfg):
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
 
-
-
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
     )
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
     )
 
     # Command Definition
@@ -183,6 +201,7 @@ class MotionJigFlatEnvCfg(DirectRLEnvCfg):
     lin_vel_y_range = [-0.0, 0.0]
     ang_vel_range = [-0.5, 0.5]
 
+
 @configclass
 class MotionJigHistoryEnvCfg(DirectRLEnvCfg):
     # env
@@ -190,7 +209,7 @@ class MotionJigHistoryEnvCfg(DirectRLEnvCfg):
     decimation = 1
     action_scale = 0.25
     action_space = 26
-    
+
     priv_explicit = False
     priv_latent = True
     ang_vel = False
@@ -206,7 +225,7 @@ class MotionJigHistoryEnvCfg(DirectRLEnvCfg):
         num_prio_obs += 1
     if clock_inputs:
         num_prio_obs += 4
-    
+
     num_heights = 0
 
     num_priv = 3 if priv_explicit else 0
@@ -219,12 +238,32 @@ class MotionJigHistoryEnvCfg(DirectRLEnvCfg):
 
     state_space = 0
 
-    penalzied_body_names = ['base',
-        'FL_link_1', 'FL_link_2', 'FL_link_3', 'FL_link_4', 'FL_link_5', 'FL_link_6',
-        'FR_link_1', 'FR_link_2', 'FR_link_3', 'FR_link_4', 'FR_link_5', 'FR_link_6',
-        'HL_link_1', 'HL_link_2', 'HL_link_3', 'HL_link_4', 'HL_link_5',
-        'HR_link_1','HR_link_2', 'HR_link_3', 'HR_link_4', 'HR_link_5']
-    
+    penalzied_body_names = [
+        "base",
+        "FL_link_1",
+        "FL_link_2",
+        "FL_link_3",
+        "FL_link_4",
+        "FL_link_5",
+        "FL_link_6",
+        "FR_link_1",
+        "FR_link_2",
+        "FR_link_3",
+        "FR_link_4",
+        "FR_link_5",
+        "FR_link_6",
+        "HL_link_1",
+        "HL_link_2",
+        "HL_link_3",
+        "HL_link_4",
+        "HL_link_5",
+        "HR_link_1",
+        "HR_link_2",
+        "HR_link_3",
+        "HR_link_4",
+        "HR_link_5",
+    ]
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 40,
@@ -277,18 +316,16 @@ class MotionJigHistoryEnvCfg(DirectRLEnvCfg):
     similar_to_default_reward_scale = -0.1
     base_height_reward_scale = -10.0
 
-
-
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
     )
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
     )
 
     # Command Definition

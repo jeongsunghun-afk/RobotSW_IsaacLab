@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import numpy as np
 
 d = np.load('/home/lgb/IsaacLab/_workspace/3leg_gait_research/rank0_verify_result.npz')

@@ -1,23 +1,27 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
-import sys
 import pickle
 import shutil
+import sys
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+import genesis as gs
+import torch
 from interaction_env import InteractionEnv
 from rsl_rl.runners import OnPolicyRunnerParkour
 
-import genesis as gs
-import torch
-
 os.environ["IMAGEIO_FFMPEG_EXE"] = "/opt/homebrew/bin/ffmpeg"
 
-def get_train_cfg(exp_name, max_iterations, obs_cfg):
 
+def get_train_cfg(exp_name, max_iterations, obs_cfg):
     train_cfg_dict = {
         "algorithm": {
             "clip_param": 0.2,
@@ -25,7 +29,7 @@ def get_train_cfg(exp_name, max_iterations, obs_cfg):
             "entropy_coef": 0.01,
             "gamma": 0.99,
             "lam": 0.95,
-            "learning_rate": 1.e-4,
+            "learning_rate": 1.0e-4,
             "max_grad_norm": 1.0,
             "num_learning_epochs": 5,
             "num_mini_batches": 4,
@@ -35,7 +39,7 @@ def get_train_cfg(exp_name, max_iterations, obs_cfg):
             # dagger parameters
             "dagger_update_freq": 20,
             "priv_reg_coef_schedual": [0, 0.1, 2000, 3000],
-            "priv_reg_coef_schedual_resume": [0, 0.1, 0, 1]
+            "priv_reg_coef_schedual_resume": [0, 0.1, 0, 1],
         },
         "init_member_classes": {},
         "policy": {
@@ -45,7 +49,7 @@ def get_train_cfg(exp_name, max_iterations, obs_cfg):
             "activation": "elu",
             "init_noise_std": 1.0,
             "priv_encoder_dims": [64, 20],
-            "tanh_encoder_output": False
+            "tanh_encoder_output": False,
         },
         "runner": {
             "algorithm_class_name": "PPOParkour",
@@ -64,20 +68,20 @@ def get_train_cfg(exp_name, max_iterations, obs_cfg):
             "save_interval": 100,
         },
         "estimator": {
-            'train_with_estimated_states': True,
-            'learning_rate': 1.e-4,
-            'hidden_dims': [128, 64],
-            'priv_states_dim': obs_cfg["num_priv"],
-            'num_prop': obs_cfg["num_prio_obs"],
-            'num_scan': obs_cfg["num_heights"]
+            "train_with_estimated_states": True,
+            "learning_rate": 1.0e-4,
+            "hidden_dims": [128, 64],
+            "priv_states_dim": obs_cfg["num_priv"],
+            "num_prop": obs_cfg["num_prio_obs"],
+            "num_scan": obs_cfg["num_heights"],
         },
-        'depth_encoder':{
+        "depth_encoder": {
             "if_depth": False,
             "depth_shape": None,
             "buffer_len": None,
             "hidden_dims": 512,
-            "learning_rate": 1.e-3,
-            "num_steps_per_env": None
+            "learning_rate": 1.0e-3,
+            "num_steps_per_env": None,
         },
         "runner_class_name": "OnPolicyRunnerParkour",
         "seed": 1,
@@ -105,20 +109,18 @@ def get_cfgs():
             "RR_calf_joint": -1.5,
         },
         "default_sitting_joint_angles": {
-        'FL_hip_joint': 0.1,  
-        'RL_hip_joint': 0.1,  
-        'FR_hip_joint': -0.1,  
-        'RR_hip_joint': -0.1,  
-
-        'FL_thigh_joint': 1.57,  
-        'RL_thigh_joint': 1.57,  
-        'FR_thigh_joint': 1.57,  
-        'RR_thigh_joint': 1.57,  
-
-        'FL_calf_joint': -2.67,  
-        'RL_calf_joint': -2.67,  
-        'FR_calf_joint': -2.67,  
-        'RR_calf_joint': -2.67  
+            "FL_hip_joint": 0.1,
+            "RL_hip_joint": 0.1,
+            "FR_hip_joint": -0.1,
+            "RR_hip_joint": -0.1,
+            "FL_thigh_joint": 1.57,
+            "RL_thigh_joint": 1.57,
+            "FR_thigh_joint": 1.57,
+            "RR_thigh_joint": 1.57,
+            "FL_calf_joint": -2.67,
+            "RL_calf_joint": -2.67,
+            "FR_calf_joint": -2.67,
+            "RR_calf_joint": -2.67,
         },
         "dof_names": [
             "FR_hip_joint",
@@ -150,18 +152,8 @@ def get_cfgs():
             "RR_thigh_joint",
             "RR_calf_joint",
         ],
-        "feet_names":[
-            "FR_calf",
-            "FL_calf",
-            "RR_calf",
-            "RL_calf"
-        ],
-        "hip_names":[
-            "FR_hip_joint", 
-            "FL_hip_joint",
-            "RR_hip_joint",
-            "RL_hip_joint"
-        ],
+        "feet_names": ["FR_calf", "FL_calf", "RR_calf", "RL_calf"],
+        "hip_names": ["FR_hip_joint", "FL_hip_joint", "RR_hip_joint", "RL_hip_joint"],
         # "penalize_contacts_name": [
         #     "base",
         #     "FR_thigh",
@@ -180,14 +172,12 @@ def get_cfgs():
             "RR_thigh",
             "RL_thigh",
         ],
-        "terminate_after_contacts_on": [
-            "base"
-        ],
-        'termination_contact_link_names': ['base'],
-        'penalized_contact_link_names': ['base', 'thigh', 'trunk'],
-        'feet_link_names': ['foot'],
-        'hip_link_names': ['shoulder'],
-        'base_link_name': ['base'],
+        "terminate_after_contacts_on": ["base"],
+        "termination_contact_link_names": ["base"],
+        "penalized_contact_link_names": ["base", "thigh", "trunk"],
+        "feet_link_names": ["foot"],
+        "hip_link_names": ["shoulder"],
+        "base_link_name": ["base"],
         # PD
         "kp": 20.0,
         "kd": 1.0,
@@ -201,24 +191,24 @@ def get_cfgs():
         "resampling_time_s": 5.0,
         "action_scale": 0.25,
         "simulate_action_latency": True,
-        "clip_actions": 100, # 10
+        "clip_actions": 100,  # 10
         "next_goal_threshold": 0.2,
         "reach_goal_delay": 0.1,
-        "domain_rand":{
+        "domain_rand": {
             "randomize_friction": True,
             "friction_range": [0.5, 1.25],
             "randomize_base_mass": True,
-            "added_mass_range": [-1., 3.],
+            "added_mass_range": [-1.0, 3.0],
             "randomize_com_displacement": True,
             "com_displacement_range": [-0.1, 0.1],
             "push_robots": True,
             "push_interval_s": 15,
-            "max_push_vel_xy": 1.,
+            "max_push_vel_xy": 1.0,
             "simulate_action_latency": True,
-            "motor_strength_range": [0.8, 1.2]
-        }
+            "motor_strength_range": [0.8, 1.2],
+        },
     }
-    
+
     # dof pos limits
     # action smoothness 1,2
     reward_cfg = {
@@ -228,7 +218,7 @@ def get_cfgs():
         "reward_scales": {
             # Tracking Rewards
             "hip_positions": 0.5,
-            "foot_positions": 0.5, 
+            "foot_positions": 0.5,
             "base_height": 1.5,
             "base_pitch": 1.5,
             "feet_contact": 0.5,
@@ -265,7 +255,7 @@ def get_cfgs():
     }
 
     terrain_dict = {
-        "flat_terrain" : 0.0,
+        "flat_terrain": 0.0,
         "fractal_terrain": 0.0,
         "random_uniform_terrain": 0.0,
         "sloped_terrain": 0.0,
@@ -281,7 +271,7 @@ def get_cfgs():
         "parkour_step_terrain": 0.0,
         "parkour_gap_terrain": 0.0,
         "parkour_stair_terrain": 0.0,
-        "demo_terrain": 0.0
+        "demo_terrain": 0.0,
     }
     terrain_cfg = {
         "mesh_type": "trimesh",
@@ -307,13 +297,13 @@ def get_cfgs():
         "restitution": 0.0,
         "measure_heights": False,
         "measured_points_x": [-0.45, -0.3, -0.15, 0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.05, 1.2],
-        "measured_points_y": [-0.75, -0.6, -0.45, -0.3, -0.15, 0., 0.15, 0.3, 0.45, 0.6, 0.75],
+        "measured_points_y": [-0.75, -0.6, -0.45, -0.3, -0.15, 0.0, 0.15, 0.3, 0.45, 0.6, 0.75],
         "measure_horizontal_noise": 0.0,
         "selected": False,
         "terrain_kwargs": None,
         "max_init_terrain_level": 5,
-        "terrain_length": 10.,
-        "terrain_width": 10.,
+        "terrain_length": 10.0,
+        "terrain_width": 10.0,
         "num_rows": 1,
         "num_cols": 1,
         "terrain_proportions": list(terrain_dict.values()),
@@ -323,9 +313,9 @@ def get_cfgs():
         "num_goals": 8,
         "max_platform_height": 0.2,
         "parkour": False,
-        "x_init_range": 0.,
-        "y_init_range": 0.,
-        "update_interval" : 5
+        "x_init_range": 0.0,
+        "y_init_range": 0.0,
+        "update_interval": 5,
     }
 
     priv_explicit = True
@@ -333,13 +323,13 @@ def get_cfgs():
     ang_vel = False
 
     num_prio_obs = 42  # 3(gravity) + 1(interaction_cmd) + 12(dof_pos) + 12(dof_vel) + 12(actions) + 2(roll,pitch)
-    if terrain_cfg['measure_heights']:
+    if terrain_cfg["measure_heights"]:
         num_heights = 132
     else:
         num_heights = 0
-    
+
     if priv_explicit:
-        num_priv = 3 
+        num_priv = 3
     else:
         num_priv = 0
 
@@ -347,17 +337,11 @@ def get_cfgs():
         num_priv_latent = 4 + 18
     else:
         num_priv_latent = 0
-    
+
     history_len = 10
 
     obs_cfg = {
-        "obs_scales": {
-            "lin_vel": 2.0,
-            "ang_vel": 0.25,
-            "dof_pos": 1.0,
-            "dof_vel": 0.05,
-            "height_measurements": 5.0
-        },
+        "obs_scales": {"lin_vel": 2.0, "ang_vel": 0.25, "dof_pos": 1.0, "dof_vel": 0.05, "height_measurements": 5.0},
         "history_encoding": True,
         "priv_explicit": priv_explicit,
         "priv_latent": priv_latent,
@@ -372,14 +356,14 @@ def get_cfgs():
         "num_privileged_obs": None,  # Set to None to use obs as critic_obs
         "add_noise": True,
         "noise_scales": {
-            'rotation': 0.01,
-            'dof_pos': 0.01,
-            'dof_vel': 0.05,
-            'lin_vel': 0.05,
-            'ang_vel': 0.05,
-            'gravity': 0.02,
-            'height_measurements': 0.02
-        }
+            "rotation": 0.01,
+            "dof_pos": 0.01,
+            "dof_vel": 0.05,
+            "lin_vel": 0.05,
+            "ang_vel": 0.05,
+            "gravity": 0.02,
+            "height_measurements": 0.02,
+        },
     }
     depth_cfg = {
         "use_camera": False,
@@ -397,7 +381,7 @@ def get_cfgs():
         "far_clip": 2,
         "dis_noise": 0.0,
         "scale": 1,
-        "invert": True
+        "invert": True,
     }
 
     return env_cfg, obs_cfg, reward_cfg, command_cfg, terrain_cfg, depth_cfg
@@ -408,17 +392,17 @@ def main():
     parser.add_argument("-e", "--exp_name", type=str, default="no_name")
     parser.add_argument("-B", "--num_envs", type=int, default=6144)
     parser.add_argument("--max_iterations", type=int, default=5000)
-    parser.add_argument("--depth", action='store_true')
+    parser.add_argument("--depth", action="store_true")
     parser.add_argument("-r", "--resume_name", type=str, default="go1_parkour")
     parser.add_argument("--ckpt", type=int, default=1000)
     args = parser.parse_args()
-    
+
     if torch.cuda.is_available():
-        device = 'cuda:0' 
+        device = "cuda:0"
     elif torch.backends.mps.is_available():
-        device = 'mps'
+        device = "mps"
     else:
-        device = 'cpu'
+        device = "cpu"
 
     gs.init(logging_level="warning")
 
@@ -437,16 +421,22 @@ def main():
         train_cfg["depth_encoder"]["buffer_len"] = depth_cfg["buffer_len"]
         train_cfg["depth_encoder"]["num_steps_per_env"] = depth_cfg["update_interval"] * 24
 
-
-
     if os.path.exists(log_dir):
         shutil.rmtree(log_dir)
     os.makedirs(log_dir, exist_ok=True)
 
     env = InteractionEnv(
-        num_envs=args.num_envs, env_cfg=env_cfg, obs_cfg=obs_cfg, reward_cfg=reward_cfg, command_cfg=command_cfg, terrain_cfg=terrain_cfg, device=device, depth_cfg=depth_cfg, show_viewer=False
+        num_envs=args.num_envs,
+        env_cfg=env_cfg,
+        obs_cfg=obs_cfg,
+        reward_cfg=reward_cfg,
+        command_cfg=command_cfg,
+        terrain_cfg=terrain_cfg,
+        device=device,
+        depth_cfg=depth_cfg,
+        show_viewer=False,
     )
-    
+
     # rgb, _, _, _ = env.view_cam.render()
 
     # runner = OnPolicyRunner(env, train_cfg, log_dir, device=device)
@@ -463,7 +453,7 @@ def main():
         runner.learn_depth(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)
     else:
         runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
-        
+
 
 if __name__ == "__main__":
     main()

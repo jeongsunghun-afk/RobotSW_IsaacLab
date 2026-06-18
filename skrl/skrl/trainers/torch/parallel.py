@@ -1,12 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-import copy
 import dataclasses
 import sys
-import tqdm
 
 import torch
 import torch.multiprocessing as mp
+import tqdm
 
 from skrl.agents.torch import Agent
 from skrl.envs.wrappers.torch import MultiAgentEnvWrapper, Wrapper
@@ -41,7 +45,7 @@ def fn_processor(process_index, *args):
             break
 
         # initialize agent
-        elif task == "init":
+        if task == "init":
             agent = queue.get()
             agent.init(trainer_cfg=trainer_cfg)
             print(f"[INFO] Processor {process_index}: init agent {type(agent).__name__} with scope {scope}")
@@ -238,7 +242,6 @@ class ParallelTrainer(Trainer):
             states.share_memory_()
 
         for timestep in tqdm.tqdm(range(self.cfg.timesteps), disable=self.cfg.disable_progressbar, file=sys.stdout):
-
             # pre-interaction
             for pipe in producer_pipes:
                 pipe.send({"task": "pre_interaction", "timestep": timestep, "timesteps": self.cfg.timesteps})
@@ -394,7 +397,6 @@ class ParallelTrainer(Trainer):
             states.share_memory_()
 
         for timestep in tqdm.tqdm(range(self.cfg.timesteps), disable=self.cfg.disable_progressbar, file=sys.stdout):
-
             # pre-interaction
             for pipe in producer_pipes:
                 pipe.send({"task": "pre_interaction", "timestep": timestep, "timesteps": self.cfg.timesteps})

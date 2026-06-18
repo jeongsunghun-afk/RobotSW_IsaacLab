@@ -448,3 +448,7 @@ class HindLegEnv(DirectRLEnv):
             self._commands[env_ids, 2] = torch_rand_float(
                 *self.cfg.command_cfg["ang_vel_range"], (len(env_ids),), self.device
             )
+
+        # 일부 env는 정지(standing) 명령으로 강제 → 정책이 cmd=0 평형을 학습하게 함
+        standing = torch.rand(len(env_ids), device=self.device) < self.cfg.rel_standing_envs
+        self._commands[env_ids[standing], :] = 0.0

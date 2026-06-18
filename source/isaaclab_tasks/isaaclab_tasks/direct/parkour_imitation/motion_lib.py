@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Copied from direct/go2_imitation/motion_lib.py — keep in sync.
 
 Go2 모션 라이브러리 — MimicKit-style 인터페이스 + IsaacLab 전용 구현.

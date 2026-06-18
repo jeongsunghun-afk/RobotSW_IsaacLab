@@ -1,12 +1,17 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 import argparse
 import atexit
 import sys
+
 import gymnasium
 
 from skrl import logger
-
 
 __all__ = ["load_isaaclab_env"]
 
@@ -143,7 +148,6 @@ def load_isaaclab_env(
     def close_the_simulator():
         app_launcher.app.close()
 
-    import isaaclab_tasks  # type: ignore
     from isaaclab_tasks.utils import parse_env_cfg  # type: ignore
 
     cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs, use_fabric=not args.disable_fabric)
@@ -155,7 +159,7 @@ def load_isaaclab_env(
         print(f"\nIsaac Lab environment ({args.task})")
         try:
             _print_cfg(cfg)
-        except AttributeError as e:
+        except AttributeError:
             pass
 
     # load environment

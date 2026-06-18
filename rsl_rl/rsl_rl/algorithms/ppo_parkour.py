@@ -55,6 +55,13 @@ class PPOParkour:
         symmetry_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
+        # SPO surrogate parameters
+        surrogate_type: str = "ppo",
+        spo_epsilon: float = 0.2,
+        # LCP gradient penalty (arXiv:2410.11825 §3.4) — bounds Lipschitz constant of actor MLP
+        # w.r.t. its immediate input (proprio + priv_explicit + priv_latent concat).
+        # None disables LCP entirely (backward-compatible default).
+        lcp_cfg: dict | None = None,
     ) -> None:
         # Device-related parameters
         self.device = device
@@ -145,6 +152,19 @@ class PPOParkour:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
+        # SPO parameters
+        self.surrogate_type = surrogate_type
+        self.spo_epsilon = spo_epsilon
+
+        # LCP parameters (arXiv:2410.11825, Eq.7): λ_gp · E[‖∇_input log π(a|input)‖²]
+        # None means LCP is disabled (lcp_cfg=None → no-op, backward-compatible).
+        if lcp_cfg is not None:
+            self.lcp_lambda_gp = lcp_cfg["lambda_gp"]
+            self.lcp_penalize = lcp_cfg.get("penalize", "log_prob")
+        else:
+            self.lcp_lambda_gp = None
+            self.lcp_penalize = "log_prob"
+
     def act(self, obs: TensorDict, hist_encoding: bool = False) -> torch.Tensor:
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
@@ -228,6 +248,8 @@ class PPOParkour:
         mean_estimator_loss = 0 if self.estimator else None
         # Symmetry loss
         mean_symmetry_loss = 0 if self.symmetry else None
+        # LCP gradient penalty loss
+        mean_lcp_loss = 0 if self.lcp_lambda_gp is not None else None
         # Adaptation Reg loss
         mean_priv_reg_loss = 0
 
@@ -278,8 +300,6 @@ class PPOParkour:
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: We need to do this because we updated the policy with the new parameters
-            # # For LCP gradient penalty: enable gradient flow through obs_batch
-            # obs_batch_gp = obs_batch.clone().apply(lambda x: x.requires_grad_(True) if isinstance(x, torch.Tensor) else x)
             self.policy.act(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[1])
@@ -339,11 +359,17 @@ class PPOParkour:
 
             # Surrogate loss
             ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-            surrogate = -torch.squeeze(advantages_batch) * ratio
-            surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-            )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            adv = torch.squeeze(advantages_batch)
+
+            if self.surrogate_type == "spo":
+                # Simple Policy Optimization (arXiv:2401.16025), Eq.16:
+                #   f_spo = r·A − (|A| / 2ε)·(r − 1)^2      (maximize)
+                surrogate_obj = ratio * adv - torch.abs(adv) * torch.square(ratio - 1.0) / (2.0 * self.spo_epsilon)
+                surrogate_loss = -surrogate_obj.mean()  # maximize → minimize negative
+            else:  # "ppo" — original ratio-clip (default, backward-compatible)
+                surrogate = -adv * ratio
+                surrogate_clipped = -adv * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -362,6 +388,50 @@ class PPOParkour:
                 - self.entropy_coef * entropy_batch.mean()
                 + priv_reg_coef * priv_reg_loss
             )
+
+            # LCP gradient penalty: λ_gp · E[‖∇_input log π(a|input)‖²]  (arXiv:2410.11825, Eq.7)
+            # Gradient target: the *immediate actor MLP input* = [norm_proprio, norm_priv_explicit,
+            # priv_latent, (scandot_latent)].  This bounds the Lipschitz constant of the actor MLP
+            # w.r.t. its own concat input.  Encoders (priv_encoder, scandot_encoder) are excluded
+            # from the gradient path because actor_input_leaf is detached from them — intentional
+            # simplification per spec scope caveat (encoders are separately trained; LCP focuses on
+            # the deploy-time MLP, which is the smoothness bottleneck).
+            # update_dagger / hist_encoder_optimizer: separate method + separate optimizer → no contamination.
+            if self.lcp_lambda_gp is not None:
+                # Build post-norm / post-concat actor MLP input with encoders in no_grad, then
+                # detach to make it a clean leaf before re-enabling grad on the *concat* tensor.
+                with torch.no_grad():
+                    actor_input_raw = self.policy.get_actor_input(obs_batch[:original_batch_size])
+                obs_in = actor_input_raw.detach().requires_grad_(True)
+
+                if self.lcp_penalize == "mean":
+                    # Cheaper variant: penalize ‖∇_input μ(input)‖² (no actions needed).
+                    # grad(μ.sum()) approximates the Frobenius norm of the actor Jacobian; the
+                    # default "log_prob" mode is paper-faithful (arXiv:2410.11825 Eq.7).
+                    if self.policy.state_dependent_std:
+                        mean_from_leaf = self.policy.actor(obs_in)[..., 0, :]
+                    else:
+                        mean_from_leaf = self.policy.actor(obs_in)
+                    grads = torch.autograd.grad(
+                        outputs=mean_from_leaf.sum(),
+                        inputs=obs_in,
+                        create_graph=True,
+                        retain_graph=True,
+                        only_inputs=True,
+                    )[0]
+                else:  # "log_prob" — paper-faithful (default)
+                    actions_for_gp = actions_batch[:original_batch_size].detach()
+                    logp = self.policy.log_prob_from_actor_input(obs_in, actions_for_gp)
+                    grads = torch.autograd.grad(
+                        outputs=logp.sum(),
+                        inputs=obs_in,
+                        create_graph=True,
+                        retain_graph=True,
+                        only_inputs=True,
+                    )[0]
+
+                lcp_loss = grads.norm(2, dim=-1).pow(2).mean()
+                loss = loss + self.lcp_lambda_gp * lcp_loss
 
             # Symmetry loss
             if self.symmetry:
@@ -454,6 +524,9 @@ class PPOParkour:
             # Symmetry loss
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
+            # LCP loss
+            if mean_lcp_loss is not None:
+                mean_lcp_loss += lcp_loss.item()
 
         # Divide the losses by the number of updates
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -466,6 +539,8 @@ class PPOParkour:
             mean_estimator_loss /= num_updates
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
+        if mean_lcp_loss is not None:
+            mean_lcp_loss /= num_updates
 
         mean_priv_reg_loss /= num_updates
 
@@ -485,6 +560,8 @@ class PPOParkour:
             loss_dict["estimator"] = mean_estimator_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if self.lcp_lambda_gp is not None:
+            loss_dict["lipschitz"] = mean_lcp_loss
 
         # --- F9: per-joint action statistics + policy noise std ---
         # Compute over the full rollout buffer (storage.actions shape: [num_steps, num_envs, num_actions]).

@@ -1,15 +1,18 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+import numpy as np
+import torch
+from omniisaacgymenvs.tasks.base.rl_task import RLTask
+from robots.iiwa14 import Iiwa14 as Robot
+from skrl.utils import omniverse_isaacgym_utils
+
 from omni.isaac.core.articulations import ArticulationView
 from omni.isaac.core.objects import DynamicSphere
 from omni.isaac.core.prims import RigidPrimView
 from omni.isaac.core.utils.prims import get_prim_at_path
-from omniisaacgymenvs.tasks.base.rl_task import RLTask
-from robots.iiwa14 import Iiwa14 as Robot
-
-import numpy as np
-import torch
-
-from skrl.utils import omniverse_isaacgym_utils
-
 
 # post_physics_step calls
 # - get_observations()
@@ -137,7 +140,7 @@ class ReachingIiwaTask(RLTask):
         elif self._control_space == "cartesian":
             self._num_actions = 3
         else:
-            raise ValueError("Invalid control space: {}".format(self._control_space))
+            raise ValueError(f"Invalid control space: {self._control_space}")
 
         self._end_effector_link = "iiwa_link_7"
 
@@ -154,7 +157,7 @@ class ReachingIiwaTask(RLTask):
         scene.add(self._robots)
         # end-effectors view
         self._end_effectors = RigidPrimView(
-            prim_paths_expr="/World/envs/.*/robot/{}".format(self._end_effector_link), name="end_effector_view"
+            prim_paths_expr=f"/World/envs/.*/robot/{self._end_effector_link}", name="end_effector_view"
         )
         scene.add(self._end_effectors)
         # target view
@@ -193,9 +196,10 @@ class ReachingIiwaTask(RLTask):
 
         if self._control_space == "cartesian":
             self.jacobians = torch.zeros((self._num_envs, 7, 6, 7), device=self._device)
-            self.end_effector_pos, self.end_effector_rot = torch.zeros(
-                (self._num_envs, 3), device=self._device
-            ), torch.zeros((self._num_envs, 4), device=self._device)
+            self.end_effector_pos, self.end_effector_rot = (
+                torch.zeros((self._num_envs, 3), device=self._device),
+                torch.zeros((self._num_envs, 4), device=self._device),
+            )
 
     def get_observations(self) -> dict:
         robot_dof_pos = self._robots.get_joint_positions(clone=False)

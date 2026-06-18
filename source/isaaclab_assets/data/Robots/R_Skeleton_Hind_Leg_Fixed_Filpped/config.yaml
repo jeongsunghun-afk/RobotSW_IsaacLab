@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 asset_path: /home/lgb/Dog_Motion_data_3D/robots/CM_HL_v8/urdf/CM_HL_v11.urdf
 usd_dir: /home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/R_Skeleton_Hind_Leg_Fixed_Filpped
 usd_file_name: Leg.usd

@@ -1,18 +1,22 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import time
+
 import geometry_msgs.msg
 import gymnasium as gym
 import libiiwa_msgs.srv
+import numpy as np
 import rclpy
 import sensor_msgs.msg
 from rclpy.node import Node
 from rclpy.qos import QoSPresetProfiles
 
-import numpy as np
-
 
 class ReachingIiwa(gym.Env):
     def __init__(self, control_space="joint"):
-
         self.control_space = control_space  # joint or cartesian
 
         # spaces

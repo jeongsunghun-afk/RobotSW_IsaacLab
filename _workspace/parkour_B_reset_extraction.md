@@ -1,7 +1,7 @@
 # Codebase B (Isaaclab_Parkour) — Reset/Termination/Curriculum Extraction
 
-**Analysis Date**: 2026-05-20  
-**Target Codebase**: `/home/lgb/IsaacLab/Isaaclab_Parkour/`  
+**Analysis Date**: 2026-05-20
+**Target Codebase**: `/home/lgb/IsaacLab/Isaaclab_Parkour/`
 **Framework**: ManagerBased RL Environment (Isaac Lab)
 
 ---
@@ -16,14 +16,14 @@
 def terminate_episode(
     env: ParkourManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-):  
+):
     reset_buf = torch.zeros((env.num_envs, ), dtype=torch.bool, device=env.device)
     asset: Articulation = env.scene[asset_cfg.name]
     roll, pitch, _ = euler_xyz_from_quat(asset.data.root_state_w[:,3:7])
     roll_cutoff = torch.abs(wrap_to_pi(roll)) > 1.5
     pitch_cutoff = torch.abs(wrap_to_pi(pitch)) > 1.5
     time_out_buf = env.episode_length_buf >= env.max_episode_length
-    parkour_event: ParkourEvent =  env.parkour_manager.get_term('base_parkour')    
+    parkour_event: ParkourEvent =  env.parkour_manager.get_term('base_parkour')
     reach_goal_cutoff = parkour_event.cur_goal_idx >= env.scene.terrain.cfg.terrain_generator.num_goals
     height_cutoff = asset.data.root_state_w[:, 2] < -0.25
     time_out_buf |= reach_goal_cutoff  # ⚠️ KEY: goal achievement also marks timeout
@@ -42,9 +42,9 @@ def terminate_episode(
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
-    
+
     total_terminates = DoneTerm(
-        func=terminations.terminate_episode, 
+        func=terminations.terminate_episode,
         time_out=True,                                # ← Bootstrap flag: ALL terminations treated as timeout
         params= {
             "asset_cfg":SceneEntityCfg("robot")
@@ -129,7 +129,7 @@ Events with `mode="reset"`:
 2. **reset_robot_joints** (lines 267-274)
    ```python
    reset_robot_joints = EventTerm(
-       func= reset_joints_by_scale, 
+       func= reset_joints_by_scale,
        params={
            "position_range": (0.95, 1.05),
            "velocity_range": (0.0, 0.0),
@@ -187,7 +187,7 @@ def _resample_command(self, env_ids: Sequence[int]):
     threshold = self.env.command_manager.get_command("base_velocity")[env_ids, 0] * self.episode_length_s
     move_up = self.dis_to_start_pos > 0.8*threshold         # Line 143: progressed >80% → level up
     move_down = self.dis_to_start_pos < 0.4*threshold       # Line 144: progressed <40% → level down
-    
+
     # Update terrain level
     self.terrain.terrain_levels[env_ids] += 1 * move_up - 1 * move_down  # Line 147
     # Clip to valid range [0, max_level-1], or random restart if >max
@@ -196,10 +196,10 @@ def _resample_command(self, env_ids: Sequence[int]):
         torch.randint_like(self.terrain.terrain_levels[env_ids], self.terrain.max_terrain_level),
         torch.clip(self.terrain.terrain_levels[env_ids], 0)  # Line 151
     )
-    
+
     # Update environment origins and goal positions for new level
     self.env_origins[env_ids] = self.terrain.terrain_origins[
-        self.terrain.terrain_levels[env_ids], 
+        self.terrain.terrain_levels[env_ids],
         self.terrain.terrain_types[env_ids]
     ]  # Line 152
     # Reset goal index and timer
@@ -333,7 +333,7 @@ The `time_out=True` flag in termination config ensures **all terminations** (goa
 
 ```python
 total_terminates = DoneTerm(
-    func=terminations.terminate_episode, 
+    func=terminations.terminate_episode,
     time_out=True,        # ← No terminal state penalty; use γ-bootstrapped value
     params={"asset_cfg": SceneEntityCfg("robot")},
 )
@@ -349,9 +349,9 @@ class UnitreeGo2ParkourTeacherPPORunnerCfg(ParkourRslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24                     # Line 13: 24 env steps before PPO update
     max_iterations = 50000                     # Line 14
     save_interval = 100
-    
+
     # ... (policy architecture) ...
-    
+
     algorithm = ParkourRslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,

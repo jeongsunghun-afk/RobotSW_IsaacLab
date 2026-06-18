@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# run/play_interactive — RSL-RL 인터랙티브 Inference 래퍼
+#
+# 터미널에서 보행 커맨드를 실시간으로 입력하며 시뮬레이션을 조종.
+# Go2WTW (14커맨드), 일반 3커맨드(vx/vy/yaw) 모두 지원.
+#
+# 사용법:
+#   ./run/play_interactive --task Go2WTW --num_envs 1
+#   ./run/play_interactive --task Go2WTW --num_envs 1 --checkpoint logs/.../model_1000.pt
+#   ./run/play_interactive --task Go2WTW --num_envs 1 --video --real-time
+#
+# 주요 인자:
+#   --task <id>              태스크 이름 (필수)
+#   --num_envs <N>           환경 수 (기본값: cfg 기본값)
+#   --checkpoint <path>      체크포인트 경로 (없으면 최신 run 자동 탐색)
+#   --load_run <run_name>    특정 run 이름으로 체크포인트 탐색
+#   --video                  영상 녹화
+#   --video_length <N>       녹화 길이 (스텝, 기본 200)
+#   --real-time              실시간 모드 슬립
+#   --save_data              매 500스텝마다 results/에 데이터 저장
+#   --wbc                    Whole body control 모드 (19 DoF)
+#   --headless               headless 모드
+#   [AppLauncher 공통 인자]   --device, --livestream 등
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate isaac-5.1
+
+cd "$REPO"
+
+exec ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play_interactive.py "$@"

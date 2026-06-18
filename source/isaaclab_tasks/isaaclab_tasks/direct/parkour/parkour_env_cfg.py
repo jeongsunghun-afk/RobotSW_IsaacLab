@@ -652,7 +652,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
         #
         #   Recommended experiment weight: -3e-4  (conservative first run; step up to -1e-3 if
         #   efficiency pressure appears too weak after 10k+ steps of observation).
-        "positive_work": -3e-4,  # opt-in; recommended experiment weight: -3e-4 (see calibration above)
+        "positive_work": -1e-3,  # opt-in; recommended experiment weight: -3e-4 (see calibration above)
     }
 
     # tracking reward parameters (Genesis original)

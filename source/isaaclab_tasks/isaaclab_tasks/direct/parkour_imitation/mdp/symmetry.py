@@ -28,14 +28,14 @@ from typing import TYPE_CHECKING
 from isaaclab_tasks.direct.parkour.mdp.symmetry import compute_parkour_symmetric_states
 
 if TYPE_CHECKING:
-    from tensordict import TensorDict
     import torch
+    from tensordict import TensorDict
 
 __all__ = ["compute_parkour_imitation_symmetric_states"]
 
 
 def compute_parkour_imitation_symmetric_states(
-    *, env, obs: "TensorDict | None" = None, actions: "torch.Tensor | None" = None
+    *, env, obs: TensorDict | None = None, actions: torch.Tensor | None = None
 ):
     """Augment ParkourImitation observations/actions with the left/right mirror (num_aug=2).
 

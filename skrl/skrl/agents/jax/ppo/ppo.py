@@ -1,10 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import functools
 from typing import Any
 
-import functools
 import gymnasium
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -162,7 +166,7 @@ class PPO(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.jax.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
             if self.value is not None:
@@ -436,7 +440,6 @@ class PPO(Agent):
                 sampled_returns,
                 sampled_advantages,
             ) in sampled_batches:
-
                 inputs = {
                     "observations": self._observation_preprocessor(sampled_observations, train=not epoch),
                     "states": self._state_preprocessor(sampled_states, train=not epoch),

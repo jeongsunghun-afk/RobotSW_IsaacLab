@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
@@ -173,6 +178,41 @@ class ActorCritic(nn.Module):
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def log_prob_from_actor_obs(self, actor_obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Compute log π(a|obs) from a pre-concatenated, grad-enabled actor-obs tensor.
+
+        This helper is used by the LCP gradient penalty (ppo.py) and must NOT modify
+        ``self.distribution``; it builds a fresh local Normal distribution.
+
+        Args:
+            actor_obs: Pre-normalized actor observation tensor with ``requires_grad=True``.
+                       Shape: ``[batch, num_actor_obs]``.  Caller is responsible for any
+                       observation normalization applied *before* passing the tensor here.
+            actions:   Sampled actions from the old policy.  Shape: ``[batch, num_actions]``.
+
+        Returns:
+            Per-sample log-probabilities summed over the action dimension.  Shape: ``[batch]``.
+        """
+        if self.state_dependent_std:
+            mean_and_std = self.actor(actor_obs)
+            if self.noise_std_type == "scalar":
+                mean, std = torch.unbind(mean_and_std, dim=-2)
+            elif self.noise_std_type == "log":
+                mean, log_std = torch.unbind(mean_and_std, dim=-2)
+                std = torch.exp(log_std)
+            else:
+                raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        else:
+            mean = self.actor(actor_obs)
+            if self.noise_std_type == "scalar":
+                std = self.std.expand_as(mean)
+            elif self.noise_std_type == "log":
+                std = torch.exp(self.log_std).expand_as(mean)
+            else:
+                raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        dist = Normal(mean, std)
+        return dist.log_prob(actions).sum(dim=-1)
 
     def update_normalization(self, obs: TensorDict) -> None:
         if self.actor_obs_normalization:

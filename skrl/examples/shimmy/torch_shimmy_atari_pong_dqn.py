@@ -1,12 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
+
 import ale_py  # needed to re-register the correct environment entry_point (requires: `pip install ale-py`)
 import gymnasium as gym
-
 import torch.nn as nn
-
-# import the skrl components to build the RL system
-from skrl import logger
 from skrl.agents.torch.dqn import DQN, DQN_DEFAULT_CONFIG
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
@@ -14,6 +16,8 @@ from skrl.models.torch import DeterministicMixin, Model
 from skrl.trainers.torch import SequentialTrainer
 from skrl.utils import set_seed
 
+# import the skrl components to build the RL system
+from skrl import logger
 
 # parse arguments
 parser = argparse.ArgumentParser()

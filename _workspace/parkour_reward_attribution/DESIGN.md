@@ -595,4 +595,3 @@ The stage-2 implementation can be considered complete when:
    change to the reward computation itself. Existing training runs unaffected (same `_episode_sums`,
    same total reward, same gradient).
 5. No change touches `source/isaaclab/`, the policy observation space, or the contact sensor cfg.
-

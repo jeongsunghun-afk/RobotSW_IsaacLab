@@ -1,5 +1,11 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import torch
 import torch.nn as nn
+
 from rsl_rl.networks import MLP, EmpiricalNormalization
 
 
@@ -11,7 +17,7 @@ class AMPDiscriminator(nn.Module):
         activation="relu",
         device="cuda",
         disc_reward_type="ls_gan",  # "ls_gan" | "bce" (MimicKit: -log(1-sigmoid(logit)))
-        norm_clip=None,             # None=clip없음, 10.0=MimicKit 스타일
+        norm_clip=None,  # None=clip없음, 10.0=MimicKit 스타일
     ):
         super().__init__()
         self.device = device
@@ -20,10 +26,15 @@ class AMPDiscriminator(nn.Module):
         self.norm_clip = norm_clip
 
         # AMP loss parameter
-        self.amp_reward_coef = 1.5 # AMP style 보상 스케일
+        self.amp_reward_coef = 1.5  # AMP style 보상 스케일
 
         # Empirical Normalizer (input_dim 수치만큼 정규화)
         self.amp_obs_normalizer = EmpiricalNormalization(input_dim).to(self.device)
+
+        # WGAN reward normalizer: (D - μ̂) / σ̂  (Eq 4, arXiv:2206.11693)
+        # 항상 생성되지만 disc_reward_type="wgan"일 때만 사용됨.
+        # forward()는 순수 정규화만 수행하므로 update()를 별도 호출해야 함.
+        self.reward_normalizer = EmpiricalNormalization(1).to(self.device)
 
         # discriminator network (input -> hidden_dims -> 1)
         self.trunk = MLP(input_dim, 1, hidden_dims, activation)
@@ -45,6 +56,7 @@ class AMPDiscriminator(nn.Module):
 
         Args:
             amp_obs (torch.Tensor): agent 또는 expert의 모션 관측치. [Batch, amp_observation_size]
+
         Returns:
             torch.Tensor: 에이전트의 모션이 전문가 모션과 얼마나 유사한지에 대한 스칼라 보상
         """
@@ -58,6 +70,16 @@ class AMPDiscriminator(nn.Module):
             # logit → -∞ (fake): reward → 0
             prob = torch.sigmoid(disc_logits)
             reward = -torch.log(torch.clamp(1.0 - prob, min=1e-4))
+        elif self.disc_reward_type == "wgan":
+            # WASABI(WGAN) reward: (D - μ̂) / σ̂  — 논문 arXiv:2206.11693 Eq 4.
+            # reward는 zero-mean·unit-variance이므로 약 절반이 음수 — signed 유지, clamp(min=0) 절대 금지.
+            # 주의: parkour 경로의 total_reward.clip(min=0) (A env L1108, parkour_reward_manager.py L38)이
+            # 활성인 경우 음수 AMP reward가 통째로 0으로 잘려 학습 신호 절반 소실.
+            # 비-parkour Go2-Imitation 경로 우선 검증 권장.
+            # EmpiricalNormalization.forward()는 통계를 갱신하지 않으므로 update()를 명시 호출.
+            if self.training:
+                self.reward_normalizer.update(disc_logits.detach())
+            reward = self.reward_normalizer(disc_logits)
         else:
             # LS-GAN reward: clamp(1 - (1/4)*(d-1)^2, min=0) · coef
             reward = torch.clamp(1 - 0.25 * torch.square(disc_logits - 1), min=0)

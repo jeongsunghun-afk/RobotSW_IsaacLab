@@ -1,6 +1,6 @@
 # A(direct/parkour) Reset/Termination/Curriculum Flow Extraction
 
-**목표**: Codebase A의 termination, max_episode_length, reset flow, curriculum, PPO bootstrap을 사실(file:line)로 추출하기.  
+**목표**: Codebase A의 termination, max_episode_length, reset flow, curriculum, PPO bootstrap을 사실(file:line)로 추출하기.
 **프레임**: A는 학습 성공 이력이 없다. 버그 찾는 것 아니라 **구조 사실 추출**. "X 없음"은 grep 재검증 후 "검증된 부재" 표기.
 
 ---
@@ -54,24 +54,24 @@ def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
 
 ### 상세 분석
 
-**1. Base contact 조건 (현재 비활성화)**  
+**1. Base contact 조건 (현재 비활성화)**
 - 코드: `# terminated = self._term_base_contact | ... ` (주석 처리됨) — `parkour_env.py:1130`
 - 이유: 앞부분에서 계산되지만 최종 terminated에 포함되지 않음
 - 검증: `grep -n "_term_base_contact" parkour_env.py` 확인 결과, base contact는 logging에만 사용 (라인 1213-1214)
 
-**2. Goal-reached 조건 (즉시 success reset)**  
+**2. Goal-reached 조건 (즉시 success reset)**
 - `_term_goal_reached`는 `_update_goals()` 매 스텝마다 계산 — `parkour_env.py:580-594`
 - 조건: `self._reach_goal_timer > hold_time_steps AND current_goal_idx >= num_goals - 1`
 - hold_time_steps = int(cfg.reach_goal_delay / step_dt) = int(0.1 / 0.02) = 5 steps — `parkour_env_cfg.py:598`
 - 동작: 마지막 goal 도달 후 0.1초 동안 hold하면 `_term_goal_reached = True` → 다음 스텝에서 즉시 reset
 - **예시**: env 0가 마지막 goal 근처 도달 → timer 증가 → 5 스텝 후 _term_goal_reached 플래그 → _get_dones()에서 terminated에 포함 → reset_idx() 호출
 
-**3. Grace period (early termination 방지)**  
+**3. Grace period (early termination 방지)**
 - Failure conditions (tilt, low_height)에만 적용
 - Goal success는 grace 영향 없음 (항상 종료)
 - 계산: `terminated = (terminated & ~grace) | self._term_goal_reached` — `parkour_env.py:1133`
 
-**4. Return 값**  
+**4. Return 값**
 - `terminated`: failure + success (goal reached) + time_out이 아님
 - `time_out`: timeout only (truncated)
 - 합치면: `dones = (terminated | time_out)`
@@ -97,7 +97,7 @@ dt: float = 1 / 200  # 200 Hz physics
 
 ### 계산
 
-**공식**: `max_episode_length = ceil(episode_length_s / (sim.dt * decimation))`  
+**공식**: `max_episode_length = ceil(episode_length_s / (sim.dt * decimation))`
 **파일:라인**: `source/isaaclab/isaaclab/envs/direct_rl_env.py:286`
 
 ```python
@@ -141,7 +141,7 @@ time_out = self.episode_length_buf >= self.max_episode_length - 1
 
 ### 상세 흐름
 
-**Step 2.1-2.7**: Buffer 초기화 (총 7개 buffer 초기화)  
+**Step 2.1-2.7**: Buffer 초기화 (총 7개 buffer 초기화)
 - `_actions[env_ids] = 0.0` — `1147`
 - `_previous_actions[env_ids] = 0.0` — `1148`
 - `_current_goal_idx[env_ids] = 0` — `1150`
@@ -287,7 +287,7 @@ def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
 
 ### DirectRLEnv → RslRlVecEnvWrapper 변환
 
-**DirectRLEnv.step() return**: `parkour_env.py`가 상속받는 부모의 step() 실행  
+**DirectRLEnv.step() return**: `parkour_env.py`가 상속받는 부모의 step() 실행
 **파일:라인**: `source/isaaclab/isaaclab/envs/direct_rl_env.py:420`
 
 ```python
@@ -397,6 +397,6 @@ self.alg.process_env_step(obs, rewards, dones, extras)
 
 ---
 
-**작성일**: 2026-05-20  
-**검증 방식**: grep -rn, Read 도구로 파일:라인 직접 인용  
+**작성일**: 2026-05-20
+**검증 방식**: grep -rn, Read 도구로 파일:라인 직접 인용
 **부재 검증**: base_contact condition 제외 모든 항목 코드에서 확인

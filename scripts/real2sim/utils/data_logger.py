@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -17,9 +22,7 @@ JOINT_LABELS = ["thigh_r", "thigh_p", "knee_p", "ankle_p", "toe_p"]
 
 # CSV 헤더 (17컬럼)
 COLUMNS: list[str] = (
-    ["timestamp"]
-    + [f"{j}_{k}" for j in JOINT_LABELS for k in ["pos", "vel", "torque"]]
-    + ["setpoint_applied"]
+    ["timestamp"] + [f"{j}_{k}" for j in JOINT_LABELS for k in ["pos", "vel", "torque"]] + ["setpoint_applied"]
 )
 
 _FLUSH_INTERVAL = 200  # 200행마다 disk flush

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -13,11 +13,12 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg, GaussianNoiseCfg
+from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 from isaaclab_assets.robots.rga import R_SKELETON_CFG
-from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
+
 
 @configclass
 class EventCfg:
@@ -34,6 +35,7 @@ class EventCfg:
             "num_buckets": 64,
         },
     )
+
 
 @configclass
 class SkeletonWtwEnvCfg(DirectRLEnvCfg):
@@ -64,7 +66,7 @@ class SkeletonWtwEnvCfg(DirectRLEnvCfg):
         num_prio_obs += 1
     if clock_inputs:
         num_prio_obs += 4
-    
+
     num_heights = 0
 
     num_priv = 3 if priv_explicit else 0
@@ -96,7 +98,7 @@ class SkeletonWtwEnvCfg(DirectRLEnvCfg):
         ".*_waist_r",
         ".*_waist_y",
     ]
-    
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=dt,
@@ -135,10 +137,10 @@ class SkeletonWtwEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.005, track_air_time=True
     )
 
-    gait_force_sigma = 100.
-    gait_vel_sigma = 10.
+    gait_force_sigma = 100.0
+    gait_vel_sigma = 10.0
     tracking_sigma = 0.25
-    base_height_target = 0.608 # Updated base height for skeleton
+    base_height_target = 0.608  # Updated base height for skeleton
     sigma_rew_neg = 0.02
 
     # reward scales
@@ -162,14 +164,14 @@ class SkeletonWtwEnvCfg(DirectRLEnvCfg):
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="add"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="add"),
     )
 
     # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-      noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-      bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="add"),
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="add"),
     )
 
     # Command Definition
@@ -188,11 +190,12 @@ class SkeletonWtwEnvCfg(DirectRLEnvCfg):
         "gait_bound_cmd_range": [0.0, 1.0],
         "gait_duration_cmd_range": [0.3, 0.7],
         "footswing_height_range": [0.03, 0.2],
-        "body_pitch_range": [-0., 0.],
-        "body_roll_range": [-0., 0.],
-        "stance_width_range": [0.19, 0.20], #0.195
-        "stance_length_range": [0.75, 0.85]
+        "body_pitch_range": [-0.0, 0.0],
+        "body_roll_range": [-0.0, 0.0],
+        "stance_width_range": [0.19, 0.20],  # 0.195
+        "stance_length_range": [0.75, 0.85],
     }
+
 
 @configclass
 class SkeletonWtwRoughEnvCfg(SkeletonWtwEnvCfg):

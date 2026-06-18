@@ -1,8 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -15,8 +21,6 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
-import isaaclab.envs.mdp as mdp
-
 ##
 # Pre-defined configs
 ##
@@ -25,6 +29,7 @@ from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 # ---------------------------------------------------------------------------
 # 이벤트 설정
 # ---------------------------------------------------------------------------
+
 
 @configclass
 class InteractionEventCfg:
@@ -69,6 +74,7 @@ class InteractionEventCfg:
 # 환경 설정 (Config)
 # ---------------------------------------------------------------------------
 
+
 @configclass
 class Go2InteractionCfg(DirectRLEnvCfg):
     """Go2 상호작용 학습 환경 설정.
@@ -80,10 +86,10 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     # 기본 환경 파라미터
     # ------------------------------------------------------------------ #
     episode_length_s: float = 4.0
-    dt: float = 1 / 200           # 물리 서브스텝 dt
-    decimation: int = 4            # 제어 주파수 = 200/4 = 50 Hz
+    dt: float = 1 / 200  # 물리 서브스텝 dt
+    decimation: int = 4  # 제어 주파수 = 200/4 = 50 Hz
     action_scale: float = 0.25
-    action_space: int = 12         # Go2 12개 관절
+    action_space: int = 12  # Go2 12개 관절
     clip_actions: float = 100.0
     hip_scale_reduction: bool = True
     debug_vis: bool = True
@@ -149,9 +155,7 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------ #
     # 씬 설정
     # ------------------------------------------------------------------ #
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=4.0, replicate_physics=True
-    )
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
     # ------------------------------------------------------------------ #
     # 이벤트 (도메인 랜덤화)
@@ -161,9 +165,7 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------ #
     # 로봇
     # ------------------------------------------------------------------ #
-    robot: ArticulationCfg = UNITREE_GO2_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot"
-    )
+    robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
@@ -188,9 +190,9 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------ #
     # 모션 파일은 interaction/ref_motion/ 폴더에 위치
     motion_files: dict = {
-        "0": "default.csv",       # 기본 자세
-        "1": "sit.csv",           # 앉기
-        "2": "lay.csv",           # 눕기
+        "0": "default.csv",  # 기본 자세
+        "1": "sit.csv",  # 앉기
+        "2": "lay.csv",  # 눕기
         "3": "stand_cap_v2.csv",  # 일어서기
     }
 
@@ -212,7 +214,7 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------ #
     # 종료 조건
     # ------------------------------------------------------------------ #
-    termination_if_roll_greater_than: float = 1.484   # 85도 (rad)
+    termination_if_roll_greater_than: float = 1.484  # 85도 (rad)
     termination_if_pitch_greater_than: float = 1.484  # 85도 (rad)
 
     # 패널티 대상 바디 이름 (Contact 기반)
@@ -245,8 +247,8 @@ class Go2InteractionCfg(DirectRLEnvCfg):
     torques_balance_reward_scale: float = -0.01
 
     # Stand 앞다리 진동 억제
-    stand_front_vel_reward_scale: float = -0.05   # [A] FL/FR 관절 속도² 페널티 (음수)
-    front_stillness_reward_scale: float = 0.5     # [B] 타겟 근방 정지 보상 (양수)
+    stand_front_vel_reward_scale: float = -0.05  # [A] FL/FR 관절 속도² 페널티 (음수)
+    front_stillness_reward_scale: float = 0.5  # [B] 타겟 근방 정지 보상 (양수)
 
     # ------------------------------------------------------------------ #
     # 노이즈 모델

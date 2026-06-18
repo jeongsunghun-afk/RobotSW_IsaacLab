@@ -1,19 +1,21 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import os
 
 # isaacgymenvs (VecTask class)
 import sys
-import isaacgymenvs
-from isaacgym import gymapi, gymtorch
 
+import isaacgymenvs
 import numpy as np
 import torch
-
+from isaacgym import gymapi, gymtorch
 
 sys.path.append(list(isaacgymenvs.__path__)[0])
-from tasks.base.vec_task import VecTask
-
 from skrl.utils import isaacgym_utils
-
+from tasks.base.vec_task import VecTask
 
 TASK_CFG = {
     "name": "ReachingFranka",
@@ -89,7 +91,7 @@ class ReachingFrankaTask(VecTask):
         elif self._control_space == "cartesian":
             self.cfg["env"]["numActions"] = 3
         else:
-            raise ValueError("Invalid control space: {}".format(self._control_space))
+            raise ValueError(f"Invalid control space: {self._control_space}")
 
         self._end_effector_link = "panda_leftfinger"
 

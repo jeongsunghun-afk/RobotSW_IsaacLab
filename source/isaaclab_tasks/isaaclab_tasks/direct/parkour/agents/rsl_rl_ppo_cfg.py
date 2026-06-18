@@ -5,7 +5,14 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlLcpCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoActorCriticMoECfg,
+    RslRlPpoAlgorithmCfg,
+    RslRlSymmetryCfg,
+)
 
 
 @configclass
@@ -31,18 +38,20 @@ class Go2ParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     # obs_groups: route env's dict observations to actor/critic/encoders
     # env returns: {policy, scan, priv_explicit, priv_latent, history}
-    # policy:        proprio          [N, 42]   (3+1+1+1+12+12+12)
-    # scan:          height_scan      [N, 187]
-    # priv_explicit: lin_vel+ang_vel  [N, 6]    (root_lin_vel_b*2.0(3) + root_ang_vel_b*0.25(3))
-    # priv_latent:   fric+mass+com    [N, 12]   (foot_friction(8) + base_mass(1) + base_com(3))
-    # history:       proprio history  [N, 10, 42] for StateHistoryEncoder
-    # critic total:  42+187+6+12 = 247
+    # policy:        proprio           [N, 42]   (3+1+1+1+12+12+12)
+    # scan:          height_scan       [N, 187]
+    # priv_explicit: lin_vel+ang_vel   [N, 6]    (root_lin_vel_b*2.0(3) + root_ang_vel_b*0.25(3))
+    # priv_latent:   B-style extended  [N, 37]   (base_friction(1) + foot_friction(8) +
+    #                                             base_mass(1) + base_com(3) +
+    #                                             joint_stiffness_ratio(12) + joint_damping_ratio(12))
+    # history:       proprio history   [N, 10, 42] for StateHistoryEncoder
+    # critic total:  42+187+6+37 = 272
     obs_groups = {
-        "policy":        ["policy"],
-        "critic":        ["policy", "scan", "priv_explicit", "priv_latent"],
-        "scan":          ["scan"],
-        "history":       ["history"],
-        "priv":          ["priv_latent"],
+        "policy": ["policy"],
+        "critic": ["policy", "scan", "priv_explicit", "priv_latent"],
+        "scan": ["scan"],
+        "history": ["history"],
+        "priv": ["priv_latent"],
         "priv_explicit": ["priv_explicit"],
     }
 
@@ -61,6 +70,7 @@ class Go2ParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_obs_normalization=False,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
+        noise_std_type="log",
         activation="elu",
     )
 
@@ -80,6 +90,82 @@ class Go2ParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class Go2ParkourSPOPPORunnerCfg(Go2ParkourPPORunnerCfg):
+    """Go2 Parkour with SPO (Simple Policy Optimization) surrogate.
+
+    Replaces PPO clip surrogate with a quadratic ratio penalty:
+        f_spo = r·A − (|A|/2ε)(r−1)²
+    Reference: Xie et al., arXiv:2401.16025, Eq. 16.
+
+    Only the surrogate function changes; env, architecture, and all other
+    hyperparameters are inherited from Go2ParkourPPORunnerCfg unchanged.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.surrogate_type = "spo"
+        # FINAL combined stabilization screen (lead-driven): ε↑ + epochs↓ both attack the
+        # SPO surrogate spike (|A|/ε)(r-1)² at its source. ② adv-norm FAILED full-env;
+        # ① epochs=2 alone only DELAYED divergence (~2636→~3100). ε=0.4 halves the (1/ε)
+        # amplification; epochs=2 bounds intra-update ratio drift. Judged by REWARD recovery.
+        self.algorithm.spo_epsilon = 0.4
+        self.algorithm.schedule = "fixed"
+        self.algorithm.num_learning_epochs = 2
+        self.experiment_name = "go2_parkour_spo"
+
+
+@configclass
+class Go2ParkourLCPPPORunnerCfg(Go2ParkourPPORunnerCfg):
+    """Go2 Parkour with LCP (Lipschitz-Constrained Policy) gradient penalty.
+
+    Adds λ·‖∇_obs log π‖² to the policy loss to reduce action jitter and
+    improve sim-to-real transfer.
+    Reference: arXiv:2410.11825.
+
+    Note: PPOParkour currently accepts lcp_cfg but does not apply the penalty
+    (RMA encoder inputs make the gradient path non-trivial). This cfg registers
+    the variant so the penalty can be activated once ppo_parkour is extended.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.lcp_cfg = RslRlLcpCfg(lambda_gp=0.002, penalize="log_prob")
+        self.experiment_name = "go2_parkour_lcp"
+
+
+@configclass
+class Go2ParkourMoEPPORunnerCfg(Go2ParkourPPORunnerCfg):
+    """Go2 Parkour with MoE-RMA actor (Mixture-of-Experts).
+
+    Replaces the single-MLP actor with a dense-softmax MoE: 6 expert MLPs
+    weighted by a learned gating network. The critic and all encoders are
+    inherited unchanged from ActorCriticRMA.
+    Reference: Huang*, Zhu* et al., arXiv:2503.08564 — MoE-Loco.
+
+    ActorCriticRMAMoE is implemented in a separate worker; this cfg wires the
+    class_name so OnPolicyRunnerParkour will instantiate it.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.policy = RslRlPpoActorCriticMoECfg(
+            class_name="ActorCriticRMAMoE",
+            init_noise_std=1.0,
+            actor_obs_normalization=False,
+            critic_obs_normalization=False,
+            actor_hidden_dims=[512, 256, 128],
+            critic_hidden_dims=[512, 256, 128],
+            noise_std_type="log",
+            activation="elu",
+            num_experts=6,
+            gating_hidden_dims=[128],
+            expert_hidden_dims=[512, 256, 128],
+            gating_temperature=1.0,
+        )
+        self.experiment_name = "go2_parkour_moe"
 
 
 @configclass
@@ -107,8 +193,6 @@ class Go2ParkourSymmetryPPORunnerCfg(Go2ParkourPPORunnerCfg):
             use_data_augmentation=True,
             use_mirror_loss=False,
             mirror_loss_coeff=0.0,
-            data_augmentation_func=(
-                "isaaclab_tasks.direct.parkour.mdp.symmetry:compute_parkour_symmetric_states"
-            ),
+            data_augmentation_func=("isaaclab_tasks.direct.parkour.mdp.symmetry:compute_parkour_symmetric_states"),
         )
         self.experiment_name = "go2_parkour_symmetry"

@@ -1,8 +1,12 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-from typing import Any, Literal
-
 from functools import partial
+from typing import Any, Literal
 
 import flax
 import jax
@@ -70,7 +74,11 @@ class MultiCategoricalMixin:
         self._mc_reduction = (
             jnp.mean
             if reduction == "mean"
-            else jnp.sum if reduction == "sum" else jnp.prod if reduction == "prod" else None
+            else jnp.sum
+            if reduction == "sum"
+            else jnp.prod
+            if reduction == "prod"
+            else None
         )
 
         self._mc_i = 0

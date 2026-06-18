@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """실제 로봇 통신용 ROS2 인터페이스 skeleton.
 
 현재 미구현 상태. 향후 실제 로봇 도입 시 여기에 ROS2 노드 추가.
@@ -16,7 +21,6 @@ Phase 2: ROS2 service/topic으로 실제 로봇과 통신
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import numpy as np
 
@@ -33,7 +37,7 @@ class RobotInterface(ABC):
         """
 
     @abstractmethod
-    def recv_state(self, timeout_ms: int = 0) -> Optional[dict]:
+    def recv_state(self, timeout_ms: int = 0) -> dict | None:
         """로봇 상태 수신.
 
         Returns:
@@ -63,7 +67,7 @@ class MockRobotInterface(RobotInterface):
         if len(q) == 5:
             self._setpoint = q.copy()
 
-    def recv_state(self, timeout_ms: int = 0) -> Optional[dict]:
+    def recv_state(self, timeout_ms: int = 0) -> dict | None:
         """Dummy: 미리 정해진 상태 반환 (실제 로봇 움직임 없음)."""
         import time
 
@@ -95,17 +99,18 @@ class ROS2RobotInterface(RobotInterface):
     from real2sim_msgs.msg import JointCommand, JointState
     from real2sim_msgs.srv import GetJointState
 
+
     class ROS2RobotBridge(Node):
         def __init__(self):
-            super().__init__('robot_bridge')
+            super().__init__("robot_bridge")
 
             # Setpoint 발행
-            self.cmd_pub = self.create_publisher(
-                JointCommand, 'robot/joint_command', qos_profile_sensor_data)
+            self.cmd_pub = self.create_publisher(JointCommand, "robot/joint_command", qos_profile_sensor_data)
 
             # State 구독
             self.state_sub = self.create_subscription(
-                JointState, 'robot/joint_state', self._on_state, qos_profile_sensor_data)
+                JointState, "robot/joint_state", self._on_state, qos_profile_sensor_data
+            )
 
             self._latest_state = None
     ```
@@ -114,15 +119,14 @@ class ROS2RobotInterface(RobotInterface):
     def __init__(self):
         """ROS2 로봇 인터페이스 초기화 (미구현)."""
         raise NotImplementedError(
-            "ROS2RobotInterface는 Phase 2에서 구현됩니다. "
-            "현재는 ZMQ 또는 MockRobotInterface를 사용하세요."
+            "ROS2RobotInterface는 Phase 2에서 구현됩니다. 현재는 ZMQ 또는 MockRobotInterface를 사용하세요."
         )
 
     def send_setpoint(self, q: np.ndarray) -> None:
         """ROS2 service로 setpoint 전송 (미구현)."""
         raise NotImplementedError()
 
-    def recv_state(self, timeout_ms: int = 0) -> Optional[dict]:
+    def recv_state(self, timeout_ms: int = 0) -> dict | None:
         """ROS2 subscription에서 state 수신 (미구현)."""
         raise NotImplementedError()
 
@@ -141,7 +145,7 @@ class DualTransportBridge:
     같은 setpoint를 두 채널 모두에 송신하여 동시 검증 가능.
     """
 
-    def __init__(self, zmq_bridge, robot_interface: Optional[RobotInterface] = None):
+    def __init__(self, zmq_bridge, robot_interface: RobotInterface | None = None):
         """
         Args:
             zmq_bridge: ZMQ 브릿지 인스턴스
@@ -162,7 +166,7 @@ class DualTransportBridge:
             except Exception as e:
                 print(f"[Robot] Send failed: {e}")
 
-    def recv_state(self, source: str = "zmq", timeout_ms: int = 0) -> Optional[dict]:
+    def recv_state(self, source: str = "zmq", timeout_ms: int = 0) -> dict | None:
         """지정된 소스에서 state 수신.
 
         Args:

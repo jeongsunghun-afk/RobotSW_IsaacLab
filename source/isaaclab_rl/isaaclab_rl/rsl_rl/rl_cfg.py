@@ -13,6 +13,38 @@ from isaaclab.utils import configclass
 from .rnd_cfg import RslRlRndCfg
 from .symmetry_cfg import RslRlSymmetryCfg
 
+#####################
+# LCP configuration #
+#####################
+
+
+@configclass
+class RslRlLcpCfg:
+    """Configuration for the Lipschitz-Constrained Policy (LCP) gradient penalty.
+
+    Penalizes the L2-squared norm of the gradient of log π(a|obs) w.r.t. the observation,
+    encouraging a Lipschitz-smooth policy for sim-to-real transfer.
+
+    Reference: Chen et al., arXiv:2410.11825 — *Learning Smooth Humanoid Locomotion through
+    Lipschitz-Constrained Policies* (X.B. Peng group), Eq. 7.
+    """
+
+    lambda_gp: float = 0.002
+    """Gradient penalty coefficient λ_gp. Paper default is 0.002.
+
+    Ablation grid from the paper: {0.0, 0.001, 0.002, 0.005, 0.01}.
+    Larger values enforce stronger Lipschitz constraint but may reduce task performance.
+    """
+
+    penalize: str = "log_prob"
+    """Which quantity to penalize the gradient of. Either 'log_prob' or 'mean'.
+
+    - 'log_prob': paper-faithful — penalizes ‖∇_obs log π(a|obs)‖² (Eq. 7).
+    - 'mean': cheaper variant — penalizes ‖∇_obs μ(obs)‖², directly bounds the
+      Lipschitz constant of the deterministic policy map. No actions_batch needed.
+    """
+
+
 #########################
 # Policy configurations #
 #########################
@@ -65,6 +97,43 @@ class RslRlPpoActorCriticRecurrentCfg(RslRlPpoActorCriticCfg):
 
     rnn_num_layers: int = MISSING
     """The number of RNN layers."""
+
+
+@configclass
+class RslRlPpoActorCriticMoECfg(RslRlPpoActorCriticCfg):
+    """Configuration for the PPO actor-critic network with a Mixture-of-Experts (MoE) actor.
+
+    The actor is replaced by a dense-softmax MoE: N expert MLPs are each applied to the
+    observation, and their outputs are weighted-summed by a learned gating network.
+    No load-balancing auxiliary loss is needed (dense routing — all experts receive
+    gradients every step). PPO loop is unmodified.
+
+    Reference: Huang*, Zhu* et al., arXiv:2503.08564 — *MoE-Loco: Mixture of Experts
+    for Multitask Locomotion*.
+    """
+
+    class_name: str = "ActorCriticMoE"
+    """The policy class name. Must match the registered class in modules/__init__.py."""
+
+    num_experts: int = 6
+    """Number of expert MLPs in the MoE actor. Paper default is 6."""
+
+    gating_hidden_dims: list[int] = [128]
+    """Hidden dimensions of the gating network MLP. Paper uses [128] (Table VI)."""
+
+    expert_hidden_dims: list[int] = MISSING
+    """Hidden dimensions of each expert MLP. Replaces actor_hidden_dims for the MoE actor.
+
+    Must be set explicitly. Example: [256, 256, 256].
+    Note: actor_hidden_dims (inherited) is accepted by super().__init__ but is superseded
+    by this field — ActorCriticMoE replaces self.actor with the MoE module after super init.
+    """
+
+    gating_temperature: float = 1.0
+    """Temperature for the gating softmax. Values > 1.0 flatten the gating distribution
+    (encourage expert diversity); values < 1.0 sharpen it (encourage specialization).
+    Start at 1.0; tune if expert collapse is observed.
+    """
 
 
 ############################
@@ -127,6 +196,31 @@ class RslRlPpoAlgorithmCfg:
 
     symmetry_cfg: RslRlSymmetryCfg | None = None
     """The symmetry configuration. Default is None, in which case symmetry is not used."""
+
+    surrogate_type: str = "ppo"
+    """Surrogate objective type. Either 'ppo' (ratio-clip, default) or 'spo' (quadratic ratio penalty).
+
+    SPO replaces PPO's clipped surrogate with a quadratic penalty:
+        f_spo = r·A − (|A| / 2ε)·(r − 1)²
+    where ε is :attr:`spo_epsilon`. Reference: Xie et al., arXiv:2401.16025, Eq. 16.
+    Default 'ppo' preserves existing PPO behaviour exactly.
+    """
+
+    spo_epsilon: float = 0.2
+    """Trust-region coefficient ε for SPO quadratic penalty. Only used when surrogate_type='spo'.
+
+    Same role and scale as PPO's clip_param (≈ 0.2 recommended starting point).
+    f_spo = r·A − (|A| / 2ε)·(r − 1)²  (arXiv:2401.16025, Eq. 16 / Eq. 18).
+    Must be > 0; spo_epsilon → 0 causes the penalty term to blow up.
+    """
+
+    lcp_cfg: RslRlLcpCfg | None = None
+    """The Lipschitz-Constrained Policy (LCP) gradient penalty configuration.
+
+    Default is None, in which case LCP is disabled. When set, the gradient penalty
+    λ_gp·E[‖∇_obs log π(a|obs)‖²] is added to the PPO loss to smooth the policy.
+    Reference: Chen et al., arXiv:2410.11825, Eq. 7.
+    """
 
 
 #########################

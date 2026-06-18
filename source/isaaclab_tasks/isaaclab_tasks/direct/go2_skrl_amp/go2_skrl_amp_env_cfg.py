@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -14,13 +19,12 @@ from __future__ import annotations
 import os
 
 import isaaclab.sim as sim_utils
+from isaaclab.actuators import DCMotorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
-
-from isaaclab.actuators import DCMotorCfg
 
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 
@@ -52,8 +56,8 @@ class Go2SkrlAmpEnvCfg(DirectRLEnvCfg):
     observation_space = 42
     action_space = 12
     state_space = 0
-    num_amp_observations = 2      # skrl AMP 히스토리 길이 (humanoid_amp 스타일)
-    amp_observation_space = 43    # 단일 프레임 AMP obs 크기
+    num_amp_observations = 2  # skrl AMP 히스토리 길이 (humanoid_amp 스타일)
+    amp_observation_space = 43  # 단일 프레임 AMP obs 크기
 
     # 조기 종료
     early_termination = True
@@ -67,7 +71,7 @@ class Go2SkrlAmpEnvCfg(DirectRLEnvCfg):
     # 모션 파일 (NPZ 디렉토리 또는 단일 파일)
     motion_file: str = MOTIONS_DIR
     reference_body = "base"
-    reset_strategy = "random"   # {"default", "random", "random-start"}
+    reset_strategy = "random"  # {"default", "random", "random-start"}
 
     # 커맨드
     command_cfg = {
@@ -95,9 +99,7 @@ class Go2SkrlAmpEnvCfg(DirectRLEnvCfg):
     )
 
     # 씬
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=5.0, replicate_physics=True
-    )
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=5.0, replicate_physics=True)
 
     # 로봇
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(
@@ -111,7 +113,7 @@ class Go2SkrlAmpEnvCfg(DirectRLEnvCfg):
                 stiffness=25.0,
                 damping=1.0,
                 friction=0.0,
-                armature=0.01
+                armature=0.01,
             ),
         },
     )

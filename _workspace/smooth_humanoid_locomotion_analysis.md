@@ -11,7 +11,7 @@
 ## 2. 코드 구조 및 주요 모듈
 
 ### A. Environment (Isaac Gym 기반 `legged_gym`)
-- **`legged_gym/envs/base/humanoid.py`**: 휴먼노이드 보행을 위한 Base Environment 클래스. 
+- **`legged_gym/envs/base/humanoid.py`**: 휴먼노이드 보행을 위한 Base Environment 클래스.
   - `compute_ref_state`: 발자국 위상의 Sine/Cosine 곡선을 이용해 목표 관절 궤적(Reference State)을 생성하는 방식 사용. (AMP와 다르게 직접 Heuristic Trajectory를 계산함)
   - `_reward_tracking_lin_vel_exp`, `_reward_feet_clearance`, `_reward_feet_air_time` 등 Dense Reward 체계 적용.
   - 다양한 **Terrain Curriculum**과 **Domain Randomization**(질량, 마찰, 모터 강도, 모터 딜레이 등) 구현.

@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -32,16 +37,20 @@ parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point")
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--num_steps", type=int, default=2000)
 # --checkpoint provided by cli_args.add_rsl_rl_args()
-parser.add_argument("--force_thresh", type=float, default=2.0,
-                    help="Contact force threshold [N] (default 2.0, matches env reward)")
-parser.add_argument("--z_thresh", type=float, default=0.03,
-                    help="Extra clearance above sole_offset for kin contact [m]")
-parser.add_argument("--v_thresh", type=float, default=0.2,
-                    help="Foot vertical velocity threshold [m/s]")
-parser.add_argument("--kin_only_flag_thresh", type=float, default=0.10,
-                    help="kin_only excess above which edge-underreporting is flagged")
-parser.add_argument("--cal_steps", type=int, default=200,
-                    help="Warm-up steps for sole-offset calibration")
+parser.add_argument(
+    "--force_thresh", type=float, default=2.0, help="Contact force threshold [N] (default 2.0, matches env reward)"
+)
+parser.add_argument(
+    "--z_thresh", type=float, default=0.03, help="Extra clearance above sole_offset for kin contact [m]"
+)
+parser.add_argument("--v_thresh", type=float, default=0.2, help="Foot vertical velocity threshold [m/s]")
+parser.add_argument(
+    "--kin_only_flag_thresh",
+    type=float,
+    default=0.10,
+    help="kin_only excess above which edge-underreporting is flagged",
+)
+parser.add_argument("--cal_steps", type=int, default=200, help="Warm-up steps for sole-offset calibration")
 parser.add_argument("--seed", type=int, default=42)
 
 cli_args.add_rsl_rl_args(parser)
@@ -59,24 +68,26 @@ import time
 import gymnasium as gym
 import numpy as np
 import torch
-
 from rsl_rl.runners import OnPolicyRunnerParkour
-from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-import isaaclab_tasks  # noqa: F401
+
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.utils.assets import retrieve_file_path
+
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
+
+import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg
-from isaaclab.utils.assets import retrieve_file_path
 
 SCRIPT_VERSION = "v3"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _ground_z_from_ray_hits(
-    feet_pos_w: torch.Tensor,   # (N, 4, 3) world-frame foot positions
-    ray_hits_w: torch.Tensor,   # (N, C, 3) world-frame ray hit positions
+    feet_pos_w: torch.Tensor,  # (N, 4, 3) world-frame foot positions
+    ray_hits_w: torch.Tensor,  # (N, C, 3) world-frame ray hit positions
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Find ground_z under each foot as z of the nearest finite ray hit.
 
@@ -92,10 +103,10 @@ def _ground_z_from_ray_hits(
     finite_mask = torch.isfinite(ray_hits_w).all(dim=-1)
 
     # Squared xy distances: (N, 4, C)
-    ray_xy  = ray_hits_w[..., :2]                          # (N, C, 2)
-    foot_xy = feet_pos_w[..., :2]                          # (N, 4, 2)
-    diff    = foot_xy.unsqueeze(2) - ray_xy.unsqueeze(1)   # (N, 4, C, 2)
-    sq_dist = (diff * diff).sum(dim=-1)                    # (N, 4, C)
+    ray_xy = ray_hits_w[..., :2]  # (N, C, 2)
+    foot_xy = feet_pos_w[..., :2]  # (N, 4, 2)
+    diff = foot_xy.unsqueeze(2) - ray_xy.unsqueeze(1)  # (N, 4, C, 2)
+    sq_dist = (diff * diff).sum(dim=-1)  # (N, 4, C)
 
     INF_DIST = 1e9
     sq_dist = torch.where(
@@ -104,13 +115,13 @@ def _ground_z_from_ray_hits(
         torch.full_like(sq_dist, INF_DIST),
     )
 
-    nearest_idx  = sq_dist.argmin(dim=-1)                          # (N, 4)
-    min_sq_dist  = sq_dist.min(dim=-1).values                      # (N, 4)
-    valid_mask   = min_sq_dist < (INF_DIST / 2.0)
-    min_xy_dist  = min_sq_dist.sqrt()                              # (N, 4)
+    nearest_idx = sq_dist.argmin(dim=-1)  # (N, 4)
+    min_sq_dist = sq_dist.min(dim=-1).values  # (N, 4)
+    valid_mask = min_sq_dist < (INF_DIST / 2.0)
+    min_xy_dist = min_sq_dist.sqrt()  # (N, 4)
 
     # Gather z for nearest ray
-    ray_z    = ray_hits_w[..., 2]                                   # (N, C)
+    ray_z = ray_hits_w[..., 2]  # (N, C)
     ground_z = ray_z.gather(1, nearest_idx.reshape(N, -1)).reshape(N, num_feet)
 
     ground_z = torch.where(valid_mask, ground_z, torch.full_like(ground_z, float("nan")))
@@ -132,15 +143,15 @@ def _print_table(foot_names: list[str], metrics: dict[str, np.ndarray], title: s
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
-
     # FAIL-LOUD version stamp — first thing printed after Isaac boot
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"=== verify_3leg {SCRIPT_VERSION} (height_scanner ground_z) ===")
     print(f"=== started {ts} ===")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # ── Environment setup ──────────────────────────────────────────────────────
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
@@ -174,13 +185,13 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         policy_nn = runner.alg.actor_critic
 
     base_env = env.unwrapped
-    device   = base_env.device
-    N        = args_cli.num_envs
-    T        = args_cli.num_steps
-    CAL      = args_cli.cal_steps
+    device = base_env.device
+    N = args_cli.num_envs
+    T = args_cli.num_steps
+    CAL = args_cli.cal_steps
 
     # Foot ids and names (runtime, no hard-coding)
-    feet_ids   = list(base_env._feet_ids)
+    feet_ids = list(base_env._feet_ids)
     foot_names = [base_env._contact_sensor.body_names[i] for i in feet_ids]
     print(f"[{SCRIPT_VERSION}] Foot body names : {foot_names}")
     print(f"[{SCRIPT_VERSION}] Foot body ids   : {feet_ids}")
@@ -213,35 +224,39 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     if hs_valid:
         with torch.no_grad():
-            rh = hs.data.ray_hits_w   # (N, C, 3)
+            rh = hs.data.ray_hits_w  # (N, C, 3)
             # Use env 0 for the bbox (representative)
-            finite_mask_0 = torch.isfinite(rh[0]).all(dim=-1)   # (C,)
-            rh0_fin = rh[0][finite_mask_0]                       # (C_fin, 3)
+            finite_mask_0 = torch.isfinite(rh[0]).all(dim=-1)  # (C,)
+            rh0_fin = rh[0][finite_mask_0]  # (C_fin, 3)
 
             # feet for env 0 (body frame xy relative to robot base for readability)
-            fp0_w  = base_env._robot.data.body_pos_w[0, feet_ids, :]  # (4, 3) world
-            base0  = base_env._robot.data.root_pos_w[0, :2]           # (2,) world base xy
-            fp0_b  = fp0_w[:, :2] - base0                             # (4, 2) body-relative xy
+            fp0_w = base_env._robot.data.body_pos_w[0, feet_ids, :]  # (4, 3) world
+            base0 = base_env._robot.data.root_pos_w[0, :2]  # (2,) world base xy
+            fp0_b = fp0_w[:, :2] - base0  # (4, 2) body-relative xy
 
             print(f"\n[{SCRIPT_VERSION}] ======= SCANNER COVERAGE DIAGNOSTIC (env 0) =======")
-            print(f"  height_scanner cfg: offset_x=+0.375m, size=[1.6, 1.0]m")
-            print(f"  => scanner grid (body-relative x): [{0.375-0.8:.3f}, {0.375+0.8:.3f}] m")
+            print("  height_scanner cfg: offset_x=+0.375m, size=[1.6, 1.0]m")
+            print(f"  => scanner grid (body-relative x): [{0.375 - 0.8:.3f}, {0.375 + 0.8:.3f}] m")
             print(f"  => scanner grid (body-relative y): [{-0.5:.3f}, {+0.5:.3f}] m")
 
             if rh0_fin.shape[0] > 0:
-                rh0_b_xy = rh0_fin[:, :2] - base0               # body-relative xy of hit points
-                print(f"  ray_hits bbox (body-relative x): [{rh0_b_xy[:, 0].min().item():.3f}, "
-                      f"{rh0_b_xy[:, 0].max().item():.3f}] m")
-                print(f"  ray_hits bbox (body-relative y): [{rh0_b_xy[:, 1].min().item():.3f}, "
-                      f"{rh0_b_xy[:, 1].max().item():.3f}] m")
+                rh0_b_xy = rh0_fin[:, :2] - base0  # body-relative xy of hit points
+                print(
+                    f"  ray_hits bbox (body-relative x): [{rh0_b_xy[:, 0].min().item():.3f}, "
+                    f"{rh0_b_xy[:, 0].max().item():.3f}] m"
+                )
+                print(
+                    f"  ray_hits bbox (body-relative y): [{rh0_b_xy[:, 1].min().item():.3f}, "
+                    f"{rh0_b_xy[:, 1].max().item():.3f}] m"
+                )
             else:
                 print("  ray_hits (env 0): ALL INVALID (all inf) — scanner not hitting terrain!")
 
-            print(f"  Foot body-relative xy (vs scanner grid):")
+            print("  Foot body-relative xy (vs scanner grid):")
             for fi, fn in enumerate(foot_names):
                 bx, by = fp0_b[fi, 0].item(), fp0_b[fi, 1].item()
                 in_x = -0.425 <= bx <= 1.175
-                in_y = -0.5   <= by <= 0.5
+                in_y = -0.5 <= by <= 0.5
                 coverage = "IN grid" if (in_x and in_y) else f"OUT OF GRID (x_ok={in_x}, y_ok={in_y})"
                 print(f"    {fn}: body_rel_x={bx:+.3f}m  body_rel_y={by:+.3f}m  -> {coverage}")
 
@@ -251,31 +266,35 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                 rh,
             )
             ray_valid_frac = valid_v.float().mean(dim=0).cpu().numpy()  # (4,) fraction over envs
-            mean_dxy       = dxy_v.cpu().numpy().mean(axis=0)           # (4,) mean nearest-ray distance
-            foot_z_mean    = base_env._robot.data.body_pos_w[:, feet_ids, 2].mean(dim=0).cpu().numpy()
-            gzv_np         = gzv.cpu().numpy()
-            valid_np       = valid_v.cpu().numpy()
-            ground_z_mean  = np.where(valid_np, gzv_np, np.nan)
-            ground_z_mean  = np.nanmean(ground_z_mean, axis=0)          # (4,)
-            clearance_mean = foot_z_mean - ground_z_mean                 # (4,)
+            mean_dxy = dxy_v.cpu().numpy().mean(axis=0)  # (4,) mean nearest-ray distance
+            foot_z_mean = base_env._robot.data.body_pos_w[:, feet_ids, 2].mean(dim=0).cpu().numpy()
+            gzv_np = gzv.cpu().numpy()
+            valid_np = valid_v.cpu().numpy()
+            ground_z_mean = np.where(valid_np, gzv_np, np.nan)
+            ground_z_mean = np.nanmean(ground_z_mean, axis=0)  # (4,)
+            clearance_mean = foot_z_mean - ground_z_mean  # (4,)
 
-            print(f"\n  Per-foot scanner validity (all envs, step 1):")
-            print(f"  {'foot':<12} {'ray_valid%':>12} {'mean_nearest_m':>16} "
-                  f"{'mean_foot_z':>13} {'mean_gnd_z':>12} {'mean_clr':>10}")
+            print("\n  Per-foot scanner validity (all envs, step 1):")
+            print(
+                f"  {'foot':<12} {'ray_valid%':>12} {'mean_nearest_m':>16} "
+                f"{'mean_foot_z':>13} {'mean_gnd_z':>12} {'mean_clr':>10}"
+            )
             for fi, fn in enumerate(foot_names):
-                print(f"  {fn:<12} {ray_valid_frac[fi]*100:>11.1f}% "
-                      f"{mean_dxy[fi]:>16.3f}m "
-                      f"{foot_z_mean[fi]:>13.3f}m "
-                      f"{ground_z_mean[fi]:>12.3f}m "
-                      f"{clearance_mean[fi]:>10.3f}m")
+                print(
+                    f"  {fn:<12} {ray_valid_frac[fi] * 100:>11.1f}% "
+                    f"{mean_dxy[fi]:>16.3f}m "
+                    f"{foot_z_mean[fi]:>13.3f}m "
+                    f"{ground_z_mean[fi]:>12.3f}m "
+                    f"{clearance_mean[fi]:>10.3f}m"
+                )
             print(f"[{SCRIPT_VERSION}] =====================================================\n")
 
     # ── Phase 1: sole-offset calibration ─────────────────────────────────────
-    sole_offset  = np.zeros(4, dtype=np.float32)
+    sole_offset = np.zeros(4, dtype=np.float32)
     cal_clr: list[list[float]] = [[] for _ in range(4)]
     # Track ray_valid counts across calibration steps (per foot, across envs*steps)
     cal_ray_valid_count = np.zeros(4, dtype=np.int64)
-    cal_total_count     = np.zeros(4, dtype=np.int64)
+    cal_total_count = np.zeros(4, dtype=np.int64)
 
     if hs_valid:
         print(f"[{SCRIPT_VERSION}] === Sole-offset calibration ({CAL} steps) ===")
@@ -289,19 +308,18 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                 obs, _, dones, _ = env.step(actions)
                 policy_nn.reset(dones)
 
-            ep_len    = base_env.episode_length_buf.cpu().numpy()
+            ep_len = base_env.episode_length_buf.cpu().numpy()
             valid_env = ep_len > 1
 
-            net_cf     = base_env._contact_sensor.data.net_forces_w_history
-            sensor_np  = (torch.norm(net_cf[:, 0, feet_ids], dim=-1) > args_cli.force_thresh
-                          ).cpu().numpy()                               # (N, 4)
+            net_cf = base_env._contact_sensor.data.net_forces_w_history
+            sensor_np = (torch.norm(net_cf[:, 0, feet_ids], dim=-1) > args_cli.force_thresh).cpu().numpy()  # (N, 4)
 
-            fp_w  = base_env._robot.data.body_pos_w[:, feet_ids, :]   # (N, 4, 3)
-            rh    = hs.data.ray_hits_w
+            fp_w = base_env._robot.data.body_pos_w[:, feet_ids, :]  # (N, 4, 3)
+            rh = hs.data.ray_hits_w
             gz_t, rv_t, _ = _ground_z_from_ray_hits(fp_w, rh)
-            fz_t  = fp_w[..., 2]
+            fz_t = fp_w[..., 2]
             clr_np = (fz_t - gz_t).cpu().numpy()
-            rv_np  = rv_t.cpu().numpy()
+            rv_np = rv_t.cpu().numpy()
 
             for fi in range(4):
                 for ei in range(N):
@@ -314,19 +332,22 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                         cal_clr[fi].append(float(clr_np[ei, fi]))
 
         print(f"[{SCRIPT_VERSION}] Sole offset calibration results:")
-        print(f"  (expected offset ~0.01-0.05 m = foot body origin above sole surface)")
-        print(f"  {'foot':<12} {'ray_valid%':>11} {'cal_n':>7} {'sole_offset':>12} "
-              f"{'mean_clr':>10} {'p5':>8} {'p95':>8}")
+        print("  (expected offset ~0.01-0.05 m = foot body origin above sole surface)")
+        print(
+            f"  {'foot':<12} {'ray_valid%':>11} {'cal_n':>7} {'sole_offset':>12} {'mean_clr':>10} {'p5':>8} {'p95':>8}"
+        )
         for fi, fn in enumerate(foot_names):
             rv_pct = 100.0 * cal_ray_valid_count[fi] / max(cal_total_count[fi], 1)
-            vals   = cal_clr[fi]
-            n_cal  = len(vals)
+            vals = cal_clr[fi]
+            n_cal = len(vals)
             if n_cal >= 10:
                 med = float(np.median(vals))
                 sole_offset[fi] = med
-                print(f"  {fn:<12} {rv_pct:>10.1f}% {n_cal:>7} {med:>12.4f}m "
-                      f"{np.mean(vals):>10.4f}m {np.percentile(vals,5):>8.4f} "
-                      f"{np.percentile(vals,95):>8.4f}")
+                print(
+                    f"  {fn:<12} {rv_pct:>10.1f}% {n_cal:>7} {med:>12.4f}m "
+                    f"{np.mean(vals):>10.4f}m {np.percentile(vals, 5):>8.4f} "
+                    f"{np.percentile(vals, 95):>8.4f}"
+                )
             else:
                 sole_offset[fi] = 0.0
                 print(f"  {fn:<12} {rv_pct:>10.1f}% {n_cal:>7}  *** INSUFFICIENT — using 0.0m ***")
@@ -341,21 +362,21 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     print(f"[{SCRIPT_VERSION}] Collecting {T} steps × {N} envs ...")
 
     arr_sensor = np.zeros((T, N, 4), dtype=bool)
-    arr_kin    = np.zeros((T, N, 4), dtype=bool)
-    arr_class  = np.zeros((T, N), dtype=np.int64)
+    arr_kin = np.zeros((T, N, 4), dtype=bool)
+    arr_class = np.zeros((T, N), dtype=np.int64)
 
     # Per-step diagnostic accumulators (mean over envs)
     # For per-foot analysis: accumulate across all steps when sensor=True
-    diag_rv_count   = np.zeros(4, dtype=np.int64)   # ray_valid count (all envs, all steps)
-    diag_total      = np.zeros(4, dtype=np.int64)    # total count
-    diag_clr_sum    = np.zeros(4, dtype=np.float64)  # clearance sum (finite, sensor=True)
-    diag_clr_n      = np.zeros(4, dtype=np.int64)    # clearance count (finite, sensor=True)
-    diag_fz_sum     = np.zeros(4, dtype=np.float64)  # foot_z sum (all valid envs)
-    diag_gz_sum     = np.zeros(4, dtype=np.float64)  # ground_z sum (where ray_valid)
-    diag_gz_n       = np.zeros(4, dtype=np.int64)
+    diag_rv_count = np.zeros(4, dtype=np.int64)  # ray_valid count (all envs, all steps)
+    diag_total = np.zeros(4, dtype=np.int64)  # total count
+    diag_clr_sum = np.zeros(4, dtype=np.float64)  # clearance sum (finite, sensor=True)
+    diag_clr_n = np.zeros(4, dtype=np.int64)  # clearance count (finite, sensor=True)
+    diag_fz_sum = np.zeros(4, dtype=np.float64)  # foot_z sum (all valid envs)
+    diag_gz_sum = np.zeros(4, dtype=np.float64)  # ground_z sum (where ray_valid)
+    diag_gz_n = np.zeros(4, dtype=np.int64)
 
-    sole_t = torch.tensor(sole_offset, dtype=torch.float32, device=device)   # (4,)
-    thresh_t = sole_t + args_cli.z_thresh                                     # (4,)
+    sole_t = torch.tensor(sole_offset, dtype=torch.float32, device=device)  # (4,)
+    thresh_t = sole_t + args_cli.z_thresh  # (4,)
 
     t_start = time.time()
     for step in range(T):
@@ -369,31 +390,27 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
         # sensor contact
         net_cf = base_env._contact_sensor.data.net_forces_w_history
-        sensor_contact = (
-            torch.norm(net_cf[:, 0, feet_ids], dim=-1) > args_cli.force_thresh
-        ).cpu().numpy()   # (N, 4)
+        sensor_contact = (torch.norm(net_cf[:, 0, feet_ids], dim=-1) > args_cli.force_thresh).cpu().numpy()  # (N, 4)
 
         # kinematic contact
         if hs_valid:
-            fp_w = base_env._robot.data.body_pos_w[:, feet_ids, :]    # (N, 4, 3)
-            rh   = hs.data.ray_hits_w
+            fp_w = base_env._robot.data.body_pos_w[:, feet_ids, :]  # (N, 4, 3)
+            rh = hs.data.ray_hits_w
             gz_t, rv_t, _ = _ground_z_from_ray_hits(fp_w, rh)
-            fz_t  = fp_w[..., 2]                                       # (N, 4)
-            clr_t = fz_t - gz_t                                        # (N, 4)
+            fz_t = fp_w[..., 2]  # (N, 4)
+            clr_t = fz_t - gz_t  # (N, 4)
 
-            fv_w  = base_env._robot.data.body_lin_vel_w[:, feet_ids, :]
-            fvz   = fv_w[..., 2].abs()                                 # (N, 4)
+            fv_w = base_env._robot.data.body_lin_vel_w[:, feet_ids, :]
+            fvz = fv_w[..., 2].abs()  # (N, 4)
 
-            kin_contact = (
-                rv_t & (clr_t < thresh_t) & (fvz < args_cli.v_thresh)
-            ).cpu().numpy()
+            kin_contact = (rv_t & (clr_t < thresh_t) & (fvz < args_cli.v_thresh)).cpu().numpy()
 
             # Diagnostics accumulation
-            rv_np  = rv_t.cpu().numpy()
-            fz_np  = fz_t.cpu().numpy()
-            gz_np  = gz_t.cpu().numpy()
+            rv_np = rv_t.cpu().numpy()
+            fz_np = fz_t.cpu().numpy()
+            gz_np = gz_t.cpu().numpy()
             clr_np = clr_t.cpu().numpy()
-            sn_np  = sensor_contact
+            sn_np = sensor_contact
         else:
             kin_contact = np.zeros((N, 4), dtype=bool)
 
@@ -402,13 +419,13 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
         # Skip spawn transient
         ep_len = base_env.episode_length_buf.cpu().numpy()
-        valid  = ep_len > 1
+        valid = ep_len > 1
         sensor_contact[~valid] = False
-        kin_contact[~valid]    = False
+        kin_contact[~valid] = False
 
         arr_sensor[step] = sensor_contact
-        arr_kin[step]    = kin_contact
-        arr_class[step]  = env_class
+        arr_kin[step] = kin_contact
+        arr_class[step] = env_class
 
         # Accumulate diagnostics
         if hs_valid:
@@ -422,13 +439,13 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                         diag_rv_count[fi] += 1
                         if np.isfinite(gz_np[ei, fi]):
                             diag_gz_sum[fi] += gz_np[ei, fi]
-                            diag_gz_n[fi]   += 1
+                            diag_gz_n[fi] += 1
                     if sn_np[ei, fi] and rv_np[ei, fi] and np.isfinite(clr_np[ei, fi]):
                         diag_clr_sum[fi] += clr_np[ei, fi]
-                        diag_clr_n[fi]   += 1
+                        diag_clr_n[fi] += 1
 
         if (step + 1) % 200 == 0:
-            print(f"  step {step+1}/{T}  ({time.time()-t_start:.1f}s)")
+            print(f"  step {step + 1}/{T}  ({time.time() - t_start:.1f}s)")
 
     total_time = time.time() - t_start
     print(f"[{SCRIPT_VERSION}] Collection done in {total_time:.1f}s\n")
@@ -436,18 +453,19 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     # ── Per-foot diagnostic report ─────────────────────────────────────────────
     diag_lines: list[str] = []
     diag_lines.append(f"[{SCRIPT_VERSION}] === PER-FOOT DIAGNOSTIC (main collection) ===")
-    hdr = (f"  {'foot':<12} {'ray_valid%':>11} {'mean_foot_z':>13} "
-           f"{'mean_gnd_z':>11} {'mean_clr(planted)':>19} {'cal_n':>7}")
+    hdr = (
+        f"  {'foot':<12} {'ray_valid%':>11} {'mean_foot_z':>13} "
+        f"{'mean_gnd_z':>11} {'mean_clr(planted)':>19} {'cal_n':>7}"
+    )
     diag_lines.append(hdr)
     diag_lines.append("  " + "-" * 80)
     for fi, fn in enumerate(foot_names):
-        rv_pct  = 100.0 * diag_rv_count[fi] / max(diag_total[fi], 1)
-        mfz     = diag_fz_sum[fi] / max(diag_total[fi], 1)
-        mgz     = diag_gz_sum[fi] / max(diag_gz_n[fi], 1) if diag_gz_n[fi] > 0 else float("nan")
-        mclr    = diag_clr_sum[fi] / max(diag_clr_n[fi], 1) if diag_clr_n[fi] > 0 else float("nan")
-        n_cal   = diag_clr_n[fi]
-        line = (f"  {fn:<12} {rv_pct:>10.1f}% {mfz:>13.3f}m "
-                f"{mgz:>11.3f}m {mclr:>19.4f}m {n_cal:>7}")
+        rv_pct = 100.0 * diag_rv_count[fi] / max(diag_total[fi], 1)
+        mfz = diag_fz_sum[fi] / max(diag_total[fi], 1)
+        mgz = diag_gz_sum[fi] / max(diag_gz_n[fi], 1) if diag_gz_n[fi] > 0 else float("nan")
+        mclr = diag_clr_sum[fi] / max(diag_clr_n[fi], 1) if diag_clr_n[fi] > 0 else float("nan")
+        n_cal = diag_clr_n[fi]
+        line = f"  {fn:<12} {rv_pct:>10.1f}% {mfz:>13.3f}m {mgz:>11.3f}m {mclr:>19.4f}m {n_cal:>7}"
         diag_lines.append(line)
 
     diag_lines.append("")
@@ -469,19 +487,27 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     def _compute_metrics(sensor: np.ndarray, kin: np.ndarray) -> dict[str, np.ndarray]:
         if sensor.shape[0] == 0:
             nan4 = np.full(4, np.nan)
-            return {k: nan4 for k in (
-                "sensor_ratio", "kin_ratio", "kin_only_ratio",
-                "sensor_only_ratio", "both_ratio", "neither_ratio")}
+            return {
+                k: nan4
+                for k in (
+                    "sensor_ratio",
+                    "kin_ratio",
+                    "kin_only_ratio",
+                    "sensor_only_ratio",
+                    "both_ratio",
+                    "neither_ratio",
+                )
+            }
         return {
-            "sensor_ratio":      sensor.mean(axis=0),
-            "kin_ratio":         kin.mean(axis=0),
-            "kin_only_ratio":    ((~sensor) & kin).mean(axis=0),
+            "sensor_ratio": sensor.mean(axis=0),
+            "kin_ratio": kin.mean(axis=0),
+            "kin_only_ratio": ((~sensor) & kin).mean(axis=0),
             "sensor_only_ratio": (sensor & (~kin)).mean(axis=0),
-            "both_ratio":        (sensor & kin).mean(axis=0),
-            "neither_ratio":     ((~sensor) & (~kin)).mean(axis=0),
+            "both_ratio": (sensor & kin).mean(axis=0),
+            "neither_ratio": ((~sensor) & (~kin)).mean(axis=0),
         }
 
-    overall       = _compute_metrics(S, K)
+    overall = _compute_metrics(S, K)
     overall_table = _print_table(foot_names, overall, "=== OVERALL per-foot contact metrics ===")
     print(overall_table)
     print()
@@ -506,12 +532,11 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     terrain_tables: list[str] = []
     per_terrain: dict[str, dict[str, np.ndarray]] = {}
     for cls_id in active_classes:
-        mask     = C == cls_id
+        mask = cls_id == C
         cls_name = _TERRAIN_CLASS_NAMES.get(int(cls_id), f"class_{cls_id}")
-        cls_m    = _compute_metrics(S[mask], K[mask])
+        cls_m = _compute_metrics(S[mask], K[mask])
         per_terrain[cls_name] = cls_m
-        tbl = _print_table(foot_names, cls_m,
-                           f"--- Terrain: {cls_name} (class {cls_id})  n={int(mask.sum())} ---")
+        tbl = _print_table(foot_names, cls_m, f"--- Terrain: {cls_name} (class {cls_id})  n={int(mask.sum())} ---")
         terrain_tables.append(tbl)
         print(tbl)
         print()
@@ -519,8 +544,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     flat_kin_only = np.zeros(4)
     if "flat" in per_terrain:
         flat_kin_only = per_terrain["flat"].get("kin_only_ratio", np.zeros(4))
-        print("[verify_3leg] Flat terrain kin_only (noise floor): "
-              + ", ".join(f"{foot_names[i]}={flat_kin_only[i]:.4f}" for i in range(4)))
+        print(
+            "[verify_3leg] Flat terrain kin_only (noise floor): "
+            + ", ".join(f"{foot_names[i]}={flat_kin_only[i]:.4f}" for i in range(4))
+        )
         print()
 
     # Flags
@@ -551,29 +578,31 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         print("\n  -> 권장: contact 대신 운동학 신호(foot_z-ground_z) 사용.\n")
     else:
         if hs_valid:
-            print(f"  kin_only excess < {args_cli.kin_only_flag_thresh} 모든 발 → "
-                  "edge-underreporting 근거 약함. 3-leg gait 원인은 reward/policy 쪽.")
+            print(
+                f"  kin_only excess < {args_cli.kin_only_flag_thresh} 모든 발 → "
+                "edge-underreporting 근거 약함. 3-leg gait 원인은 reward/policy 쪽."
+            )
         print()
 
     # Asymmetry + cross-verdict
     print("=== per-foot sensor_ratio ASYMMETRY ===")
-    sr      = overall["sensor_ratio"]
+    sr = overall["sensor_ratio"]
     sr_mean = sr.mean()
-    sr_std  = sr.std()
+    sr_std = sr.std()
     for fi, fn in enumerate(foot_names):
-        print(f"  {fn}: sensor_ratio={sr[fi]:.4f}  (mean={sr_mean:.4f}, dev={sr[fi]-sr_mean:+.4f})")
+        print(f"  {fn}: sensor_ratio={sr[fi]:.4f}  (mean={sr_mean:.4f}, dev={sr[fi] - sr_mean:+.4f})")
 
     verdict_text = ""
     if sr_std > 0.05:
-        ui  = int(np.argmin(sr))
-        un  = foot_names[ui]
+        ui = int(np.argmin(sr))
+        un = foot_names[ui]
         print(f"\n  -> 비대칭 감지 (std={sr_std:.4f}). 가장 덜 딛는 발: {un} (sensor={sr[ui]:.4f})\n")
 
         print("=== CROSS-VERDICT ===")
         if hs_valid:
-            kr  = overall["kin_ratio"]
-            ko  = overall["kin_only_ratio"]
-            nf  = float(flat_kin_only[ui]) if "flat" in per_terrain else 0.0
+            kr = overall["kin_ratio"]
+            ko = overall["kin_only_ratio"]
+            nf = float(flat_kin_only[ui]) if "flat" in per_terrain else 0.0
             exc = float(ko[ui]) - nf
             rv_pct_u = 100.0 * diag_rv_count[ui] / max(diag_total[ui], 1)
             print(f"  Underused foot : {un}")
@@ -591,8 +620,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                     "kin_ratio/kin_only 수치는 신뢰할 수 없음 (scanner coverage 문제). "
                     "ground_z 대안 필요 (terrain heightmap 직접 조회 또는 발별 별도 ray cast)."
                 )
-                print(f"\n  VERDICT: {un}의 ray_valid%={rv_pct_u:.1f}% — "
-                      "scanner coverage 부족. kin 수치 무효.")
+                print(f"\n  VERDICT: {un}의 ray_valid%={rv_pct_u:.1f}% — scanner coverage 부족. kin 수치 무효.")
                 print("  ground_z 대안 필요 전까지 sensor_ratio 비대칭만으로 진단 가능.")
             elif kr[ui] < sr_mean - 0.05:
                 verdict_text = (
@@ -600,8 +628,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                     "정책이 이 발을 실제로 공중에 유지. edge-underreporting 근거 없음. "
                     "원인: reward shaping / gait pairing 부재."
                 )
-                print(f"\n  VERDICT: {un}의 kin_ratio도 낮음 → kinematic choice. "
-                      "edge-underreporting 근거 없음.")
+                print(f"\n  VERDICT: {un}의 kin_ratio도 낮음 → kinematic choice. edge-underreporting 근거 없음.")
                 print("  권장: feet_air_time 상한 패널티 + gait_pairing 재활성.")
             elif exc > args_cli.kin_only_flag_thresh:
                 verdict_text = (
@@ -616,7 +643,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
                 print("\n  VERDICT: 혼재 신호. 추가 스텝/envs 권장.")
         else:
             verdict_text = "height_scanner 비활성 → kinematic 비교 불가."
-            print(f"  height_scanner 비활성 → sensor_ratio 비대칭만 확인됨.")
+            print("  height_scanner 비활성 → sensor_ratio 비대칭만 확인됨.")
         print()
     else:
         verdict_text = "sensor_ratio 대칭적 — 3-leg gait 없음."
@@ -634,7 +661,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         arr_kin=arr_kin.astype(np.uint8),
         arr_class=arr_class,
         foot_names=np.array(foot_names),
-        sole_offset=sole_offset,                      # present in v3
+        sole_offset=sole_offset,  # present in v3
         ray_valid_ratio=(diag_rv_count / np.maximum(diag_total, 1)).astype(np.float32),
         sensor_ratio=overall["sensor_ratio"],
         kin_ratio=overall["kin_ratio"],
@@ -654,18 +681,19 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     md_path = os.path.join(out_dir, "rank0_verify_result.md")
 
     # sole_offset table
-    sole_rows = ["| foot | sole_offset (m) | cal_n |",
-                 "|------|----------------|-------|"]
+    sole_rows = ["| foot | sole_offset (m) | cal_n |", "|------|----------------|-------|"]
     for fi, fn in enumerate(foot_names):
         n_c = len(cal_clr[fi]) if hs_valid else 0
         sole_rows.append(f"| {fn} | {sole_offset[fi]:.4f} | {n_c} |")
 
     # ray_valid table for md
-    rv_rows = ["| foot | ray_valid% (main) | mean_clearance_planted (m) |",
-               "|------|------------------|---------------------------|"]
+    rv_rows = [
+        "| foot | ray_valid% (main) | mean_clearance_planted (m) |",
+        "|------|------------------|---------------------------|",
+    ]
     for fi, fn in enumerate(foot_names):
         rv_pct = 100.0 * diag_rv_count[fi] / max(diag_total[fi], 1)
-        mclr   = diag_clr_sum[fi] / max(diag_clr_n[fi], 1) if diag_clr_n[fi] > 0 else float("nan")
+        mclr = diag_clr_sum[fi] / max(diag_clr_n[fi], 1) if diag_clr_n[fi] > 0 else float("nan")
         rv_rows.append(f"| {fn} | {rv_pct:.1f}% | {mclr:.4f} |")
 
     report = [
@@ -676,7 +704,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         f"- num_steps: {T}  num_envs: {N}  cal_steps: {CAL}",
         f"- force_thresh: {args_cli.force_thresh} N  z_thresh: {args_cli.z_thresh} m  "
         f"v_thresh: {args_cli.v_thresh} m/s",
-        f"- ground_z 소스: height_scanner ray_hits_w (nearest finite ray)",
+        "- ground_z 소스: height_scanner ray_hits_w (nearest finite ray)",
         "",
         "## Scanner Coverage Diagnostic",
         "",
@@ -737,9 +765,9 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     print(f"[{SCRIPT_VERSION}] MD  saved  : {md_path}")
 
     ts_end = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"=== verify_3leg {SCRIPT_VERSION} DONE @ {ts_end} ===")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     env.close()
 

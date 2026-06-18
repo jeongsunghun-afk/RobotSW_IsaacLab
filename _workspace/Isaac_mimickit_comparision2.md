@@ -1,6 +1,6 @@
 # IsaacLab vs MimicKit: AMP Go2 학습 실패 원인 정밀 분석 보고서
 
-질문해주신 내용을 바탕으로 `go2_amp`에서 학습이 실패하고 `MimicKit`에서 성공하는 원인을 파악하기 위해, MimicKit의 설정 파일 및 코드 레벨의 디테일한 차이점을 분석했습니다. 
+질문해주신 내용을 바탕으로 `go2_amp`에서 학습이 실패하고 `MimicKit`에서 성공하는 원인을 파악하기 위해, MimicKit의 설정 파일 및 코드 레벨의 디테일한 차이점을 분석했습니다.
 
 가장 치명적인 차이점은 **Replay Buffer의 실제 적용 여부**와 **종료 조건(Termination)의 관대함**, 그리고 **Loss 함수의 형태**에 있습니다.
 
@@ -18,7 +18,7 @@ MimicKit의 Go2 학습 환경을 정의하는 핵심 파일들은 다음과 같�
     *   **옵티마이저**: 모두 **SGD** 사용. (IsaacLab의 Adam과 다름)
         *   Actor LR: `2e-4`, Critic LR: `1e-4`, Disc LR: `2.5e-4`
         *   Discriminator에 `weight_decay: 0.0001` 적용.
-    *   **AMP 하이퍼파라미터**: 
+    *   **AMP 하이퍼파라미터**:
         *   `disc_buffer_size: 200000` (Replay Buffer 크기)
         *   `disc_replay_samples: 1000` (매 스텝 버퍼에 추가할 샘플 수)
         *   `disc_grad_penalty: 5.0`, `disc_reward_scale: 2.0`
@@ -79,7 +79,7 @@ $$ + \lambda_{gp} \Big( \| \nabla_{x_{expert}} D \|^2 + \| \nabla_{x_{policy}} D
 
 ## 5. Replay Buffer 운영 방식의 치명적 차이점 (핵심)
 
-**IsaacLab의 구현상 버그(혹은 누락)로 의심되는 매우 중대한 차이입니다.** 
+**IsaacLab의 구현상 버그(혹은 누락)로 의심되는 매우 중대한 차이입니다.**
 
 망각(Catastrophic Forgetting)을 막기 위해서는 Discriminator를 학습할 때 방금 수집한 최신 Policy 데이터뿐만 아니라 과거 Policy 데이터를 섞어주어야 합니다.
 
@@ -115,4 +115,4 @@ $$ + \lambda_{gp} \Big( \| \nabla_{x_{expert}} D \|^2 + \| \nabla_{x_{policy}} D
 
 **해결 방안:**
 1.  **IsaacLab 환경에서 `pose_termination`을 끄거나 임계값(`pose_termination_dist`)을 매우 크게 늘려주세요.**
-2.  **`ppo_amp.py`의 `update_amp` 함수를 수정하여 Replay Buffer에서 샘플링한 데이터를 `policy_batch`에 합쳐서(concat) 학습하도록 코드를 변경해야 합니다.** 
+2.  **`ppo_amp.py`의 `update_amp` 함수를 수정하여 Replay Buffer에서 샘플링한 데이터를 `policy_batch`에 합쳐서(concat) 학습하도록 코드를 변경해야 합니다.**

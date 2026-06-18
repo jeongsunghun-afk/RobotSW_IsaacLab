@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -93,45 +98,41 @@ def convert_txt_to_npz(txt_path: str, output_path: str) -> bool:
     # ------------------------------------------------------------------ #
     # DOF (관절) 데이터 — 좌표 변환 불필요, 그대로 사용
     # ------------------------------------------------------------------ #
-    dof_positions = frames[:, 7:19]    # (N, 12) FL→FR→RL→RR
+    dof_positions = frames[:, 7:19]  # (N, 12) FL→FR→RL→RR
     dof_velocities = frames[:, 37:49]  # (N, 12) FL→FR→RL→RR
 
     # ------------------------------------------------------------------ #
     # 쿼터니언 형식 변환: xyzw → wxyz
     # frames[:, 3:7] = (qx, qy, qz, qw)
     # ------------------------------------------------------------------ #
-    quat_wxyz = np.concatenate(
-        [frames[:, 6:7], frames[:, 3:6]], axis=-1
-    ).astype(np.float32)  # (N, 4) (qw, qx, qy, qz)
+    quat_wxyz = np.concatenate([frames[:, 6:7], frames[:, 3:6]], axis=-1).astype(np.float32)  # (N, 4) (qw, qx, qy, qz)
 
     # ------------------------------------------------------------------ #
     # 발끝(toe) 위치 — body-local frame, 순서 재배열
     # SMR 순서: [FL, RL, FR, RR] → 목표: [FL, FR, RL, RR]
     # ------------------------------------------------------------------ #
-    toes_raw = frames[:, 19:31].reshape(N, 4, 3)       # [FL, RL, FR, RR]
-    toes_local = toes_raw[:, _TOE_REORDER, :]           # [FL, FR, RL, RR] (N, 4, 3)
+    toes_raw = frames[:, 19:31].reshape(N, 4, 3)  # [FL, RL, FR, RR]
+    toes_local = toes_raw[:, _TOE_REORDER, :]  # [FL, FR, RL, RR] (N, 4, 3)
 
     # ------------------------------------------------------------------ #
     # 발끝 속도 — body-local frame, 동일한 순서 재배열
     # ------------------------------------------------------------------ #
-    toe_vel_raw = frames[:, 49:61].reshape(N, 4, 3)    # [FL, RL, FR, RR]
-    toe_vel_local = toe_vel_raw[:, _TOE_REORDER, :]     # [FL, FR, RL, RR] (N, 4, 3)
+    toe_vel_raw = frames[:, 49:61].reshape(N, 4, 3)  # [FL, RL, FR, RR]
+    toe_vel_local = toe_vel_raw[:, _TOE_REORDER, :]  # [FL, FR, RL, RR] (N, 4, 3)
 
     # ------------------------------------------------------------------ #
     # 베이스 데이터
     # ------------------------------------------------------------------ #
-    root_pos = frames[:, 0:3]    # (N, 3) world frame
-    lin_vel = frames[:, 31:34]   # (N, 3) body frame
-    ang_vel = frames[:, 34:37]   # (N, 3) body frame
+    root_pos = frames[:, 0:3]  # (N, 3) world frame
+    lin_vel = frames[:, 31:34]  # (N, 3) body frame
+    ang_vel = frames[:, 34:37]  # (N, 3) body frame
 
     # ------------------------------------------------------------------ #
     # body_positions: [FL, FR, RL, RR, base] (N, 5, 3)
     # toes: body-local frame (go2_amp 관례)
     # base: world frame
     # ------------------------------------------------------------------ #
-    body_positions = np.concatenate(
-        [toes_local, root_pos[:, None, :]], axis=1
-    ).astype(np.float32)
+    body_positions = np.concatenate([toes_local, root_pos[:, None, :]], axis=1).astype(np.float32)
 
     # ------------------------------------------------------------------ #
     # body_rotations: [FL, FR, RL, RR, base] (N, 5, 4) — wxyz
@@ -139,18 +140,14 @@ def convert_txt_to_npz(txt_path: str, output_path: str) -> bool:
     # base: root_quat_wxyz
     # ------------------------------------------------------------------ #
     identity = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (N, 4, 1))
-    body_rotations = np.concatenate(
-        [identity, quat_wxyz[:, None, :]], axis=1
-    ).astype(np.float32)
+    body_rotations = np.concatenate([identity, quat_wxyz[:, None, :]], axis=1).astype(np.float32)
 
     # ------------------------------------------------------------------ #
     # body_linear_velocities: [FL, FR, RL, RR, base] (N, 5, 3)
     # toes: body-local frame
     # base: body frame
     # ------------------------------------------------------------------ #
-    body_linear_velocities = np.concatenate(
-        [toe_vel_local, lin_vel[:, None, :]], axis=1
-    ).astype(np.float32)
+    body_linear_velocities = np.concatenate([toe_vel_local, lin_vel[:, None, :]], axis=1).astype(np.float32)
 
     # ------------------------------------------------------------------ #
     # body_angular_velocities: [FL, FR, RL, RR, base] (N, 5, 3)
@@ -158,9 +155,7 @@ def convert_txt_to_npz(txt_path: str, output_path: str) -> bool:
     # base: body frame
     # ------------------------------------------------------------------ #
     toe_ang_vel = np.zeros((N, 4, 3), dtype=np.float32)
-    body_angular_velocities = np.concatenate(
-        [toe_ang_vel, ang_vel[:, None, :]], axis=1
-    ).astype(np.float32)
+    body_angular_velocities = np.concatenate([toe_ang_vel, ang_vel[:, None, :]], axis=1).astype(np.float32)
 
     # ------------------------------------------------------------------ #
     # NPZ 저장
@@ -180,7 +175,9 @@ def convert_txt_to_npz(txt_path: str, output_path: str) -> bool:
     )
 
     duration = frame_duration * (N - 1)
-    print(f"  OK  {os.path.basename(txt_path)} → {os.path.basename(output_path)}.npz  (N={N}, fps={fps}, {duration:.2f}s)")
+    print(
+        f"  OK  {os.path.basename(txt_path)} → {os.path.basename(output_path)}.npz  (N={N}, fps={fps}, {duration:.2f}s)"
+    )
     return True
 
 

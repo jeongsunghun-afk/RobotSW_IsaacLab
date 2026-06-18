@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Go2 모션 파일 로더.
 
 stmr_go2.py가 생성하는 DeepMimic JSON 형식 txt 파일과
@@ -26,7 +31,6 @@ import glob
 import json
 import os
 import pickle
-from typing import Optional
 
 import numpy as np
 import torch
@@ -44,17 +48,17 @@ class Go2MotionLoader:
     ROOT_ROT_START = 3
     ROOT_ROT_END = 7
     JOINT_POS_START = 7
-    JOINT_POS_END = 19   # 12개
+    JOINT_POS_END = 19  # 12개
     TOE_POS_START = 19
-    TOE_POS_END = 31     # 4 × 3
+    TOE_POS_END = 31  # 4 × 3
     LIN_VEL_START = 31
     LIN_VEL_END = 34
     ANG_VEL_START = 34
     ANG_VEL_END = 37
     JOINT_VEL_START = 37
-    JOINT_VEL_END = 49   # 12개
+    JOINT_VEL_END = 49  # 12개
     TOE_VEL_START = 49
-    TOE_VEL_END = 61     # 4 × 3
+    TOE_VEL_END = 61  # 4 × 3
 
     NUM_JOINTS = 12
     NUM_TOES = 4
@@ -145,30 +149,30 @@ class Go2MotionLoader:
 
         for idx, leg in enumerate(leg_order):
             s = leg_slices[leg]
-            hip_a = joint_pos[:, s.start]        # (N,)
+            hip_a = joint_pos[:, s.start]  # (N,)
             thigh_a = joint_pos[:, s.start + 1]  # (N,)
-            calf_a = joint_pos[:, s.start + 2]   # (N,)
+            calf_a = joint_pos[:, s.start + 2]  # (N,)
 
-            hip_base = cls._HIP_BASE[leg]         # (3,)
+            hip_base = cls._HIP_BASE[leg]  # (3,)
             thigh_ofs = np.array([0.0, cls._THIGH_OFS_Y[leg], 0.0])
 
-            R_hip = cls._Rx(hip_a)    # (N,3,3)
-            R_th = cls._Ry(thigh_a)   # (N,3,3)
-            R_ca = cls._Ry(calf_a)    # (N,3,3)
+            R_hip = cls._Rx(hip_a)  # (N,3,3)
+            R_th = cls._Ry(thigh_a)  # (N,3,3)
+            R_ca = cls._Ry(calf_a)  # (N,3,3)
 
             # thigh pivot = hip_base + R_hip @ thigh_ofs
             thigh_pivot = hip_base + np.einsum("nij,j->ni", R_hip, thigh_ofs)  # (N,3)
 
             # calf pivot = thigh_pivot + R_hip @ R_th @ (0,0,-thigh_len)
-            thigh_end_local = _down * cls._THIGH_LEN   # (3,)
-            thigh_end_th = np.einsum("nij,j->ni", R_th, thigh_end_local)       # (N,3)
+            thigh_end_local = _down * cls._THIGH_LEN  # (3,)
+            thigh_end_th = np.einsum("nij,j->ni", R_th, thigh_end_local)  # (N,3)
             calf_pivot = thigh_pivot + np.einsum("nij,nj->ni", R_hip, thigh_end_th)  # (N,3)
 
             # foot = calf_pivot + R_hip @ R_th @ R_ca @ (0,0,-calf_len)
             calf_end_local = _down * cls._CALF_LEN
-            calf_end_ca = np.einsum("nij,j->ni", R_ca, calf_end_local)          # (N,3)
-            calf_end_th = np.einsum("nij,nj->ni", R_th, calf_end_ca)            # (N,3)
-            foot = calf_pivot + np.einsum("nij,nj->ni", R_hip, calf_end_th)     # (N,3)
+            calf_end_ca = np.einsum("nij,j->ni", R_ca, calf_end_local)  # (N,3)
+            calf_end_th = np.einsum("nij,nj->ni", R_th, calf_end_ca)  # (N,3)
+            foot = calf_pivot + np.einsum("nij,nj->ni", R_hip, calf_end_th)  # (N,3)
 
             toe_pos[:, idx, :] = foot
 
@@ -217,9 +221,21 @@ class Go2MotionLoader:
         x = quat_wxyz[:, 1]
         y = quat_wxyz[:, 2]
         z = quat_wxyz[:, 3]
-        vx = (1 - 2*(y*y + z*z)) * vel_world[:, 0] + (2*(x*y + w*z)) * vel_world[:, 1] + (2*(x*z - w*y)) * vel_world[:, 2]
-        vy = (2*(x*y - w*z))     * vel_world[:, 0] + (1 - 2*(x*x + z*z)) * vel_world[:, 1] + (2*(y*z + w*x)) * vel_world[:, 2]
-        vz = (2*(x*z + w*y))     * vel_world[:, 0] + (2*(y*z - w*x)) * vel_world[:, 1] + (1 - 2*(x*x + y*y)) * vel_world[:, 2]
+        vx = (
+            (1 - 2 * (y * y + z * z)) * vel_world[:, 0]
+            + (2 * (x * y + w * z)) * vel_world[:, 1]
+            + (2 * (x * z - w * y)) * vel_world[:, 2]
+        )
+        vy = (
+            (2 * (x * y - w * z)) * vel_world[:, 0]
+            + (1 - 2 * (x * x + z * z)) * vel_world[:, 1]
+            + (2 * (y * z + w * x)) * vel_world[:, 2]
+        )
+        vz = (
+            (2 * (x * z + w * y)) * vel_world[:, 0]
+            + (2 * (y * z - w * x)) * vel_world[:, 1]
+            + (1 - 2 * (x * x + y * y)) * vel_world[:, 2]
+        )
         return np.stack([vx, vy, vz], axis=-1).astype(np.float32)
 
     @staticmethod
@@ -231,20 +247,19 @@ class Go2MotionLoader:
           ω_y =  cos(φ) * dθ/dt + sin(φ)*cos(θ) * dψ/dt
           ω_z = -sin(φ) * dθ/dt + cos(φ)*cos(θ) * dψ/dt
         """
-        roll  = euler[:, 0]
+        roll = euler[:, 0]
         pitch = euler[:, 1]
         dr = euler_rates[:, 0]
         dp = euler_rates[:, 1]
         dy = euler_rates[:, 2]
         wx = dr - np.sin(pitch) * dy
-        wy =  np.cos(roll) * dp + np.sin(roll) * np.cos(pitch) * dy
+        wy = np.cos(roll) * dp + np.sin(roll) * np.cos(pitch) * dy
         wz = -np.sin(roll) * dp + np.cos(roll) * np.cos(pitch) * dy
         return np.stack([wx, wy, wz], axis=-1).astype(np.float32)
 
-    def _load_pkl_file(self, path: str) -> tuple[
-        np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-        np.ndarray, np.ndarray, np.ndarray, np.ndarray, float
-    ]:
+    def _load_pkl_file(
+        self, path: str
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         """pkl 파일을 로드하고 txt 로더와 동일한 출력을 반환합니다.
 
         Returns:
@@ -260,7 +275,7 @@ class Go2MotionLoader:
 
         assert frames.shape[1] == 18, f"pkl 프레임 크기 불일치: {frames.shape[1]} != 18 ({path})"
 
-        root_pos = frames[:, 0:3]    # (N, 3)
+        root_pos = frames[:, 0:3]  # (N, 3)
         root_euler = frames[:, 3:6]  # (N, 3) — roll, pitch, yaw
         joint_pos = frames[:, 6:18]  # (N, 12)
 
@@ -269,19 +284,19 @@ class Go2MotionLoader:
 
         # 속도: finite difference (loop=False — 위치는 절대 좌표라 wraparound 불가)
         lin_vel_world = self._finite_diff(root_pos, dt, loop=False)  # (N, 3) world frame
-        euler_rates   = self._finite_diff(root_euler, dt, loop=False) # (N, 3) euler rates
-        joint_vel     = self._finite_diff(joint_pos, dt, loop=False)  # (N, 12)
+        euler_rates = self._finite_diff(root_euler, dt, loop=False)  # (N, 3) euler rates
+        joint_vel = self._finite_diff(joint_pos, dt, loop=False)  # (N, 12)
 
         # TXT 파일과 동일한 body frame으로 정규화
         # (TXT: lin_vel/ang_vel이 명시적으로 base frame 으로 저장되어 있음)
-        lin_vel = self._world_vel_to_body(lin_vel_world, root_rot_wxyz)   # world → body
+        lin_vel = self._world_vel_to_body(lin_vel_world, root_rot_wxyz)  # world → body
         ang_vel = self._euler_rates_to_body_angvel(root_euler, euler_rates)  # euler rate → body ω
 
         # 발 위치: FK
-        toe_pos = self._go2_fk_toe_pos(joint_pos)                    # (N, 4, 3)
+        toe_pos = self._go2_fk_toe_pos(joint_pos)  # (N, 4, 3)
         toe_vel = np.zeros_like(toe_pos)
         toe_vel_flat = self._finite_diff(toe_pos.reshape(len(toe_pos), -1), dt, loop=False)
-        toe_vel = toe_vel_flat.reshape(len(toe_pos), 4, 3)           # (N, 4, 3)
+        toe_vel = toe_vel_flat.reshape(len(toe_pos), 4, 3)  # (N, 4, 3)
 
         return root_pos, root_rot_wxyz, joint_pos, joint_vel, lin_vel, ang_vel, toe_pos, toe_vel, dt
 
@@ -319,8 +334,9 @@ class Go2MotionLoader:
 
             if ext == ".pkl":
                 # ---- pkl 로딩 경로 ----
-                (root_pos, root_rot_wxyz, joint_pos, joint_vel,
-                 lin_vel, ang_vel, toe_pos, toe_vel, frame_duration) = self._load_pkl_file(path)
+                (root_pos, root_rot_wxyz, joint_pos, joint_vel, lin_vel, ang_vel, toe_pos, toe_vel, frame_duration) = (
+                    self._load_pkl_file(path)
+                )
                 num_frames_file = root_pos.shape[0]
             else:
                 # ---- txt (JSON) 로딩 경로 ----
@@ -341,9 +357,7 @@ class Go2MotionLoader:
                 toe_vel_flat = frames[:, self.TOE_VEL_START : self.TOE_VEL_END]
 
                 # xyzw → wxyz
-                root_rot_wxyz = np.concatenate(
-                    [root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1
-                )
+                root_rot_wxyz = np.concatenate([root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1)
                 # stmr_go2.py 저장 순서: [FL=0, RL=1, FR=2, RR=3] → [FL, FR, RL, RR]
                 toe_pos = toe_pos_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
                 toe_vel = toe_vel_flat.reshape(-1, self.NUM_TOES, 3)[:, [0, 2, 1, 3], :]
@@ -375,8 +389,8 @@ class Go2MotionLoader:
         root_rot_all = np.concatenate(all_root_rot_wxyz, axis=0)
         lin_vel_all = np.concatenate(all_lin_vel, axis=0)
         ang_vel_all = np.concatenate(all_ang_vel, axis=0)
-        toe_pos_all = np.concatenate(all_toe_pos, axis=0)   # (N,4,3)
-        toe_vel_all = np.concatenate(all_toe_vel, axis=0)   # (N,4,3)
+        toe_pos_all = np.concatenate(all_toe_pos, axis=0)  # (N,4,3)
+        toe_vel_all = np.concatenate(all_toe_vel, axis=0)  # (N,4,3)
 
         self.dof_positions = torch.tensor(joint_pos_all, dtype=torch.float32, device=device)
         self.dof_velocities = torch.tensor(joint_vel_all, dtype=torch.float32, device=device)
@@ -397,9 +411,7 @@ class Go2MotionLoader:
         toe_vel_t = torch.tensor(toe_vel_all, dtype=torch.float32, device=device)
 
         self.body_linear_velocities = torch.cat([toe_vel_t, lin_vel_t.unsqueeze(1)], dim=1)
-        self.body_angular_velocities = torch.cat(
-            [torch.zeros_like(toe_vel_t), ang_vel_t.unsqueeze(1)], dim=1
-        )
+        self.body_angular_velocities = torch.cat([torch.zeros_like(toe_vel_t), ang_vel_t.unsqueeze(1)], dim=1)
 
         self._dof_names = self.DOF_NAMES
         self._body_names = self.BODY_NAMES
@@ -414,10 +426,7 @@ class Go2MotionLoader:
         # 속도 구간별 균등 샘플링 가중치 사전 계산
         self._vel_sample_weights = self._build_velocity_sample_weights(lin_vel_all)
 
-        print(
-            f"Go2MotionLoader: 총 {self.num_frames} 프레임 "
-            f"({self.duration:.2f}s, dt={self.dt:.4f}s)"
-        )
+        print(f"Go2MotionLoader: 총 {self.num_frames} 프레임 ({self.duration:.2f}s, dt={self.dt:.4f}s)")
 
     @property
     def dof_names(self) -> list[str]:
@@ -439,10 +448,10 @@ class Go2MotionLoader:
         self,
         a: torch.Tensor,
         *,
-        b: Optional[torch.Tensor] = None,
-        blend: Optional[torch.Tensor] = None,
-        start: Optional[np.ndarray] = None,
-        end: Optional[np.ndarray] = None,
+        b: torch.Tensor | None = None,
+        blend: torch.Tensor | None = None,
+        start: np.ndarray | None = None,
+        end: np.ndarray | None = None,
     ) -> torch.Tensor:
         if start is not None and end is not None:
             return self._interpolate(a=a[start], b=a[end], blend=blend)
@@ -456,10 +465,10 @@ class Go2MotionLoader:
         self,
         q0: torch.Tensor,
         *,
-        q1: Optional[torch.Tensor] = None,
-        blend: Optional[torch.Tensor] = None,
-        start: Optional[np.ndarray] = None,
-        end: Optional[np.ndarray] = None,
+        q1: torch.Tensor | None = None,
+        blend: torch.Tensor | None = None,
+        start: np.ndarray | None = None,
+        end: np.ndarray | None = None,
     ) -> torch.Tensor:
         if start is not None and end is not None:
             return self._slerp(q0=q0[start], q1=q0[end], blend=blend)
@@ -528,21 +537,21 @@ class Go2MotionLoader:
 
         return weights.astype(np.float64)
 
-    def sample_times(self, num_samples: int, duration: Optional[float] = None, velocity_balanced: bool = False) -> np.ndarray:
+    def sample_times(
+        self, num_samples: int, duration: float | None = None, velocity_balanced: bool = False
+    ) -> np.ndarray:
         if velocity_balanced:
             frame_indices = np.random.choice(self.num_frames, size=num_samples, p=self._vel_sample_weights)
             return (frame_indices * float(self.dt)).astype(np.float32)  # type: ignore[arg-type]
         duration = self.duration if duration is None else duration
-        assert duration <= self.duration, (
-            f"요청 duration({duration}) > 모션 duration({self.duration})"
-        )
+        assert duration <= self.duration, f"요청 duration({duration}) > 모션 duration({self.duration})"
         return duration * np.random.uniform(low=0.0, high=1.0, size=num_samples)
 
     def sample(
         self,
         num_samples: int,
-        times: Optional[np.ndarray] = None,
-        duration: Optional[float] = None,
+        times: np.ndarray | None = None,
+        duration: float | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """모션 데이터 샘플링.
 
@@ -566,9 +575,7 @@ class Go2MotionLoader:
         """Isaac Sim joint 이름으로 motion data DOF 인덱스를 반환합니다."""
         indexes = []
         for name in dof_names:
-            assert name in self._dof_names, (
-                f"DOF 이름 '{name}'이 존재하지 않습니다: {self._dof_names}"
-            )
+            assert name in self._dof_names, f"DOF 이름 '{name}'이 존재하지 않습니다: {self._dof_names}"
             indexes.append(self._dof_names.index(name))
         return indexes
 
@@ -576,8 +583,6 @@ class Go2MotionLoader:
         """Body 이름으로 인덱스를 반환합니다."""
         indexes = []
         for name in body_names:
-            assert name in self._body_names, (
-                f"Body 이름 '{name}'이 존재하지 않습니다: {self._body_names}"
-            )
+            assert name in self._body_names, f"Body 이름 '{name}'이 존재하지 않습니다: {self._body_names}"
             indexes.append(self._body_names.index(name))
         return indexes

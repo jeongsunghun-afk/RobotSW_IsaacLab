@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# run/launch — IsaacLab 커스텀 환경 통합 런처
+#
+# 사용법:
+#   ./run/launch <env_alias> <train|play> [추가 인자]
+#
+# 예시:
+#   ./run/launch go2 train --num_envs 4096
+#   ./run/launch go2_recovery play --checkpoint logs/rsl_rl/go2_recovery/.../model_1000.pt
+#   ./run/launch parkour train --num_envs 4096 --headless
+#   ./run/launch parkour_imitation_sym play --num_envs 32
+#
+# conda env:
+#   기본적으로 모든 환경에 isaac-5.1 사용.
+#   parkour / parkour_imitation 계열은 isaac-parkour env로 실행해야 할 경우
+#   CONDA_ENV=isaac-parkour ./run/launch parkour train 처럼 환경변수로 덮어쓸 수 있음.
+#
+# r2s_hind_leg 는 RL 환경이 아니므로 이 런처에서 지원하지 않음.
+# 실행 방법: scripts/real2sim/sim_runner.py / controller.py 직접 참조.
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# ── env alias → (task_id, default_train_envs, default_play_envs, conda_env) ──
+# 형식:  "task_id:train_num_envs:play_num_envs:conda_env"
+declare -A ENV_MAP
+ENV_MAP["go2"]="Go2:4096:32:isaac-5.1"
+ENV_MAP["go2wtw"]="Go2WTW:4096:32:isaac-5.1"
+ENV_MAP["go2rough"]="Go2Rough:4096:32:isaac-5.1"
+ENV_MAP["go2_recovery"]="Go2Recovery-v0:4096:32:isaac-5.1"
+ENV_MAP["hind_leg"]="HindLeg-Direct-v0:4096:32:isaac-5.1"
+ENV_MAP["go2_imitation"]="Go2-Imitation-v0:4096:32:isaac-5.1"
+ENV_MAP["go2_imitation_tracking"]="Go2-Imitation-Tracking-v0:4096:32:isaac-5.1"
+ENV_MAP["parkour"]="Go2-Parkour-Direct-v0:4096:32:isaac-5.1"
+ENV_MAP["parkour_sym"]="Go2-Parkour-Symmetry:4096:32:isaac-5.1"
+ENV_MAP["parkour_spo"]="Go2-Parkour-Direct-SPO:4096:32:isaac-5.1"
+ENV_MAP["parkour_lcp"]="Go2-Parkour-Direct-LCP:4096:32:isaac-5.1"
+ENV_MAP["parkour_moe"]="Go2-Parkour-Direct-MoE:4096:32:isaac-5.1"
+ENV_MAP["parkour_imitation"]="Go2-ParkourImitation-v0:4096:32:isaac-5.1"
+ENV_MAP["parkour_imitation_sym"]="Go2-ParkourImitation-Symmetry-v0:4096:32:isaac-5.1"
+ENV_MAP["parkour_imitation_rg"]="Go2-ParkourImitation-Symmetry-RandomGoal-v0:4096:32:isaac-5.1"
+ENV_MAP["parkour_imitation_terrain"]="Go2-ParkourImitation-TerrainStyle-v0:4096:32:isaac-5.1"
+
+# ── 도움말 ────────────────────────────────────────────────────────────────────
+usage() {
+    echo "사용법: ./run/launch <env_alias> <train|play> [추가 인자]"
+    echo ""
+    echo "지원 env_alias 목록:"
+    for key in $(echo "${!ENV_MAP[@]}" | tr ' ' '\n' | sort); do
+        IFS=':' read -r task _ _ _ <<< "${ENV_MAP[$key]}"
+        printf "  %-35s → %s\n" "$key" "$task"
+    done
+    echo ""
+    echo "r2s_hind_leg 는 RL 환경이 아님 — scripts/real2sim/ 참조"
+    exit 0
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 2 ]]; then
+    usage
+fi
+
+ENV_ALIAS="$1"
+MODE="$2"
+shift 2
+
+# ── alias 조회 ────────────────────────────────────────────────────────────────
+if [[ -z "${ENV_MAP[$ENV_ALIAS]:-}" ]]; then
+    echo "[ERROR] 알 수 없는 env_alias: '$ENV_ALIAS'"
+    echo "지원 목록:"
+    for key in $(echo "${!ENV_MAP[@]}" | tr ' ' '\n' | sort); do
+        echo "  $key"
+    done
+    exit 1
+fi
+
+IFS=':' read -r TASK_ID TRAIN_ENVS PLAY_ENVS CONDA_ENV_DEFAULT <<< "${ENV_MAP[$ENV_ALIAS]}"
+
+# 환경변수로 conda env 덮어쓰기 가능
+CONDA_ENV="${CONDA_ENV:-$CONDA_ENV_DEFAULT}"
+
+# ── mode 검증 ────────────────────────────────────────────────────────────────
+case "$MODE" in
+    train)
+        SCRIPT="scripts/reinforcement_learning/rsl_rl/train.py"
+        DEFAULT_ENVS="$TRAIN_ENVS"
+        ;;
+    play)
+        SCRIPT="scripts/reinforcement_learning/rsl_rl/play.py"
+        DEFAULT_ENVS="$PLAY_ENVS"
+        ;;
+    *)
+        echo "[ERROR] mode 는 'train' 또는 'play' 여야 합니다. 입력: '$MODE'"
+        exit 1
+        ;;
+esac
+
+# ── conda 활성화 ──────────────────────────────────────────────────────────────
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
+
+cd "$REPO"
+
+# num_envs 기본값 주입 (사용자가 --num_envs 를 주지 않았을 때)
+EXTRA=()
+if [[ " $* " != *" --num_envs "* ]]; then
+    EXTRA+=(--num_envs "$DEFAULT_ENVS")
+fi
+
+echo "[run/launch] task=${TASK_ID}  mode=${MODE}  conda=${CONDA_ENV}"
+exec ./isaaclab.sh -p "$SCRIPT" --task "$TASK_ID" "${EXTRA[@]}" "$@"

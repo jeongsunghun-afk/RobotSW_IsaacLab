@@ -1,7 +1,7 @@
 # 공원(Parkour) 목표(Goal) 시스템 비교 분석 보고서
 
-**작성일**: 2026-04-30  
-**팀**: isaaclab-parkour-fixes  
+**작성일**: 2026-04-30
+**팀**: isaaclab-parkour-fixes
 **담당자**: W6-writer
 
 ---
@@ -102,7 +102,7 @@ def _build_terrain_goals_map(self, registry: list) -> None:
         else:
             row = k // num_cols
             col = k % num_cols
-        
+
         world_origin = t_origins[row, col]  # [3], world frame
         delta = local_goals[:num_goals] - local_origin[np.newaxis, :]  # [num_goals, 3]
         n = min(num_goals, len(local_goals))

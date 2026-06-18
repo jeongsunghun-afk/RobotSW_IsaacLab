@@ -1,8 +1,12 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-from typing import Any
-
 import collections
+from typing import Any
 
 import torch
 
@@ -26,7 +30,9 @@ class PettingZooWrapper(MultiAgentEnvWrapper):
 
         self._seed = config.torch.key
 
-    def step(self, actions: dict[str, torch.Tensor]) -> tuple[
+    def step(
+        self, actions: dict[str, torch.Tensor]
+    ) -> tuple[
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],

@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -70,9 +75,10 @@ import tempfile
 import time
 
 import gymnasium as gym
-import skrl
 import torch
 from packaging import version
+
+import skrl
 
 SKRL_VERSION = "1.4.3"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):  # type: ignore[attr-defined]
@@ -85,6 +91,7 @@ if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):  # type: ignor
 from skrl.utils.runner.torch import Runner
 
 from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
+
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
 
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -124,7 +131,7 @@ def parse_cmd_grid(grid_str: str) -> list[dict[str, float]]:
 def seed_list(mode: str, num_seeds: int) -> list[int]:
     """Return the fixed seed list based on mode."""
     if mode == "primary":
-        return list(range(num_seeds))           # [0, 1, 2, 3]
+        return list(range(num_seeds))  # [0, 1, 2, 3]
     elif mode == "disjoint":
         return list(range(10, 10 + num_seeds))  # [10, 11, 12, 13]
     else:
@@ -231,9 +238,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, experiment_cfg: dict):
             # Fix the command to (vx, vy, wz) by directly writing to the unwrapped env's buffer.
             # env -> SkrlVecEnvWrapper (IsaacLabWrapper) -> gym.Wrapper -> DirectRLEnv
             unwrapped_env = gym_env.unwrapped
-            unwrapped_env._commands[:] = torch.tensor(
-                [[vx, vy, wz]], dtype=torch.float32, device=unwrapped_env.device
-            )
+            unwrapped_env._commands[:] = torch.tensor([[vx, vy, wz]], dtype=torch.float32, device=unwrapped_env.device)
 
             # Accumulation buffers
             logits_buffer: list[torch.Tensor] = []
@@ -263,9 +268,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, experiment_cfg: dict):
                         amp_obs = unwrapped_env.amp_observation_buffer.view(-1, unwrapped_env.amp_observation_size)
 
                     # --- Discriminator forward (pattern from amp.py:387-392) ---
-                    amp_logits, _ = discriminator.act(
-                        {"observations": amp_preprocessor(amp_obs)}, role="discriminator"
-                    )
+                    amp_logits, _ = discriminator.act({"observations": amp_preprocessor(amp_obs)}, role="discriminator")
                     # amp_logits shape: (1, 1) or (1,) — squeeze to scalar for accumulation
                     logit_val = amp_logits.squeeze()
                     logits_buffer.append(logit_val.detach().cpu())
@@ -284,14 +287,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, experiment_cfg: dict):
                     root_ang_vel_b = unwrapped_env.robot.data.root_ang_vel_b  # (1, 3)
 
                     v_xy_actual = root_lin_vel_b[0, :2]  # (2,)
-                    w_z_actual = root_ang_vel_b[0, 2]    # scalar
+                    w_z_actual = root_ang_vel_b[0, 2]  # scalar
 
                     v_xy_cmd = torch.tensor([vx, vy], dtype=torch.float32, device=device)
                     w_z_cmd = torch.tensor(wz, dtype=torch.float32, device=device)
 
-                    track_err = (
-                        torch.norm(v_xy_actual - v_xy_cmd).item() + torch.abs(w_z_actual - w_z_cmd).item()
-                    )
+                    track_err = torch.norm(v_xy_actual - v_xy_cmd).item() + torch.abs(w_z_actual - w_z_cmd).item()
                     tracking_errs.append(track_err)
 
             # --- Per (cmd, seed) aggregation ---

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -25,6 +25,35 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Go2-Parkour-Direct-SPO",
+    entry_point=f"{__name__}.parkour_env:Go2ParkourEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.parkour_env_cfg:ParkourEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2ParkourSPOPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Go2-Parkour-Direct-LCP",
+    entry_point=f"{__name__}.parkour_env:Go2ParkourEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.parkour_env_cfg:ParkourEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2ParkourLCPPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Go2-Parkour-Direct-MoE",
+    entry_point=f"{__name__}.parkour_env:Go2ParkourEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.parkour_env_cfg:ParkourEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2ParkourMoEPPORunnerCfg",
+    },
+)
 
 gym.register(
     id="Go2-Parkour-Symmetry",

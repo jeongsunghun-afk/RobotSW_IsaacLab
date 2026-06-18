@@ -140,6 +140,8 @@ UNITREE_GO1_CFG = ArticulationCfg(
 UNITREE_GO2_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/Unitree/Go2/go2.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Go2Clean/go2.usd",
+        # usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/go2/go2.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -175,7 +177,7 @@ UNITREE_GO2_CFG = ArticulationCfg(
             stiffness=25.0,
             damping=0.5,
             friction=0.0,
-            armature=0.01
+            armature=0.01,
         ),
     },
 )

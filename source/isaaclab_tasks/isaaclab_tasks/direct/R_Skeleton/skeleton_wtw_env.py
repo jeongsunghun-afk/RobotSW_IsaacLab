@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -6,21 +6,21 @@
 from __future__ import annotations
 
 import gymnasium as gym
-import torch
 import numpy as np
+import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.markers import VisualizationMarkers, SPHERE_MARKER_CFG
+from isaaclab.markers import SPHERE_MARKER_CFG, VisualizationMarkers
 from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.utils.math import (
     quat_apply,
+    quat_apply_inverse,
     quat_apply_yaw,
     quat_from_angle_axis,
     quat_inv,
     quat_mul,
-    quat_apply_inverse,
 )
 
 from .skeleton_wtw_env_cfg import SkeletonWtwEnvCfg, SkeletonWtwRoughEnvCfg
@@ -116,14 +116,14 @@ class SkeletonWtwEnv(DirectRLEnv):
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._neck_ids, _ = self._contact_sensor.find_bodies([".*neck_p", ".*neck_r", ".*neck_y"])
-        
+
         # Robustly order feet to ensure [FL, FR, HL, HR] correspondence
         self._feet_contact_ids = []
         self._feet_ids = []
-        
+
         all_foot_sensor_ids, all_foot_sensor_names = self._contact_sensor.find_bodies(".*toe")
         all_foot_robot_ids, all_foot_robot_names = self._robot.find_bodies(".*toe")
-        
+
         ordered_prefixes = ["FL", "FR", "HL", "HR"]
         for prefix in ordered_prefixes:
             for s_id, s_name in zip(all_foot_sensor_ids, all_foot_sensor_names):
@@ -134,8 +134,8 @@ class SkeletonWtwEnv(DirectRLEnv):
                 if prefix in r_name:
                     self._feet_ids.append(r_id)
                     break
-                    
-        # Fallback if explicit search failed 
+
+        # Fallback if explicit search failed
         if len(self._feet_ids) != 4 or len(self._feet_contact_ids) != 4:
             print("[SkeletonWtwEnv] WARNING: Explicit foot prefix match failed, falling back to raw find_bodies order!")
             self._feet_contact_ids = all_foot_sensor_ids
@@ -144,7 +144,8 @@ class SkeletonWtwEnv(DirectRLEnv):
         all_joint_names = self._robot.data.joint_names
         self._hip_joint_ids = torch.tensor(
             [i for i, n in enumerate(all_joint_names) if "hip" in n or "_y" in n or "shoulder" in n],
-            dtype=torch.long, device=self.device
+            dtype=torch.long,
+            device=self.device,
         )
 
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
@@ -231,9 +232,7 @@ class SkeletonWtwEnv(DirectRLEnv):
 
             # von mises distribution
             kappa = 0.07
-            smoothing_cdf_start = torch.distributions.normal.Normal(
-                0, kappa
-            ).cdf
+            smoothing_cdf_start = torch.distributions.normal.Normal(0, kappa).cdf
 
             smoothing_multiplier_FL = smoothing_cdf_start(torch.remainder(foot_indices[0], 1.0)) * (
                 1 - smoothing_cdf_start(torch.remainder(foot_indices[0], 1.0) - 0.5)
@@ -373,7 +372,7 @@ class SkeletonWtwEnv(DirectRLEnv):
         joint_accel = torch.sum(torch.square(self._robot.data.joint_acc), dim=1)
         # action rate
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
-        
+
         # undesired contacts
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         is_contact = (
@@ -395,7 +394,7 @@ class SkeletonWtwEnv(DirectRLEnv):
         target_height = commands[:, 9].unsqueeze(1) * phases + 0.02
         feet_clearance_cmd_linear = torch.square(target_height - foot_height) * (1 - self.desired_contact_states)
         feet_clearance_cmd_linear = torch.sum(feet_clearance_cmd_linear, dim=1)
-        feet_clearance_cmd_linear[both_low] = 0.
+        feet_clearance_cmd_linear[both_low] = 0.0
 
         # orientation control tracking from commands
         roll_pitch_commands = commands[:, 10:12]
@@ -507,7 +506,7 @@ class SkeletonWtwEnv(DirectRLEnv):
                 (1 - desired_contact[:, i]) * (1 - torch.exp(-1 * foot_forces[:, i] ** 2 / self.cfg.gait_force_sigma))
             )
         tracking_contacts_shaped_force = tracking_contacts_shaped_force / 4
-        tracking_contacts_shaped_force[both_low] = 0.
+        tracking_contacts_shaped_force[both_low] = 0.0
 
         # contact shaping (velocity)
         foot_velocities = torch.norm(foot_velocities, dim=2).view(self.num_envs, -1)
@@ -517,7 +516,7 @@ class SkeletonWtwEnv(DirectRLEnv):
                 desired_contact[:, i] * (1 - torch.exp(-1 * foot_velocities[:, i] ** 2 / self.cfg.gait_vel_sigma))
             )
         tracking_contacts_shaped_vel = tracking_contacts_shaped_vel / 4
-        tracking_contacts_shaped_vel[both_low] = 0.
+        tracking_contacts_shaped_vel[both_low] = 0.0
 
         # dof velocity penalty
         dof_vel_penalty = dof_vel[:]
@@ -569,13 +568,15 @@ class SkeletonWtwEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        died_base = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        died_base = torch.any(
+            torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1
+        )
         died_neck = torch.any(
             torch.max(torch.norm(net_contact_forces[:, :, self._neck_ids], dim=-1), dim=1)[0] > 1.0, dim=1
         )
         # Base roll/pitch termination (if projected gravity Z > -0.5, means angle > 60 degrees)
         died_ang = self._robot.data.projected_gravity_b[:, 2] > -0.5
-        
+
         died = died_base | died_neck | died_ang
         return died, time_out
 

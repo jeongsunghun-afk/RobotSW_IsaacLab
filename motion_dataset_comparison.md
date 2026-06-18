@@ -1,6 +1,6 @@
 # Go2 AMP 모션 데이터셋 비교 분석: walk vs smr
 
-**분석 일시**: 2026-04-02  
+**분석 일시**: 2026-04-02
 **분석 대상**:
 - `/home/lgb/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/go2_amp/imitation/new_dataset_walk` (15개 파일)
 - `/home/lgb/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/go2_amp/imitation/new_dataset_smr` (15개 파일)
@@ -212,7 +212,7 @@ D1_009_KAN01_001_F247_F548_010.txt
 | 최소값 | 0.000046 m | 0.000075 m | 1.630배 |
 | 최대값 | 0.004926 m | 0.007647 m | 1.552배 |
 
-**해석**: 
+**해석**:
 - SMR은 걸음 당 **53.8% 더 큰 거리**를 이동
 - 즉, SMR은 walk의 약 **1.5배 더 큰 스텝**으로 샘플링됨
 
@@ -253,7 +253,7 @@ D1_009_KAN01_001_F247_F548_010.txt
 주석과 데이터 분석에서 유추:
 
 1. **SMR**: **Sparse Motion Representation** (희소 모션 표현) 또는 **Subsampled Motion Retargeting** (부분샘플된 모션 리타겟팅)
-   
+
 2. **처리 방식**:
    - Walk 데이터: 원본 모션 데이터 (60Hz, 고주파 정보 포함)
    - SMR: **키프레임 샘플링** 적용 → 약 48% 프레임 압축
@@ -291,7 +291,7 @@ D1_009_KAN01_001_F247_F548_010.txt
 2. **추론/배포 단계**: **SMR** 데이터셋으로 경량화 가능
    - 학습 완료 후 추론 속도 개선
 
-3. **하이브리드 접근**: 
+3. **하이브리드 접근**:
    - Walk로 학습 → SMR로 discriminator fine-tuning
    - 메모리 효율성과 품질 균형
 

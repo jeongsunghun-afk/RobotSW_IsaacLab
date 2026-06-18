@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -37,6 +37,7 @@ class Go2FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+
 @configclass
 class Go2WTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
@@ -45,11 +46,11 @@ class Go2WTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "go2_wtw_direct"
     class_name = "OnPolicyRunnerParkour"
     obs_groups = {
-            "policy": ["policy"],
-            "critic": ["policy", "priv"],
-            # "scan": ["scan"],
-            "history": ["history"],
-            "priv": ["priv"]
+        "policy": ["policy"],
+        "critic": ["policy", "priv"],
+        # "scan": ["scan"],
+        "history": ["history"],
+        "priv": ["priv"],
     }
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
@@ -73,8 +74,9 @@ class Go2WTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOParkour"
+        class_name="PPOParkour",
     )
+
 
 @configclass
 class Go2NeckWTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -84,11 +86,11 @@ class Go2NeckWTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "go2_neck_wtw_direct"
     class_name = "OnPolicyRunnerParkour"
     obs_groups = {
-            "policy": ["policy"],
-            "critic": ["policy", "priv"],
-            # "scan": ["scan"],
-            "history": ["history"],
-            "priv": ["priv"]
+        "policy": ["policy"],
+        "critic": ["policy", "priv"],
+        # "scan": ["scan"],
+        "history": ["history"],
+        "priv": ["priv"],
     }
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCriticRMA",
@@ -112,7 +114,7 @@ class Go2NeckWTWPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOParkour"
+        class_name="PPOParkour",
     )
 
 
@@ -160,6 +162,7 @@ class Go2InteractionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 @configclass
 class Go2NeckInteractionPPORunnerCfg(Go2InteractionPPORunnerCfg):
     """Go2 목 추가 모델 Interaction 환경용 PPO 러너 설정 (RMA 구조)."""
+
     experiment_name = "go2_neck_interaction_direct"
 
 

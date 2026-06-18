@@ -189,14 +189,14 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
         Ring-buffer convention: oldest frame at index 0, newest at index -1.
         ``torch.roll(..., shifts=-1, dims=1)`` shifts left so index -1 is overwritten.
         """
-        root_pos_w = self._robot.data.root_pos_w          # [N, 3]
-        root_quat_w = self._robot.data.root_quat_w        # [N, 4]  wxyz convention
+        root_pos_w = self._robot.data.root_pos_w  # [N, 3]
+        root_quat_w = self._robot.data.root_quat_w  # [N, 4]  wxyz convention
         root_lin_vel_b = self._robot.data.root_lin_vel_b  # [N, 3]
         root_ang_vel_b = self._robot.data.root_ang_vel_b  # [N, 3]
 
         # Foot positions in base-local frame
         foot_pos_w = self._robot.data.body_pos_w[:, self._amp_foot_body_ids, :]  # [N, 4, 3]
-        rel_pos = foot_pos_w - root_pos_w.unsqueeze(1)                           # [N, 4, 3]
+        rel_pos = foot_pos_w - root_pos_w.unsqueeze(1)  # [N, 4, 3]
         N, K = rel_pos.shape[:2]
         local_foot_pos = quat_apply_inverse(
             root_quat_w.unsqueeze(1).expand(-1, K, -1).reshape(-1, 4),
@@ -206,12 +206,12 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
         # Build the 43-dim base AMP frame for the current step
         current_frame = torch.cat(
             [
-                self._robot.data.joint_pos,          # 12  rad
-                self._robot.data.joint_vel,          # 12  rad/s
-                root_pos_w[:, 2:3],                  # 1   m
-                root_lin_vel_b,                      # 3   m/s
-                root_ang_vel_b,                      # 3   rad/s
-                local_foot_pos.view(N, -1),          # 12  m
+                self._robot.data.joint_pos,  # 12  rad
+                self._robot.data.joint_vel,  # 12  rad/s
+                root_pos_w[:, 2:3],  # 1   m
+                root_lin_vel_b,  # 3   m/s
+                root_ang_vel_b,  # 3   rad/s
+                local_foot_pos.view(N, -1),  # 12  m
             ],
             dim=-1,
         )  # [N, 43]
@@ -239,9 +239,9 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
             Tensor [N, H*49] — flattened 49-dim AMP obs for discriminator input.
         """
         N, H = base_buf.shape[:2]
-        rot_tan_norm = _apply_root_rot_tan_norm(quat_buf, N, H)       # [N, H, 6]
-        full_obs = torch.cat([base_buf, rot_tan_norm], dim=-1)         # [N, H, 49]
-        return full_obs.flatten(start_dim=1)                           # [N, H*49]
+        rot_tan_norm = _apply_root_rot_tan_norm(quat_buf, N, H)  # [N, H, 6]
+        full_obs = torch.cat([base_buf, rot_tan_norm], dim=-1)  # [N, H, 49]
+        return full_obs.flatten(start_dim=1)  # [N, H*49]
 
     def _log_amp_metrics(self) -> None:
         """Write per-step AMP diagnostics to ``self.extras["log"]``.
@@ -268,8 +268,8 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
             AMP/total_reward_mean_flat  — mean parkour reward on flat envs
             AMP/total_reward_mean_terrain — mean parkour reward on non-flat envs
         """
-        flat_mask = self._flat_env_mask        # [N] bool
-        non_flat_mask = ~flat_mask             # [N] bool
+        flat_mask = self._flat_env_mask  # [N] bool
+        non_flat_mask = ~flat_mask  # [N] bool
 
         # Guard against empty masks (small batches may be all-flat or all-non-flat)
         def _safe_masked_mean(buf: torch.Tensor, mask: torch.Tensor) -> float:
@@ -386,19 +386,19 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
         #   root_ang_vel(3) + foot_pos_local(12) = 43
         base_frame = torch.cat(
             [
-                dp,                          # 12  rad
-                dv,                          # 12  rad/s
-                rp[:, 2:3],                  # 1   m  (root height)
-                lv,                          # 3   m/s body-frame
-                av,                          # 3   rad/s body-frame
-                fp.view(fp.shape[0], -1),    # 12  m  (4 feet x 3, body-local)
+                dp,  # 12  rad
+                dv,  # 12  rad/s
+                rp[:, 2:3],  # 1   m  (root height)
+                lv,  # 3   m/s body-frame
+                av,  # 3   rad/s body-frame
+                fp.view(fp.shape[0], -1),  # 12  m  (4 feet x 3, body-local)
             ],
             dim=-1,
         )  # [N*H, 43]
 
         # Reshape to [N, H, 43] and [N, H, 4] for _apply_root_rot_tan_norm
-        base_buf = base_frame.view(num_samples, H, 43)       # [N, H, 43]
-        quat_buf = rq.view(num_samples, H, 4)                # [N, H, 4]
+        base_buf = base_frame.view(num_samples, H, 43)  # [N, H, 43]
+        quat_buf = rq.view(num_samples, H, 4)  # [N, H, 4]
 
         # Append tan_norm to produce [N, H, 49] then flatten to [N, H*49]
         return self._build_flat_amp_obs(base_buf, quat_buf)  # [N, 490]
@@ -485,9 +485,8 @@ def _apply_root_rot_tan_norm(
     norm_ref = torch.zeros(num_envs * n_hist, 3, dtype=quat_buf.dtype, device=quat_buf.device)
     norm_ref[:, 2] = 1.0  # [0, 0, 1]
 
-    tan = quat_apply(rel_quat, tan_ref)   # [N*H, 3]
+    tan = quat_apply(rel_quat, tan_ref)  # [N*H, 3]
     norm = quat_apply(rel_quat, norm_ref)  # [N*H, 3]
 
     tan_norm = torch.cat([tan, norm], dim=-1)  # [N*H, 6]
     return tan_norm.view(num_envs, n_hist, 6)
-

@@ -38,6 +38,7 @@ Quick-change examples::
 from isaaclab.utils import configclass
 
 from isaaclab_tasks.direct.parkour.parkour_env_cfg import ParkourEnvCfg
+from isaaclab_tasks.direct.parkour.parkour_terrains import MeshParkourStairWithMidGoalsTerrainCfg
 
 
 @configclass
@@ -165,6 +166,28 @@ class ParkourImitationEnvCfg(ParkourEnvCfg):
         for name, proportion in self.terrain_sub_terrain_proportions.items():
             if name in tg.sub_terrains:
                 tg.sub_terrains[name].proportion = proportion
+
+        # ── Replace the stair sub-terrain with the mid-goal / run-out variant ─────
+        # parkour_imitation only: swap the core ``parkour_stair_terrain`` for the
+        # task-level ``parkour_stair_with_midgoals_terrain`` (4 goals/cycle in the
+        # order [ascend-mid, top, descend-mid, bottom] + a run-out final goal).
+        #
+        # Shared-reference footgun: ``self.terrain`` defaults to the module-level
+        # ``PARKOUR_TERRAINS_CFG`` object, but @configclass's _custom_post_init runs
+        # inside super().__post_init__() above and deep-copies every mutable member of
+        # self (including terrain → terrain_generator → sub_terrains and each entry).
+        # So ``tg`` here is already instance-local and replacing the stair entry cannot
+        # leak back to base ParkourEnvCfg. Verified empirically (function identity check).
+        old_stair = tg.sub_terrains["parkour_stair"]
+        tg.sub_terrains["parkour_stair"] = MeshParkourStairWithMidGoalsTerrainCfg(
+            proportion=old_stair.proportion,
+            stair_width_range=old_stair.stair_width_range,
+            stair_height_range=old_stair.stair_height_range,
+            num_steps_per_stair=old_stair.num_steps_per_stair,
+            num_goals=old_stair.num_goals,
+            flat_patch_sampling=old_stair.flat_patch_sampling,
+            last_goal_runout=1.0,
+        )
 
         # Apply max_init_terrain_level to the TerrainImporterCfg wrapper.
         self.terrain.max_init_terrain_level = self.terrain_max_init_level

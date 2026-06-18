@@ -122,7 +122,6 @@ import sys as _sys
 import gymnasium as gym
 import numpy as np
 import torch
-
 from rsl_rl.runners import OnPolicyRunnerParkour
 
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg
@@ -140,7 +139,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 # Populated inside main(); consumed in __main__ after simulation_app.close().
 # (Matplotlib Agg backend must be imported after Isaac's Qt loop exits —
 #  see DESIGN.md §8 "Why offline + matplotlib".)
-_deferred_plots: list[tuple[str, str, str]] = []   # (npz_path, png_primary, png_results)
+_deferred_plots: list[tuple[str, str, str]] = []  # (npz_path, png_primary, png_results)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _SUPPORTED_TASK = "Go2-Parkour-Direct-v0"
@@ -185,9 +184,7 @@ def _pin_terrain_per_env(raw, active_class_ids: list[int], difficulty: int) -> N
     raw._terrain_levels[:] = level
     raw._terrain_types[:] = col_per_env
     raw._env_class[:] = raw._col_to_class[raw._terrain_types]
-    raw._terrain.env_origins[:] = raw._terrain.terrain_origins[
-        raw._terrain_levels, raw._terrain_types
-    ]
+    raw._terrain.env_origins[:] = raw._terrain.terrain_origins[raw._terrain_levels, raw._terrain_types]
 
     # Belt-and-suspenders: skip curriculum advance even if terrain_curriculum=True.
     raw._skip_curriculum[:] = True
@@ -201,15 +198,13 @@ def _pin_terrain_per_env(raw, active_class_ids: list[int], difficulty: int) -> N
 # ── Recording helpers ─────────────────────────────────────────────────────────
 def _capture_contact(raw) -> torch.Tensor:
     """Read current-step per-foot contact mask (N, 4) bool — same threshold as env."""
-    forces = raw._contact_sensor.data.net_forces_w_history   # (N, hist, B, 3)
+    forces = raw._contact_sensor.data.net_forces_w_history  # (N, hist, B, 3)
     return (torch.norm(forces[:, 0, raw._feet_ids], dim=-1) > 2.0).cpu()  # (N, 4)
 
 
 def _capture_foot_xy_speed(raw) -> torch.Tensor:
     """Read per-foot XY speed (N, 4) float32 for dragging indicator."""
-    return torch.norm(
-        raw._robot.data.body_lin_vel_w[:, raw._feet_ids, :2], dim=-1
-    ).detach().cpu()  # (N, 4)
+    return torch.norm(raw._robot.data.body_lin_vel_w[:, raw._feet_ids, :2], dim=-1).detach().cpu()  # (N, 4)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -239,7 +234,7 @@ def main(
     if not active_info:
         raise RuntimeError("No active terrain classes found (all proportions == 0).")
     active_class_ids = [t[0] for t in active_info]
-    terrain_names = [t[1] for t in active_info]      # "flat", "hurdle", "step", …
+    terrain_names = [t[1] for t in active_info]  # "flat", "hurdle", "step", …
     num_active = len(active_class_ids)
     print(f"[INFO] Active terrains ({num_active}): {list(zip(active_class_ids, terrain_names))}")
 
@@ -255,9 +250,9 @@ def main(
     # ── Cfg overrides (before gym.make) ───────────────────────────────────────
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = num_envs
-    env_cfg.terrain_curriculum = False                              # §4: disable curriculum
-    env_cfg.terrain.max_init_terrain_level = args_cli.difficulty    # cosmetic; §4 overrides
-    env_cfg.debug_vis = False                                       # suppress viewport overlays
+    env_cfg.terrain_curriculum = False  # §4: disable curriculum
+    env_cfg.terrain.max_init_terrain_level = args_cli.difficulty  # cosmetic; §4 overrides
+    env_cfg.debug_vis = False  # suppress viewport overlays
 
     if args_cli.seed is not None:
         env_cfg.seed = args_cli.seed
@@ -280,15 +275,13 @@ def main(
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
     if isinstance(env.unwrapped, DirectMARLEnv):
         from isaaclab.envs import multi_agent_to_single_agent
+
         env = multi_agent_to_single_agent(env)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # ── Runner + policy (mirrors play.py:275-296) ─────────────────────────────
     if agent_cfg.class_name != "OnPolicyRunnerParkour":
-        raise ValueError(
-            f"play_reward_attribution.py requires OnPolicyRunnerParkour, "
-            f"got '{agent_cfg.class_name}'."
-        )
+        raise ValueError(f"play_reward_attribution.py requires OnPolicyRunnerParkour, got '{agent_cfg.class_name}'.")
     runner = OnPolicyRunnerParkour(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     runner.load(resume_path)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -307,6 +300,7 @@ def main(
         try:
             import zmq as _zmq  # noqa: PLC0415
             from reward_pub_protocol import ZMQ_ENDPOINT, ZMQ_HWM, encode_step, make_pub_socket  # noqa: PLC0415
+
             _zmq_ctx = _zmq.Context()
             _effective_endpoint = args_cli.zmq_endpoint or ZMQ_ENDPOINT
             if args_cli.zmq_endpoint:
@@ -333,21 +327,21 @@ def main(
 
     # ── Record env metadata ───────────────────────────────────────────────────
     step_dt: float = float(raw.step_dt)
-    term_names: list[str] = list(raw.cfg.reward_scales.keys())         # 16, canonical order
+    term_names: list[str] = list(raw.cfg.reward_scales.keys())  # 16, canonical order
     reward_scales_dict: dict[str, float] = dict(raw.cfg.reward_scales)
     dragging_threshold: float = float(raw.cfg.dragging_velocity_threshold)
-    K = len(term_names)                                                # 16
-    N = raw.num_envs                                                   # 5
-    T_max = int(raw.cfg.episode_length_s / step_dt)                    # 1000
+    K = len(term_names)  # 16
+    N = raw.num_envs  # 5
+    T_max = int(raw.cfg.episode_length_s / step_dt)  # 1000
 
     print(f"[INFO] Buffers: T_max={T_max}, N={N}, K={K}, step_dt={step_dt}")
     print(f"[INFO] Reward terms: {term_names}")
 
     # ── Pre-allocate recording buffers ────────────────────────────────────────
-    buf_rewards = torch.zeros(T_max, N, K, dtype=torch.float32)             # (T, N, 16)
-    buf_contacts = torch.zeros(T_max, N, 4, dtype=torch.bool)               # (T, N, 4)
-    buf_foot_xy_speed = torch.zeros(T_max, N, 4, dtype=torch.float32)       # (T, N, 4)
-    buf_commands = torch.zeros(T_max, N, 3, dtype=torch.float32)            # (T, N, 3)
+    buf_rewards = torch.zeros(T_max, N, K, dtype=torch.float32)  # (T, N, 16)
+    buf_contacts = torch.zeros(T_max, N, 4, dtype=torch.bool)  # (T, N, 4)
+    buf_foot_xy_speed = torch.zeros(T_max, N, 4, dtype=torch.float32)  # (T, N, 4)
+    buf_commands = torch.zeros(T_max, N, 3, dtype=torch.float32)  # (T, N, 3)
     ep_len = torch.full((N,), -1, dtype=torch.int32)
     env_done = torch.zeros(N, dtype=torch.bool)
 
@@ -366,16 +360,16 @@ def main(
             policy_nn.reset(dones)
 
         # Capture reward breakdown (S1 buffer, §5).
-        r_step = raw._last_reward_breakdown_per_env.detach().cpu()      # (N, K)
+        r_step = raw._last_reward_breakdown_per_env.detach().cpu()  # (N, K)
 
         # Capture foot contact (§6).
-        c_step = _capture_contact(raw)                                   # (N, 4) bool
+        c_step = _capture_contact(raw)  # (N, 4) bool
 
         # Capture foot XY speed (for dragging indicator).
-        spd_step = _capture_foot_xy_speed(raw)                           # (N, 4)
+        spd_step = _capture_foot_xy_speed(raw)  # (N, 4)
 
         # Capture commands.
-        cmd_step = raw._commands[:, :3].detach().cpu()                   # (N, 3)
+        cmd_step = raw._commands[:, :3].detach().cpu()  # (N, 3)
 
         # Live-viz publish — non-blocking; silently swallowed if viewer absent.
         # Runs only when --live-viz is active; zero overhead otherwise.
@@ -434,11 +428,11 @@ def main(
     all_npz_path = os.path.join(out_primary, "reward_attribution_all.npz")
     np.savez_compressed(
         all_npz_path,
-        rewards=buf_rewards[:T_used].numpy(),              # (T_used, N, 16)
-        foot_contact=buf_contacts[:T_used].numpy(),        # (T_used, N, 4)
+        rewards=buf_rewards[:T_used].numpy(),  # (T_used, N, 16)
+        foot_contact=buf_contacts[:T_used].numpy(),  # (T_used, N, 4)
         foot_xy_speed=buf_foot_xy_speed[:T_used].numpy(),  # (T_used, N, 4)
-        commands=buf_commands[:T_used].numpy(),            # (T_used, N, 3)
-        episode_len=ep_len.numpy(),                        # (N,)
+        commands=buf_commands[:T_used].numpy(),  # (T_used, N, 3)
+        episode_len=ep_len.numpy(),  # (N,)
         terrain_ids=np.array(active_class_ids, dtype=np.int32),
         terrain_names=np.array(terrain_names),
         term_names=np.array(term_names),
@@ -480,10 +474,10 @@ def main(
         # matches the **kwds: ArrayLike signature without triggering a pyright
         # false-positive on the allow_pickle: bool parameter.
         per_env_data: dict[str, np.ndarray] = {
-            "rewards": buf_rewards[:T_env, env_idx].numpy(),              # (T_env, 16)
-            "foot_contact": buf_contacts[:T_env, env_idx].numpy(),        # (T_env, 4)
+            "rewards": buf_rewards[:T_env, env_idx].numpy(),  # (T_env, 16)
+            "foot_contact": buf_contacts[:T_env, env_idx].numpy(),  # (T_env, 4)
             "foot_xy_speed": buf_foot_xy_speed[:T_env, env_idx].numpy(),  # (T_env, 4)
-            "commands": buf_commands[:T_env, env_idx].numpy(),            # (T_env, 3)
+            "commands": buf_commands[:T_env, env_idx].numpy(),  # (T_env, 3)
             "episode_len": np.array(T_env, dtype=np.int32),
             "terrain_id": np.array(class_id, dtype=np.int32),
             "terrain_name": np.array(tname),
@@ -539,9 +533,11 @@ if __name__ == "__main__":
     if _deferred_plots:
         print(f"\n[INFO] Rendering {len(_deferred_plots)} plot(s) offline …")
         import matplotlib
+
         matplotlib.use("Agg")
-        from reward_attribution_plot import plot_terrain_attribution
         import shutil
+
+        from reward_attribution_plot import plot_terrain_attribution
 
         for entry in _deferred_plots:
             npz_path, png_primary, png_results = entry

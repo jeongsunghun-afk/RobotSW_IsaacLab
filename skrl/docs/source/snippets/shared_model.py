@@ -1,8 +1,12 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [start-mlp-single-forward-pass-torch]
 import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, GaussianMixin, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 
 
 # define the shared model
@@ -79,10 +83,8 @@ models["value"] = models["policy"]
 
 
 # [start-mlp-multi-forward-pass-torch]
-import torch
-import torch.nn as nn
 
-from skrl.models.torch import Model, GaussianMixin, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 
 
 # define the shared model

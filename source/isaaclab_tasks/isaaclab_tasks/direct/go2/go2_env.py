@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -13,15 +13,19 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, RayCaster
 
-from .go2_env_cfg import Go2FlatEnvCfg, Go2RoughEnvCfg, Go2NeckFlatEnvCfg
+from .go2_env_cfg import Go2FlatEnvCfg, Go2NeckFlatEnvCfg, Go2RoughEnvCfg
+
 
 def torch_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
 
+
 class Go2Env(DirectRLEnv):
     cfg: Go2FlatEnvCfg | Go2RoughEnvCfg | Go2NeckFlatEnvCfg
 
-    def __init__(self, cfg: Go2FlatEnvCfg | Go2RoughEnvCfg | Go2NeckFlatEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(
+        self, cfg: Go2FlatEnvCfg | Go2RoughEnvCfg | Go2NeckFlatEnvCfg, render_mode: str | None = None, **kwargs
+    ):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -58,7 +62,7 @@ class Go2Env(DirectRLEnv):
                 "undesired_contacts",
                 "flat_orientation_l2",
                 "similar_to_default",
-                "base_height"
+                "base_height",
             ]
         }
         # Get specific body indices
@@ -120,7 +124,7 @@ class Go2Env(DirectRLEnv):
             dim=-1,
         )
         observations = {"policy": obs}
-        
+
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -156,11 +160,12 @@ class Go2Env(DirectRLEnv):
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
 
         # Similar to default
-        similar_to_default = torch.sum(torch.abs(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1)
+        similar_to_default = torch.sum(
+            torch.abs(self._robot.data.joint_pos - self._robot.data.default_joint_pos), dim=1
+        )
 
         # base height
         base_height = torch.square(self._robot.data.root_link_pos_w[:, 2] - self._robot.data.default_root_state[:, 2])
-
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -238,9 +243,9 @@ class Go2Env(DirectRLEnv):
     def _resample_commands(self, env_ids: torch.Tensor):
         if self.command_curriculum:
             command_keys_in_order = [
-            "lin_vel_x_range",
-            "lin_vel_y_range",
-            "ang_vel_range",
+                "lin_vel_x_range",
+                "lin_vel_y_range",
+                "ang_vel_range",
             ]
             for i in range(self.cfg.num_commands):
                 if i < len(command_keys_in_order):
@@ -252,17 +257,29 @@ class Go2Env(DirectRLEnv):
                             use_curriculum = curr < upper
                             low = torch.where(use_curriculum, curr - self.curriculum_step, torch.full_like(curr, lower))
                             high = torch.where(use_curriculum, curr, torch.full_like(curr, upper))
-                            self._commands[env_ids, i] = torch.lerp(low, high, torch.rand(len(env_ids), device=self.device))
-                        elif i == 1 or i ==2:  # ang_vel에 curriculum 적용
+                            self._commands[env_ids, i] = torch.lerp(
+                                low, high, torch.rand(len(env_ids), device=self.device)
+                            )
+                        elif i == 1 or i == 2:  # ang_vel에 curriculum 적용
                             curr = self.curriculum_ang_vel[env_ids]
                             use_curriculum = curr < upper
                             # random sign 선택
                             direction = torch.randint(0, 2, (len(env_ids),), device=self.device) * 2 - 1  # {-1, +1}
                             signed_curr = curr * direction.float()
-                            low = torch.where(use_curriculum, signed_curr - self.curriculum_step, torch.full_like(curr, lower))
+                            low = torch.where(
+                                use_curriculum, signed_curr - self.curriculum_step, torch.full_like(curr, lower)
+                            )
                             high = torch.where(use_curriculum, signed_curr, torch.full_like(curr, upper))
-                            self._commands[env_ids, i] = torch.lerp(low, high, torch.rand(len(env_ids), device=self.device))
+                            self._commands[env_ids, i] = torch.lerp(
+                                low, high, torch.rand(len(env_ids), device=self.device)
+                            )
         else:
-            self._commands[env_ids, 0] = torch_rand_float(*self.cfg.command_cfg["lin_vel_x_range"], (len(env_ids),), self.device)
-            self._commands[env_ids, 1] = torch_rand_float(*self.cfg.command_cfg["lin_vel_y_range"], (len(env_ids),), self.device)
-            self._commands[env_ids, 2] = torch_rand_float(*self.cfg.command_cfg["ang_vel_range"], (len(env_ids),), self.device)
+            self._commands[env_ids, 0] = torch_rand_float(
+                *self.cfg.command_cfg["lin_vel_x_range"], (len(env_ids),), self.device
+            )
+            self._commands[env_ids, 1] = torch_rand_float(
+                *self.cfg.command_cfg["lin_vel_y_range"], (len(env_ids),), self.device
+            )
+            self._commands[env_ids, 2] = torch_rand_float(
+                *self.cfg.command_cfg["ang_vel_range"], (len(env_ids),), self.device
+            )

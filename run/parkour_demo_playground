@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# run/parkour_demo_playground — 자유 조종(omni.ui 조이스틱) playground
+#
+# 사용법:
+#   ./run/parkour_demo_playground                       # GUI (디스플레이 연결 환경)
+#   ./run/parkour_demo_playground --livestream 2 --enable_cameras   # WebRTC 원격(렉 적음)
+#   ./run/parkour_demo_playground --checkpoint <다른.pt>
+#
+# 공통으로 박혀있는 것: conda(isaac-5.1) + Go2-ParkourDemo-Playground-v0 + --mode playground
+# GUI는 그대로, 원격이면 --livestream 2 --enable_cameras 를 뒤에 붙이세요.
+set -euo pipefail
+
+# run/ 한 단계 위가 저장소 루트
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_CKPT="${PARKOUR_CKPT:-$REPO/logs/rsl_rl/parkour_imitation_go2_symmetry/2026-06-15_18-06-15_amp_4.0/model_12600.pt}"
+
+source "$(conda info --base 2>/dev/null || echo /home/user/miniconda3)/etc/profile.d/conda.sh"
+conda activate isaac-5.1
+
+cd "$REPO"
+
+EXTRA=()
+if [[ " $* " != *" --checkpoint "* ]]; then
+    EXTRA+=(--checkpoint "$DEFAULT_CKPT")
+fi
+
+exec ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play_parkour_demo.py \
+    --task Go2-ParkourDemo-Playground-v0 --mode playground \
+    "${EXTRA[@]}" "$@"

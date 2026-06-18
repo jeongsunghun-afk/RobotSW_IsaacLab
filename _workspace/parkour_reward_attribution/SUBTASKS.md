@@ -189,7 +189,7 @@ Include:
              │
              ▼
             S2 (play script, executor) ──► S3 (plot helper, executor)
-                                       
+
             S4 (PyQt+IPC spec, writer) — independent, lowest priority
 ```
 
@@ -208,4 +208,3 @@ After S1+S2 land, run `validate-code` worker on the changed files to confirm:
 - No `_reset_idx` buffer that wasn't initialized (S1's buffer is overwritten each step so it's
   exempt).
 - IL / AMP / discriminator dims untouched (S1 doesn't touch any of those).
-

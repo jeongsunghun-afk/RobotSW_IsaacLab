@@ -35,27 +35,26 @@ import sys
 
 import numpy as np
 
-
 # ── Tab20 color palette (matches viewer _TERM_COLORS for visual continuity) ────
 # 16 entries, one per reward term index.  Same RGB values as viewer's _TERM_COLORS,
 # converted to normalized float tuples for matplotlib.
 _TAB20_COLORS: list[tuple[float, float, float]] = [
-    (31 / 255,  119 / 255, 180 / 255),   #  0 tracking_goal_vel
-    (174 / 255, 199 / 255, 232 / 255),   #  1 tracking_yaw
-    (255 / 255, 127 / 255,  14 / 255),   #  2 lin_vel_z_l2
-    (255 / 255, 187 / 255, 120 / 255),   #  3 ang_vel_xy_l2
-    ( 44 / 255, 160 / 255,  44 / 255),   #  4 orientation_l2
-    (152 / 255, 223 / 255, 138 / 255),   #  5 dof_acc_l2
-    (214 / 255,  39 / 255,  40 / 255),   #  6 collision
-    (255 / 255, 152 / 255, 150 / 255),   #  7 action_rate_l2
-    (148 / 255, 103 / 255, 189 / 255),   #  8 delta_torques
-    (197 / 255, 176 / 255, 213 / 255),   #  9 torques_l2
-    (140 / 255,  86 / 255,  75 / 255),   # 10 hip_pos
-    (196 / 255, 156 / 255, 148 / 255),   # 11 dof_error_l2
-    (227 / 255, 119 / 255, 194 / 255),   # 12 feet_stumble
-    (247 / 255, 182 / 255, 210 / 255),   # 13 feet_edge
-    (127 / 255, 127 / 255, 127 / 255),   # 14 feet_dragging
-    (188 / 255, 189 / 255, 220 / 255),   # 15 feet_gait_pairing
+    (31 / 255, 119 / 255, 180 / 255),  #  0 tracking_goal_vel
+    (174 / 255, 199 / 255, 232 / 255),  #  1 tracking_yaw
+    (255 / 255, 127 / 255, 14 / 255),  #  2 lin_vel_z_l2
+    (255 / 255, 187 / 255, 120 / 255),  #  3 ang_vel_xy_l2
+    (44 / 255, 160 / 255, 44 / 255),  #  4 orientation_l2
+    (152 / 255, 223 / 255, 138 / 255),  #  5 dof_acc_l2
+    (214 / 255, 39 / 255, 40 / 255),  #  6 collision
+    (255 / 255, 152 / 255, 150 / 255),  #  7 action_rate_l2
+    (148 / 255, 103 / 255, 189 / 255),  #  8 delta_torques
+    (197 / 255, 176 / 255, 213 / 255),  #  9 torques_l2
+    (140 / 255, 86 / 255, 75 / 255),  # 10 hip_pos
+    (196 / 255, 156 / 255, 148 / 255),  # 11 dof_error_l2
+    (227 / 255, 119 / 255, 194 / 255),  # 12 feet_stumble
+    (247 / 255, 182 / 255, 210 / 255),  # 13 feet_edge
+    (127 / 255, 127 / 255, 127 / 255),  # 14 feet_dragging
+    (188 / 255, 189 / 255, 220 / 255),  # 15 feet_gait_pairing
 ]
 
 
@@ -89,20 +88,21 @@ def plot_terrain_attribution(
     """
     # Deferred import so the module can be imported without a display server.
     import matplotlib
+
     # Only set backend if not already set; avoids conflict when called from sim context.
     try:
         matplotlib.use("Agg")
     except Exception:
         pass
-    import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
     import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
 
     # ── Load data ──────────────────────────────────────────────────────────────
     data = np.load(npz_path, allow_pickle=True)
 
-    rewards: np.ndarray = data["rewards"].astype(np.float32)         # (T, K)
-    contacts: np.ndarray = data["foot_contact"].astype(bool)          # (T, 4)
+    rewards: np.ndarray = data["rewards"].astype(np.float32)  # (T, K)
+    contacts: np.ndarray = data["foot_contact"].astype(bool)  # (T, 4)
     step_dt: float = float(data["step_dt"])
     T: int = int(data["episode_len"])
     terrain_name: str = str(data["terrain_name"])
@@ -126,14 +126,14 @@ def plot_terrain_attribution(
     t_secs = t_steps * step_dt
 
     # ── Derived signals ────────────────────────────────────────────────────────
-    n_contact = contacts.sum(axis=-1).astype(np.int32)        # (T,) 0..4
-    n_airborne = 4 - n_contact                                # (T,) 0..4
-    is_3leg = n_airborne == 1                                  # exactly 1 foot airborne
-    is_2leg = n_airborne == 2                                  # exactly 2 feet airborne
+    n_contact = contacts.sum(axis=-1).astype(np.int32)  # (T,) 0..4
+    n_airborne = 4 - n_contact  # (T,) 0..4
+    is_3leg = n_airborne == 1  # exactly 1 foot airborne
+    is_2leg = n_airborne == 2  # exactly 2 feet airborne
 
     # Hind-foot dragging (RL=idx 2, RR=idx 3): in contact AND XY speed > threshold.
-    hind_contact = contacts[:, 2:4]                                         # (T, 2) bool
-    hind_speed = foot_xy_speed[:, 2:4]                                      # (T, 2) float
+    hind_contact = contacts[:, 2:4]  # (T, 2) bool
+    hind_speed = foot_xy_speed[:, 2:4]  # (T, 2) float
     is_dragging_rl = hind_contact[:, 0] & (hind_speed[:, 0] > dragging_threshold)
     is_dragging_rr = hind_contact[:, 1] & (hind_speed[:, 1] > dragging_threshold)
 
@@ -144,15 +144,15 @@ def plot_terrain_attribution(
     # We use a nested GridSpec for the 4×4 block.
     fig = plt.figure(figsize=figsize, dpi=dpi)
     fig.suptitle(
-        f"Terrain: parkour_{terrain_name}  "
-        f"(level={difficulty},  ep_len={T} steps / {T * step_dt:.1f} s)",
+        f"Terrain: parkour_{terrain_name}  (level={difficulty},  ep_len={T} steps / {T * step_dt:.1f} s)",
         fontsize=13,
         fontweight="bold",
         y=0.998,
     )
 
     outer_gs = gridspec.GridSpec(
-        3, 1,
+        3,
+        1,
         height_ratios=[8, 2, 1.5],
         hspace=0.35,
         figure=fig,
@@ -160,7 +160,8 @@ def plot_terrain_attribution(
 
     # ── TOP: 4×4 reward grid ───────────────────────────────────────────────────
     inner_gs = gridspec.GridSpecFromSubplotSpec(
-        4, 4,
+        4,
+        4,
         subplot_spec=outer_gs[0],
         hspace=0.55,
         wspace=0.30,
@@ -218,40 +219,60 @@ def plot_terrain_attribution(
     # ── MIDDLE: Foot contact lanes + dragging overlay ──────────────────────────
     ax_contact = fig.add_subplot(outer_gs[1], sharex=ax_anchor)
 
-    lane_h = 0.85        # filled band height per foot
-    lane_gap = 1.2       # vertical spacing between lanes
+    lane_h = 0.85  # filled band height per foot
+    lane_gap = 1.2  # vertical spacing between lanes
     contact_color = "black"
     air_color = "#e8e8e8"
-    drag_color = "#d62728"   # red — dragging on hind feet
+    drag_color = "#d62728"  # red — dragging on hind feet
 
     for fi, fname in enumerate(foot_names):
         ybase = fi * lane_gap
 
         # Air phase: faint grey background.
         ax_contact.fill_between(
-            t_steps, ybase, ybase + lane_h,
+            t_steps,
+            ybase,
+            ybase + lane_h,
             where=~contacts[:, fi],
-            step="post", color=air_color, alpha=0.5, linewidth=0,
+            step="post",
+            color=air_color,
+            alpha=0.5,
+            linewidth=0,
         )
         # Contact phase: solid dark fill.
         ax_contact.fill_between(
-            t_steps, ybase, ybase + lane_h,
+            t_steps,
+            ybase,
+            ybase + lane_h,
             where=contacts[:, fi],
-            step="post", color=contact_color, alpha=0.78, linewidth=0,
+            step="post",
+            color=contact_color,
+            alpha=0.78,
+            linewidth=0,
         )
         # Foot label.
         ax_contact.text(
-            -T * 0.012, ybase + lane_h * 0.5, fname,
-            ha="right", va="center", fontsize=8, fontweight="bold",
+            -T * 0.012,
+            ybase + lane_h * 0.5,
+            fname,
+            ha="right",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
         )
 
     # Dragging overlay — RL lane (fi=2) and RR lane (fi=3).
     for fi, is_drag in [(2, is_dragging_rl), (3, is_dragging_rr)]:
         ybase = fi * lane_gap
         ax_contact.fill_between(
-            t_steps, ybase, ybase + lane_h,
+            t_steps,
+            ybase,
+            ybase + lane_h,
             where=is_drag,
-            step="post", color=drag_color, alpha=0.55, linewidth=0,
+            step="post",
+            color=drag_color,
+            alpha=0.55,
+            linewidth=0,
         )
 
     # Y-axis: hide ticks (visual lane layout is self-explanatory).
@@ -275,22 +296,34 @@ def plot_terrain_attribution(
     ax_feet = fig.add_subplot(outer_gs[2], sharex=ax_anchor)
 
     ax_feet.step(
-        t_steps, n_contact,
-        where="post", color="#1f77b4", linewidth=1.3, label="feet in contact",
+        t_steps,
+        n_contact,
+        where="post",
+        color="#1f77b4",
+        linewidth=1.3,
+        label="feet in contact",
     )
 
     # 3-leg phase: exactly 1 foot airborne — magenta @ 28% alpha.
     ax_feet.fill_between(
-        t_steps, 0, 4,
+        t_steps,
+        0,
+        4,
         where=is_3leg,
-        step="post", color="magenta", alpha=0.28,
+        step="post",
+        color="magenta",
+        alpha=0.28,
         label="3-leg phase (1 airborne)",
     )
     # 2-leg phase: exactly 2 feet airborne — cyan @ 20% alpha.
     ax_feet.fill_between(
-        t_steps, 0, 4,
+        t_steps,
+        0,
+        4,
         where=is_2leg,
-        step="post", color="cyan", alpha=0.20,
+        step="post",
+        color="cyan",
+        alpha=0.20,
         label="2-leg phase (2 airborne)",
     )
 

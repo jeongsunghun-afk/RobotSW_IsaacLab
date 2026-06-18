@@ -2,7 +2,7 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
-# use --load_run 
+# use --load_run
 
 """Script to play a checkpoint if an RL agent from RSL-RL."""
 
@@ -60,12 +60,19 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import os
+import os as _os
+import sys as _sys
 import time
 
 import gymnasium as gym
-import torch
 
+# PLACEHOLDER: Extension template (do not remove this comment)
+import numpy as np
+import pandas as pd
+import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
+from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP, OnPolicyRunnerAMPBase
+from rsl_rl.runners.on_policy_runner_parkour_amp import OnPolicyRunnerParkourAMP
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -81,8 +88,8 @@ from isaaclab_rl.rsl_rl import (
     RslRlBaseRunnerCfg,
     RslRlVecEnvWrapper,
     export_policy_as_jit,
-    export_policy_as_onnx,
     export_policy_as_jit_parkour,
+    export_policy_as_onnx,
     export_policy_as_onnx_parkour,
 )
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -91,10 +98,8 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-# PLACEHOLDER: Extension template (do not remove this comment)
-
-import numpy as np
-import pandas as pd
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from _debug.reward_publisher import RewardUDPPublisher  # noqa: E402
 
 
 def save_obs_data_to_csv(obs_history, save_path, num_obs):
@@ -236,7 +241,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # Enable height scanner ray visualization in play mode (if the scene defines one)
     if hasattr(env_cfg.scene, "height_scanner") and hasattr(env_cfg.scene.height_scanner, "debug_vis"):
         env_cfg.scene.height_scanner.debug_vis = True
-        env_cfg.debug_vis_edge_mask=True
+    # Enable parkour edge mask visualization (if the cfg supports it)
+    if hasattr(env_cfg, "debug_vis_edge_mask"):
+        env_cfg.debug_vis_edge_mask = True
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     env.unwrapped.set_debug_vis(getattr(env_cfg, "debug_vis", True))
 
@@ -269,6 +276,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "OnPolicyRunnerParkour":
         runner = OnPolicyRunnerParkour(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerAMP":
+        runner = OnPolicyRunnerAMP(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerAMPBase":
+        runner = OnPolicyRunnerAMPBase(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
+        runner = OnPolicyRunnerParkourAMP(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
@@ -299,14 +312,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    if agent_cfg.class_name == "OnPolicyRunnerParkour":
-        export_policy_as_jit_parkour(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-        export_policy_as_onnx_parkour(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    if agent_cfg.class_name in ("OnPolicyRunnerParkour", "OnPolicyRunnerParkourAMP"):
+        # Bundle estimator into exported graph if the algorithm has one (predicts priv_explicit from proprio).
+        estimator = getattr(runner.alg, "estimator", None)
+        export_policy_as_jit_parkour(
+            policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt", estimator=estimator
+        )
+        export_policy_as_onnx_parkour(
+            policy_nn, path=export_model_dir, normalizer=normalizer, filename="policy.onnx", estimator=estimator
+        )
     else:
         export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
         export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
+
+    # Go2Recovery eval: settle 비활성화 (학습 시 2s 안착 단계 → eval에서 불필요)
+    # 다른 task는 settle_max_steps 속성 자체가 없으므로 hasattr 가드로 무영향 보장.
+    if hasattr(env.unwrapped.cfg, "settle_max_steps"):
+        env.unwrapped.cfg.settle_max_steps = 0
 
     # reset environment
     obs = env.get_observations()
@@ -338,6 +362,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         duration = 0.5
         stance_width_cmd = 0.25
         stance_length_cmd = 0.45
+    # --- live reward UDP publisher (parkour only) ---
+    _reward_publisher = None
+    _task_str = (args_cli.task or "").lower()
+    if "parkour" in _task_str:
+        try:
+            _reward_publisher = RewardUDPPublisher(env.unwrapped, target_env_id=0)
+        except Exception as _exc:
+            print(f"[reward-publisher] init failed: {_exc}; continuing without publisher.")
+            _reward_publisher = None
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -356,11 +390,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env.unwrapped._commands[:, 11] = roll_cmd
                 env.unwrapped._commands[:, 12] = stance_width_cmd
                 env.unwrapped._commands[:, 13] = stance_length_cmd
-            else:
-                # agent stepping
-                env.unwrapped._commands[:, 0] = 0.5
+            elif hasattr(env.unwrapped, "_commands"):
+                # command 기반 task: 기본 전진 명령
+                env.unwrapped._commands[:, 0] = 1.0
                 env.unwrapped._commands[:, 1] = 0.0
                 env.unwrapped._commands[:, 2] = 0.0
+            # Go2Recovery 등 _commands 없는 task는 위 블록 모두 스킵 (no-op)
 
             if args_cli.task[:10] == "R_Skeleton":
                 actions = torch.zeros(env.action_space.shape, device=env.device)
@@ -369,6 +404,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actions = policy(obs)
             obs_history.append(obs["policy"].cpu().numpy().squeeze())
             action_history.append(actions.detach().cpu().numpy().squeeze())
+            print(env.unwrapped._robot.data.root_lin_vel_b)
+            # print('FL', actions[:, [0, 4, 8]])
+            # print('RL', actions[:, [2, 6, 10]])
+            # print('FR', actions[:, [1, 5, 9]])
+            # print('RR', actions[:, [3, 7, 11]])
 
             # Save policy actions at timestep 499
             if timestep == 499:
@@ -378,6 +418,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # print(obs["policy"])
             # env stepping
             obs, _, dones, _ = env.step(actions)
+            if _reward_publisher is not None:
+                _reward_publisher.step(env.unwrapped)
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
         if args_cli.video:
@@ -392,6 +434,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             time.sleep(sleep_time)
 
     # close the simulator
+    if _reward_publisher is not None:
+        _reward_publisher.close()
     env.close()
 
 

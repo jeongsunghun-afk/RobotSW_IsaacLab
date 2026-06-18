@@ -79,9 +79,10 @@ import random
 import time
 
 import gymnasium as gym
-import skrl
 import torch
 from packaging import version
+
+import skrl
 
 # check for minimum supported skrl version
 SKRL_VERSION = "1.4.3"

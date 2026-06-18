@@ -1,16 +1,16 @@
 # [FACTS] Training Logs Analysis: Calf Divergence Discriminators
 
-**Date**: 2026-05-26  
-**Task**: #1 — log-investigator  
-**Scope**: Analyze Go2 Parkour training logs to extract 4 critical discriminators for calf joint divergence  
+**Date**: 2026-05-26
+**Task**: #1 — log-investigator
+**Scope**: Analyze Go2 Parkour training logs to extract 4 critical discriminators for calf joint divergence
 **Logs Analyzed**:
 - `/home/lgb/IsaacLab/logs/rsl_rl/go2_parkour/2026-05-26_10-07-36_change_spot_trot_add_pi_clipping_for_yaw_reward/`
   - Run duration: ~5 hours, 5300 iterations (0.005 s/step × 4 steps/iteration × ~5300 = ~106 seconds per iteration)
   - Checkpoints saved: 54 total (every 100 iterations)
   - Event file: 468,502 lines of TensorFlow event data
-  
+
 - `/home/lgb/IsaacLab/logs/rsl_rl/go2_parkour/2026-05-26_13-44-31_change_spot_trot_0.1/`
-  - Run duration: ~1.5 hours, 1900 iterations  
+  - Run duration: ~1.5 hours, 1900 iterations
   - Checkpoints saved: 20 total
   - Event file: 4,750,998 bytes
 

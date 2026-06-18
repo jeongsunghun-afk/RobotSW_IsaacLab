@@ -1,9 +1,15 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
 from isaaclab.utils import configclass
+
 from isaaclab_assets.robots.rga import RGA_GO2_CFG
 
 from .go2_interaction_cfg import Go2InteractionCfg
@@ -44,9 +50,7 @@ class Go2NeckInteractionCfg(Go2InteractionCfg):
     # ------------------------------------------------------------------ #
     # 로봇
     # ------------------------------------------------------------------ #
-    robot = RGA_GO2_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot"
-    )
+    robot = RGA_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # 패널티 대상 바디 이름에 목 파트 추가
     penalized_body_names: list = ["base", ".*thigh", ".*calf", ".*hip", ".*neck_p", ".*neck_r", ".*neck_y"]

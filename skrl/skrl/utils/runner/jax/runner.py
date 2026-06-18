@@ -1,10 +1,14 @@
-from __future__ import annotations
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any, Literal, Type
+from __future__ import annotations
 
 import copy
 import dataclasses
 import math  # noqa
+from typing import Any, Literal, Type
 
 from skrl import logger
 from skrl.agents.jax import Agent
@@ -249,7 +253,7 @@ class Runner:
 
         agent_class = cfg.get("agent", {}).get("class")
         if not agent_class:
-            raise ValueError(f"The 'agent.class' field is not defined in the specified configuration")
+            raise ValueError("The 'agent.class' field is not defined in the specified configuration")
         agent_class = agent_class.lower()
 
         # instantiate models
@@ -285,7 +289,7 @@ class Runner:
                     if agent_class == "amp" and role == "discriminator":
                         try:
                             observation_space = env.amp_observation_space
-                        except Exception as e:
+                        except Exception:
                             logger.warning(
                                 "Unable to get AMP space via 'env.amp_observation_space'. Using 'env.observation_space' instead"
                             )
@@ -351,16 +355,16 @@ class Runner:
 
         # get agent class
         if "agent" not in cfg:
-            raise ValueError(f"The 'agent' field is not defined in the specified configuration")
+            raise ValueError("The 'agent' field is not defined in the specified configuration")
         if "class" not in cfg["agent"]:
-            raise ValueError(f"The 'agent.class' field is not defined in the specified configuration")
+            raise ValueError("The 'agent.class' field is not defined in the specified configuration")
         agent_class = cfg["agent"]["class"].lower()
 
         # get memory class
         if "memory" not in cfg:
-            raise ValueError(f"The 'memory' field is not defined in the specified configuration")
+            raise ValueError("The 'memory' field is not defined in the specified configuration")
         if "class" not in cfg["memory"]:
-            raise ValueError(f"The 'memory.class' field is not defined in the specified configuration")
+            raise ValueError("The 'memory.class' field is not defined in the specified configuration")
         memory_class = self._component(cfg["memory"]["class"])
         # instantiate memory
         if cfg["memory"]["memory_size"] < 0:
@@ -419,9 +423,9 @@ class Runner:
         """
         # get trainer class
         if "trainer" not in cfg:
-            raise ValueError(f"The 'trainer' field is not defined in the specified configuration")
+            raise ValueError("The 'trainer' field is not defined in the specified configuration")
         if "class" not in cfg["trainer"]:
-            raise ValueError(f"The 'trainer.class' field is not defined in the specified configuration")
+            raise ValueError("The 'trainer.class' field is not defined in the specified configuration")
         trainer_class = cfg["trainer"]["class"].lower()
         # instantiate trainer
         trainer_cfg = self._component(f"{trainer_class}_CFG")(**self._process_cfg(cfg["trainer"]))

@@ -32,7 +32,6 @@ from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_obs_groups
 from rsl_rl.utils.logger import Logger
 
-
 _JOINT_KEY_RE = re.compile(r"^(action_stats|policy_std)/joint_(\d+)(/.+)?$")
 
 

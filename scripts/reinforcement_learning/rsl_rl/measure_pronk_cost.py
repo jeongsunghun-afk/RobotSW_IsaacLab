@@ -156,12 +156,18 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     # with act.effort_limit / act.velocity_limit (articulation.py:1901). joint_indices may be a
     # slice OR a tensor; we index applied_torque/joint_vel with it directly to stay aligned.
     act_joint_ids = act.joint_indices  # slice | tensor — indices into robot joints (articulation order)
-    print(f"[{SCRIPT_VERSION}] actuator effort_limit (per-joint, env0): "
-          f"{eff_lim[0].detach().cpu().numpy().round(3).tolist()}")
-    print(f"[{SCRIPT_VERSION}] actuator velocity_limit (per-joint, env0): "
-          f"{vel_lim[0].detach().cpu().numpy().round(3).tolist()}")
+    print(
+        f"[{SCRIPT_VERSION}] actuator effort_limit (per-joint, env0): "
+        f"{eff_lim[0].detach().cpu().numpy().round(3).tolist()}"
+    )
+    print(
+        f"[{SCRIPT_VERSION}] actuator velocity_limit (per-joint, env0): "
+        f"{vel_lim[0].detach().cpu().numpy().round(3).tolist()}"
+    )
     print(f"[{SCRIPT_VERSION}] actuator saturation_effort (scalar): {sat_eff}")
-    print(f"[{SCRIPT_VERSION}] actuator controls joint ids: {act_joint_ids.tolist() if torch.is_tensor(act_joint_ids) else act_joint_ids}")
+    print(
+        f"[{SCRIPT_VERSION}] actuator controls joint ids: {act_joint_ids.tolist() if torch.is_tensor(act_joint_ids) else act_joint_ids}"
+    )
 
     # ── Nominal robot mass (for bodyweight normalization) ───────────────────────
     default_mass = base_env._robot.data.default_mass  # (N, num_bodies)
@@ -173,13 +179,13 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     # ── Allocate collection buffers (CPU numpy, streamed) ──────────────────────
     arr_class = np.zeros((T, N), dtype=np.int64)
     arr_level = np.zeros((T, N), dtype=np.int16)
-    arr_contact = np.zeros((T, N, 4), dtype=bool)            # per-foot contact (history-max norm > thresh)
-    arr_airborne = np.zeros((T, N), dtype=bool)              # all 4 feet airborne (pronk indicator)
-    arr_peakfz = np.zeros((T, N, 4), dtype=np.float32)       # per-foot peak vertical force over history dim
-    arr_sat = np.zeros((T, N), dtype=bool)                   # ANY leg joint saturated this step
-    arr_satcount = np.zeros((T, N), dtype=np.int8)           # how many of 12 joints saturated
-    arr_mech_pow = np.zeros((T, N), dtype=np.float32)        # sum of positive tau*qdot over 12 joints [W]
-    arr_rootxy = np.zeros((T, N, 2), dtype=np.float32)       # base xy (distance for CoT)
+    arr_contact = np.zeros((T, N, 4), dtype=bool)  # per-foot contact (history-max norm > thresh)
+    arr_airborne = np.zeros((T, N), dtype=bool)  # all 4 feet airborne (pronk indicator)
+    arr_peakfz = np.zeros((T, N, 4), dtype=np.float32)  # per-foot peak vertical force over history dim
+    arr_sat = np.zeros((T, N), dtype=bool)  # ANY leg joint saturated this step
+    arr_satcount = np.zeros((T, N), dtype=np.int8)  # how many of 12 joints saturated
+    arr_mech_pow = np.zeros((T, N), dtype=np.float32)  # sum of positive tau*qdot over 12 joints [W]
+    arr_rootxy = np.zeros((T, N, 2), dtype=np.float32)  # base xy (distance for CoT)
     arr_dones = np.zeros((T, N), dtype=bool)
     arr_c_tilt = np.zeros((T, N), dtype=bool)
     arr_c_low = np.zeros((T, N), dtype=bool)
@@ -205,16 +211,16 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
         # ── contact forces: history-max over the history dim (catches sub-step transients) ──
         net_cf = base_env._contact_sensor.data.net_forces_w_history  # (N, hist, bodies, 3)
-        feet_cf_hist = net_cf[:, :, feet_ids, :]                      # (N, hist, 4, 3)
+        feet_cf_hist = net_cf[:, :, feet_ids, :]  # (N, hist, 4, 3)
         # per-foot peak vertical (z) force over history
-        peak_fz = feet_cf_hist[..., 2].abs().max(dim=1).values        # (N, 4)
+        peak_fz = feet_cf_hist[..., 2].abs().max(dim=1).values  # (N, 4)
         # contact = current (index 0) norm > thresh (matches env reward semantics)
         contact = torch.norm(net_cf[:, 0, feet_ids], dim=-1) > args_cli.force_thresh  # (N, 4)
-        airborne = torch.all(~contact, dim=1)                         # (N,)
+        airborne = torch.all(~contact, dim=1)  # (N,)
 
         # ── torque / saturation (dynamic DCMotor envelope) ──
-        tau = base_env._robot.data.applied_torque[:, jids]            # (N, 12) actuator-joint order
-        qd = base_env._robot.data.joint_vel[:, jids]                  # (N, 12)
+        tau = base_env._robot.data.applied_torque[:, jids]  # (N, 12) actuator-joint order
+        qd = base_env._robot.data.joint_vel[:, jids]  # (N, 12)
         # DCMotor _clip_effort envelope magnitude at this joint speed:
         #   top    = sat*(1 - qd/vel_lim) clipped at +eff_lim
         #   bottom = sat*(-1 - qd/vel_lim) clipped at -eff_lim
@@ -225,14 +231,14 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         # bound for a given torque sign: positive tau bounded by top, negative by |bottom|
         pos_bound = torch.clamp(top, min=0.0)
         neg_bound = torch.clamp(-bottom, min=0.0)
-        dyn_bound = torch.where(tau >= 0, pos_bound, neg_bound)       # (N, 12) >=0
+        dyn_bound = torch.where(tau >= 0, pos_bound, neg_bound)  # (N, 12) >=0
         dyn_bound = torch.clamp(dyn_bound, min=1e-3)
-        sat_mask = tau.abs() >= (args_cli.sat_frac * dyn_bound)       # (N, 12)
-        sat_count = sat_mask.sum(dim=1).to(torch.int8)                # (N,)
-        any_sat = sat_count > 0                                        # (N,)
+        sat_mask = tau.abs() >= (args_cli.sat_frac * dyn_bound)  # (N, 12)
+        sat_count = sat_mask.sum(dim=1).to(torch.int8)  # (N,)
+        any_sat = sat_count > 0  # (N,)
 
         # ── mechanical power: sum positive tau*qdot (CoT numerator) ──
-        mech_pow = torch.clamp(tau * qd, min=0.0).sum(dim=1)         # (N,) [W]
+        mech_pow = torch.clamp(tau * qd, min=0.0).sum(dim=1)  # (N,) [W]
 
         # ── terrain / level / pose ──
         env_class = base_env._env_class
@@ -302,11 +308,15 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             seg_start = ds + 1
         # trailing (unterminated) segment kept as valid (in-progress)
 
-    print(f"[{SCRIPT_VERSION}] Episodes: total={n_total_episodes}  failure={n_fail_episodes}  "
-          f"goal_reached={n_goal_episodes}")
+    print(
+        f"[{SCRIPT_VERSION}] Episodes: total={n_total_episodes}  failure={n_fail_episodes}  "
+        f"goal_reached={n_goal_episodes}"
+    )
     if n_total_episodes > 0:
-        print(f"[{SCRIPT_VERSION}]   failure rate = {100.0 * n_fail_episodes / n_total_episodes:.1f}%  "
-              f"goal rate = {100.0 * n_goal_episodes / n_total_episodes:.1f}%")
+        print(
+            f"[{SCRIPT_VERSION}]   failure rate = {100.0 * n_fail_episodes / n_total_episodes:.1f}%  "
+            f"goal rate = {100.0 * n_goal_episodes / n_total_episodes:.1f}%"
+        )
     valid_frac = valid.mean()
     print(f"[{SCRIPT_VERSION}] valid (non-failure-episode) sample fraction = {valid_frac:.3f}\n")
 
@@ -315,8 +325,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     lvl_end = arr_level[-max(1, T // 20) :].mean()
     print(f"[{SCRIPT_VERSION}] mean terrain_level: first 5% steps={lvl_start:.2f}  last 5% steps={lvl_end:.2f}")
     if n_goal_episodes == 0:
-        print(f"[{SCRIPT_VERSION}] *** WARNING: ZERO goal-reached episodes — robot may not be traversing. "
-              "Per-terrain numbers may be contaminated. ***")
+        print(
+            f"[{SCRIPT_VERSION}] *** WARNING: ZERO goal-reached episodes — robot may not be traversing. "
+            "Per-terrain numbers may be contaminated. ***"
+        )
     print()
 
     class_ids = sorted({int(c) for c in np.unique(arr_class)})
@@ -387,7 +399,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     emit("(2b) LANDING IMPACT: peak vertical contact force at airborne->contact transition")
     emit("=" * 64)
     emit(f"  normalized by bodyweight = {bodyweight_N:.1f} N (nominal mass {total_mass:.2f} kg)")
-    emit(f"  peak vertical force = max over contact-history dim of |Fz| summed across 4 feet at landing")
+    emit("  peak vertical force = max over contact-history dim of |Fz| summed across 4 feet at landing")
     emit("")
     emit(f"{'terrain':<16}{'n_landings':>12}{'mean_BW':>12}{'p50_BW':>10}{'p95_BW':>10}{'max_BW':>10}")
     impact_by_terrain = {}
@@ -401,8 +413,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         impact_bw = impact_N / bodyweight_N
         cname = _TERRAIN_CLASS_NAMES.get(cls, f"class_{cls}")
         impact_by_terrain[cname] = float(np.median(impact_bw))
-        emit(f"{cname:<16}{nl:>12}{impact_bw.mean():>12.3f}{np.percentile(impact_bw, 50):>10.3f}"
-             f"{np.percentile(impact_bw, 95):>10.3f}{impact_bw.max():>10.3f}")
+        emit(
+            f"{cname:<16}{nl:>12}{impact_bw.mean():>12.3f}{np.percentile(impact_bw, 50):>10.3f}"
+            f"{np.percentile(impact_bw, 95):>10.3f}{impact_bw.max():>10.3f}"
+        )
     emit("")
 
     # ── (3) RELATIVE CoT per terrain vs flat ──
@@ -457,11 +471,11 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     #       "front lands, takes off again before rear lands" = front/rear coordination failure.
     # ════════════════════════════════════════════════════════════════════════════
     front_ids = [0, 1]  # FL, FR (foot order [FL,FR,RL,RR] verified above)
-    rear_ids = [2, 3]   # RL, RR
+    rear_ids = [2, 3]  # RL, RR
     front_contact = arr_contact[:, :, front_ids].any(axis=-1)  # (T,N) any front foot down
-    rear_contact = arr_contact[:, :, rear_ids].any(axis=-1)    # (T,N) any rear foot down
-    n_contact = arr_contact.sum(axis=-1)                       # (T,N) number of feet down
-    full_settle = n_contact >= 3                               # 3-4 feet = settled stance
+    rear_contact = arr_contact[:, :, rear_ids].any(axis=-1)  # (T,N) any rear foot down
+    n_contact = arr_contact.sum(axis=-1)  # (T,N) number of feet down
+    full_settle = n_contact >= 3  # 3-4 feet = settled stance
 
     emit("=" * 64)
     emit("(4) SPLIT-JUMP / FRONT-REAR COORDINATION (per terrain)")
@@ -470,8 +484,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     emit("  split-jump (re-takeoff) = airborne -> PARTIAL contact (front-only/rear-only) -> airborne")
     emit("    with NO full(>=3-foot) settle in between. Signals front/rear NOT used as one coordinated leap.")
     emit("")
-    emit(f"{'terrain':<14}{'flights':>9}{'flt_steps':>11}{'mean_len':>10}{'retakeoff':>11}"
-         f"{'retk/flight':>13}{'frontfirst':>12}{'rearfirst':>11}")
+    emit(
+        f"{'terrain':<14}{'flights':>9}{'flt_steps':>11}{'mean_len':>10}{'retakeoff':>11}"
+        f"{'retk/flight':>13}{'frontfirst':>12}{'rearfirst':>11}"
+    )
     split_by_terrain = {}
     for cls in class_ids:
         cname = _TERRAIN_CLASS_NAMES.get(cls, f"class_{cls}")
@@ -533,8 +549,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         mean_len = float(np.mean(flight_lengths)) if flight_lengths else float("nan")
         retk_per_flight = (n_retakeoff / n_flights) if n_flights > 0 else float("nan")
         split_by_terrain[cname] = retk_per_flight
-        emit(f"{cname:<14}{n_flights:>9}{flight_steps:>11}{mean_len:>10.2f}{n_retakeoff:>11}"
-             f"{retk_per_flight:>13.3f}{n_front_first:>12}{n_rear_first:>11}")
+        emit(
+            f"{cname:<14}{n_flights:>9}{flight_steps:>11}{mean_len:>10.2f}{n_retakeoff:>11}"
+            f"{retk_per_flight:>13.3f}{n_front_first:>12}{n_rear_first:>11}"
+        )
     emit("")
     emit("  retk/flight high => obstacle crossings frequently split into multiple hops (coordination gap).")
     emit("  frontfirst >> rearfirst => front pair consistently lands before rear (expected for forward")
@@ -543,13 +561,15 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     # ── GO / NO-GO VERDICT ──
     # Thresholds defined BEFORE measurement (see report). X = saturation, Y = landing impact.
-    X_SAT = 0.20   # >20% of landing steps saturated
+    X_SAT = 0.20  # >20% of landing steps saturated
     Y_IMPACT = 4.0  # >4 bodyweights peak landing force
     emit("=" * 64)
     emit("GO / NO-GO VERDICT")
     emit("=" * 64)
-    emit(f"  Pre-registered thresholds: X_sat={X_SAT:.2f} (landing saturation frac), "
-         f"Y_impact={Y_IMPACT:.1f} bodyweights (peak landing force).")
+    emit(
+        f"  Pre-registered thresholds: X_sat={X_SAT:.2f} (landing saturation frac), "
+        f"Y_impact={Y_IMPACT:.1f} bodyweights (peak landing force)."
+    )
     emit("  Rule: if stair/step has (landing_satfrac > X) OR (median landing impact > Y),")
     emit("        AND is notably higher than gap (legitimate-jump reference) => B+C penalty JUSTIFIED.")
     emit("        Otherwise => HOLD (do not add penalty on this evidence).")
@@ -560,8 +580,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     for tname in ("stair", "step"):
         s = sat_by_terrain.get(tname, float("nan"))
         imp = impact_by_terrain.get(tname, float("nan"))
-        emit(f"  [{tname}] landing_satfrac={s:.4f}  median_impact={imp:.3f} BW   "
-             f"(gap ref: sat={gap_sat:.4f} imp={gap_imp:.3f} BW)")
+        emit(
+            f"  [{tname}] landing_satfrac={s:.4f}  median_impact={imp:.3f} BW   "
+            f"(gap ref: sat={gap_sat:.4f} imp={gap_imp:.3f} BW)"
+        )
     emit("")
     emit("  NOTE (gap is NOT a clean control): user observed gap crossings are SPLIT jumps")
     emit("  (front lands, re-takeoff before rear lands). Compare split-jump rate across terrains:")
@@ -620,7 +642,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         f"- run time: {ts}",
         f"- num_steps={T}  num_envs={N}  seed={args_cli.seed}  dt={dt}",
         f"- force_thresh={args_cli.force_thresh} N  sat_frac={args_cli.sat_frac}",
-        f"- ACTUATOR (read at runtime from _robot.actuators['base_legs']):",
+        "- ACTUATOR (read at runtime from _robot.actuators['base_legs']):",
         f"  - effort_limit (per actuated joint) = {eff_lim_np.round(3).tolist()}",
         f"  - velocity_limit = {vel_lim_np.round(3).tolist()}",
         f"  - saturation_effort = {sat_eff}",

@@ -1,13 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
 import os
-import gymnasium as gym
-import mani_skill.envs  # needed to register the ManiSkill environment entry points
 
 import flax.linen as nn
+import gymnasium as gym
 import jax.numpy as jnp
-
-# import the skrl components to build the RL system
-from skrl import config, logger
 from skrl.agents.jax.ppo import PPO, PPO_CFG
 from skrl.envs.wrappers.jax import wrap_env
 from skrl.memories.jax import RandomMemory
@@ -17,6 +18,8 @@ from skrl.resources.schedulers.jax import KLAdaptiveLR
 from skrl.trainers.jax import SequentialTrainer
 from skrl.utils import set_seed
 
+# import the skrl components to build the RL system
+from skrl import logger
 
 # parse arguments
 parser = argparse.ArgumentParser()

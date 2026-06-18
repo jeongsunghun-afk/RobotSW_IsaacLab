@@ -14,11 +14,11 @@ Wire format overview
 The outer msgpack dict uses single-char keys to minimize overhead::
 
     {
-        "v": int,          # PROTOCOL_VERSION (uint8)
-        "t": float64,      # Unix timestamp (seconds since epoch)
-        "s": uint32,       # Global step counter
-        "n": uint8,        # Number of environments in this frame
-        "e": [bytes, ...], # Per-env binary blobs (one per env, see below)
+        "v": int,  # PROTOCOL_VERSION (uint8)
+        "t": float64,  # Unix timestamp (seconds since epoch)
+        "s": uint32,  # Global step counter
+        "n": uint8,  # Number of environments in this frame
+        "e": [bytes, ...],  # Per-env binary blobs (one per env, see below)
     }
 
 Each per-env binary blob is packed with :func:`struct.pack` in big-endian order::
@@ -72,15 +72,16 @@ PROTOCOL_VERSION: int = 1
 """Bump on any breaking schema change so the viewer can reject stale messages."""
 
 # Internal struct formats (big-endian).
-_HDR_FMT = "!BBBB"           # env_id, terrain_id, contact_done, K
+_HDR_FMT = "!BBBB"  # env_id, terrain_id, contact_done, K
 _HDR_SIZE: int = struct.calcsize(_HDR_FMT)  # 4
-_CMD_FMT = "!3f"             # 3 × float32 commands
+_CMD_FMT = "!3f"  # 3 × float32 commands
 _FLOAT16_MAX: float = 65504.0
 
 
 # --------------------------------------------------------------------------- #
 # Private helpers                                                               #
 # --------------------------------------------------------------------------- #
+
 
 def _pack_env(
     env_id: int,
@@ -123,7 +124,7 @@ def _unpack_env(blob: bytes | bytearray | memoryview) -> dict[str, Any]:
         "terrain_id": int(terrain_id),
         "contact": contact,
         "done": done,
-        "rewards": rewards,   # list[float], decoded from float16
+        "rewards": rewards,  # list[float], decoded from float16
         "commands": commands,
     }
 
@@ -131,6 +132,7 @@ def _unpack_env(blob: bytes | bytearray | memoryview) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Public API: encode / decode                                                  #
 # --------------------------------------------------------------------------- #
+
 
 def encode_step(
     step_idx: int,
@@ -183,20 +185,20 @@ def decode_step(payload: bytes) -> dict[str, Any]:
     Returns a dict with the following structure::
 
         {
-            "v":        int,        # protocol version
-            "t":        float,      # Unix timestamp
-            "step_idx": int,        # global step counter
+            "v": int,  # protocol version
+            "t": float,  # Unix timestamp
+            "step_idx": int,  # global step counter
             "envs": [
                 {
-                    "env_id":    int,
+                    "env_id": int,
                     "terrain_id": int,
-                    "contact":   [bool, bool, bool, bool],
-                    "done":      bool,
-                    "rewards":   [float, ...],  # K values (decoded from float16)
-                    "commands":  [float, float, float],
+                    "contact": [bool, bool, bool, bool],
+                    "done": bool,
+                    "rewards": [float, ...],  # K values (decoded from float16)
+                    "commands": [float, float, float],
                 },
-                ...
-            ]
+                ...,
+            ],
         }
 
     Raises:
@@ -220,6 +222,7 @@ def decode_step(payload: bytes) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Socket factories                                                              #
 # --------------------------------------------------------------------------- #
+
 
 def make_pub_socket(context: Any) -> Any:
     """Create a ZMQ PUB socket bound to :data:`ZMQ_ENDPOINT`.
@@ -271,6 +274,7 @@ def make_sub_socket(context: Any) -> Any:
 # Self-test (importable + __main__)                                             #
 # --------------------------------------------------------------------------- #
 
+
 def _roundtrip_test(n_envs: int = 5, n_terms: int = 16, label: str = "") -> None:
     """Verify encode→decode round-trip, value fidelity, and the 400 B budget.
 
@@ -289,7 +293,7 @@ def _roundtrip_test(n_envs: int = 5, n_terms: int = 16, label: str = "") -> None
             "rewards": [random.gauss(0.0, 0.5) for _ in range(n_terms)],
             "contact": [random.random() > 0.5 for _ in range(4)],
             "commands": [1.0, 0.0, 0.0],
-            "done": (i == 0),   # env 0 always done, rest not
+            "done": (i == 0),  # env 0 always done, rest not
             "terrain_id": i % 5,
         }
         for i in range(n_envs)
@@ -307,9 +311,7 @@ def _roundtrip_test(n_envs: int = 5, n_terms: int = 16, label: str = "") -> None
 
     decoded = decode_step(payload)
     assert decoded["step_idx"] == 42, f"{prefix}step_idx round-trip mismatch"
-    assert len(decoded["envs"]) == n_envs, (
-        f"{prefix}envs count: got {len(decoded['envs'])}, want {n_envs}"
-    )
+    assert len(decoded["envs"]) == n_envs, f"{prefix}envs count: got {len(decoded['envs'])}, want {n_envs}"
 
     for i, env in enumerate(decoded["envs"]):
         orig = env_payloads[i]
@@ -324,8 +326,7 @@ def _roundtrip_test(n_envs: int = 5, n_terms: int = 16, label: str = "") -> None
             if abs(want) > 1e-6:
                 rel_err = abs_err / abs(want)
                 assert rel_err < 0.002, (
-                    f"{prefix}reward[{i}][{j}]: {want:.6f} → {got:.6f} "
-                    f"(rel_err={rel_err:.4f} > 0.002)"
+                    f"{prefix}reward[{i}][{j}]: {want:.6f} → {got:.6f} (rel_err={rel_err:.4f} > 0.002)"
                 )
 
     print(

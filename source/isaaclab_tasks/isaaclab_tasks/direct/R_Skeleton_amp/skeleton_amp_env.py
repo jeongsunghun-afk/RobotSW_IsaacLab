@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -62,9 +67,7 @@ class SkeletonAmpEnv(DirectRLEnv):
 
         # 로봇에서 body/joint 인덱스 구하기
         self.ref_body_index = self._robot.data.body_names.index(self.cfg.reference_body)
-        self.key_body_indexes = [
-            self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES
-        ]
+        self.key_body_indexes = [self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES]
         # X/Y linear velocity and yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
 
@@ -82,20 +85,18 @@ class SkeletonAmpEnv(DirectRLEnv):
         # stmr.py가 [FL, HL, FR, HR] 순서로 저장하지만 motion_loader 로딩 시 [0,2,1,3] 재정렬로
         # [FL(0), FR(1), HL(2), HR(3), base(4)] 순서로 맞춰져 있음.
         # KEY_BODY_NAMES = [FL, FR, HL, HR] 와 완전히 대응됨.
-        self.motion_ref_body_index = 4          # base = index 4
+        self.motion_ref_body_index = 4  # base = index 4
         self.motion_key_body_indexes = [0, 1, 2, 3]  # FL, FR, HL, HR
 
         # AMP 관측 버퍼
         self.amp_observation_size = self.cfg.num_amp_observations * self.cfg.amp_observation_space
-        self.amp_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.amp_observation_size,)
-        )
+        self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
         self.amp_observation_buffer = torch.zeros(
             (self.num_envs, self.cfg.num_amp_observations, self.cfg.amp_observation_space),
             dtype=torch.float32,
             device=self.device,
         )
-        
+
         # History Buffer 추가
         if self.cfg.history_observation:
             self.obs_history_buf = torch.zeros(
@@ -130,7 +131,7 @@ class SkeletonAmpEnv(DirectRLEnv):
         # 씬에 등록
         self.scene.articulations["robot"] = self._robot
         self.scene.sensors["contact_sensor"] = self.contact_sensor
-        
+
         # 에피소드 로깅용 딕셔너리
         self._episode_sums = {
             "tracking_lin_vel": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
@@ -155,14 +156,14 @@ class SkeletonAmpEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         # AMP 관측 벡터 계산
         # compute_obs는 이제 local 좌표를 받으므로, 사전에 변환하여 전달합니다.
-        
+
         root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]
         root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]
         root_lin_vel_w = self._robot.data.body_lin_vel_w[:, self.ref_body_index]
 
         root_lin_vel_b = self._robot.data.root_lin_vel_b
         root_ang_vel_b = self._robot.data.root_ang_vel_b
-        
+
         # 월드 기준 상대 거리/속도
         rel_pos = self._robot.data.body_pos_w[:, self.key_body_indexes] - root_pos_w.unsqueeze(1)
         rel_vel = self._robot.data.body_lin_vel_w[:, self.key_body_indexes] - root_lin_vel_w.unsqueeze(1)
@@ -170,17 +171,15 @@ class SkeletonAmpEnv(DirectRLEnv):
         # 루트 쿼터니언 형상 맞추기 (N, num_keys, 4)
         num_keys = rel_pos.shape[1]
         root_quat_expanded = root_quat_w.unsqueeze(1).expand(-1, num_keys, -1)
-        
+
         # 로컬 프레임으로 완전하게 회전 변환 (quat_rotate_inverse)
-        local_key_body_pos = quat_apply_inverse(
-            root_quat_expanded.reshape(-1, 4), 
-            rel_pos.reshape(-1, 3)
-        ).view(*rel_pos.shape)
-        
-        local_key_body_vel = quat_apply_inverse(
-            root_quat_expanded.reshape(-1, 4), 
-            rel_vel.reshape(-1, 3)
-        ).view(*rel_vel.shape)
+        local_key_body_pos = quat_apply_inverse(root_quat_expanded.reshape(-1, 4), rel_pos.reshape(-1, 3)).view(
+            *rel_pos.shape
+        )
+
+        local_key_body_vel = quat_apply_inverse(root_quat_expanded.reshape(-1, 4), rel_vel.reshape(-1, 3)).view(
+            *rel_vel.shape
+        )
 
         obs = compute_obs(
             self._robot.data.joint_pos,
@@ -196,25 +195,23 @@ class SkeletonAmpEnv(DirectRLEnv):
             self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]
         self.amp_observation_buffer[:, 0] = obs.clone()
 
-        self.extras = {
-            "amp_obs": self.amp_observation_buffer.view(-1, self.amp_observation_size)
-        }
-        
+        self.extras = {"amp_obs": self.amp_observation_buffer.view(-1, self.amp_observation_size)}
+
         # 정책 네트워크용 관측치 (AMP obs + commands -> 삭제: 이제 projected gravity, commands, pos, vel, actions 위주)
         # Actor/Critic RMA 구조 관측
         policy_obs = torch.cat(
             [
-                self._robot.data.projected_gravity_b, # 3
-                self._commands, # 3
-                self._robot.data.joint_pos - self._robot.data.default_joint_pos, # 34
-                self._robot.data.joint_vel, # 34
-                self.actions, # 34
+                self._robot.data.projected_gravity_b,  # 3
+                self._commands,  # 3
+                self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # 34
+                self._robot.data.joint_vel,  # 34
+                self.actions,  # 34
             ],
             dim=-1,
         )
-        
+
         observations = {"policy": policy_obs}
-        
+
         # History
         if self.cfg.history_observation:
             self.obs_history_buf = torch.where(
@@ -223,23 +220,27 @@ class SkeletonAmpEnv(DirectRLEnv):
                 torch.cat([self.obs_history_buf[:, 1:], policy_obs.unsqueeze(1)], dim=1),
             )
             observations["history"] = self.obs_history_buf
-            
+
         # Privileged
         if self.cfg.priv_latent:
             priv_obs = torch.cat(
                 [
-                    self._robot.data.root_lin_vel_b, # 3
-                    self._robot.data.root_ang_vel_b, # 3
-                    torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device).reshape(self.num_envs, -1),
-                    torch.tensor(self._robot.root_physx_view.get_material_properties(), device=self.device).reshape(self.num_envs, -1),
+                    self._robot.data.root_lin_vel_b,  # 3
+                    self._robot.data.root_ang_vel_b,  # 3
+                    torch.tensor(self._robot.root_physx_view.get_masses(), device=self.device).reshape(
+                        self.num_envs, -1
+                    ),
+                    torch.tensor(self._robot.root_physx_view.get_material_properties(), device=self.device).reshape(
+                        self.num_envs, -1
+                    ),
                 ],
                 dim=-1,
             )
             observations["priv"] = priv_obs
 
-        # 디스크리미네이터에서 사용하기 위해 extras['amp_obs']에 AMP 관측을 유지합니다. 
+        # 디스크리미네이터에서 사용하기 위해 extras['amp_obs']에 AMP 관측을 유지합니다.
         # rsl_rl Runner가 step 시 extras['amp_obs'] 부분을 떼어냅니다.
-        
+
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -250,7 +251,7 @@ class SkeletonAmpEnv(DirectRLEnv):
         # Linear Velocity (x, y) Tracking
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - base_lin_vel[:, :2]), dim=1)
         tracking_lin_vel = torch.exp(-lin_vel_error / self.cfg.tracking_sigma)
-        
+
         # Yaw Rate (z) Tracking
         yaw_rate_error = torch.square(self._commands[:, 2] - base_ang_vel[:, 2])
         tracking_ang_vel = torch.exp(-yaw_rate_error / self.cfg.tracking_sigma)
@@ -285,14 +286,14 @@ class SkeletonAmpEnv(DirectRLEnv):
                 contact_forces = self.contact_sensor.data.net_forces_w
                 if contact_forces is not None and contact_forces.numel() > 0:
                     body_names = self._robot.data.body_names
-                    
+
                     # 지면과 닿으면 안 되는 부위들
                     # bad_contact_keywords = ["base", "neck", "arm", "shoulder", "thigh", "waist", "knee"]
                     bad_contact_keywords = ["base"]
                     bad_contacts = torch.zeros_like(died)
                     for keyword in bad_contact_keywords:
                         bad_contacts |= self._get_body_contact(contact_forces, body_names, keyword)
-                        
+
                     died = died | bad_contacts
         else:
             died = torch.zeros_like(time_out)
@@ -331,7 +332,7 @@ class SkeletonAmpEnv(DirectRLEnv):
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             # 에피소드가 끝난 환경은 버퍼 초기화
             self._episode_sums[key][env_ids] = 0.0
-            
+
         if "log" not in self.extras:
             self.extras["log"] = dict()
         self.extras["log"].update(extras)
@@ -340,15 +341,13 @@ class SkeletonAmpEnv(DirectRLEnv):
     # 리셋 전략
     # ------------------------------------------------------------------
 
-    def _reset_strategy_default(
-        self, env_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _reset_strategy_default(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         root_state = self._robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] += self.scene.env_origins[env_ids]
         joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
         joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
         self.amp_observation_buffer[env_ids] = 0.0
-        
+
         return root_state, joint_pos, joint_vel
 
     def _reset_strategy_random(
@@ -368,13 +367,11 @@ class SkeletonAmpEnv(DirectRLEnv):
 
         # root 상태 설정 (base body 사용)
         root_state = self._robot.data.default_root_state[env_ids].clone()
-        root_state[:, 0:3] = (
-            body_positions[:, self.motion_ref_body_index] + self.scene.env_origins[env_ids]
-        )
+        root_state[:, 0:3] = body_positions[:, self.motion_ref_body_index] + self.scene.env_origins[env_ids]
         root_state[:, 2] += 0.05  # 지면 충돌 방지를 위해 약간 들어올림
         root_rot = body_rotations[:, self.motion_ref_body_index]
         root_state[:, 3:7] = root_rot
-        
+
         # motion_loader의 속도 데이터는 Base 로컬 좌표계 기준이므로, 월드 좌표계 속도로 변환하여 할당합니다.
         root_state[:, 7:10] = quat_apply(root_rot, body_linear_velocities[:, self.motion_ref_body_index])
         root_state[:, 10:13] = quat_apply(root_rot, body_angular_velocities[:, self.motion_ref_body_index])
@@ -382,14 +379,12 @@ class SkeletonAmpEnv(DirectRLEnv):
         n_dofs = len(self.motion_dof_indexes)
         joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
         joint_vel = self._robot.data.default_joint_vel[env_ids].clone()
-        joint_pos[:, : n_dofs] = dof_positions[:, self.motion_dof_indexes[: n_dofs]]
-        joint_vel[:, : n_dofs] = dof_velocities[:, self.motion_dof_indexes[: n_dofs]]
+        joint_pos[:, :n_dofs] = dof_positions[:, self.motion_dof_indexes[:n_dofs]]
+        joint_vel[:, :n_dofs] = dof_velocities[:, self.motion_dof_indexes[:n_dofs]]
 
         # AMP 히스토리 초기화
         amp_observations = self.collect_reference_motions(num_samples, times)
-        self.amp_observation_buffer[env_ids] = amp_observations.view(
-            num_samples, self.cfg.num_amp_observations, -1
-        )
+        self.amp_observation_buffer[env_ids] = amp_observations.view(num_samples, self.cfg.num_amp_observations, -1)
 
         return root_state, joint_pos, joint_vel
 
@@ -397,16 +392,13 @@ class SkeletonAmpEnv(DirectRLEnv):
     # skrl AMP 인터페이스
     # ------------------------------------------------------------------
 
-    def collect_reference_motions(
-        self, num_samples: int, current_times: np.ndarray | None = None
-    ) -> torch.Tensor:
+    def collect_reference_motions(self, num_samples: int, current_times: np.ndarray | None = None) -> torch.Tensor:
         """레퍼런스 모션 AMP 관측값 수집 (skrl이 호출)."""
         if current_times is None:
             current_times = self._motion_loader.sample_times(num_samples)
 
         times = (
-            np.expand_dims(current_times, axis=-1)
-            - self.step_dt * np.arange(0, self.cfg.num_amp_observations)
+            np.expand_dims(current_times, axis=-1) - self.step_dt * np.arange(0, self.cfg.num_amp_observations)
         ).flatten()
 
         (
@@ -449,17 +441,19 @@ class SkeletonAmpEnv(DirectRLEnv):
                     if key in self.cfg.command_cfg:
                         lower, upper = self.cfg.command_cfg[key]
                         if i == 0:  # lin_vel_x에 curriculum 적용
-                            if not hasattr(self, 'curriculum_lin_vel_x'):
+                            if not hasattr(self, "curriculum_lin_vel_x"):
                                 self.curriculum_lin_vel_x = torch.full((self.num_envs,), lower, device=self.device)
                             curr = self.curriculum_lin_vel_x[env_ids]
                             use_curriculum = curr < upper
-                            low = torch.where(use_curriculum, curr - self.cfg.curriculum_step, torch.full_like(curr, lower))
+                            low = torch.where(
+                                use_curriculum, curr - self.cfg.curriculum_step, torch.full_like(curr, lower)
+                            )
                             high = torch.where(use_curriculum, curr, torch.full_like(curr, upper))
                             self._commands[env_ids, i] = torch.lerp(
                                 low, high, torch.rand(len(env_ids), device=self.device)
                             )
                         else:  # ang_vel에 curriculum 적용
-                            if not hasattr(self, 'curriculum_ang_vel'):
+                            if not hasattr(self, "curriculum_ang_vel"):
                                 self.curriculum_ang_vel = torch.full((self.num_envs,), lower, device=self.device)
                             curr = self.curriculum_ang_vel[env_ids]
                             use_curriculum = curr < upper
@@ -475,13 +469,22 @@ class SkeletonAmpEnv(DirectRLEnv):
                             )
         else:
             self._commands[env_ids, 0] = torch_rand_float(
-                self.cfg.command_cfg["lin_vel_x_range"][0], self.cfg.command_cfg["lin_vel_x_range"][1], (len(env_ids),), self.device
+                self.cfg.command_cfg["lin_vel_x_range"][0],
+                self.cfg.command_cfg["lin_vel_x_range"][1],
+                (len(env_ids),),
+                self.device,
             )
             self._commands[env_ids, 1] = torch_rand_float(
-                self.cfg.command_cfg["lin_vel_y_range"][0], self.cfg.command_cfg["lin_vel_y_range"][1], (len(env_ids),), self.device
+                self.cfg.command_cfg["lin_vel_y_range"][0],
+                self.cfg.command_cfg["lin_vel_y_range"][1],
+                (len(env_ids),),
+                self.device,
             )
             self._commands[env_ids, 2] = torch_rand_float(
-                self.cfg.command_cfg["ang_vel_range"][0], self.cfg.command_cfg["ang_vel_range"][1], (len(env_ids),), self.device
+                self.cfg.command_cfg["ang_vel_range"][0],
+                self.cfg.command_cfg["ang_vel_range"][1],
+                (len(env_ids),),
+                self.device,
             )
 
     # ------------------------------------------------------------------
@@ -542,19 +545,15 @@ def compute_obs(
     """
     obs = torch.cat(
         (
-            dof_positions,               # 34
-            dof_velocities,              # 34
-            root_positions[:, 2:3],      # 1 (root 높이)
-            root_linear_velocities,      # 3
-            root_angular_velocities,     # 3
+            dof_positions,  # 34
+            dof_velocities,  # 34
+            root_positions[:, 2:3],  # 1 (root 높이)
+            root_linear_velocities,  # 3
+            root_angular_velocities,  # 3
             # key body 상대 위치 (root 기준)
-            local_key_body_positions.view(
-                local_key_body_positions.shape[0], -1
-            ),  # 4×3 = 12
+            local_key_body_positions.view(local_key_body_positions.shape[0], -1),  # 4×3 = 12
             # key body 상대 선속도 (root 기준)
-            local_key_body_linear_velocities.view(
-                local_key_body_linear_velocities.shape[0], -1
-            ),  # 4×3 = 12
+            local_key_body_linear_velocities.view(local_key_body_linear_velocities.shape[0], -1),  # 4×3 = 12
         ),
         dim=-1,
     )

@@ -107,3 +107,39 @@ class Go2ImitationPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         disc_logit_reg_type="weight",  # "logit" | "weight" (MimicKit 방식) — ablation: logit→weight
         disc_norm_clip=10.0,  # None | 10.0 (MimicKit 방식) — ablation: None→10.0
     )
+
+
+@configclass
+class Go2ImitationWASABIPPORunnerCfg(Go2ImitationPPORunnerCfg):
+    """Go2 Imitation 환경용 PPO 러너 설정 — WASABI(WGAN-AMP) 변형.
+
+    Base(Go2ImitationPPORunnerCfg)에서 AMP discriminator loss/reward type을
+    BCE → WGAN(Wasserstein critic)으로 교체한다.
+
+    변경 사항 (§3.6, wasabi_spec.md):
+      - disc_loss_type: "bce" → "wgan"   (arXiv:2206.11693 Eq 2)
+      - disc_reward_type: "bce" → "wgan" (Eq 4: (D-μ̂)/σ̂, signed zero-mean)
+      - reward_coef: 2.0 → 0.5           (WGAN unit-var reward → 작게)
+      - disc_logit_reg: 0.01 → 0.0       (WGAN에서 logit reg 불필요)
+      - gradient_penalty_coef: 5.0       (both-sided GP; 기존 base와 동일)
+
+    ⚠ disc_loss_type과 disc_reward_type은 반드시 둘 다 "wgan"이어야 함.
+       불일치 시 ppo_amp.py가 RuntimeError를 발생시킴.
+    ⚠ WGAN reward는 signed(zero-mean) — parkour clip(min=0) 경로와 충돌.
+       비-parkour Go2-Imitation 경로에서 우선 검증할 것.
+    """
+
+    experiment_name: str = "go2_imitation_wasabi"
+
+    def __post_init__(self):
+        super().__post_init__()
+        # amp dict은 _custom_post_init에서 deepcopy되므로 in-place 수정이 base에 영향 없음.
+        self.amp["disc_loss_type"] = "wgan"
+        self.amp["disc_reward_type"] = "wgan"
+        self.amp["gradient_penalty_coef"] = 5.0  # both-sided GP; 기존도 5.0 (문서화)
+        self.amp["reward_coef"] = 0.5  # WGAN unit-var reward → LS-GAN(2.0)보다 작게
+        self.amp["disc_logit_reg"] = 0.0  # WGAN에서 logit reg 불필요
+        # WGAN critic anchor (AdamW decoupled weight decay) — CASSI ref값.
+        # iter~32k 붕괴 원인(critic 절대출력 unbounded drift) 차단. from-scratch 재시작 필수
+        # (resume은 checkpoint disc optimizer state(wd=0)를 복원해 fix 무력화).
+        self.amp["disc_weight_decay"] = 5e-4

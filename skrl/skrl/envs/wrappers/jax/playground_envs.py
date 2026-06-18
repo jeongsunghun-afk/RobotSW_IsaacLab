@@ -1,12 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 from typing import Any
 
 import gymnasium
-import mujoco
-
 import jax
 import jax.numpy as jnp
+import mujoco
 import numpy as np
 
 from skrl import config, logger
@@ -122,7 +126,7 @@ class PlaygroundWrapper(Wrapper):
         """Render the environment."""
         if self.num_envs > 1:
             logger.warning("Rendering is not supported for parallel environments. Rendering will be skipped")
-            return
+            return None
 
         # render frame
         scene_option = mujoco.MjvOption()

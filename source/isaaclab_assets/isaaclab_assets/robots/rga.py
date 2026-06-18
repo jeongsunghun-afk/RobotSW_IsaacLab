@@ -434,73 +434,63 @@ R_SKELETON_HIND_LEG_CFG = ArticulationCfg(
 
 
 HIND_LEG_CFG = ArticulationCfg(
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Hind_Leg/hind_leg.usd",
-            activate_contact_sensors=True,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                max_linear_velocity=1000.0,
-                max_angular_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-            ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=4
-            ),
+    spawn=sim_utils.UsdFileCfg(
+        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Hind_Leg/hind_leg.usd",
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=5.0,
         ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.6),
-            # joint_pos={
-            # # Left Leg (HL)
-            # "HL_Hip_Joint": 0.,
-            # "HL_Thigh_Joint": -0.2618,
-            # "HL_Calf_Joint": -0.8727,
-            # "HL_Foot_Joint": -0.8727,
-            # # Right Leg (HR)
-            # "HR_Hip_Joint": 0.,
-            # "HR_Thigh_Joint": 0.2618,
-            # "HR_Calf_Joint": 0.8727,
-            # "HR_Foot_Joint": 0.8727,
-            # }   
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=4
         ),
-        actuator_value_resolution_debug_print=True,  # type: ignore
-        soft_joint_pos_limit_factor=0.9,
-        actuators={
-            "legs": ImplicitActuatorCfg(
-                joint_names_expr=[
-                    ".*_hip_joint",
-                    ".*_thigh_joint",
-                    ".*_calf_joint",
-                    ".*_foot_joint"
-                ],
-                velocity_limit_sim={
-                    ".*_hip_joint":29.6,
-                    ".*_thigh_joint":29.6,
-                    ".*_calf_joint":19.7,
-                    ".*_foot_joint":14.8
-                },
-                effort_limit_sim={
-                    ".*_hip_joint":28,
-                    ".*_thigh_joint":28,
-                    ".*_calf_joint":42,
-                    ".*_foot_joint":56
-                },
-                # PD gains: inertia-scaled (ω_n=20 rad/s, ζ=0.9) from measured per-joint
-                # effective inertia I_eff (hip 0.163 / thigh 0.133 / calf 0.030 / foot 0.0019 kg·m²).
-                # Previous uniform Kp=25/Kd=0.5 (= Go2 quadruped default) left hip/thigh at ζ≈0.12
-                # (under-damped) and foot at ω_n≈113 (over-stiff). foot=20 sized for contact authority
-                # (env=HindLegHistoryEnvCfg, 200Hz physics). See _workspace/hind_leg_kp_kd_tuning_guide.md
-                stiffness={
-                    ".*_hip_joint": 65.0,
-                    ".*_thigh_joint": 53.0,
-                    ".*_calf_joint": 12.0,
-                    ".*_foot_joint": 20.0,
-                },
-                damping={
-                    ".*_hip_joint": 6.0,
-                    ".*_thigh_joint": 4.8,
-                    ".*_calf_joint": 1.1,
-                    ".*_foot_joint": 1.0,
-                },
-            ),
-        },
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.6),
+        # joint_pos={
+        # # Left Leg (HL)
+        # "HL_Hip_Joint": 0.,
+        # "HL_Thigh_Joint": -0.2618,
+        # "HL_Calf_Joint": -0.8727,
+        # "HL_Foot_Joint": -0.8727,
+        # # Right Leg (HR)
+        # "HR_Hip_Joint": 0.,
+        # "HR_Thigh_Joint": 0.2618,
+        # "HR_Calf_Joint": 0.8727,
+        # "HR_Foot_Joint": 0.8727,
+        # }
+    ),
+    actuator_value_resolution_debug_print=True,  # type: ignore
+    soft_joint_pos_limit_factor=0.9,
+    actuators={
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint", ".*_foot_joint"],
+            velocity_limit_sim={
+                ".*_hip_joint": 29.6,
+                ".*_thigh_joint": 29.6,
+                ".*_calf_joint": 19.7,
+                ".*_foot_joint": 14.8,
+            },
+            effort_limit_sim={".*_hip_joint": 28, ".*_thigh_joint": 28, ".*_calf_joint": 42, ".*_foot_joint": 56},
+            # PD gains: inertia-scaled (ω_n=20 rad/s, ζ=0.9) from measured per-joint
+            # effective inertia I_eff (hip 0.163 / thigh 0.133 / calf 0.030 / foot 0.0019 kg·m²).
+            # Previous uniform Kp=25/Kd=0.5 (= Go2 quadruped default) left hip/thigh at ζ≈0.12
+            # (under-damped) and foot at ω_n≈113 (over-stiff). foot=20 sized for contact authority
+            # (env=HindLegHistoryEnvCfg, 200Hz physics). See _workspace/hind_leg_kp_kd_tuning_guide.md
+            stiffness={
+                ".*_hip_joint": 65.0,
+                ".*_thigh_joint": 53.0,
+                ".*_calf_joint": 12.0,
+                ".*_foot_joint": 20.0,
+            },
+            damping={
+                ".*_hip_joint": 6.0,
+                ".*_thigh_joint": 4.8,
+                ".*_calf_joint": 1.1,
+                ".*_foot_joint": 1.0,
+            },
+        ),
+    },
 )

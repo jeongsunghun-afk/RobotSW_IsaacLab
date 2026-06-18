@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -49,9 +49,9 @@ class Go2AmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         class_name="PPOAMP",
     )
     amp = dict(
-        task_reward_lerp=1.0,                   # Stage 2 최종값 (annealing 완료 후)
-        task_reward_lerp_start=1.0,            # Stage 1 초기값 (pure task 위주)
-        task_reward_lerp_anneal_iters=10000,    # Stage 1→2 전환 iteration 수
+        task_reward_lerp=1.0,  # Stage 2 최종값 (annealing 완료 후)
+        task_reward_lerp_start=1.0,  # Stage 1 초기값 (pure task 위주)
+        task_reward_lerp_anneal_iters=10000,  # Stage 1→2 전환 iteration 수
         discriminator_learning_rate=1e-4,
         gradient_penalty_coef=5.0,
         reward_coef=2.0,
@@ -59,8 +59,8 @@ class Go2AmpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         enable_replay_buffer=True,
         replay_buffer_size=100000,
         disc_num_epochs=2,
-        enable_lerp_schedule=True,              # False로 바꾸면 lerp annealing 비활성화
-        disc_logit_reg=0.01,                    # discriminator 출력 L2 정규화 (MimicKit 방식)
+        enable_lerp_schedule=True,  # False로 바꾸면 lerp annealing 비활성화
+        disc_logit_reg=0.01,  # discriminator 출력 L2 정규화 (MimicKit 방식)
     )
 
 

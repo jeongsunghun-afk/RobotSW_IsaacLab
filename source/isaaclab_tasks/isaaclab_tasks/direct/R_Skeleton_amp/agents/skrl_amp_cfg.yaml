@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # R_Skeleton AMP (Adversarial Motion Prior) skrl 학습 설정
 # humanoid_amp/agents/skrl_dance_amp_cfg.yaml 기반으로 R_Skeleton에 맞게 수정
 

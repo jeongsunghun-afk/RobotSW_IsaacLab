@@ -62,7 +62,14 @@ class PPOAMPBase(PPO):
         )
         self.discriminator.amp_reward_coef = self.amp_reward_coef
 
-        self.disc_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.amp_discriminator_lr)
+        # AdamW with decoupled weight decay — CASSI/WASABI-faithful critic anchor.
+        # disc_weight_decay=0.0 (default) → AdamW(wd=0) ≡ Adam → 기존 bce/ls_gan run 수치 불변.
+        # WGAN 사용 시 ~5e-4 (CASSI default) 또는 1e-3 (논문 Table S5)로 설정 권장.
+        self.disc_optimizer = optim.AdamW(
+            self.discriminator.parameters(),
+            lr=self.amp_discriminator_lr,
+            weight_decay=amp_cfg.get("disc_weight_decay", 0.0),
+        )
 
         self.enable_replay_buffer = amp_cfg.get("enable_replay_buffer", True)
         self.replay_buffer_size = amp_cfg.get("replay_buffer_size", 100000)
@@ -277,8 +284,14 @@ class PPOAMP(PPOParkour):
         )
         self.discriminator.amp_reward_coef = self.amp_reward_coef
 
-        # Discriminator Optimizer
-        self.disc_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.amp_discriminator_lr)
+        # Discriminator Optimizer — AdamW with decoupled weight decay for CASSI/WASABI-faithful critic anchor.
+        # disc_weight_decay=0.0 (default) → AdamW(wd=0) ≡ Adam → 기존 bce/ls_gan run 수치 불변.
+        # WGAN 사용 시 ~5e-4 (CASSI default) 또는 1e-3 (논문 Table S5)로 설정 권장.
+        self.disc_optimizer = optim.AdamW(
+            self.discriminator.parameters(),
+            lr=self.amp_discriminator_lr,
+            weight_decay=amp_cfg.get("disc_weight_decay", 0.0),
+        )
 
         # Replay Buffer (catastrophic forgetting 방지)
         self.enable_replay_buffer = amp_cfg.get("enable_replay_buffer", True)

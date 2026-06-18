@@ -101,7 +101,7 @@ _report_command_keys: list = []
 if args_cli.report:
     import yaml as _yaml
 
-    with open(args_cli.commands_file, "r", encoding="utf-8") as _f:
+    with open(args_cli.commands_file, encoding="utf-8") as _f:
         _full_commands = _yaml.safe_load(_f)
 
     if not _full_commands:
@@ -150,8 +150,9 @@ import random
 import time
 
 import gymnasium as gym
-import skrl
 import torch
+
+import skrl
 
 # skrl version check disabled: local skrl is 2.0.0, which changed act() signature
 # from act(obs, timestep, timesteps) → act(obs, states, *, timestep, timesteps)
@@ -184,6 +185,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # ── play_utils 동적 임포트 (report 모드용) ─────────────────────────────────────
 _PLAY_UTILS_DIR = pathlib.Path(__file__).resolve().parent.parent / "rsl_rl" / "play_utils"
 
+
 def _load_play_util(name: str, filename: str):
     spec = _ilu.spec_from_file_location(name, _PLAY_UTILS_DIR / filename)
     if spec is None:
@@ -191,6 +193,7 @@ def _load_play_util(name: str, filename: str):
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -439,6 +442,7 @@ def _run_report_mode(env, gym_env, runner, base_env, log_dir: str, task_name: st
                 video_src = video_dir / f"report_{timestamp_str}.mp4"
                 try:
                     import imageio
+
                     imageio.mimsave(str(video_src), video_frames, fps=max(1, int(1.0 / dt)))
                     print(f"[INFO] 비디오 저장 완료: {video_src}")
                 except Exception as _e:

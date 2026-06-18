@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [start-definition-torch]
 class DeterministicModel(DeterministicMixin, Model):
     def __init__(self, observation_space, state_space, action_space, device, clip_actions=False):
@@ -32,8 +37,7 @@ class DeterministicModel(DeterministicMixin, Model):
 # [start-mlp-sequential-torch]
 import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -71,11 +75,8 @@ critic = MLP(
 # [end-mlp-sequential-torch]
 
 # [start-mlp-functional-torch]
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -113,10 +114,9 @@ critic = MLP(
 # [end-mlp-functional-torch]
 
 # [start-mlp-setup-jax]
-import jax.numpy as jnp
 import flax.linen as nn
-
-from skrl.models.jax import Model, DeterministicMixin
+import jax.numpy as jnp
+from skrl.models.jax import DeterministicMixin, Model
 
 
 # define the model
@@ -161,10 +161,8 @@ critic.init_state_dict(role="critic")
 # [end-mlp-setup-jax]
 
 # [start-mlp-compact-jax]
-import jax.numpy as jnp
-import flax.linen as nn
 
-from skrl.models.jax import Model, DeterministicMixin
+from skrl.models.jax import DeterministicMixin, Model
 
 
 # define the model
@@ -205,10 +203,8 @@ critic.init_state_dict(role="critic")
 # =============================================================================
 
 # [start-cnn-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -258,11 +254,8 @@ critic = CNN(
 # [end-cnn-sequential-torch]
 
 # [start-cnn-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -319,10 +312,8 @@ critic = CNN(
 # [end-cnn-functional-torch]
 
 # [start-cnn-setup-jax]
-import jax.numpy as jnp
 import flax.linen as nn
-
-from skrl.models.jax import Model, DeterministicMixin
+from skrl.models.jax import DeterministicMixin, Model
 
 
 # define the model
@@ -384,10 +375,8 @@ critic.init_state_dict(role="critic")
 # [end-cnn-setup-jax]
 
 # [start-cnn-compact-jax]
-import jax.numpy as jnp
 import flax.linen as nn
-
-from skrl.models.jax import Model, DeterministicMixin
+from skrl.models.jax import DeterministicMixin, Model
 
 
 # define the model
@@ -442,10 +431,8 @@ critic.init_state_dict(role="critic")
 # =============================================================================
 
 # [start-rnn-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -559,11 +546,8 @@ critic = RNN(
 # [end-rnn-sequential-torch]
 
 # [start-rnn-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -680,10 +664,8 @@ critic = RNN(
 # =============================================================================
 
 # [start-gru-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -797,11 +779,8 @@ critic = GRU(
 # [end-gru-sequential-torch]
 
 # [start-gru-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -918,10 +897,8 @@ critic = GRU(
 # =============================================================================
 
 # [start-lstm-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model
@@ -1046,11 +1023,8 @@ critic = LSTM(
 # [end-lstm-sequential-torch]
 
 # [start-lstm-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, DeterministicMixin
+from skrl.models.torch import DeterministicMixin, Model
 
 
 # define the model

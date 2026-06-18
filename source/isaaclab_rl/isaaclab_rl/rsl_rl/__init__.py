@@ -22,3 +22,6 @@ from .rl_cfg import *
 from .rnd_cfg import RslRlRndCfg
 from .symmetry_cfg import RslRlSymmetryCfg
 from .vecenv_wrapper import RslRlVecEnvWrapper
+
+# Explicit re-exports for cfg classes defined inside rl_cfg (covered by * but listed for IDE discoverability)
+from .rl_cfg import RslRlLcpCfg, RslRlPpoActorCriticMoECfg

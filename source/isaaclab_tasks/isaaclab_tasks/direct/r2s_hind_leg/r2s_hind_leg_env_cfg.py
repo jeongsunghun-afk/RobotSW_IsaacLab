@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -33,11 +38,11 @@ JOINT_LABELS: list[str] = ["thigh_r", "thigh_p", "knee_p", "ankle_p", "toe_p"]
 
 # 관절 각도 한계 (degree) — GUI 슬라이더 범위
 JOINT_LIMITS_DEG: list[tuple[float, float]] = [
-    (-60.0, 60.0),   # thigh_r
-    (-90.0, 90.0),   # thigh_p
-    (0.0, 120.0),    # knee_p
-    (-45.0, 45.0),   # ankle_p
-    (-30.0, 30.0),   # toe_p
+    (-60.0, 60.0),  # thigh_r
+    (-90.0, 90.0),  # thigh_p
+    (0.0, 120.0),  # knee_p
+    (-45.0, 45.0),  # ankle_p
+    (-30.0, 30.0),  # toe_p
 ]
 
 # 관절 최대 속도 (rad/s) — slew rate limiter용
@@ -76,14 +81,10 @@ class R2SHindLegEnvCfg(DirectRLEnvCfg):
     state_space: int = 0
 
     # 로봇
-    robot: ArticulationCfg = R_SKELETON_HIND_LEG_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot"
-    )
+    robot: ArticulationCfg = R_SKELETON_HIND_LEG_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # 씬
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1, env_spacing=4.0, replicate_physics=True
-    )
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=True)
 
     # 시뮬레이션
     sim: SimulationCfg = SimulationCfg(dt=1.0 / 200.0, render_interval=decimation)

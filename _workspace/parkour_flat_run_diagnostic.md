@@ -1,8 +1,8 @@
 # Flat-Only Parkour Run Diagnostic
 
-**Date**: 2026-05-13 (09:28 UTC)  
-**Task**: Diagnose why flat-only training fails to produce flat walking behavior  
-**Config**: Flat-only terrain (100%), rsl_rl PPO, 1865 training iterations  
+**Date**: 2026-05-13 (09:28 UTC)
+**Task**: Diagnose why flat-only training fails to produce flat walking behavior
+**Config**: Flat-only terrain (100%), rsl_rl PPO, 1865 training iterations
 **Evidence Level**: Tier A (TB metrics) + Tier B (git config snapshot)
 
 ---
@@ -90,7 +90,7 @@
 - Actual contribution: ~+0.19 (matches observed)
 - But `ang_vel_xy_l2` penalty: -0.121 is **HUGE** relative to the yaw reward itself
 
-**Interpretation**: 
+**Interpretation**:
 - Policy is oscillating in yaw trying to find good angles (high ang_vel penalty)
 - Because wrapped angles give near-zero reward (exponential collapse), policy cannot learn clean yaw behavior
 - Oscillation + weak actuators = feet dragging as byproduct
@@ -194,5 +194,5 @@ The flat-only run **fails to produce natural walking** because:
 
 ---
 
-**Report Generated**: 2026-05-13 (flat-diagnostic)  
+**Report Generated**: 2026-05-13 (flat-diagnostic)
 **Data Source**: TensorFlow events (tbparse) from `/home/lgb/IsaacLab/logs/rsl_rl/go2_parkour/2026-05-13_09-28-12_flat_terrain/`

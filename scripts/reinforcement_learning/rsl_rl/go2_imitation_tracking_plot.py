@@ -45,10 +45,10 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--out_dir", type=str, default=None, help="Output directory for PNGs (default: <run>/results).")
 # velocity schedule shaping
-parser.add_argument("--max_speed", type=float, default=3.0, help="Peak forward speed of the sweep (m/s).")
+parser.add_argument("--max_speed", type=float, default=3.5, help="Peak forward speed of the sweep (m/s).")
 parser.add_argument("--speed_step", type=float, default=0.5, help="Speed increment between hold levels (m/s).")
-parser.add_argument("--ramp_duration", type=float, default=0.5, help="Ramp duration between hold levels (s).")
-parser.add_argument("--hold_duration", type=float, default=2.0, help="Hold duration at each speed level (s).")
+parser.add_argument("--ramp_duration", type=float, default=1.5, help="Ramp duration between hold levels (s).")
+parser.add_argument("--hold_duration", type=float, default=4.0, help="Hold duration at each speed level (s).")
 parser.add_argument("--settle_duration", type=float, default=2.0, help="Initial speed-0 hold so heading settles (s).")
 parser.add_argument("--debug_fast", action="store_true", help="Use a tiny schedule for a quick end-to-end smoke run.")
 # video recording
@@ -147,9 +147,9 @@ def build_velocity_schedule(dt, max_speed, speed_step, ramp_duration, hold_durat
 
 def freeze_command(base_env, speed):
     """body-frame 속도 명령을 (vx=speed, vy=0, yaw_rate=0)으로 고정하고 타이머를 무력화."""
-    base_env._lin_vel_cmd[:, 0] = speed   # vx command (forward sweep)
-    base_env._lin_vel_cmd[:, 1] = 0.0     # vy 항상 0
-    base_env._yaw_vel_cmd[:] = 0.0        # yaw rate = 0 (직진/고정 heading)
+    base_env._lin_vel_cmd[:, 0] = speed  # vx command (forward sweep)
+    base_env._lin_vel_cmd[:, 1] = 0.0  # vy 항상 0
+    base_env._yaw_vel_cmd[:] = 0.0  # yaw rate = 0 (직진/고정 heading)
     base_env._tar_timer[:] = float("inf")  # _post_physics_step resample 방지
 
 
@@ -382,7 +382,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     dt = base_env.step_dt
     if args_cli.debug_fast:
         velocity_schedule = build_velocity_schedule(
-            dt, max_speed=2.0, speed_step=1.0, ramp_duration=0.2, hold_duration=0.4, settle_duration=0.4
+            dt, max_speed=2.0, speed_step=0.5, ramp_duration=0.2, hold_duration=0.4, settle_duration=0.4
         )
     else:
         velocity_schedule = build_velocity_schedule(

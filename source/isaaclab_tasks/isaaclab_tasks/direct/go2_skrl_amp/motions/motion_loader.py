@@ -49,7 +49,7 @@ class MotionLoader:
         body_lv_list, body_av_list = [], []
 
         # per-clip 경계 인덱스 (uniform time sampling에 사용)
-        self._clip_end_frames: list[int] = []   # 각 clip의 마지막 프레임 인덱스 (exclusive)
+        self._clip_end_frames: list[int] = []  # 각 clip의 마지막 프레임 인덱스 (exclusive)
         total = 0
 
         for path in npz_files:
@@ -78,10 +78,7 @@ class MotionLoader:
 
         self.num_frames = self.dof_positions.shape[0]
         self.duration = self.dt * (self.num_frames - 1)
-        print(
-            f"MotionLoader: {len(npz_files)}개 파일 로드 완료 — "
-            f"총 {self.num_frames}프레임, {self.duration:.2f}s"
-        )
+        print(f"MotionLoader: {len(npz_files)}개 파일 로드 완료 — 총 {self.num_frames}프레임, {self.duration:.2f}s")
 
     @property
     def dof_names(self) -> list[str]:

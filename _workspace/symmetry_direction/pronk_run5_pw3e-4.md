@@ -62,11 +62,11 @@ stair                   7654       3.557     3.118     8.202    17.224
   Reported as ratio to FLAT (defensible relative claim). NOT a claim about alternating gait.
 
 terrain               energy_J      dist_m         CoT   CoT_vs_flat
-flat                  174182.0      3080.3      0.3838              
-hurdle                183481.5      3195.3      0.3897              
-step                  202396.0      3141.7      0.4372              
-gap                   178517.9      3240.8      0.3739              
-stair                 266148.5      3134.3      0.5763              
+flat                  174182.0      3080.3      0.3838
+hurdle                183481.5      3195.3      0.3897
+step                  202396.0      3141.7      0.4372
+gap                   178517.9      3240.8      0.3739
+stair                 266148.5      3134.3      0.5763
 
   flat CoT reference = 0.3838
     flat           CoT=0.3838  (1.00x flat)

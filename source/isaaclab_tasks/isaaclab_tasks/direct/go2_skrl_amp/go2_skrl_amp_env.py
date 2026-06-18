@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
@@ -55,17 +60,12 @@ class Go2SkrlAmpEnv(DirectRLEnv):
         if os.path.isdir(motion_file):
             npz_files = sorted(glob.glob(os.path.join(motion_file, "*.npz")))
             if not npz_files:
-                raise FileNotFoundError(
-                    f"NPZ 파일 없음: {motion_file}\n"
-                    "convert_smr_to_npz.py 를 먼저 실행하세요."
-                )
+                raise FileNotFoundError(f"NPZ 파일 없음: {motion_file}\nconvert_smr_to_npz.py 를 먼저 실행하세요.")
         self._motion_loader = MotionLoader(motion_file, device=self.device)
 
         # 로봇 body/joint 인덱스
         self.ref_body_index = self.robot.data.body_names.index(self.cfg.reference_body)
-        self.key_body_indexes = [
-            self.robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES
-        ]
+        self.key_body_indexes = [self.robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES]
 
         # 모션 로더 body/DOF 인덱스
         self.motion_ref_body_index = self._motion_loader.get_body_index([self.cfg.reference_body])[0]
@@ -82,9 +82,7 @@ class Go2SkrlAmpEnv(DirectRLEnv):
 
         # AMP 관측 버퍼
         self.amp_observation_size = self.cfg.num_amp_observations * self.cfg.amp_observation_space
-        self.amp_observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.amp_observation_size,)
-        )
+        self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
         self.amp_observation_buffer = torch.zeros(
             (self.num_envs, self.cfg.num_amp_observations, self.cfg.amp_observation_space),
             dtype=torch.float32,
@@ -132,9 +130,9 @@ class Go2SkrlAmpEnv(DirectRLEnv):
         rel_pos = key_pos_w - root_pos_w.unsqueeze(1)
         num_keys = rel_pos.shape[1]
         root_quat_exp = root_quat_w.unsqueeze(1).expand(-1, num_keys, -1)
-        local_key_body_pos = quat_apply_inverse(
-            root_quat_exp.reshape(-1, 4), rel_pos.reshape(-1, 3)
-        ).view(*rel_pos.shape)
+        local_key_body_pos = quat_apply_inverse(root_quat_exp.reshape(-1, 4), rel_pos.reshape(-1, 3)).view(
+            *rel_pos.shape
+        )
 
         obs = compute_obs(
             self.robot.data.joint_pos,
@@ -155,11 +153,11 @@ class Go2SkrlAmpEnv(DirectRLEnv):
         # Policy 관측치
         policy_obs = torch.cat(
             [
-                self.robot.data.projected_gravity_b,                              # 3
-                self._commands,                                                    # 3
-                self.robot.data.joint_pos - self.robot.data.default_joint_pos,   # 12
-                self.robot.data.joint_vel,                                        # 12
-                self.actions,                                                      # 12
+                self.robot.data.projected_gravity_b,  # 3
+                self._commands,  # 3
+                self.robot.data.joint_pos - self.robot.data.default_joint_pos,  # 12
+                self.robot.data.joint_vel,  # 12
+                self.actions,  # 12
             ],
             dim=-1,
         )
@@ -169,9 +167,7 @@ class Go2SkrlAmpEnv(DirectRLEnv):
         base_lin_vel = self.robot.data.root_lin_vel_b
         base_ang_vel = self.robot.data.root_ang_vel_b
 
-        lin_vel_error = torch.sum(
-            torch.square(self._commands[:, :2] - base_lin_vel[:, :2]), dim=1
-        )
+        lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - base_lin_vel[:, :2]), dim=1)
         tracking_lin_vel = torch.exp(-lin_vel_error / self.cfg.tracking_sigma)
 
         yaw_rate_error = torch.square(self._commands[:, 2] - base_ang_vel[:, 2])
@@ -236,9 +232,7 @@ class Go2SkrlAmpEnv(DirectRLEnv):
     # 리셋 전략
     # ------------------------------------------------------------------
 
-    def _reset_strategy_default(
-        self, env_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _reset_strategy_default(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         root_state = self.robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] += self.scene.env_origins[env_ids]
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
@@ -278,9 +272,7 @@ class Go2SkrlAmpEnv(DirectRLEnv):
 
         # AMP 버퍼 초기화 (RSI 시점의 reference motion으로)
         amp_observations = self.collect_reference_motions(num_samples, times)
-        self.amp_observation_buffer[env_ids] = amp_observations.view(
-            num_samples, self.cfg.num_amp_observations, -1
-        )
+        self.amp_observation_buffer[env_ids] = amp_observations.view(num_samples, self.cfg.num_amp_observations, -1)
 
         return root_state, joint_pos, joint_vel
 
@@ -288,9 +280,7 @@ class Go2SkrlAmpEnv(DirectRLEnv):
     # AMP 인터페이스 (skrl AMP agent 필수)
     # ------------------------------------------------------------------
 
-    def collect_reference_motions(
-        self, num_samples: int, current_times: np.ndarray | None = None
-    ) -> torch.Tensor:
+    def collect_reference_motions(self, num_samples: int, current_times: np.ndarray | None = None) -> torch.Tensor:
         """레퍼런스 모션 AMP 관측값 수집.
 
         NPZ의 body_positions[:, key_indexes]는 body-local frame으로 저장됨.
@@ -315,18 +305,16 @@ class Go2SkrlAmpEnv(DirectRLEnv):
             _,
             body_linear_velocities,
             body_angular_velocities,
-        ) = self._motion_loader.sample(
-            num_samples=num_samples * self.cfg.num_amp_observations, times=times
-        )
+        ) = self._motion_loader.sample(num_samples=num_samples * self.cfg.num_amp_observations, times=times)
 
         # key body positions: NPZ에 body-local frame으로 저장됨 → 그대로 사용
         amp_obs = compute_obs(
             dof_positions[:, self.motion_dof_indexes],
             dof_velocities[:, self.motion_dof_indexes],
-            body_positions[:, self.motion_ref_body_index],           # world pos (height용)
-            body_linear_velocities[:, self.motion_ref_body_index],   # body frame
+            body_positions[:, self.motion_ref_body_index],  # world pos (height용)
+            body_linear_velocities[:, self.motion_ref_body_index],  # body frame
             body_angular_velocities[:, self.motion_ref_body_index],  # body frame
-            body_positions[:, self.motion_key_body_indexes],         # body-local toe pos
+            body_positions[:, self.motion_key_body_indexes],  # body-local toe pos
         )
         return amp_obs.view(-1, self.amp_observation_size)
 
@@ -371,12 +359,12 @@ def compute_obs(
     """
     obs = torch.cat(
         (
-            dof_positions,                                                                   # 12
-            dof_velocities,                                                                  # 12
-            root_positions[:, 2:3],                                                          # 1
-            root_linear_velocities,                                                          # 3
-            root_angular_velocities,                                                         # 3
-            local_key_body_positions.view(local_key_body_positions.shape[0], -1),           # 12
+            dof_positions,  # 12
+            dof_velocities,  # 12
+            root_positions[:, 2:3],  # 1
+            root_linear_velocities,  # 3
+            root_angular_velocities,  # 3
+            local_key_body_positions.view(local_key_body_positions.shape[0], -1),  # 12
         ),
         dim=-1,
     )

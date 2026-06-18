@@ -139,7 +139,7 @@ No single layer alone would produce this exact failure timeline. Three concurren
 
 2. **Learning phase (iter ~200–~500)**: Policy learns basic locomotion (hip/thigh produce coherent stance). `tracking_goal_vel` starts paying off. The mechanical advantage of longer leg push-off creates a consistent positive advantage for calf-extension actions. Hip remains constrained by `hip_pos` penalty, but calf has only `dof_error_l2` (4.7% of tracking reward) — too weak to resist.
 
-3. **Collapse phase (iter ~500+)**: 
+3. **Collapse phase (iter ~500+)**:
    - Calf mean has drifted past **+2.649** → joint pinned at URDF limit → **dead zone entered**.
    - Within dead zone, `tracking_goal_vel` continues to reward (joint still at advantageous position even if action is "redundant").
    - 3 smoothness penalties → 0 (action no longer changes).

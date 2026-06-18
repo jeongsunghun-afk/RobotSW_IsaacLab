@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -10,12 +10,12 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns, FrameTransformerCfg
+from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg, RayCasterCfg, patterns
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg, GaussianNoiseCfg
+from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 ##
 # Pre-defined configs
@@ -336,6 +336,7 @@ class SkeletonHistoryEnvCfg(DirectRLEnvCfg):
         "ang_vel_range": [-0.0, 0.0],
     }
 
+
 @configclass
 class SkeletonHistoryFixedEnvCfg(SkeletonHistoryEnvCfg):
     episode_length_s = 20.0
@@ -459,7 +460,6 @@ class SkeletonHistoryFixedEnvCfg(SkeletonHistoryEnvCfg):
         ],
     )
 
-
     # reward scales
     lin_vel_reward_scale = 1.0
     yaw_rate_reward_scale = 0.5
@@ -498,6 +498,7 @@ class SkeletonHistoryFixedEnvCfg(SkeletonHistoryEnvCfg):
         "lin_vel_y_range": [-0.0, 0.0],
         "ang_vel_range": [-0.5, 0.5],
     }
+
 
 @configclass
 class SkeletonRoughEnvCfg(SkeletonEnvCfg):

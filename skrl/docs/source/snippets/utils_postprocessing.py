@@ -1,6 +1,10 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [start-memory_file_iterator-torch]
 from skrl.utils import postprocessing
-
 
 # assuming there is a directory called "memories" with Torch files in it
 memory_iterator = postprocessing.MemoryFileIterator("memories/*.pt")
@@ -23,7 +27,6 @@ for filename, data in memory_iterator:
 # [start-memory_file_iterator-numpy]
 from skrl.utils import postprocessing
 
-
 # assuming there is a directory called "memories" with NumPy files in it
 memory_iterator = postprocessing.MemoryFileIterator("memories/*.npz")
 for filename, data in memory_iterator:
@@ -45,7 +48,6 @@ for filename, data in memory_iterator:
 # [start-memory_file_iterator-csv]
 from skrl.utils import postprocessing
 
-
 # assuming there is a directory called "memories" with CSV files in it
 memory_iterator = postprocessing.MemoryFileIterator("memories/*.csv")
 for filename, data in memory_iterator:
@@ -66,7 +68,6 @@ for filename, data in memory_iterator:
 
 # [start-tensorboard_file_iterator-list]
 from skrl.utils import postprocessing
-
 
 # assuming there is a directory called "runs" with experiments and TensorBoard files in it
 tensorboard_iterator = postprocessing.TensorboardFileIterator(

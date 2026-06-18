@@ -1,8 +1,8 @@
 # [HYP-ENV] Parkour Action Pipeline — Calf Joint Analysis
 
-**Date:** 2026-05-26  
-**Task:** #2 — Map raw → scale → clip → joint target → PD → torque pipeline for calf joints  
-**Author:** env-investigator  
+**Date:** 2026-05-26
+**Task:** #2 — Map raw → scale → clip → joint target → PD → torque pipeline for calf joints
+**Author:** env-investigator
 
 ---
 
@@ -42,8 +42,8 @@ def act(self, obs, **kwargs):
 
 **File:** `agents/rsl_rl_ppo_cfg.py:27` — `clip_actions = 10.0`
 
-- This field exists on `Go2ParkourPPORunnerCfg` but is **never read** by any runner code.  
-- Verified: zero hits in `on_policy_runner_parkour.py`, `on_policy_runner.py`, `vec_env.py` for `clip_actions`.  
+- This field exists on `Go2ParkourPPORunnerCfg` but is **never read** by any runner code.
+- Verified: zero hits in `on_policy_runner_parkour.py`, `on_policy_runner.py`, `vec_env.py` for `clip_actions`.
 - **Runner clip: NONE (dead config field).**
 
 ### Step 3: Env-Level Clip
@@ -174,7 +174,7 @@ idx=9  RR_hip_joint      idx=10 RR_thigh_joint    idx=11 RR_calf_joint
 | `set_joint_position_target` | same ordering | `parkour_env.py:537` |
 | Hip scaling | `self._hip_joint_ids` dynamically found via string match `"hip" in name` | `parkour_env.py:273–277` |
 
-**No manual index remapping found anywhere in the pipeline.**  
+**No manual index remapping found anywhere in the pipeline.**
 Both obs and action use `self._robot.data` ordering — they are internally consistent by construction.
 
 The only potential H5 risk would be if the USD joint ordering differs from expectation, but since no re-mapping exists, obs and action would still be self-consistent (all channels shift together).

@@ -1,13 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-from typing import Any
-
 from functools import partial
+from typing import Any
 
 import flax
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from skrl import config
 
@@ -86,9 +89,7 @@ class CategoricalMixin:
         # map from observations/states to normalized probabilities or unnormalized log probabilities
         net_output, outputs = self.apply(self.state_dict.params if params is None else params, inputs, role)
 
-        actions, log_prob = _categorical(
-            net_output, self._c_unnormalized_log_prob, inputs.get("taken_actions", None), subkey
-        )
+        actions, log_prob = _categorical(net_output, self._c_unnormalized_log_prob, inputs.get("taken_actions"), subkey)
 
         outputs["log_prob"] = log_prob
         outputs["net_output"] = net_output

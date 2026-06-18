@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -82,19 +82,20 @@ DOFBOT_CONFIG = ArticulationCfg(
 )
 
 JIG_CONFIG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/MotionJig/motion_jig.usd",
-    rigid_props=sim_utils.RigidBodyPropertiesCfg(
-        disable_gravity=False,
-        max_depenetration_velocity=5.0,
+    spawn=sim_utils.UsdFileCfg(
+        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/MotionJig/motion_jig.usd",
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            max_depenetration_velocity=5.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True, solver_position_iteration_count=8, solver_velocity_iteration_count=0
+        ),
     ),
-    articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-        enabled_self_collisions=True, solver_position_iteration_count=8, solver_velocity_iteration_count=0
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.5, -0.5, 0.0),
     ),
-    ),
-init_state=ArticulationCfg.InitialStateCfg(
-    pos=(0.5, -0.5, 0.0),
-),
-actuators={"acts": ImplicitActuatorCfg(joint_names_expr=[".*"], damping=0.76, stiffness=7.6)}
+    actuators={"acts": ImplicitActuatorCfg(joint_names_expr=[".*"], damping=0.76, stiffness=7.6)},
 )
 
 
@@ -113,8 +114,6 @@ class NewRobotsSceneCfg(InteractiveSceneCfg):
     Jetbot = JETBOT_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Jetbot")
     Dofbot = DOFBOT_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Dofbot")
     Jig = JIG_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Jig")
-
-
 
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):

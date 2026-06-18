@@ -342,7 +342,7 @@ class MeshParkourGapTerrainCfg(SubTerrainBaseCfg):
     platform_length_range: tuple[float, float] = (1.6, 2.4)
     """The minimum and maximum length of each intermediate platform along x (in m). Defaults to (1.6, 2.4)."""
 
-    y_offset_range: tuple[float, float] = (-1.2, 1.2)
+    y_offset_range: tuple[float, float] = (-0.4, 0.4)
     """The minimum and maximum y-offset of each intermediate platform center (in m). Defaults to (-1.2, 1.2)."""
 
     half_valid_width_range: tuple[float, float] = (0.6, 1.2)
@@ -372,13 +372,13 @@ class MeshParkourHurdleTerrainCfg(SubTerrainBaseCfg):
 
     function = mesh_terrains.parkour_hurdle_terrain
 
-    platform_length: float = 2.5
+    platform_length: float = 0.0
     """The length of the start platform along x (in m). Defaults to 2.5."""
 
     num_hurdles: int = MISSING
     """The number of hurdles in the terrain."""
 
-    hurdle_thickness: float = 0.3
+    hurdle_thickness: float = 0.2
     """The thickness of each hurdle along x (in m). Defaults to 0.3."""
 
     hurdle_height_range: tuple[float, float] = MISSING
@@ -390,7 +390,7 @@ class MeshParkourHurdleTerrainCfg(SubTerrainBaseCfg):
     y_offset_range: tuple[float, float] = (-0.4, 0.4)
     """The minimum and maximum y-offset of each hurdle center (in m). Defaults to (-0.4, 0.4)."""
 
-    half_valid_width_range: tuple[float, float] = (0.4, 0.8)
+    half_valid_width_range: tuple[float, float] = (0.8, 1.4)
     """The minimum and maximum half-width of the passage corridor (in m). Defaults to (0.4, 0.8)."""
 
     border_width: float = 0.0

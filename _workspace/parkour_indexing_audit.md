@@ -1,7 +1,7 @@
 # Parkour Indexing Audit: Genesis vs. Isaac (Left-Hind Asymmetry RCA)
 
-**Date**: 2026-05-13  
-**Auditor**: asym-auditor  
+**Date**: 2026-05-13
+**Auditor**: asym-auditor
 **Scope**: Joint ordering, foot body indexing, contact tensor alignment across Genesis reference and Isaac implementation.
 
 ---
@@ -113,7 +113,7 @@ Both use **identical URDF link ordering**:
 
 **Evidence (Tier B - Code Surface)**:
 - Both repos use the same URDF definition (`go2_description.urdf`).
-- Both use regex-based body/link search: 
+- Both use regex-based body/link search:
   - Genesis: `find_link_indices(self.env_cfg['feet_link_names'])` with `feet_link_names: ['foot']` (train_parkour.py:142)
   - Isaac: `self._contact_sensor.find_bodies(".*foot")` and `self._robot.find_bodies(".*foot")` (parkour_env.py:176, 196)
 
@@ -169,7 +169,7 @@ self.last_contacts = contact
 # Line 176: Find feet bodies (contact sensor layer)
 self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
 
-# Line 196: Find feet bodies (robot layer)  
+# Line 196: Find feet bodies (robot layer)
 _foot_body_ids, _foot_body_names = self._robot.find_bodies(".*foot")
 
 # Print at line 228-235:
@@ -248,7 +248,7 @@ This could cause:
 - Isaac uses `find_bodies(".*foot")` on PhysX articulation (order depends on Omni USD → PhysX ordering).
 - **No empirical confirmation** of the actual foot body IDs returned by Isaac.
 
-**Required for Verdict**: 
+**Required for Verdict**:
 - [ ] Run Isaac training and capture line 230-231 print output: `foot body names` and `foot body ids`.
 - [ ] Verify if Isaac returns `[FL_foot(8), FR_foot(14), RL_foot(20), RR_foot(26)]` or a permutation.
 
@@ -338,6 +338,6 @@ If IDs differ or order is permuted, foot-based rewards (feet_dragging, feet_stum
 
 ---
 
-**Audited By**: asym-auditor  
-**Date**: 2026-05-13  
+**Audited By**: asym-auditor
+**Date**: 2026-05-13
 **Confidence**: Tier B evidence for joint order; Tier C (unconfirmed) for foot ordering.

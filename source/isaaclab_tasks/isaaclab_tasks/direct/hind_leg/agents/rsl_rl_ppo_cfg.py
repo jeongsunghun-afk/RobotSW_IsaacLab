@@ -51,7 +51,7 @@ class HindLegParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         # "scan": ["scan"],
         "history": ["history"],
         "priv": ["priv_latent"],
-        "priv_explicit": ["priv_explicit"]
+        "priv_explicit": ["priv_explicit"],
     }
 
     estimator = {

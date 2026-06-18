@@ -1,10 +1,14 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import copy
 from typing import Any
 
-import copy
 import gymnasium
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -230,7 +234,7 @@ class TRPO(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.torch.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
             if self.value is not None:
@@ -544,10 +548,8 @@ class TRPO(Agent):
 
         # learning epochs
         for epoch in range(self.cfg.learning_epochs):
-
             # mini-batches loop
             for sampled_observations, sampled_states, sampled_returns in sampled_batches:
-
                 inputs = {
                     "observations": self._observation_preprocessor(sampled_observations, train=not epoch),
                     "states": self._state_preprocessor(sampled_states, train=not epoch),

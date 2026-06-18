@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [start-definition-torch]
 class TabularModel(TabularMixin, Model):
     def __init__(self, observation_space, state_space, action_space, device):
@@ -17,7 +22,6 @@ class TabularModel(TabularMixin, Model):
 # [start-epsilon-greedy-torch]
 import torch
 import torch.nn as nn
-
 from skrl.models.torch import Model, TabularMixin
 
 

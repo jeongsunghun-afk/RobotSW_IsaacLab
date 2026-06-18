@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 terminal_input.py
 =================
@@ -21,7 +26,7 @@ NOTE: gait_commands 모듈을 생성자 파라미터로 주입받습니다.
 from __future__ import annotations
 
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 
 def _print_help(
@@ -130,8 +135,10 @@ class TerminalCommandInput:
             # ── 특수 명령 ────────────────────────────────────────────
             if cmd == "help":
                 _print_help(
-                    self._gait_names, self.num_commands,
-                    self._interaction_mode, self._motion_labels,
+                    self._gait_names,
+                    self.num_commands,
+                    self._interaction_mode,
+                    self._motion_labels,
                 )
                 continue
 
@@ -195,8 +202,8 @@ class TerminalCommandInput:
 
         gait = tokens[0].lower()
         try:
-            x_vel   = float(tokens[1])
-            y_vel   = float(tokens[2])
+            x_vel = float(tokens[1])
+            y_vel = float(tokens[2])
             yaw_vel = float(tokens[3])
         except ValueError:
             print("[ERROR] 속도 값은 float이어야 합니다. 예: trotting 1.0 0.0 0.0")
@@ -220,8 +227,8 @@ class TerminalCommandInput:
             return
 
         try:
-            x_vel   = float(tokens[0])
-            y_vel   = float(tokens[1])
+            x_vel = float(tokens[0])
+            y_vel = float(tokens[1])
             yaw_vel = float(tokens[2])
         except ValueError:
             print("[ERROR] 속도 값은 float이어야 합니다. 예: 1.0 0.0 0.0")

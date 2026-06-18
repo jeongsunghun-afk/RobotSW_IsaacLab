@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # [start-definition-torch]
 class CategoricalModel(CategoricalMixin, Model):
     def __init__(self, observation_space, state_space, action_space, device, unnormalized_log_prob=True):
@@ -32,8 +37,7 @@ class CategoricalModel(CategoricalMixin, Model):
 # [start-mlp-sequential-torch]
 import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -71,11 +75,8 @@ policy = MLP(
 # [end-mlp-sequential-torch]
 
 # [start-mlp-functional-torch]
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -114,8 +115,7 @@ policy = MLP(
 
 # [start-mlp-setup-jax]
 import flax.linen as nn
-
-from skrl.models.jax import Model, CategoricalMixin
+from skrl.models.jax import CategoricalMixin, Model
 
 
 # define the model
@@ -159,9 +159,8 @@ policy.init_state_dict(role="policy")
 # [end-mlp-setup-jax]
 
 # [start-mlp-compact-jax]
-import flax.linen as nn
 
-from skrl.models.jax import Model, CategoricalMixin
+from skrl.models.jax import CategoricalMixin, Model
 
 
 # define the model
@@ -203,10 +202,8 @@ policy.init_state_dict(role="policy")
 # =============================================================================
 
 # [start-cnn-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -256,11 +253,8 @@ policy = CNN(
 # [end-cnn-sequential-torch]
 
 # [start-cnn-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -318,8 +312,7 @@ policy = CNN(
 
 # [start-cnn-setup-jax]
 import flax.linen as nn
-
-from skrl.models.jax import Model, CategoricalMixin
+from skrl.models.jax import CategoricalMixin, Model
 
 
 # define the model
@@ -381,8 +374,7 @@ policy.init_state_dict(role="policy")
 
 # [start-cnn-compact-jax]
 import flax.linen as nn
-
-from skrl.models.jax import Model, CategoricalMixin
+from skrl.models.jax import CategoricalMixin, Model
 
 
 # define the model
@@ -436,10 +428,8 @@ policy.init_state_dict(role="policy")
 # =============================================================================
 
 # [start-rnn-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -554,11 +544,8 @@ policy = RNN(
 # [end-rnn-sequential-torch]
 
 # [start-rnn-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -680,10 +667,8 @@ policy = RNN(
 # =============================================================================
 
 # [start-gru-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -798,11 +783,8 @@ policy = GRU(
 # [end-gru-sequential-torch]
 
 # [start-gru-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -924,10 +906,8 @@ policy = GRU(
 # =============================================================================
 
 # [start-lstm-sequential-torch]
-import torch
 import torch.nn as nn
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model
@@ -1051,11 +1031,8 @@ policy = LSTM(
 # [end-lstm-sequential-torch]
 
 # [start-lstm-functional-torch]
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from skrl.models.torch import Model, CategoricalMixin
+from skrl.models.torch import CategoricalMixin, Model
 
 
 # define the model

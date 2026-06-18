@@ -1,13 +1,16 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
+import functools
 from typing import Any
 
-import functools
 import gymnasium
-
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from skrl import config, logger
 from skrl.agents.jax import Agent
@@ -119,7 +122,7 @@ class DDPG(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.jax.is_distributed:
-            logger.info(f"Broadcasting models' parameters")
+            logger.info("Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
             if self.critic is not None:
@@ -359,7 +362,6 @@ class DDPG(Agent):
 
         # gradient steps
         for gradient_step in range(self.cfg.gradient_steps):
-
             # sample a batch from memory
             (
                 sampled_observations,

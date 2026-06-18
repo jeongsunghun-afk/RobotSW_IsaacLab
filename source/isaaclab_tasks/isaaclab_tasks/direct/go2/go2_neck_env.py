@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import torch
 
-from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from isaaclab.markers import VisualizationMarkers, SPHERE_MARKER_CFG
 import isaaclab.utils.math as math_utils
+from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
+from isaaclab.markers import SPHERE_MARKER_CFG, VisualizationMarkers
 
-from .go2_wtw_env import WTWEnv, torch_rand_float
 from .go2_env_cfg import Go2NeckFlatEnvCfg
+from .go2_wtw_env import WTWEnv, torch_rand_float
 
 
 class Go2NeckEnv(WTWEnv):
@@ -118,7 +118,6 @@ class Go2NeckEnv(WTWEnv):
     # -----------------------------------------------------------------------
     # ... rest ...
 
-
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = torch.clip(actions.clone(), -self.cfg.clip_actions, self.cfg.clip_actions).to(self.device)
 
@@ -186,23 +185,22 @@ class Go2NeckEnv(WTWEnv):
         # === 8. action vector에 반영 ===
         # RL에서 넘겨받은 원본 액션은 self._actions (관측용)에 그대로 유지
         applied_actions = torch.zeros(self.num_envs, 19, device=self.device)
-        
+
         if self.cfg.whole_body_control:
             applied_actions = self._actions.clone()
         else:
             # 12-DOF 다리 제어 배정
             applied_actions[:, self._non_neck_ids] = self._actions.clone()
-            
+
         # 7-DOF 목 제어 역운동학(IK) 타겟으로 덮어쓰기
         neck_default = self._robot.data.default_joint_pos[:, self._neck_joint_ids]  # (N, 7)
         neck_action = (self._current_neck_q - neck_default) / self.cfg.action_scale
         applied_actions[:, self._action_neck_ids] = neck_action
         # applied_actions[:, self._action_neck_ids] = 0.0
 
-
         if self.cfg.hip_scale_reduction:
             applied_actions[:, self._hip_joint_ids] *= 0.5
-            
+
         self._processed_actions = self.cfg.action_scale * applied_actions + self._robot.data.default_joint_pos
 
         # === 9. 타겟 위치 시각화 ===
@@ -314,7 +312,7 @@ class Go2NeckEnv(WTWEnv):
             self._actions = padded_actions
             self._previous_actions = padded_prev
             self._previous_previous_actions = padded_prev_prev
-            
+
             # 목 제어가 아닌 다리 제어 정책의 경우
             # _get_rewards 내부에서 도출되는 dof_acc_l2, dof_torques_l2, dof_vel_l2 등의 패널티가
             # 목(Neck)에서 발생하는 수치 때문에 정책 학습에 방해가 되지 않도록 마스킹 처리합니다.
@@ -333,7 +331,7 @@ class Go2NeckEnv(WTWEnv):
                 self._actions = orig_actions
                 self._previous_actions = orig_prev
                 self._previous_previous_actions = orig_prev_prev
-                
+
                 # 목 부분 상태값 원상 복구 (Property Setter 오류 방지를 위해 In-place 복구)
                 self._robot.data.joint_vel[:, self._neck_joint_ids] = orig_joint_vel[:, self._neck_joint_ids]
                 self._robot.data.joint_acc[:, self._neck_joint_ids] = orig_joint_acc[:, self._neck_joint_ids]
