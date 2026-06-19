@@ -89,6 +89,12 @@ class ParkourImitationEnvCfg(ParkourEnvCfg):
     # default=False → 기존 Go2-ParkourImitation-v0 동작 100% 보존.
     apply_amp_on_terrain: bool = True
 
+    # True(기본)면 stair sub-terrain을 mid-goal(좌우 offset 포함) 변형으로 교체.
+    # False면 core ``MeshParkourStairTerrainCfg``(원본 stair, mid-goal/run-out 없음) 사용.
+    # default=True → v0/Symmetry/TerrainStyle 거동 보존.  RandomGoal task는 False로 끔
+    # (mid-goal × random-goal 상호작용이 학습을 붕괴시켜 stock stair로 격리).
+    enable_stair_midgoals: bool = False
+
     # Inherits parkour reward_scales entirely — regularization penalties (torque, action_rate,
     # joint_acc, collision, stumble, edge, ...) all retained for sim-to-real safety.
     # AMP reward fusion is handled by OnPolicyRunnerParkourAMP (additive + flat_env_mask).
@@ -178,16 +184,20 @@ class ParkourImitationEnvCfg(ParkourEnvCfg):
         # self (including terrain → terrain_generator → sub_terrains and each entry).
         # So ``tg`` here is already instance-local and replacing the stair entry cannot
         # leak back to base ParkourEnvCfg. Verified empirically (function identity check).
-        old_stair = tg.sub_terrains["parkour_stair"]
-        tg.sub_terrains["parkour_stair"] = MeshParkourStairWithMidGoalsTerrainCfg(
-            proportion=old_stair.proportion,
-            stair_width_range=old_stair.stair_width_range,
-            stair_height_range=old_stair.stair_height_range,
-            num_steps_per_stair=old_stair.num_steps_per_stair,
-            num_goals=old_stair.num_goals,
-            flat_patch_sampling=old_stair.flat_patch_sampling,
-            last_goal_runout=1.0,
-        )
+        # Gated by ``enable_stair_midgoals`` (default True).  When False (RandomGoal task)
+        # the core ``parkour_stair`` entry is left untouched, i.e. the original
+        # ``MeshParkourStairTerrainCfg`` / ``parkour_stair_terrain`` with no mid-goals or run-out.
+        if self.enable_stair_midgoals:
+            old_stair = tg.sub_terrains["parkour_stair"]
+            tg.sub_terrains["parkour_stair"] = MeshParkourStairWithMidGoalsTerrainCfg(
+                proportion=old_stair.proportion,
+                stair_width_range=old_stair.stair_width_range,
+                stair_height_range=old_stair.stair_height_range,
+                num_steps_per_stair=old_stair.num_steps_per_stair,
+                num_goals=old_stair.num_goals,
+                flat_patch_sampling=old_stair.flat_patch_sampling,
+                last_goal_runout=1.0,
+            )
 
         # Apply max_init_terrain_level to the TerrainImporterCfg wrapper.
         self.terrain.max_init_terrain_level = self.terrain_max_init_level

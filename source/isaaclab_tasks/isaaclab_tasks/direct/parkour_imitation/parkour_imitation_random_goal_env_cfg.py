@@ -67,6 +67,13 @@ class ParkourImitationRandomGoalEnvCfg(ParkourImitationEnvCfg):
         relaxed (no height-diff check) goal placement.
     """
 
+    # ── Stair mid-goal override ─────────────────────────────────────────────
+    # RandomGoal trains fine with stock stair but collapses with mid-goals (unexplained
+    # mid-goal × random-goal interaction).  Disable mid-goals so the stair sub-terrain falls
+    # back to the core ``MeshParkourStairTerrainCfg``.  The parent ``__post_init__`` reads
+    # this flag (this subclass has no own __post_init__) and skips the stair replacement.
+    enable_stair_midgoals: bool = False
+
     # ── Random-goal mode ────────────────────────────────────────────────────
     # Master switch: set False to disable all random-goal logic.
     enable_random_goal: bool = True

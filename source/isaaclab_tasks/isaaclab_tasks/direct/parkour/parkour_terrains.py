@@ -1274,11 +1274,13 @@ def parkour_stair_with_midgoals_terrain(
     1. Intermediate goals — each cycle emits 4 goals instead of 2, in the order
        ``[ascend-mid, top, descend-mid, bottom]``:
 
-       * ``ascend-mid``: centre of the mid ascending step (index ``num_steps_per_stair // 2``),
-         placed on that step's *top surface* (z = ``(m + 1) * sh``).
+       * ``ascend-mid``: mid ascending step (index ``num_steps_per_stair // 2``), on that
+         step's *top surface* (z = ``(m + 1) * sh``).  Its y is laterally offset from the
+         centreline by ``U(-mid_goal_lateral_offset, +mid_goal_lateral_offset)`` (#3).
        * ``top``: centre of the flat top section (z = ``num_steps_per_stair * sh``) — same as core.
-       * ``descend-mid``: centre of the mid descending step (index ``num_steps_per_stair // 2``),
-         placed on that step's *top surface* (z = ``(num_steps_per_stair - m - 1) * sh``).
+       * ``descend-mid``: mid descending step (index ``num_steps_per_stair // 2``), on that
+         step's *top surface* (z = ``(num_steps_per_stair - m - 1) * sh``).  Its y is laterally
+         offset like ``ascend-mid`` (#3).
        * ``bottom``: centre of the flat bottom section (z = 0) — same as core, except the
          final cycle (see #2).
 
@@ -1290,6 +1292,14 @@ def parkour_stair_with_midgoals_terrain(
        on top of it.  The full tile ground plane already covers this run-out region
        (bottom flats are at z = 0), so no extra mesh box is required.  Only the final
        cycle's bottom goal is moved; intermediate cycles keep the flat-centre bottom goal.
+
+    3. Lateral mid-goal offset — ascend-mid / descend-mid goals are shifted off the centreline
+       in y by an independent ``U(-mid_goal_lateral_offset, +mid_goal_lateral_offset)`` draw
+       (clamped to keep a robot-half-width margin from each border).  Because stair steps span
+       the full tile width, only the goal y moves; the mesh and the goal z (step top surface)
+       are unchanged.  This breaks the otherwise-collinear goal line so the XY heading obs
+       varies, and exposes the policy to left/right approach positions on the stairs.
+       top/bottom goals stay centred (``mid_y``).
 
     Args:
         difficulty: The difficulty of the terrain. This is a value between 0 and 1.
@@ -1317,6 +1327,18 @@ def parkour_stair_with_midgoals_terrain(
     # mid-step index (same for ascending and descending sections)
     m = cfg.num_steps_per_stair // 2
 
+    # Lateral (y) offset bound for the ascend/descend mid-goals.  The stair steps span the
+    # full tile width (``dim = (sw, terrain_w, step_top)``), so shifting the mid-goal off the
+    # centreline keeps it on a valid walkable surface — only the goal y moves, never the mesh.
+    # Clamped to keep the goal a robot-half-width inside the tile bounds.  Drawn independently
+    # per mid-goal (core convention: y-offset is sampled per-obstacle, mesh_terrains.py:923/996/1162)
+    # so different tiles — and the ascend vs descend goal within one tile — learn distinct lateral
+    # approach positions.  This makes the XY-derived heading obs actually vary (collinear mid-goals
+    # were near-inert) and reduces front-centre narrow-step dwell.
+    off = max(0.0, float(cfg.mid_goal_lateral_offset))
+    y_lo = min(mid_y, off + 1e-3)  # keep ≥ off inside the lower border (off ≤ mid_y on a 4 m tile)
+    y_hi = terrain_w - off
+
     current_x = cfg.platform_length
 
     for cycle in range(cfg.num_stairs):
@@ -1330,10 +1352,11 @@ def parkour_stair_with_midgoals_terrain(
                 meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
             current_x += sw
 
-        # goal (ascend-mid): centre of the mid ascending step, on its top surface
+        # goal (ascend-mid): centre of the mid ascending step, laterally offset on its top surface
         ascend_mid_x = asc_start_x + m * sw + sw / 2.0
         ascend_mid_z = (m + 1) * sh
-        goals_list.append([ascend_mid_x, mid_y, ascend_mid_z])
+        ascend_mid_y = float(np.clip(mid_y + np.random.uniform(-off, off), y_lo, y_hi))
+        goals_list.append([ascend_mid_x, ascend_mid_y, ascend_mid_z])
 
         # ── flat top section ──────────────────────────────────────────────────
         top_h = cfg.num_steps_per_stair * sh
@@ -1355,10 +1378,11 @@ def parkour_stair_with_midgoals_terrain(
                 meshes_list.append(trimesh.creation.box(dim, trimesh.transformations.translation_matrix(pos)))
             current_x += sw
 
-        # goal (descend-mid): centre of the mid descending step, on its top surface
+        # goal (descend-mid): centre of the mid descending step, laterally offset on its top surface
         descend_mid_x = desc_start_x + m * sw + sw / 2.0
         descend_mid_z = (cfg.num_steps_per_stair - m - 1) * sh
-        goals_list.append([descend_mid_x, mid_y, descend_mid_z])
+        descend_mid_y = float(np.clip(mid_y + np.random.uniform(-off, off), y_lo, y_hi))
+        goals_list.append([descend_mid_x, descend_mid_y, descend_mid_z])
 
         # ── flat bottom section (ground level — no box needed, advance x only) ─
         last_step_end_x = current_x
@@ -1416,4 +1440,17 @@ class MeshParkourStairWithMidGoalsTerrainCfg(MeshParkourStairTerrainCfg):
     u-turning on top of it.  The full tile ground plane already covers this run-out region
     (bottom flats are at z = 0), so no extra mesh is added.  Must keep the final goal x inside
     the tile ``size[0]``.  Defaults to 1.0.
+    """
+
+    mid_goal_lateral_offset: float = 0.4
+    """Half-range (m) of the lateral (y) offset applied to the ascend/descend mid-goals.
+
+    Each mid-goal's y is sampled independently as ``mid_y + U(-offset, +offset)`` (clamped to
+    keep it a robot-half-width inside the tile bounds).  The stair steps span the full tile
+    width, so only the goal y moves — never the mesh, and z stays on the step's top surface.
+    Offsetting the mid-goals (a) breaks the previously collinear goal line so the XY-derived
+    heading obs actually varies, exposing the policy to left/right approach positions, and
+    (b) reduces front-centre narrow-step dwell.  On the default 4.0 m wide tile, 0.4 keeps the
+    goal within ``[0.4, 3.6]`` (≈robot-half-width margin from each border).  Set to 0.0 to
+    restore centred mid-goals.  Defaults to 0.4.
     """
