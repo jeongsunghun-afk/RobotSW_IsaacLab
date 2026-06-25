@@ -64,3 +64,15 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2ParkourSymmetryPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="Go2-Parkour-Lidar-v0",
+    entry_point=f"{__name__}.parkour_lidar_env:Go2ParkourLidarEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.parkour_lidar_env_cfg:ParkourLidarEnvCfg",
+        # Reuse the SAME runner cfg as Go2-Parkour-Direct-v0 so the existing checkpoint
+        # (experiment_name="go2_parkour") loads without any architecture change.
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2ParkourPPORunnerCfg",
+    },
+)
