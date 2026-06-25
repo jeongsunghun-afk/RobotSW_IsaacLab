@@ -1,7 +1,7 @@
 # Hind-Leg Biped Locomotion (hind_leg)
 
-RGA Inc 자체 제작 **2족(biped) 8-DOF 로봇**의 보행 제어를 학습하는 환경.  
-Parkour와 별개로 존재하는 biped 전용 환경이며, **RMA(Rapid Motor Adaptation)** 아키텍처를 기본으로 채택한다.  
+RGA Inc 자체 제작 **2족(biped) 8-DOF 로봇**의 보행 제어를 학습하는 환경.
+Parkour와 별개로 존재하는 biped 전용 환경이며, **RMA(Rapid Motor Adaptation)** 아키텍처를 기본으로 채택한다.
 Gait clock 신호로 교대 보행을 유도하며, 속도 명령(vx, yaw_rate) 추종을 목표로 한다.
 
 > ⚠️ parkour 환경의 제약(sim-to-real obs 제한, contact sensor 금지 등)은 이 환경에 적용하지 않는다.
@@ -71,7 +71,7 @@ rel_standing_envs   0.1         (10% env를 cmd=0으로 고정 — standing 학�
 |---------|------------|-----------|------------|
 | `HindLeg-Direct-v0` | `OnPolicyRunnerParkour` | `HindLegHistoryEnvCfg` | `HindLegParkourPPORunnerCfg` |
 
-> `__init__.py`에 rl_games / skrl 백엔드 entry_point도 함께 등록되어 있다.  
+> `__init__.py`에 rl_games / skrl 백엔드 entry_point도 함께 등록되어 있다.
 > 기본 rsl_rl 러너는 `HindLegParkourPPORunnerCfg` (RMA 아키텍처).
 
 ---

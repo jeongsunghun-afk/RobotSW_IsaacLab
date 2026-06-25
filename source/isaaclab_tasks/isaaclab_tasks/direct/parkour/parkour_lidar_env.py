@@ -184,24 +184,20 @@ class Go2ParkourLidarEnv(Go2ParkourEnv):
             sensor_pos  (num_envs, 3) — world-frame sensor origin
             sensor_quat (num_envs, 4) — world-frame sensor orientation (wxyz)
         """
-        base_pos = self._mid360.data.pos_w    # (N, 3)
+        base_pos = self._mid360.data.pos_w  # (N, 3)
         base_quat = self._mid360.data.quat_w  # (N, 4) wxyz
         N = base_quat.shape[0]
         dev, dtype = base_quat.device, base_quat.dtype
 
         # true sensor position: base_pos + rotate(base_quat, offset_pos)
         offset_pos = (
-            torch.tensor(self._mid360.cfg.offset.pos, device=dev, dtype=dtype)
-            .unsqueeze(0)
-            .expand(N, 3)
+            torch.tensor(self._mid360.cfg.offset.pos, device=dev, dtype=dtype).unsqueeze(0).expand(N, 3)
         )  # (N, 3)
         sensor_pos = base_pos + quat_apply(base_quat, offset_pos)  # (N, 3)
 
         # true sensor orientation: base_quat ⊗ offset_rot
         offset_quat = (
-            torch.tensor(self._mid360.cfg.offset.rot, device=dev, dtype=dtype)
-            .unsqueeze(0)
-            .expand(N, 4)
+            torch.tensor(self._mid360.cfg.offset.rot, device=dev, dtype=dtype).unsqueeze(0).expand(N, 4)
         )  # (N, 4) wxyz
         sensor_quat = quat_mul(base_quat, offset_quat)  # (N, 4)
 
@@ -235,9 +231,7 @@ class Go2ParkourLidarEnv(Go2ParkourEnv):
         N = sensor_quat.shape[0]
         dev, dtype = sensor_quat.device, sensor_quat.dtype
         q_fixed = (
-            torch.tensor([0.70711, 0.0, -0.70711, 0.0], device=dev, dtype=dtype)
-            .unsqueeze(0)
-            .expand(N, 4)
+            torch.tensor([0.70711, 0.0, -0.70711, 0.0], device=dev, dtype=dtype).unsqueeze(0).expand(N, 4)
         )  # (N, 4)
         # quat_mul(parent, child): true sensor orientation ⊗ q_fixed → arrow along sensor +z.
         arrow_quat = quat_mul(sensor_quat, q_fixed)
@@ -263,10 +257,6 @@ class Go2ParkourLidarEnv(Go2ParkourEnv):
             valid = hits[finite_mask]
             mn = valid.min(dim=0).values
             mx = valid.max(dim=0).values
-            print(
-                f"[Mid360]   x[{mn[0]:.3f},{mx[0]:.3f}] "
-                f"y[{mn[1]:.3f},{mx[1]:.3f}] "
-                f"z[{mn[2]:.3f},{mx[2]:.3f}]"
-            )
+            print(f"[Mid360]   x[{mn[0]:.3f},{mx[0]:.3f}] y[{mn[1]:.3f},{mx[1]:.3f}] z[{mn[2]:.3f},{mx[2]:.3f}]")
         else:
             print("[Mid360]   (no finite hits — check tilt_deg and mesh_prim_paths)")

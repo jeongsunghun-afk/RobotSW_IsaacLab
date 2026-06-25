@@ -156,6 +156,19 @@ class Go2RecoveryEnv(DirectRLEnv):
         # potential-based shaping: Δcos_dist 계산에 사용 (초기화: _reset_idx)
         self._prev_cos_dist = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
+        # ── sitting 목표 자세 텐서 (Genesis 원본값, __init__에서 1회 구성) ────────
+        # Genesis default_sitting_joint_angles: hip FL/RL=+0.1, FR/RR=-0.1 (=IsaacLab default),
+        #   thigh all=1.57 rad, calf all=-2.67 rad.
+        # 이름 기반 인덱싱 — self._thigh_joint_ids / self._calf_joint_ids 재사용.
+        # 상수 텐서이므로 _reset_idx 재초기화 불필요.
+        self._sitting_joint_pos = self._robot.data.default_joint_pos[0].clone()  # (num_joints,)
+        self._sitting_joint_pos[self._thigh_joint_ids] = 1.57  # Genesis sitting thigh
+        self._sitting_joint_pos[self._calf_joint_ids] = -2.67  # Genesis sitting calf
+        # Note: hip stays at default (FL/RL=+0.1, FR/RR=-0.1) — matches Genesis exactly.
+        # Note: calf -2.67 is near Go2 hard lower limit (~-2.72); soft-limit clamp in
+        #   _reset_sitting may raise it slightly. That value is still within hard limits
+        #   so pose is physically valid.
+
         # ── contact sensor body indices ───────────────────────────────────────
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
@@ -296,39 +309,41 @@ class Go2RecoveryEnv(DirectRLEnv):
         #   r_roll=1.0 구간: 2.0×1.0×2.0×0.02 = 0.080/step → success_bonus(+5×0.02=0.10)와 균형
         # r_roll_progress는 별도 항으로 rewards dict에 추가됨 (step_dt 1회 적용 보장)
         reward_reset = (
-            self.cfg.roll_reward_weight * r_roll
-            + self.cfg.stand_reward_weight * r_stand
+            self.cfg.roll_reward_weight * r_roll + self.cfg.stand_reward_weight * r_stand
         ) * self.cfg.reward_reset_scale
 
         # ── smoothness / regularization penalties ─────────────────────────────
         # 1차 action 변화율 (raw action 기반)
-        action_rate_l2 = torch.sum(
-            torch.square(self._actions - self._previous_actions), dim=1
-        ) * self.cfg.action_rate_l2_scale
+        action_rate_l2 = (
+            torch.sum(torch.square(self._actions - self._previous_actions), dim=1) * self.cfg.action_rate_l2_scale
+        )
 
         # joint_pos_target 1차 차분 (target 기반 smoothness)
         # 참조(legged_env_recovery.py:1284-1288): sum((target_t - target_{t-1})²)
         # last_actions != 0 마스크: 첫 step(이전 target이 zeros)에서의 허위 penalty 제거
         first_step_mask = (self._previous_actions != 0).float()  # (num_envs, num_actions)
-        action_smoothness_1 = torch.sum(
-            torch.square(self._processed_actions - self._last_joint_pos_target) * first_step_mask,
-            dim=1,
-        ) * self.cfg.action_smoothness_1_scale
+        action_smoothness_1 = (
+            torch.sum(
+                torch.square(self._processed_actions - self._last_joint_pos_target) * first_step_mask,
+                dim=1,
+            )
+            * self.cfg.action_smoothness_1_scale
+        )
 
         # 2차 action 변화율
-        action_smoothness_2 = torch.sum(
-            torch.square(
-                self._actions - 2.0 * self._previous_actions + self._last_last_actions
-            ),
-            dim=1,
-        ) * self.cfg.action_smoothness_2_scale
+        action_smoothness_2 = (
+            torch.sum(
+                torch.square(self._actions - 2.0 * self._previous_actions + self._last_last_actions),
+                dim=1,
+            )
+            * self.cfg.action_smoothness_2_scale
+        )
 
         # applied torque 변화율 제곱합
         # 참조(legged_env_recovery.py:1154-1155): sum((torque_t - torque_{t-1})²)
         current_torque = self._robot.data.applied_torque  # (num_envs, 12)
         delta_torques = (
-            torch.sum(torch.square(current_torque - self._last_torque), dim=1)
-            * self.cfg.delta_torques_scale
+            torch.sum(torch.square(current_torque - self._last_torque), dim=1) * self.cfg.delta_torques_scale
         )
 
         # joint 가속도 (Δjoint_vel / dt)²
@@ -340,17 +355,14 @@ class Go2RecoveryEnv(DirectRLEnv):
         dof_vel_l2 = torch.sum(torch.square(joint_vel), dim=1) * self.cfg.dof_vel_l2_scale
 
         # applied torque 제곱합
-        dof_torques_l2 = (
-            torch.sum(torch.square(current_torque), dim=1)
-            * self.cfg.dof_torques_l2_scale
-        )
+        dof_torques_l2 = torch.sum(torch.square(current_torque), dim=1) * self.cfg.dof_torques_l2_scale
 
         # joint position soft limit 위반 패널티
         joint_pos = self._robot.data.joint_pos  # (num_envs, 12)
         soft_lower = self._robot.data.soft_joint_pos_limits[:, :, 0]
         soft_upper = self._robot.data.soft_joint_pos_limits[:, :, 1]
         out_of_limits = (-(joint_pos - soft_lower)).clamp(min=0.0)  # lower 위반
-        out_of_limits += (joint_pos - soft_upper).clamp(min=0.0)    # upper 위반
+        out_of_limits += (joint_pos - soft_upper).clamp(min=0.0)  # upper 위반
         dof_pos_limits = torch.sum(out_of_limits, dim=1) * self.cfg.dof_pos_limits_scale
 
         # ── buffer 갱신: 다음 step 계산에 사용할 이전 값 저장 ─────────────────
@@ -366,9 +378,9 @@ class Go2RecoveryEnv(DirectRLEnv):
             "reward_reset": reward_reset,
             "r_roll_progress": r_roll_progress,  # progress shaping (별도 항, step_dt 1회 곱)
             "action_rate_l2": action_rate_l2,
-            "action_smoothness_1": action_smoothness_1,   # target 기반 1차 차분 (참조 추가)
+            "action_smoothness_1": action_smoothness_1,  # target 기반 1차 차분 (참조 추가)
             "action_smoothness_2": action_smoothness_2,
-            "delta_torques": delta_torques,               # torque 변화율 (참조 추가)
+            "delta_torques": delta_torques,  # torque 변화율 (참조 추가)
             "dof_acc_l2": dof_acc_l2,
             "dof_vel_l2": dof_vel_l2,
             "dof_torques_l2": dof_torques_l2,
@@ -394,17 +406,22 @@ class Go2RecoveryEnv(DirectRLEnv):
         return reward
 
     def _calc_r_stand(self) -> torch.Tensor:
-        """r_stand = 0.2·r_height + 0.6·r_pose + 0.2·r_vel.
+        """r_stand = 0.2·r_height + 1.0·r_pose + 0.2·r_vel.
 
-        참조(Genesis legged_env_recovery.py:1273) 원복:
-          pose_exp_scale=0.6, stand_height/pose/vel_weight=0.2/0.6/0.2
+        참조(Genesis legged_env_recovery.py:1273) 기반, pose 실효가중 상향:
+          stand_height_weight=0.2, stand_pose_weight=1.0, stand_vel_weight=0.2
+          (합=1.4, 재정규화 없음 — 실효계수 0.5×1.0=0.5로 0.3에서 상향이 목적)
 
+        r_height 양방향 대칭: |h_root - target| 기반 → target 초과도 페널티.
         cos_dist 임계값 필터링은 호출자(_get_rewards)에서 수행.
         """
-        # r_height: 현재 높이와 목표 높이(0.27m) 편차
+        # r_height: target_height 기준 양방향 대칭 페널티
+        # 이전: clamp(tar_h - root_h, 0, tar_h) → h_root >= target이면 saturate(=1 만점)
+        # 변경: abs(h_root - target) → 위/아래 모두 target에서 멀어지면 감소
+        # target에서 정확히 r_height=1, 위아래 target_height 벗어날수록 0 방향으로 감소
         tar_h = self.cfg.target_height
         root_h = self._robot.data.root_link_pos_w[:, 2]
-        h_err = ((tar_h - root_h) / tar_h).clamp(0.0, 1.0)
+        h_err = ((root_h - tar_h).abs() / tar_h).clamp(0.0, 1.0)
         r_height = 1.0 - h_err
 
         # r_pose: default joint pos와의 가중 편차 (exp 형태)
@@ -539,9 +556,7 @@ class Go2RecoveryEnv(DirectRLEnv):
         # fallen-only success율: 직전 에피소드에서 fallen으로 시작한 env만 집계
         fallen_success_ids = ids[prev_fallen_mask]
         if len(fallen_success_ids) > 0:
-            extras["Episode/success_rate_fallen"] = (
-                self._current_success[fallen_success_ids].float().mean().item()
-            )
+            extras["Episode/success_rate_fallen"] = self._current_success[fallen_success_ids].float().mean().item()
         else:
             extras["Episode/success_rate_fallen"] = 0.0
 
@@ -557,8 +572,8 @@ class Go2RecoveryEnv(DirectRLEnv):
         self._previous_actions[ids] = 0.0
         self._last_last_actions[ids] = 0.0
         self._previous_joint_vel[ids] = 0.0
-        self._last_joint_pos_target[ids] = 0.0   # action_smoothness_1용 (불변규칙: 신규 buffer → reset 초기화)
-        self._last_torque[ids] = 0.0             # delta_torques용 (불변규칙)
+        self._last_joint_pos_target[ids] = 0.0  # action_smoothness_1용 (불변규칙: 신규 buffer → reset 초기화)
+        self._last_torque[ids] = 0.0  # delta_torques용 (불변규칙)
         self._success_counter[ids] = 0
         # _started_fallen: 이 reset에서는 아직 그룹 분류 전이므로 False로 초기화.
         # 실제 값은 _reset_fallen/_reset_standing/_reset_sitting 호출 직후 설정.
@@ -568,9 +583,7 @@ class Go2RecoveryEnv(DirectRLEnv):
 
         # settle phase 버퍼 초기화 (불변규칙: 신규 버퍼는 _reset_idx에서 반드시 초기화)
         if self.cfg.settle_max_steps > 0:
-            self._settle_steps[ids] = torch.randint(
-                0, self.cfg.settle_max_steps + 1, (len(ids),), device=self.device
-            )
+            self._settle_steps[ids] = torch.randint(0, self.cfg.settle_max_steps + 1, (len(ids),), device=self.device)
         else:
             self._settle_steps[ids] = 0
         self._settle_counter[ids] = 0
@@ -588,6 +601,15 @@ class Go2RecoveryEnv(DirectRLEnv):
         standing_ids = ids[perm[:n_standing]]
         sitting_ids = ids[perm[n_standing : n_standing + n_sitting]]
         fallen_ids = ids[perm[n_standing + n_sitting :]]
+
+        # settle은 fallen 그룹에만 적용 — standing/sitting은 이미 지면 근처에서 시작하므로
+        # 안착 대기 불필요. Genesis(init_step=0) 기준: 어느 그룹도 settling 없음.
+        # 우리 환경은 fallen 공중낙하(0.72m) 때문에 settle이 필요하지만,
+        # standing/sitting에 settle이 걸리면 default_joint_pos로 관절이 끌려가는 버그 발생.
+        if self.cfg.settle_max_steps > 0:
+            self._settle_steps[standing_ids] = 0
+            self._settle_steps[sitting_ids] = 0
+            # fallen_ids: _reset_idx 상단의 randint에서 이미 0~settle_max_steps 부여됨
 
         # ── (1) STANDING: default pose ────────────────────────────────────────
         if len(standing_ids) > 0:
@@ -609,12 +631,8 @@ class Go2RecoveryEnv(DirectRLEnv):
 
         self.extras["log"] = {}
         self.extras["log"].update(extras)
-        self.extras["log"]["Episode_Termination/base_fall"] = torch.count_nonzero(
-            self.reset_terminated[ids]
-        ).item()
-        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(
-            self.reset_time_outs[ids]
-        ).item()
+        self.extras["log"]["Episode_Termination/base_fall"] = torch.count_nonzero(self.reset_terminated[ids]).item()
+        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[ids]).item()
 
     # ── fall init helpers ─────────────────────────────────────────────────────
 
@@ -633,16 +651,19 @@ class Go2RecoveryEnv(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
     def _reset_sitting(self, env_ids: torch.Tensor):
-        """Sitting pose reset (10% sitting): lower z, slightly bent joints."""
+        """Sitting pose reset (10% sitting): Genesis 원본 앉은 자세 사용.
+
+        Genesis default_sitting_joint_angles (train_recovery.py:102-117):
+          hip FL/RL=+0.1, FR/RR=-0.1 (=IsaacLab default, no change)
+          thigh all = 1.57 rad (~90° folded)
+          calf  all = -2.67 rad (deeply tucked)
+        앉은 자세이므로 hip jitter 없음 (Genesis 원본과 동일).
+        """
         n = len(env_ids)
 
-        # joints: default에서 calf를 더 굽힘 (sitting 근사)
-        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
-        # calf joints: name-based self._calf_joint_ids (순서 무관)
-        # default calf = -1.5, sitting = -2.0~-2.5 범위로 무작위
-        calf_extra = torch.rand(n, len(self._calf_joint_ids), device=self.device) * 0.5  # 0~0.5 추가 굽힘
-        joint_pos[:, self._calf_joint_ids] -= calf_extra  # calf indices (name-based)
-        # joint limits clamp (soft limit 90% 적용)
+        # Genesis sitting 자세 텐서 broadcast: (num_joints,) → (n, num_joints)
+        joint_pos = self._sitting_joint_pos.unsqueeze(0).expand(n, -1).clone()
+        # joint limits clamp (soft limit 적용 — calf -2.67은 hard limit -2.72 이내)
         joint_pos = joint_pos.clamp(
             self._robot.data.soft_joint_pos_limits[env_ids, :, 0],
             self._robot.data.soft_joint_pos_limits[env_ids, :, 1],
@@ -689,7 +710,7 @@ class Go2RecoveryEnv(DirectRLEnv):
         upper = self._robot.data.soft_joint_pos_limits[env_ids, :, 1]  # (n, 12)
         default_pos = self._robot.data.default_joint_pos[env_ids]  # (n, 12)
         # alpha=0 → default, alpha=1 → limit (방향은 랜덤 부호)
-        sign = (torch.randint(0, 2, (n, 12), device=self.device).float() * 2.0 - 1.0)
+        sign = torch.randint(0, 2, (n, 12), device=self.device).float() * 2.0 - 1.0
         limit_target = torch.where(sign > 0, upper, lower)
         joint_pos = default_pos + alpha * (limit_target - default_pos)
         joint_pos = joint_pos.clamp(lower, upper)

@@ -213,3 +213,23 @@ class Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg(Go2ParkourImitationSy
     def __post_init__(self):
         super().__post_init__()
         self.experiment_name = "parkour_imitation_go2_symmetry_random_goal"
+
+
+@configclass
+class Go2ParkourImitationSymmetryRandomGoalLidarPPOAMPRunnerCfg(Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg):
+    """Go2 ParkourImitation + symmetry + random-goal + Mid-360 LiDAR side-channel.
+
+    Inherits ``Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg`` in full:
+    - PPO + AMP discriminator (BCE loss, WGAN disabled)
+    - L/R mirror data-augmentation (``symmetry_cfg``, ``num_aug=2``)
+    - AMP obs 49-dim/frame × 10 history = 490-dim (unchanged)
+    - 360° random-goal curriculum
+
+    Only ``experiment_name`` is changed so logs are separated from the base
+    random-goal run.  The LiDAR data appears only in ``extras["lidar_range"]``
+    and has no effect on the policy/critic/discriminator network shapes.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_random_goal_lidar"

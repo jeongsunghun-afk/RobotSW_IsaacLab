@@ -153,9 +153,9 @@ upstream Isaac Lab 설치 방법은 **[공식 문서](https://isaac-sim.github.i
 
 이 저장소는 **[NVIDIA Isaac Lab](https://github.com/isaac-sim/IsaacLab)** 을 기반으로 합니다.
 
-> Isaac Lab framework is released under [BSD-3 License](LICENSE).  
-> The `isaaclab_mimic` extension is released under [Apache 2.0](LICENSE-mimic).  
-> Isaac Lab requires Isaac Sim, which includes components under proprietary licensing terms.  
+> Isaac Lab framework is released under [BSD-3 License](LICENSE).
+> The `isaaclab_mimic` extension is released under [Apache 2.0](LICENSE-mimic).
+> Isaac Lab requires Isaac Sim, which includes components under proprietary licensing terms.
 > See [`docs/licenses/`](docs/licenses/) for full dependency license information.
 
 원본 프로젝트의 상세 문서, 튜토리얼, API 레퍼런스:

@@ -76,7 +76,6 @@ class ParkourLidarEnvCfg(ParkourEnvCfg):
             # Mid-360이 Go2 머리에서 전방으로 뻗은 브래킷(boom) 위에 장착 → 몸통보다 ~14 cm 앞이 맞음.
             # (docstring 유도값 0.1336은 boom 없는 head-mount 가정이라 실물과 다름.)
             pos=(0.333644, -0.000485, 0.050079),
-            
             # SLAM_local_window mount_transform.py: MOUNT_ROT_WXYZ
             # = (0.0, cos(15°), 0.0, sin(15°)) ≈ (0, 0.96593, 0, 0.25882)
             # dome-down 180° flip ⊗ pitch-up 30° (w=0 → flip 포함).
@@ -85,9 +84,9 @@ class ParkourLidarEnvCfg(ParkourEnvCfg):
         ),
         pattern_cfg=LivoxPatternCfg(
             sensor_type="mid360",
-            samples=24000,           # SLAM publisher 기본=20000; 기존값 24000 유지 (사용자 결정 대기)
-            use_simple_grid=False,   # SLAM과 동일 (LivoxPatternCfg 기본값도 False — 명시만)
-            downsample=1,            # SLAM과 동일 (LivoxPatternCfg 기본값도 1 — 명시만)
+            samples=24000,  # SLAM publisher 기본=20000; 기존값 24000 유지 (사용자 결정 대기)
+            use_simple_grid=False,  # SLAM과 동일 (LivoxPatternCfg 기본값도 False — 명시만)
+            downsample=1,  # SLAM과 동일 (LivoxPatternCfg 기본값도 1 — 명시만)
         ),
         ray_alignment="base",
         mesh_prim_paths=["/World/ground"],
@@ -112,8 +111,8 @@ class ParkourLidarEnvCfg(ParkourEnvCfg):
         # OmniPerception noise DR: ~10% point masking for sim-to-real robustness.
         # → pixel_dropout_prob = 0.10  (10% of rays return max_distance)
         enable_sensor_noise=True,
-        random_distance_noise=0.02,    # σ=2 cm — Mid-360 range accuracy (1σ, absolute m)
-        pixel_dropout_prob=0.10,       # 10% ray dropout — OmniPerception DR baseline
-        random_angle_noise=0.0,        # declared but not implemented; 0 = no silent effect
+        random_distance_noise=0.02,  # σ=2 cm — Mid-360 range accuracy (1σ, absolute m)
+        pixel_dropout_prob=0.10,  # 10% ray dropout — OmniPerception DR baseline
+        random_angle_noise=0.0,  # declared but not implemented; 0 = no silent effect
         pixel_std_dev_multiplier=0.0,  # declared but not implemented; 0 = no silent effect
     )

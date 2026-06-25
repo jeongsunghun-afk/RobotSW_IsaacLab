@@ -57,7 +57,7 @@ NUM_PLAYGROUND_GOALS: int = 8
 
 def parkour_playground_scatter_terrain(
     difficulty: float,
-    cfg: "ParkourPlaygroundScatterTerrainCfg",
+    cfg: ParkourPlaygroundScatterTerrainCfg,
 ) -> tuple[list[trimesh.Trimesh], np.ndarray]:
     """Generate a playground scatter terrain with 5 obstacle types on a single wide flat field.
 

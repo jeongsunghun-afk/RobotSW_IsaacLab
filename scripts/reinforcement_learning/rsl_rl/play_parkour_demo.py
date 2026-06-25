@@ -78,10 +78,7 @@ parser.add_argument(
     "--record_levels",
     type=str,
     default=None,
-    help=(
-        "Comma-separated difficulty levels (0-10) to record, e.g. '0,5,10'. "
-        "Default: 0 through 10 (all 11)."
-    ),
+    help=("Comma-separated difficulty levels (0-10) to record, e.g. '0,5,10'. Default: 0 through 10 (all 11)."),
 )
 parser.add_argument(
     "--max_frames",
@@ -145,6 +142,7 @@ import torch
 from rsl_rl.runners.on_policy_runner_parkour_amp import OnPolicyRunnerParkourAMP
 
 from isaaclab.utils.assets import retrieve_file_path
+
 from isaaclab_rl.rsl_rl import (
     RslRlVecEnvWrapper,
     export_policy_as_jit_parkour,
@@ -162,9 +160,7 @@ _NAME_TO_ID: dict[str, int] = {name: i for i, name in enumerate(_ALL_CLASS_NAMES
 _ALL_LEVELS: list[int] = list(range(11))  # 0..10
 
 
-def _parse_record_subset(
-    class_arg: str | None, level_arg: str | None
-) -> tuple[list[int], list[int]]:
+def _parse_record_subset(class_arg: str | None, level_arg: str | None) -> tuple[list[int], list[int]]:
     """Parse --record_classes / --record_levels and return (class_ids, levels).
 
     Raises ValueError on any invalid name or level.
@@ -177,8 +173,7 @@ def _parse_record_subset(
             name = part.strip()
             if name not in _NAME_TO_ID:
                 raise ValueError(
-                    f"--record_classes: unknown terrain name '{name}'. "
-                    f"Valid names: {', '.join(_ALL_CLASS_NAMES)}."
+                    f"--record_classes: unknown terrain name '{name}'. Valid names: {', '.join(_ALL_CLASS_NAMES)}."
                 )
             class_ids.append(_NAME_TO_ID[name])
         if not class_ids:
@@ -192,13 +187,9 @@ def _parse_record_subset(
             try:
                 lvl = int(part.strip())
             except ValueError:
-                raise ValueError(
-                    f"--record_levels: '{part.strip()}' is not an integer."
-                ) from None
+                raise ValueError(f"--record_levels: '{part.strip()}' is not an integer.") from None
             if lvl < 0 or lvl > 10:
-                raise ValueError(
-                    f"--record_levels: level {lvl} is out of range [0, 10]."
-                )
+                raise ValueError(f"--record_levels: level {lvl} is out of range [0, 10].")
             levels.append(lvl)
         if not levels:
             raise ValueError("--record_levels: empty list after parsing.")
@@ -256,6 +247,7 @@ def _goal_reached(env_unwrapped) -> bool:
 # Recording sweep (headless, test terrain only — OQ2)
 # ---------------------------------------------------------------------------
 
+
 def _run_recording_sweep(
     env,
     policy,
@@ -275,11 +267,14 @@ def _run_recording_sweep(
     """
     try:
         import imageio  # type: ignore[import]
+
         _has_imageio = True
     except ImportError:
         _has_imageio = False
-        print("[recording] WARNING: imageio not available — mp4 output disabled. "
-              "Install with: pip install imageio[ffmpeg]")
+        print(
+            "[recording] WARNING: imageio not available — mp4 output disabled. "
+            "Install with: pip install imageio[ffmpeg]"
+        )
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -289,8 +284,10 @@ def _run_recording_sweep(
     # 확인 필요: attribute name 'follow_camera' must match cfg field name in parkour_demo_env_cfg.py.
     follow_cam = getattr(env_unwrapped, "follow_camera", None)
     if follow_cam is None:
-        print("[recording] WARNING: env.follow_camera sensor not found. "
-              "Frames will be black/skipped. Check parkour_demo_env_cfg.py CameraCfg field name.")
+        print(
+            "[recording] WARNING: env.follow_camera sensor not found. "
+            "Frames will be black/skipped. Check parkour_demo_env_cfg.py CameraCfg field name."
+        )
 
     total_clips = len(class_ids) * len(levels)
     clip_num = 0
@@ -317,24 +314,20 @@ def _run_recording_sweep(
                 # Uses root_pos_w [N,3] and heading_w [N,] (world-frame yaw) from ArticulationData.
                 if follow_cam is not None:
                     try:
-                        root = env_unwrapped._robot.data.root_pos_w[0]          # (3,)
-                        yaw = float(env_unwrapped._robot.data.heading_w[0])     # world yaw rad
+                        root = env_unwrapped._robot.data.root_pos_w[0]  # (3,)
+                        yaw = float(env_unwrapped._robot.data.heading_w[0])  # world yaw rad
                         if cam_view == "side":
                             # 로봇 왼쪽 측면에서 바라봄 (heading에 수직), 보행 프로파일 잘 보임
                             # side 방향 벡터: (-sin yaw, +cos yaw) — heading 왼쪽 수직
                             side, up_s = 2.2, 0.7
                             eye = torch.tensor(
-                                [[root[0] - side * math.sin(yaw),
-                                  root[1] + side * math.cos(yaw),
-                                  root[2] + up_s]],
+                                [[root[0] - side * math.sin(yaw), root[1] + side * math.cos(yaw), root[2] + up_s]],
                                 device=root.device,
                             )
                         else:  # rear (기존)
                             back, up = 2.5, 1.5
                             eye = torch.tensor(
-                                [[root[0] - back * math.cos(yaw),
-                                  root[1] - back * math.sin(yaw),
-                                  root[2] + up]],
+                                [[root[0] - back * math.cos(yaw), root[1] - back * math.sin(yaw), root[2] + up]],
                                 device=root.device,
                             )
                         target = torch.tensor(
@@ -408,14 +401,13 @@ def _run_recording_sweep(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     """Demo entry point."""
     # ---- Validate recording subset args early (AC-V2: invalid → error, not silent skip) ----
     if args_cli.record:
         try:
-            rec_class_ids, rec_levels = _parse_record_subset(
-                args_cli.record_classes, args_cli.record_levels
-            )
+            rec_class_ids, rec_levels = _parse_record_subset(args_cli.record_classes, args_cli.record_levels)
         except ValueError as exc:
             print(f"[ERROR] {exc}")
             simulation_app.close()
@@ -512,16 +504,21 @@ def main() -> None:
     export_dir = os.path.join(os.path.dirname(checkpoint_path), "exported")
     estimator = getattr(runner.alg, "estimator", None)
     try:
-        normalizer = (
-            getattr(policy_nn, "actor_obs_normalizer", None)
-            or getattr(policy_nn, "student_obs_normalizer", None)
+        normalizer = getattr(policy_nn, "actor_obs_normalizer", None) or getattr(
+            policy_nn, "student_obs_normalizer", None
         )
         export_policy_as_jit_parkour(
-            policy_nn, normalizer=normalizer, path=export_dir, filename="policy.pt",
+            policy_nn,
+            normalizer=normalizer,
+            path=export_dir,
+            filename="policy.pt",
             estimator=estimator,
         )
         export_policy_as_onnx_parkour(
-            policy_nn, path=export_dir, normalizer=normalizer, filename="policy.onnx",
+            policy_nn,
+            path=export_dir,
+            normalizer=normalizer,
+            filename="policy.onnx",
             estimator=estimator,
         )
     except Exception as exc:

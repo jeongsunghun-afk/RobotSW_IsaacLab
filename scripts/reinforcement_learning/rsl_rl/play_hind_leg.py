@@ -27,9 +27,7 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Play a trained RSL-RL HindLeg checkpoint and plot joint data.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video of the rollout.")
 parser.add_argument("--video_length", type=int, default=400, help="Length of the recorded video (in steps).")
-parser.add_argument(
-    "--steps", type=int, default=500, help="Number of inference steps to run / collect for plotting."
-)
+parser.add_argument("--steps", type=int, default=500, help="Number of inference steps to run / collect for plotting.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )

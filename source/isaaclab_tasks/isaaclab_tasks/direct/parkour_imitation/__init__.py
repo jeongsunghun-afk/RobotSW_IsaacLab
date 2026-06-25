@@ -49,6 +49,16 @@ gym.register(
 )
 
 gym.register(
+    id="Go2-ParkourImitation-Symmetry-RandomGoal-Lidar-v0",
+    entry_point=f"{__name__}.parkour_imitation_random_goal_lidar_env:Go2ParkourImitationRandomGoalLidarEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.parkour_imitation_random_goal_lidar_env_cfg:ParkourImitationRandomGoalLidarEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_amp_cfg:Go2ParkourImitationSymmetryRandomGoalLidarPPOAMPRunnerCfg",
+    },
+)
+
+gym.register(
     id="Go2-ParkourImitation-TerrainStyle-v0",
     entry_point=f"{__name__}.parkour_imitation_terrain_style_env:ParkourImitationTerrainStyleEnv",
     disable_env_checker=True,

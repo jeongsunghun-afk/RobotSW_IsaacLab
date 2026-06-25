@@ -261,8 +261,10 @@ class Go2ParkourDemoEnv(Go2ParkourImitationEnv):
 
         # class → column (R9 mitigation: use precomputed LUT, not type_delta cycling)
         if class_id not in self._class_to_col:
-            print(f"[demo] set_demo_tile: class_id={class_id} not found in LUT. "
-                  f"Available classes: {sorted(self._class_to_col.keys())}. Skipping.")
+            print(
+                f"[demo] set_demo_tile: class_id={class_id} not found in LUT. "
+                f"Available classes: {sorted(self._class_to_col.keys())}. Skipping."
+            )
             return
         new_col = self._class_to_col[class_id]
 
@@ -292,6 +294,7 @@ class Go2ParkourDemoEnv(Go2ParkourImitationEnv):
             TERRAIN_CLASS_STAIR,
             TERRAIN_CLASS_STEP,
         )
+
         _names = {
             TERRAIN_CLASS_FLAT: "flat",
             TERRAIN_CLASS_HURDLE: "hurdle",
@@ -300,5 +303,7 @@ class Go2ParkourDemoEnv(Go2ParkourImitationEnv):
             TERRAIN_CLASS_STAIR: "stair",
         }
         terrain_name = _names.get(class_id, f"class_{class_id}")
-        print(f"[demo] env {env_id} → class={class_id} ({terrain_name}), "
-              f"level={new_row}/{num_rows - 1}, col={new_col}/{num_cols - 1}")
+        print(
+            f"[demo] env {env_id} → class={class_id} ({terrain_name}), "
+            f"level={new_row}/{num_rows - 1}, col={new_col}/{num_cols - 1}"
+        )

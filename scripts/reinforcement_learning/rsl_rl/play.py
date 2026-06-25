@@ -404,7 +404,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actions = policy(obs)
             obs_history.append(obs["policy"].cpu().numpy().squeeze())
             action_history.append(actions.detach().cpu().numpy().squeeze())
-            print(env.unwrapped._robot.data.root_lin_vel_b)
+            # print(env.unwrapped._robot.data.root_lin_vel_b)
             # print('FL', actions[:, [0, 4, 8]])
             # print('RL', actions[:, [2, 6, 10]])
             # print('FR', actions[:, [1, 5, 9]])

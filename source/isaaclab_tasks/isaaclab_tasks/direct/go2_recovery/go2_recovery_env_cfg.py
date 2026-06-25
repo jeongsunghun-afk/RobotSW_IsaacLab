@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg
 from isaaclab.assets import ArticulationCfg
@@ -14,10 +15,10 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-import isaaclab.envs.mdp as mdp
+
+from isaaclab_tasks.direct._common import DebugViewerCfg
 
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
-from isaaclab_tasks.direct._common import DebugViewerCfg
 
 
 @configclass
@@ -60,7 +61,9 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
     # observation_space = 3+3+12+12+12 = 42  (cmd 없음 — 복구는 목표=default pose 고정)
     observation_space: int = 42
     state_space: int = 0
-    clip_actions: float = 100.0  # unused — 실제 clip은 action_clip 필드 사용 (env.py:179). 삭제 보류(외부 참조 가능성 회피)
+    clip_actions: float = (
+        100.0  # unused — 실제 clip은 action_clip 필드 사용 (env.py:179). 삭제 보류(외부 참조 가능성 회피)
+    )
 
     # ── fall init parameters (§5 사용자 확정: 임의 자세 전체 커버) ─────────────
     fall_height: float = 0.45  # 공중에서 낙하 시작할 z offset (m)
@@ -71,7 +74,9 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
     fall_pitch_range: float = 0.785  # ±45 deg
     fall_yaw_range: float = 3.1416  # ±180 deg
     # sitting pose 낮춤 z 오프셋
-    sit_height_offset: float = 0.10  # default 0.27 - 0.10 = 0.17m
+    sit_height_offset: float = (
+        0.13  # Genesis: base_init_pos z=0.34, sit z=0.34-0.20=0.14m → IsaacLab default 0.27-0.14=0.13m
+    )
 
     # ── obs scale (sim-to-real 대응: lin_vel 제거 → 고유감각만) ───────────────
     ang_vel_scale: float = 0.25
@@ -124,7 +129,7 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
                 saturation_effort=23.5,
                 velocity_limit=18.0,  # 30→18 rad/s (60%), Tier-0 안전
                 stiffness=25.0,
-                damping=1.0,          # 0.5→1.0 (2×), 급격 토크 억제
+                damping=1.0,  # 0.5→1.0 (2×), 급격 토크 억제
                 friction=0.0,
                 armature=0.01,
             ),
@@ -175,7 +180,11 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
     # r_stand가 활성화되는 cos_dist 임계값 (cos(0.2π) ≈ 0.809)
     stand_cos_threshold: float = 0.809
     # Go2 default base height (m) — r_height 계산 기준
-    target_height: float = 0.31
+    # 실측: default_joint_pos PD-hold 평형 0.2863~0.2864m → 0.286으로 설정
+    # 기존 0.31은 joint-forced kinematic 측정값; PD 평형(0.286)과 2.4cm 어긋나
+    # r_height(target 0.31)가 success Cond2(default 자세)와 충돌 → strict success 0% 유발
+    # bidirectional r_height 이미 적용돼 있으므로 낮춰도 sitting 문제 없음
+    target_height: float = 0.286
     # r_pose 지수 감쇠 계수 (exp(-k·weighted_pose_err))
     # 참조(Genesis legged_env_recovery.py:1267): exp(-0.6·pose_err)
     # 1.0 → 0.6(참조)보다 완만히 강화. 1.5/3.0(과도, 앉기 유발) 미만.
@@ -185,11 +194,13 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
     pose_exp_scale: float = 1.0
     # r_vel 지수 감쇠 계수 (exp(-k·vel²))
     vel_exp_scale: float = 0.02
-    # r_stand 내부 가중치 (합=1.0 불변)
-    # 참조(Genesis legged_env_recovery.py:1273): 0.2·r_height + 0.6·r_pose + 0.2·r_vel
-    # 이전 0.15/0.75/0.10은 pose 과강화로 앉기/불안정 유발 → 참조값으로 원복
+    # r_stand 내부 가중치 (합=1.4, 재정규화 없음)
+    # 기준(Genesis): 0.2·r_height + 0.6·r_pose + 0.2·r_vel (합=1.0)
+    # 변경: stand_pose_weight 0.6→1.0 — 실효계수 0.5×0.6=0.3→0.5×1.0=0.5
+    # 목적: 정착 standing이 default 자세에서 0.19 rad 벗어남 → pose gradient 강화
+    # 재정규화 금지: 합=1.0 유지 시 pose 실효 0.357로 목표치(0.5) 미달
     stand_height_weight: float = 0.2
-    stand_pose_weight: float = 0.6
+    stand_pose_weight: float = 1.0
     stand_vel_weight: float = 0.2
     # reward_reset 전체 스케일: 참조(Genesis)값 1.0
     reward_reset_scale: float = 1.0
@@ -218,9 +229,9 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
 
     # ── M2 success judgment ───────────────────────────────────────────────────
     # success 조건 판정용 임계값
-    success_cos_threshold: float = 0.809   # upright cos_dist 기준
-    success_pose_eps: float = 0.5          # weighted pose error 상한 (rad)
-    success_vel_eps: float = 2.0           # joint vel RMS 상한 (rad/s)
+    success_cos_threshold: float = 0.809  # upright cos_dist 기준
+    success_pose_eps: float = 0.5  # weighted pose error 상한 (rad)
+    success_vel_eps: float = 2.0  # joint vel RMS 상한 (rad/s)
     # 조건 연속 유지 step 수 (20 step = 0.4 s at 50 Hz policy)
     success_hold_steps: int = 20
     # success 달성 시 일회성 bonus reward

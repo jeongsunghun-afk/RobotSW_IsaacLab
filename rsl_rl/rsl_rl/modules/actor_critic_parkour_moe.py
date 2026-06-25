@@ -22,9 +22,8 @@ Binding contract (cfg worker must match these names exactly):
 
 from __future__ import annotations
 
-from typing import Any
-
 from tensordict import TensorDict
+from typing import Any
 
 from .actor_critic_moe import MoEActor
 from .actor_critic_parkour import ActorCriticRMA
@@ -93,7 +92,7 @@ class ActorCriticRMAMoE(ActorCriticRMA):
 
         # Reject state_dependent_std before super() so we never build the
         # throwaway actor with the wrong output shape and confuse the init path.
-        if kwargs.get("state_dependent_std", False):
+        if kwargs.get("state_dependent_std"):
             raise NotImplementedError(
                 "ActorCriticRMAMoE does not support state_dependent_std=True. "
                 "MoEActor returns [B, num_actions]; the state_dependent_std path in "

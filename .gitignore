@@ -82,3 +82,6 @@ progress.md
 findings.md
 *.mp4
 .omc
+*.pkl
+*.pt
+_workspace/

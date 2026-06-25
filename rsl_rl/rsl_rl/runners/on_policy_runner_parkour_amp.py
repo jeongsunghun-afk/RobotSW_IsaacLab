@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import os
 import time
-
 import torch
 
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP

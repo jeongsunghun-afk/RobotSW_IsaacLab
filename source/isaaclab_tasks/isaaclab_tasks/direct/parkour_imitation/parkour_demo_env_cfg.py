@@ -47,7 +47,6 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 # Try to import TerrainGeneratorCfg for playground terrain replacement.
 # ---------------------------------------------------------------------------
-from isaaclab.terrains import TerrainGeneratorCfg  # always present in IsaacLab
 
 
 # ---------------------------------------------------------------------------

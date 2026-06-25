@@ -1,7 +1,7 @@
 # R2S HindLeg — Real2Sim Phase 1
 
-> **⚠️ 이 환경은 강화학습(RL)이 아닙니다.**  
-> `agents/` 디렉토리가 없으며 표준 `train.py` / `play.py`로 실행할 수 없습니다.  
+> **⚠️ 이 환경은 강화학습(RL)이 아닙니다.**
+> `agents/` 디렉토리가 없으며 표준 `train.py` / `play.py`로 실행할 수 없습니다.
 > 전용 실행 스크립트(`scripts/real2sim/`)를 사용해야 합니다.
 
 ## 개요

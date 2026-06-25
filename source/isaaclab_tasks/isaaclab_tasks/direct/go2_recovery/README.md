@@ -1,6 +1,6 @@
 # Go2 Fall-Recovery (go2_recovery)
 
-Go2 사족보행 로봇이 **임의 자세로 넘어진 상태에서 일어나는 복구 동작**을 학습하는 환경.  
+Go2 사족보행 로봇이 **임의 자세로 넘어진 상태에서 일어나는 복구 동작**을 학습하는 환경.
 HumanUP 방식과 같이 선속도 없는 고유감각(proprioception) 전용 obs로 설계되어 sim-to-real 전이를 고려한다.
 
 ## 주요 특징

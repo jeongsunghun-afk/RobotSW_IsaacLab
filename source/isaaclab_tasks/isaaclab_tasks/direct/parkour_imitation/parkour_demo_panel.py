@@ -8,7 +8,8 @@
 Usage (injected by demo launcher, NOT called from env.__init__)::
 
     from parkour_demo_panel import ParkourDemoPanel
-    panel = ParkourDemoPanel(env)   # no-op in headless
+
+    panel = ParkourDemoPanel(env)  # no-op in headless
     # ... run loop ...
     panel.close()
 
@@ -41,8 +42,8 @@ import torch
 # ---------------------------------------------------------------------------
 # Virtual joystick layout constants
 # ---------------------------------------------------------------------------
-_JOY_SIZE: int = 180        # px — square pad side length
-_JOY_KNOB_R: int = 18       # px — knob radius (visual)
+_JOY_SIZE: int = 180  # px — square pad side length
+_JOY_KNOB_R: int = 18  # px — knob radius (visual)
 _JOY_CLAMP_R: float = 70.0  # px — max displacement from centre
 
 if TYPE_CHECKING:
@@ -66,7 +67,7 @@ _LEVEL_MIN: int = 0
 _LEVEL_MAX: int = 10
 
 
-def _has_gui(env: "Go2ParkourDemoEnv") -> bool:
+def _has_gui(env: Go2ParkourDemoEnv) -> bool:
     """Return True only when an interactive viewport is available.
 
     Priority:
@@ -78,6 +79,7 @@ def _has_gui(env: "Go2ParkourDemoEnv") -> bool:
     # 1. Livestream detection — app is headless but stream is rendered on a remote client.
     try:
         import carb  # noqa: PLC0415
+
         settings = carb.settings.get_settings()
         if settings.get("/app/livestream/enabled"):
             return True
@@ -108,7 +110,7 @@ class ParkourDemoPanel:
     no-op sentinel and all public methods are harmless.
     """
 
-    def __init__(self, env: "Go2ParkourDemoEnv") -> None:
+    def __init__(self, env: Go2ParkourDemoEnv) -> None:
         self._env = env
         self._window = None
         self._hud_labels: dict[str, object] = {}
@@ -116,9 +118,9 @@ class ParkourDemoPanel:
 
         # Virtual joystick state
         self._joy_dragging: bool = False
-        self._joy_base_screen_x: float = 0.0   # screen-space left edge of pad
-        self._joy_base_screen_y: float = 0.0   # screen-space top edge of pad
-        self._joy_knob_placer = None            # ui.Placer that positions the knob
+        self._joy_base_screen_x: float = 0.0  # screen-space left edge of pad
+        self._joy_base_screen_y: float = 0.0  # screen-space top edge of pad
+        self._joy_knob_placer = None  # ui.Placer that positions the knob
 
         if not _has_gui(env):
             _sim = getattr(env, "sim", None)
@@ -154,7 +156,7 @@ class ParkourDemoPanel:
         env = self._env
         ui = self._ui
 
-        def _safe_scalar(t: "torch.Tensor | None") -> float:
+        def _safe_scalar(t: torch.Tensor | None) -> float:
             if t is None:
                 return float("nan")
             try:
@@ -260,7 +262,6 @@ class ParkourDemoPanel:
 
         with self._window.frame:
             with ui.VStack(spacing=6):
-
                 # ---- Mode selector ----
                 ui.Label("Mode", height=18)
                 _init_mode_idx = 0 if getattr(env, "_demo_mode", "test") == "test" else 1
@@ -381,7 +382,7 @@ class ParkourDemoPanel:
                             knob_placer = ui.Placer(
                                 offset_x=knob_center,
                                 offset_y=knob_center,
-                                draggable=False,   # we drive position manually
+                                draggable=False,  # we drive position manually
                             )
                             with knob_placer:
                                 ui.Circle(
@@ -417,8 +418,8 @@ class ParkourDemoPanel:
                                 scale = _JOY_CLAMP_R / dist
                                 dx *= scale
                                 dy *= scale
-                            nx = dx / _JOY_CLAMP_R   # [-1, 1]  right → +1
-                            ny = dy / _JOY_CLAMP_R   # [-1, 1]  down  → +1
+                            nx = dx / _JOY_CLAMP_R  # [-1, 1]  right → +1
+                            ny = dy / _JOY_CLAMP_R  # [-1, 1]  down  → +1
 
                             # vx: forward = up = -ny (screen y down is positive)
                             forward = max(0.0, -ny)
@@ -556,6 +557,7 @@ class ParkourDemoPanel:
                 # ---- Utility buttons ----
                 with ui.CollapsableFrame("Utilities", collapsed=False):
                     with ui.VStack(spacing=4):
+
                         def _do_reset_btn():
                             self._do_reset()
 
@@ -567,8 +569,7 @@ class ParkourDemoPanel:
                 # ---- HUD ----
                 with ui.CollapsableFrame("HUD", collapsed=False):
                     with ui.VStack(spacing=2):
-                        for key in ("vx", "yaw", "class", "level",
-                                    "term_timeout", "term_fall", "term_goal"):
+                        for key in ("vx", "yaw", "class", "level", "term_timeout", "term_fall", "term_goal"):
                             lbl = ui.Label("—", height=16)
                             self._hud_labels[key] = lbl
 

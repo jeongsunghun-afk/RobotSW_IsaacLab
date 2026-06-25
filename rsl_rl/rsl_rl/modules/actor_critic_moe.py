@@ -14,12 +14,11 @@ Design:
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tensordict import TensorDict
+from typing import Any
 
 from rsl_rl.networks import MLP
 
@@ -58,9 +57,9 @@ class MoEActor(nn.Module):
         self.gating = MLP(num_obs, num_experts, gating_hidden_dims, activation)
 
         # Expert networks: each maps obs -> action_mean [B, num_actions]
-        self.experts = nn.ModuleList(
-            [MLP(num_obs, num_actions, expert_hidden_dims, activation) for _ in range(num_experts)]
-        )
+        self.experts = nn.ModuleList([
+            MLP(num_obs, num_actions, expert_hidden_dims, activation) for _ in range(num_experts)
+        ])
 
         # Monitoring buffer — plain attribute, NOT in state_dict
         self.last_gate_weights: torch.Tensor | None = None
@@ -139,7 +138,7 @@ class ActorCriticMoE(ActorCritic):
             expert_hidden_dims = [256, 256, 256]
 
         # state_dependent_std is not supported in this implementation.
-        if kwargs.get("state_dependent_std", False):
+        if kwargs.get("state_dependent_std"):
             raise NotImplementedError(
                 "ActorCriticMoE does not support state_dependent_std=True in this implementation. "
                 "Use state_dependent_std=False (default) or implement per-expert std init separately."
@@ -174,8 +173,10 @@ class ActorCriticMoE(ActorCritic):
             activation=activation,
             gating_temperature=gating_temperature,
         )
-        print(f"MoEActor: {num_experts} experts, gating_hidden={gating_hidden_dims}, "
-              f"expert_hidden={expert_hidden_dims}, temperature={gating_temperature}")
+        print(
+            f"MoEActor: {num_experts} experts, gating_hidden={gating_hidden_dims}, "
+            f"expert_hidden={expert_hidden_dims}, temperature={gating_temperature}"
+        )
 
     # No method overrides — all of act / act_inference / _update_distribution /
     # evaluate / get_actions_log_prob / action_mean / action_std / entropy /

@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 asset_path: /home/lgb/MimicKit/data/assets/go2/go2.xml
 usd_dir: /home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Go2_4.5
 usd_file_name: go2.usd
