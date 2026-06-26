@@ -44,10 +44,17 @@ __all__ = ["compute_parkour_symmetric_states"]
 #   [42:46] contact_filt - 0.5    (per-foot)
 _PROPRIO_DIM = 46
 _SCAN_DIM = 187
+_SCAN_DIM_3D = 294  # clearance_3d: 21 az × 14 el = 294
 _PRIV_LATENT_DIM = 33
 # scan grid: ordering "xy", size (1.6, 1.0) -> (y=11, x=17). Lateral axis = dim 1 (size 11).
 _SCAN_LAT = 11
 _SCAN_LON = 17
+# clearance_3d grid: az-outer/el-inner, 21 az × 14 el.
+# Azimuth spans [-100, +100]° symmetrically about forward (idx 10 = 0°).
+# L/R mirror = reverse az index: mirror_idx = (20 - az_idx) * 14 + el_idx.
+# Values are distances (no sign flip needed — only permutation).
+_CLEAR_AZ = 21
+_CLEAR_EL = 14
 
 
 def _flip_side(prefix: str) -> str:
@@ -170,9 +177,62 @@ def _mirror_proprio(
     return m
 
 
+def _build_clearance_mirror_perm(num_azimuth: int, num_elevation: int, device: torch.device) -> torch.Tensor:
+    """Build the L/R az-reversal permutation for the clearance_3d scan layout.
+
+    Layout: az-outer / el-inner → flat index = az_idx * num_elevation + el_idx.
+    Mirror: reverse az index (left↔right), keep el unchanged.
+    Values are distances (positive scalars) — no sign flip required.
+
+    Returns:
+        perm: (num_azimuth * num_elevation,) LongTensor such that perm[i] gives the
+              source index for destination i in the mirrored output.
+    """
+    perm = torch.zeros(num_azimuth * num_elevation, dtype=torch.long, device=device)
+    for az_idx in range(num_azimuth):
+        mirror_az = (num_azimuth - 1 - az_idx)
+        for el_idx in range(num_elevation):
+            src = mirror_az * num_elevation + el_idx
+            dst = az_idx * num_elevation + el_idx
+            perm[dst] = src
+    return perm
+
+
+# Module-level cache for the clearance perm (built once on first use, device-agnostic key).
+_clearance_perm_cache: dict[str, torch.Tensor] = {}
+
+
 def _mirror_scan(scan: torch.Tensor) -> torch.Tensor:
-    """Flip the height-scan grid along the lateral (y) axis."""
-    return scan.view(-1, _SCAN_LAT, _SCAN_LON).flip(dims=[1]).reshape(-1, _SCAN_DIM)
+    """Mirror scan observations along the left/right axis.
+
+    Dispatches based on the last dimension:
+    - 187: height-scan 2D grid (11 lat × 17 lon), flip lateral dim.
+    - 294: clearance_3d (21 az × 14 el), az-reversal permutation.
+
+    Args:
+        scan: (..., D) tensor where D is 187 or 294.
+
+    Returns:
+        Mirrored scan tensor with the same shape.
+    """
+    dim = scan.shape[-1]
+    if dim == _SCAN_DIM:
+        # 2D height-scan: flip lateral (y) axis.
+        return scan.view(-1, _SCAN_LAT, _SCAN_LON).flip(dims=[1]).reshape(-1, _SCAN_DIM)
+    elif dim == _SCAN_DIM_3D:
+        # Clearance 3D: az-reversal permutation (L/R flip, values are distances — no sign change).
+        device_key = str(scan.device)
+        if device_key not in _clearance_perm_cache:
+            _clearance_perm_cache[device_key] = _build_clearance_mirror_perm(
+                _CLEAR_AZ, _CLEAR_EL, scan.device
+            )
+        perm = _clearance_perm_cache[device_key]
+        return scan[..., perm]
+    else:
+        raise ValueError(
+            f"[parkour symmetry] _mirror_scan: unsupported scan dim {dim}. "
+            f"Expected {_SCAN_DIM} (height_scan) or {_SCAN_DIM_3D} (clearance_3d)."
+        )
 
 
 def _mirror_priv_explicit(pe: torch.Tensor) -> torch.Tensor:
@@ -231,8 +291,12 @@ def compute_parkour_symmetric_states(*, env, obs: TensorDict | None = None, acti
                 f"[parkour symmetry] policy dim {obs['policy'].shape[-1]} != {_PROPRIO_DIM}; "
                 "proprio index map is stale."
             )
-        if obs["scan"].shape[-1] != _SCAN_DIM:
-            raise AssertionError(f"[parkour symmetry] scan dim {obs['scan'].shape[-1]} != {_SCAN_DIM}.")
+        if obs["scan"].shape[-1] not in (_SCAN_DIM, _SCAN_DIM_3D):
+            raise AssertionError(
+                f"[parkour symmetry] scan dim {obs['scan'].shape[-1]} not in "
+                f"({_SCAN_DIM}, {_SCAN_DIM_3D}). "
+                "Add new dimension or check env scan output."
+            )
         if obs["priv_latent"].shape[-1] != _PRIV_LATENT_DIM:
             raise AssertionError(
                 f"[parkour symmetry] priv_latent dim {obs['priv_latent'].shape[-1]} != {_PRIV_LATENT_DIM}; "

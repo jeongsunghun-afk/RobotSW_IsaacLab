@@ -26,6 +26,20 @@ gym.register(
 )
 
 gym.register(
+    id="Go2-Parkour-CrawlTest-v0",
+    entry_point="isaaclab_tasks.direct.parkour.parkour_env:Go2ParkourEnv",
+    kwargs={
+        "env_cfg_entry_point": (
+            "isaaclab_tasks.direct.parkour.parkour_env_cfg:ParkourCrawlTestEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            "isaaclab_tasks.direct.parkour.agents.rsl_rl_ppo_cfg:Go2ParkourPPORunnerCfg"
+        ),
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
     id="Go2-Parkour-Direct-SPO",
     entry_point=f"{__name__}.parkour_env:Go2ParkourEnv",
     disable_env_checker=True,

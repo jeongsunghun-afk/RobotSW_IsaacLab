@@ -216,6 +216,33 @@ class Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg(Go2ParkourImitationSy
 
 
 @configclass
+class Go2ParkourImitationSymmetryRandomGoalTeacher3DPPOAMPRunnerCfg(
+    Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg
+):
+    """Go2 ParkourImitation + symmetry + random-goal + Teacher 3D clearance scan (294-dim).
+
+    Inherits ``Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg`` in full:
+    - PPO + AMP discriminator (BCE loss)
+    - L/R mirror data-augmentation (symmetry_cfg, num_aug=2)
+    - AMP obs 49-dim/frame × 10 history = 490-dim (unchanged; scan group is separate from amp_obs)
+    - 360° random-goal curriculum (±60° forward cone)
+
+    scan obs group changes 187 → 294 (clearance_3d).
+    scandot_encoder input is read from runtime obs shape (ActorCriticRMA line 121),
+    so no architecture override is needed — encoder adapts automatically.
+
+    critic total: policy(46) + scan(294) + priv_explicit(6) + priv_latent(33) = 379
+    (vs. baseline 272; wider scan feeds a larger critic — acceptable for teacher training).
+
+    Only experiment_name and (obs_groups comment) differ from parent.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_teacher3d"
+
+
+@configclass
 class Go2ParkourImitationSymmetryRandomGoalLidarPPOAMPRunnerCfg(Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg):
     """Go2 ParkourImitation + symmetry + random-goal + Mid-360 LiDAR side-channel.
 

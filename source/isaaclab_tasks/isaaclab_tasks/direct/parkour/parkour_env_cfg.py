@@ -404,6 +404,24 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     debug_vis_edge_mask: bool = False  # if True, visualize edge mask cells around env 0 as green spheres (default OFF for training perf; play.py forces True)
     debug_vis_edge_mask_radius_m: float = 5.0  # radius (m) around env 0 base position to visualize
 
+    # Clearance 3D scanner (teacher privileged GT).
+    # Set True only for validation or teacher-training runs. Default OFF to avoid
+    # overhead on all parkour variants (symmetry, imitation, random-goal, lidar).
+    enable_clearance_scanner: bool = False
+
+    # Voxel occupancy GT (teacher privileged, ablation counterpart to clearance_vec).
+    # Reuses clearance scanner ray hits — enable_clearance_scanner is auto-forced True
+    # when this flag is True (guarded in parkour_env._setup_scene).
+    # Default OFF; enable alongside enable_clearance_scanner for CrawlTest or teacher runs.
+    enable_voxel_scanner: bool = False
+
+    # Teacher privileged 3D scan mode (R2).
+    # When True: the "scan" obs group returns self._clearance_vec (294-dim, normalized to [-1,1])
+    # instead of the 2D height-scan (187-dim).  Requires enable_clearance_scanner=True.
+    # Default False → all base parkour variants are unaffected (scan=187 unchanged).
+    # Normalization: (clearance_m - 2.0) / 2.0  maps [0.2, 4.0] → [-0.9, 1.0].
+    clearance_as_scan: bool = False
+
     # env
     episode_length_s: float = 20.0
     decimation: int = 4
@@ -703,3 +721,22 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # friction_range: [0.6, 2.0]
     # added_mass_range: [0.0, 5.0]
     # motor_strength_range: [0.8, 1.2]
+
+
+@configclass
+class ParkourCrawlTestEnvCfg(ParkourEnvCfg):
+    """Crawl-only env cfg for Stage-2 clearance scanner ceiling detection test.
+
+    All terrain slots redirected to parkour_crawl so every spawn cell has a ceiling.
+    Clearance scanner enabled. Not used for training — validation only.
+    """
+
+    enable_clearance_scanner: bool = True
+    enable_voxel_scanner: bool = True
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Override all terrain sub-dicts to zero except crawl, then set crawl to 1.0.
+        for key in list(self.terrain.terrain_generator.sub_terrains.keys()):
+            self.terrain.terrain_generator.sub_terrains[key].proportion = 0.0
+        self.terrain.terrain_generator.sub_terrains["parkour_crawl"].proportion = 1.0

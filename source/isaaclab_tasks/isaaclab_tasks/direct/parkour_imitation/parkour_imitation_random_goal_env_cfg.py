@@ -104,3 +104,52 @@ class ParkourImitationRandomGoalEnvCfg(ParkourImitationEnvCfg):
     # Goals are sampled within ±(cone/2) of the robot's current heading.
     # 120 = ±60°.  Set to 360 to restore the original omnidirectional behaviour.
     random_goal_forward_cone_deg: float = 120.0
+
+
+@configclass
+class ParkourImitationRandomGoalTeacher3DEnvCfg(ParkourImitationRandomGoalEnvCfg):
+    """Teacher env: RandomGoal imitation training with 3D clearance scan (294-dim) privileged obs.
+
+    Extends ParkourImitationRandomGoalEnvCfg with:
+    - enable_clearance_scanner=True  : activates the Clearance3D ray-caster
+    - clearance_as_scan=True         : routes clearance_vec (normalized) into the "scan" obs slot
+    - Terrain mix: all 5 base parkour terrains retained + parkour_crawl added,
+      so the teacher sees both open and ceiling-constrained environments.
+
+    Normalization used: (clearance_m - 2.0) / 2.0 → maps [0.2 m, 4.0 m] to [-0.9, 1.0].
+    self._clearance_vec stays raw (0–4.0) — debug blocks and voxel logic unaffected.
+
+    floating_ring terrain was requested but is not registered in PARKOUR_TERRAINS_CFG;
+    parkour_crawl is used as the sole ceiling terrain (0.25 allocation).
+
+    Terrain proportions (must sum to 1.0):
+        parkour_flat   = 0.15
+        parkour_hurdle = 0.15
+        parkour_step   = 0.15
+        parkour_gap    = 0.15
+        parkour_stair  = 0.15
+        parkour_crawl  = 0.25   (ceiling terrain; teacher uniquely benefits from 3D scan here)
+        all others     = 0.0
+    """
+
+    # Activate clearance scanner and route it into the scan slot.
+    enable_clearance_scanner: bool = True
+    clearance_as_scan: bool = True
+
+    # Keep random-goal enabled (inherited from parent).
+    # All other random-goal / AMP / reward / actuator / sensor parameters unchanged.
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Rebalance terrain proportions to include parkour_crawl.
+        # All 5 original base terrains are kept at 0.15 each (= 0.75).
+        # parkour_crawl gets 0.25 so ceiling experience is well-represented.
+        # First, zero all proportions, then set known keys.
+        for key in self.terrain.terrain_generator.sub_terrains:
+            self.terrain.terrain_generator.sub_terrains[key].proportion = 0.0
+        self.terrain.terrain_generator.sub_terrains["parkour_flat"].proportion = 0.15
+        self.terrain.terrain_generator.sub_terrains["parkour_hurdle"].proportion = 0.15
+        self.terrain.terrain_generator.sub_terrains["parkour_step"].proportion = 0.15
+        self.terrain.terrain_generator.sub_terrains["parkour_gap"].proportion = 0.15
+        self.terrain.terrain_generator.sub_terrains["parkour_stair"].proportion = 0.15
+        self.terrain.terrain_generator.sub_terrains["parkour_crawl"].proportion = 0.25

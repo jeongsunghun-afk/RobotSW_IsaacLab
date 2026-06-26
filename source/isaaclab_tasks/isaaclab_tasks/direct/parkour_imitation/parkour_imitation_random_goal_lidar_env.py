@@ -120,7 +120,7 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         # Expose raw LiDAR geometry as top-level extras keys.  Never nested under
         # extras["observations"] to avoid being picked up by symmetry / obs groups.
         self.extras["lidar_hits_w"] = self._mid360.data.ray_hits_w.clone()  # (N, R, 3) world, miss=inf
-        self.extras["lidar_pos_w"] = self._mid360.data.pos_w.clone()        # (N, 3) sensor world pos
-        self.extras["lidar_quat_w"] = self._mid360.data.quat_w.clone()      # (N, 4) wxyz
+        self.extras["lidar_pos_w"] = self._mid360.data.pos_w.clone()  # (N, 3) sensor world pos
+        self.extras["lidar_quat_w"] = self._mid360.data.quat_w.clone()  # (N, 4) wxyz
 
         return obs

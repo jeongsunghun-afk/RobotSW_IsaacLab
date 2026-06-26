@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 import weakref
 
 import numpy as np
@@ -17,13 +18,15 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import SPHERE_MARKER_CFG
-from isaaclab.sensors import ContactSensor, RayCaster
+from isaaclab.sensors import ContactSensor, RayCaster, RayCasterCfg
 from isaaclab.terrains import TerrainImporter
 from isaaclab.terrains.trimesh import mesh_terrains as _parkour_mesh_terrains
 from isaaclab.utils import math as math_utils
 
 from isaaclab_tasks.direct._common import DebugKeyBindingCfg, DebugViewer, DebugViewerCfg
 
+from .clearance_3d_pattern import Clearance3DPatternCfg, clearance_3d_pattern  # noqa: F401
+from .voxel_occupancy import VoxelOccupancyCfg, build_ray_dirs, fill_voxel_grid, voxel_grid_shape
 from .parkour_env_cfg import (
     TERRAIN_CLASS_BALANCE_BEAM,
     TERRAIN_CLASS_CRAWL,
@@ -120,6 +123,33 @@ class Go2ParkourEnv(DirectRLEnv):
         self._scan = torch.zeros(self.num_envs, _num_scan_rays, device=self.device)
         self._yaw_diff = torch.zeros(self.num_envs, device=self.device)
         self._next_yaw_diff = torch.zeros(self.num_envs, device=self.device)
+
+        if self.cfg.enable_clearance_scanner:
+            # Clearance 3D vector buffer (teacher privileged GT, R1).
+            # Shape: (num_envs, num_clearance_rays) where num_clearance_rays = 21*14 = 294.
+            # Values = Euclidean distance to first geometry hit along each ray, clamped to max_distance (4m).
+            # Misses (inf from RayCaster) are replaced by max_distance so the tensor is always finite.
+            # Not cleared in _reset_idx: the recently_reset gate in _get_observations handles stale cache,
+            # same pattern as self._scan above.
+            _num_clearance_rays = self._clearance_scanner.data.ray_hits_w.shape[1]  # 294
+            self._clearance_vec = torch.full((self.num_envs, _num_clearance_rays), fill_value=4.0, device=self.device)
+
+        if self.cfg.enable_voxel_scanner:
+            # Voxel occupancy GT buffer (teacher privileged, ablation counterpart to clearance_vec).
+            # Shape: (num_envs, X, Y, Z) int8, values -1/0/1 (unknown/free/occupied).
+            # Filled from clearance scanner hits via fill_voxel_grid().
+            # Not cleared in _reset_idx: recently_reset gate handles stale cache, same as clearance_vec.
+            self._voxel_cfg = VoxelOccupancyCfg()  # default bounds; override via subclass if needed
+            _vnx, _vny, _vnz = voxel_grid_shape(self._voxel_cfg)
+            self._voxel_grid = torch.full(
+                (self.num_envs, _vnx, _vny, _vnz), fill_value=-1, dtype=torch.int8, device=self.device
+            )
+            # Cache ray directions once (same pattern as _c3d_up_mask in clearance debug block).
+            _c3d_cfg_v = Clearance3DPatternCfg(
+                num_azimuth=21, num_elevation=14,
+                azimuth_range=(-100.0, 100.0), elevation_range=(-75.0, 60.0),
+            )
+            self._voxel_ray_dirs = build_ray_dirs(_c3d_cfg_v, self.device)  # (294, 3)
 
         # Goal tracking: which waypoint each env is targeting
         self._current_goal_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -388,6 +418,31 @@ class Go2ParkourEnv(DirectRLEnv):
         self.scene.sensors["contact_sensor"] = self._contact_sensor
         self._height_scanner = RayCaster(self.cfg.height_scanner)
         self.scene.sensors["height_scanner"] = self._height_scanner
+
+        if self.cfg.enable_clearance_scanner or self.cfg.enable_voxel_scanner:
+            # ---- Clearance 3D scanner (teacher privileged GT, R1) ----
+            # Also required when only enable_voxel_scanner is True, because voxel filling
+            # reuses this scanner's ray_hits_w data.
+            # Forward-hemisphere spherical grid: azimuth [-100°,+100°] × elevation [-75°,+60°]
+            # 21 × 14 = 294 rays, max_distance=4m, ray_alignment="yaw" (follows heading).
+            # Misses (no geometry within 4m) → ray_hits_w=inf → clamp to 4.0 in __init__/obs.
+            # This scanner is sim-only privileged. It does NOT feed into the actor obs this round (R1).
+            _clearance_cfg = RayCasterCfg(
+                prim_path="/World/envs/env_.*/Robot/base",
+                offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.05)),
+                ray_alignment="yaw",
+                pattern_cfg=Clearance3DPatternCfg(
+                    num_azimuth=21,
+                    num_elevation=14,
+                    azimuth_range=(-100.0, 100.0),
+                    elevation_range=(-75.0, 60.0),
+                ),
+                debug_vis=False,
+                mesh_prim_paths=["/World/ground"],
+                max_distance=4.0,
+            )
+            self._clearance_scanner = RayCaster(_clearance_cfg)
+            self.scene.sensors["clearance_scanner"] = self._clearance_scanner
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         # Clear goals registry before terrain generation so we get a clean set for this env
@@ -717,6 +772,204 @@ class Go2ParkourEnv(DirectRLEnv):
                 # self._yaw_diff[recently_reset] = yaw_raw[recently_reset]
                 # self._next_yaw_diff[recently_reset] = next_yaw_raw[recently_reset]
 
+        if self.cfg.enable_clearance_scanner or self.cfg.enable_voxel_scanner:
+            # ---- Shared ray-distance computation (teacher privileged GT) ----
+            # Both clearance_vec and voxel_grid are derived from the same scanner hits.
+            # _dist is computed once here and consumed by both downstream blocks.
+            # ray_hits_w: (N, 294, 3) world-frame hit positions; misses = inf.
+            # Distance = ||hit_w - sensor_pos_w|| (Euclidean, oblique rays).
+            # Uses the same 10Hz cadence gate as height_scan.
+            if do_global_refresh or recently_reset.any():
+                _sensor_pos = self._clearance_scanner.data.pos_w  # (N, 3)
+                _hits = self._clearance_scanner.data.ray_hits_w  # (N, 294, 3), inf on miss
+                _diff = _hits - _sensor_pos.unsqueeze(1)  # (N, 294, 3)
+                _dist = torch.norm(_diff, dim=-1)  # (N, 294)
+                # ray_hits_w can be NaN (missed / first-frame rays); torch.clamp does NOT fix NaN,
+                # so a routed clearance scan would poison the policy → NaN actions → physics stall.
+                # Sanitize NaN/inf → inf so downstream treats them as misses (clearance→4.0, voxel→not-hit).
+                _dist = torch.nan_to_num(_dist, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
+
+                if self.cfg.enable_clearance_scanner:
+                    # ---- Clearance 3D vector (teacher privileged GT, R1) ----
+                    # Clamped to max_distance so tensor is always finite (misses → 4.0).
+                    clearance_new = _dist.clamp(max=4.0)  # (N, 294)
+                    if do_global_refresh:
+                        self._clearance_vec = clearance_new
+                    else:
+                        self._clearance_vec[recently_reset] = clearance_new[recently_reset]
+
+                if self.cfg.enable_voxel_scanner:
+                    # ---- Voxel occupancy GT (teacher privileged, ablation counterpart) ----
+                    # Reuses _dist (pre-clamp) — miss bit preserved: dist=inf → is_hit=False.
+                    # Sensor-observable only: voxels behind the hit surface remain unknown (-1).
+                    _is_hit = _dist < self._voxel_cfg.max_distance  # (N, 294) bool
+
+                    _t0 = time.perf_counter()
+                    voxel_new = fill_voxel_grid(
+                        self._voxel_ray_dirs, _dist, _is_hit, self._voxel_cfg, self.num_envs, self.device
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    _voxel_fill_ms = (time.perf_counter() - _t0) * 1000.0
+
+                    if do_global_refresh:
+                        self._voxel_grid = voxel_new
+                        self._voxel_last_fill_ms: float = _voxel_fill_ms
+                    else:
+                        self._voxel_grid[recently_reset] = voxel_new[recently_reset]
+                        self._voxel_last_fill_ms = _voxel_fill_ms
+
+        if self.cfg.enable_clearance_scanner and not self.cfg.clearance_as_scan:
+            # DEBUG (REINFORCEMENT, side-channel verification only — skipped when clearance is the
+            # actual training scan to avoid per-step .item() sync overhead).
+            # all-envs ceiling check + per-step running-min up-ray distance.
+            # Tracks the closest overhead ceiling any robot reaches across the whole run, and
+            # announces the first time a robot is genuinely under a ceiling (up-ray < 0.8m).
+            _step = int(self.common_step_counter)
+            with torch.no_grad():
+                from .clearance_3d_pattern import Clearance3DPatternCfg as _C3DCfg
+                from .clearance_3d_pattern import clearance_3d_pattern as _c3d_fn
+
+                if not hasattr(self, "_c3d_up_mask"):
+                    _cfg_tmp = _C3DCfg(
+                        num_azimuth=21, num_elevation=14,
+                        azimuth_range=(-100.0, 100.0), elevation_range=(-75.0, 60.0),
+                    )
+                    _, _dirs = _c3d_fn(_cfg_tmp, self.device)  # (294, 3)
+                    self._c3d_el = torch.rad2deg(torch.asin(_dirs[:, 2].clamp(-1.0, 1.0)))
+                    self._c3d_up_mask = self._c3d_el > 0
+                    self._clear_runmin = float("inf")
+                    self._clear_close_announced = False
+                up = self._clearance_vec[:, self._c3d_up_mask]  # (N, n_up)
+                up_fin = torch.where(up < 4.0, up, torch.full_like(up, float("inf")))
+                up_min_env = up_fin.min(dim=1).values  # (N,) inf if no finite up-ray
+                gmin = up_min_env.min().item()
+                if gmin < self._clear_runmin:
+                    self._clear_runmin = gmin
+                if (not self._clear_close_announced) and gmin < 0.8:
+                    self._clear_close_announced = True
+                    _e = int(up_min_env.argmin().item())
+                    print(
+                        f"\n*** CLOSE OVERHEAD CEILING: env {_e} up-ray={gmin:.3f}m at step {_step} "
+                        f"— in-corridor 3D clearance CONFIRMED ***",
+                        flush=True,
+                    )
+                if _step in {5, 50, 150, 300, 500}:
+                    n_close = int((up_min_env < 0.8).sum().item())
+                    n_fin = int(torch.isfinite(up_min_env).sum().item())
+                    print(
+                        f"[Clearance3D step={_step}] envs_finite_up={n_fin}/{self.num_envs} "
+                        f"envs_close(<0.8m)={n_close} global_min_up={gmin:.3f}m run_min_up={self._clear_runmin:.3f}m "
+                        f"el=[{self._c3d_el.min().item():.0f},{self._c3d_el.max().item():.0f}]deg",
+                        flush=True,
+                    )
+                    # Down-ray floor sanity (env 0)
+                    _dn = self._clearance_vec[0][self._c3d_el < 0]
+                    _dn_fin = _dn[_dn < 4.0]
+                    if _dn_fin.numel() > 0:
+                        print(
+                            f"  [env0 floor] down-rays finite={_dn_fin.numel()} "
+                            f"min={_dn_fin.min().item():.3f}m max={_dn_fin.max().item():.3f}m",
+                            flush=True,
+                        )
+
+        if self.cfg.enable_voxel_scanner:
+            # DEBUG (CrawlTest): Voxel occupancy statistics vs. known tunnel geometry.
+            #
+            # All z-values are in the sensor-local frame (origin = base + 0.05 m).
+            # The robot's base height varies with crawl posture, so the absolute z at
+            # which floor/ceiling appear cannot be hard-coded; we print every z-layer's
+            # raw counts and let the user read the structure.
+            #
+            # Occlusion check (frame-independent, the real discriminator):
+            #   For each (x, y) column, FREE voxels must be sandwiched between the
+            #   lowest and highest OCCUPIED voxels in that column.
+            #   A FREE voxel above the topmost OCCUPIED voxel = god's-eye leak (bug).
+            #   Expected count = 0.
+            #
+            # GT-extraction timing is printed separately from clearance norm cost.
+            _step = int(self.common_step_counter)
+            if _step in {5, 50, 150, 300, 500}:
+                with torch.no_grad():
+                    _g = self._voxel_grid[0]  # (X, Y, Z) int8, env 0
+                    _n_occ = int((_g == 1).sum().item())
+                    _n_free = int((_g == 0).sum().item())
+                    _n_unk = int((_g == -1).sum().item())
+                    _n_total = _g.numel()
+                    _fill_ms = getattr(self, "_voxel_last_fill_ms", float("nan"))
+                    _vnx, _vny, _vnz = _g.shape
+                    print(
+                        f"\n[VoxelOccupancy step={_step}] grid=({_vnx},{_vny},{_vnz}) "
+                        f"total={_n_total} occ={_n_occ} free={_n_free} unk={_n_unk} "
+                        f"fill_ms={_fill_ms:.1f}",
+                        flush=True,
+                    )
+                    # All z-layers (no skipping) — let geometry emerge from data
+                    _res = self._voxel_cfg.resolution
+                    _z_min = self._voxel_cfg.z_range[0]
+                    for _zi in range(_vnz):
+                        _z_center = _z_min + _zi * _res
+                        _layer = _g[:, :, _zi]  # (X, Y)
+                        _lo = int((_layer == 1).sum().item())
+                        _lf = int((_layer == 0).sum().item())
+                        _lu = int((_layer == -1).sum().item())
+                        _lt = _layer.numel()
+                        print(
+                            f"  z={_z_center:+.2f}m  occ={_lo}/{_lt}  free={_lf}/{_lt}  unk={_lu}/{_lt}",
+                            flush=True,
+                        )
+                    # ---- Occlusion check: per-ray invariant (must be 0) ----
+                    # For each ray, voxels AFTER the hit point must remain unknown (-1).
+                    # We re-walk each ray at the same sampling step used during fill and check
+                    # that no free voxel appears at t > dist (i.e. beyond the hit surface).
+                    # A non-zero count means rays are marking through-surface voxels free → god's-eye.
+                    # Only applies to hit rays (is_hit=True for env 0).
+                    _bad_ray_count = 0
+                    _is_hit_e0 = _is_hit[0]   # (R,) bool — hit rays for env 0
+                    _dist_e0 = _dist[0].clamp(max=self._voxel_cfg.max_distance)  # (R,)
+                    if _is_hit_e0.any():
+                        _res_v = self._voxel_cfg.resolution
+                        _step_v = _res_v * 0.5
+                        _x_min_v, _x_max_v = self._voxel_cfg.x_range
+                        _y_min_v, _y_max_v = self._voxel_cfg.y_range
+                        _z_min_v, _z_max_v = self._voxel_cfg.z_range
+                        _n_steps_v = int(self._voxel_cfg.max_distance / _step_v) + 1
+                        _t_vals_v = torch.arange(_n_steps_v, dtype=torch.float32, device=self.device) * _step_v
+                        for _ri in range(self._voxel_ray_dirs.shape[0]):
+                            if not _is_hit_e0[_ri]:
+                                continue
+                            _d = _dist_e0[_ri].item()
+                            _dir = self._voxel_ray_dirs[_ri]  # (3,)
+                            # sample points after the hit: t in (_d, max_distance]
+                            _t_after = _t_vals_v[_t_vals_v > _d + _step_v * 0.5]
+                            if _t_after.numel() == 0:
+                                continue
+                            _pts_after = _t_after[:, None] * _dir[None, :]  # (S, 3)
+                            _aix = ((_pts_after[:, 0] - _x_min_v) / _res_v).round().long()
+                            _aiy = ((_pts_after[:, 1] - _y_min_v) / _res_v).round().long()
+                            _aiz = ((_pts_after[:, 2] - _z_min_v) / _res_v).round().long()
+                            _aib = (
+                                (_aix >= 0) & (_aix < _vnx)
+                                & (_aiy >= 0) & (_aiy < _vny)
+                                & (_aiz >= 0) & (_aiz < _vnz)
+                            )
+                            if not _aib.any():
+                                continue
+                            _vals = _g[_aix[_aib], _aiy[_aib], _aiz[_aib]]
+                            _bad_ray_count += int((_vals == 0).sum().item())
+                    # NOTE: a non-zero count here does NOT necessarily indicate a god's-eye leak.
+                    # A voxel beyond ray B's hit may have been legitimately marked free by ray A
+                    # passing through it before A's own hit — this is correct sensor-observable
+                    # behaviour (shared grid, multiple rays). True leaks would show as *many* free
+                    # voxels behind many hits; small counts (≤~10) at spawn are cross-ray sharing.
+                    # Authoritative occlusion verification is the synthetic single-ray test
+                    # (_workspace/validate_voxel_ceiling.py).
+                    print(
+                        f"  [occlusion check] free_voxels_beyond_hit={_bad_ray_count} "
+                        f"(cross-ray sharing expected; 0 = cleanest; large counts = suspect)",
+                        flush=True,
+                    )
+
         # DEBUG: Height-scan multi-step diagnostic.
         # Fires at each step in _scan_debug_print_steps (at most once per step value per process).
         _step = int(self.common_step_counter)
@@ -1039,10 +1292,24 @@ class Go2ParkourEnv(DirectRLEnv):
         if hasattr(self, "_debug_viewer") and self._debug_viewer is not None:
             self._debug_viewer.update(self.step_dt)
 
+        # R2 teacher mode: route clearance_vec (294-dim) into the scan slot instead of height_scan.
+        # Normalization: (dist_m - 2.0) / 2.0 → maps [0.2, 4.0] to [-0.9, 1.0], zero-centred.
+        # self._clearance_vec is kept raw (0–4.0) so debug blocks and voxel logic remain correct.
+        # Guard: clearance_as_scan requires enable_clearance_scanner=True so _clearance_vec exists.
+        if self.cfg.clearance_as_scan:
+            if not hasattr(self, "_clearance_vec"):
+                raise RuntimeError(
+                    "[parkour] clearance_as_scan=True but _clearance_vec is not allocated. "
+                    "Set enable_clearance_scanner=True in your env cfg."
+                )
+            scan_obs = (self._clearance_vec - 2.0) / 2.0  # (N, 294), values in [-0.9, 1.0]
+        else:
+            scan_obs = self._scan  # (N, 187), height-scan baseline
+
         return {
             "policy": proprio,
             # "critic": critic_obs,
-            "scan": self._scan,
+            "scan": scan_obs,
             "priv_explicit": priv_explicit,
             "priv_latent": priv_latent,
             "history": self._proprio_history,
