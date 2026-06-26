@@ -149,6 +149,7 @@ class Go2RecoveryEnv(DirectRLEnv):
                 "dof_torques_l2",
                 "dof_pos_limits",
                 "success_bonus",
+                "r_success_region",  # Lever A: 연속 in-region 보상 (Episode_Reward/r_success_region)
             ]
         }
 
@@ -372,6 +373,11 @@ class Go2RecoveryEnv(DirectRLEnv):
 
         # ── success judgment ──────────────────────────────────────────────────
         success_bonus = self._update_success(cos_dist)
+        # Lever A: 연속 in-region 보상 — _update_success 호출 후 self._success_region_mask가 최신.
+        # 순간 3조건(upright∧near-default∧low-vel) 동시충족 시 매 step 양의 보상.
+        # 실효 ≈ 3.0×0.02=0.06/step → crouch r_stand(≈0.0196/step)를 ~3배 상회.
+        # 20-step hold 불필요(dense gradient용). 기존 success_bonus(1회성)는 불변.
+        r_success_region = self._success_region_mask.float() * self.cfg.success_region_reward_scale
 
         # ── 전체 reward 합산 ──────────────────────────────────────────────────
         rewards = {
@@ -386,6 +392,7 @@ class Go2RecoveryEnv(DirectRLEnv):
             "dof_torques_l2": dof_torques_l2,
             "dof_pos_limits": dof_pos_limits,
             "success_bonus": success_bonus,
+            "r_success_region": r_success_region,  # Lever A: in-region 연속 보상
         }
 
         # step_dt 곱: per-step raw → episode 스케일 정규화
@@ -472,6 +479,14 @@ class Go2RecoveryEnv(DirectRLEnv):
         if self.cfg.settle_max_steps > 0:
             settle_active = self._settle_counter < self._settle_steps
             all_conditions = torch.where(settle_active, torch.zeros_like(all_conditions), all_conditions)
+
+        # Lever A: 연속 in-region 보상용 순간 mask 저장.
+        # 캡처 시점: settle 마스킹 적용 후, _started_fallen 게이트 적용 전.
+        # - settle 적용: settle 중 transient 발화로 인한 로그 오염 방지.
+        # - _started_fallen 미적용: 3조건 기반 reward shaping이며, 게이트는
+        #   success 판정 지표용(survivorship bias 제거)이지 reward 조건이 아님.
+        #   standing 시작 env가 즉시 발화 → smoke에서 r_success_region > 0 확인 가능.
+        self._success_region_mask = all_conditions.clone()
 
         # 자동성공 게이트: fallen 그룹에서 시작한 env만 success 유효
         # standing/sitting 시작 env는 복구 동작 없이도 success 조건 충족 → 무효화

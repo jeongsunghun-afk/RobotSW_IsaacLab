@@ -180,11 +180,9 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
     # r_stand가 활성화되는 cos_dist 임계값 (cos(0.2π) ≈ 0.809)
     stand_cos_threshold: float = 0.809
     # Go2 default base height (m) — r_height 계산 기준
-    # 실측: default_joint_pos PD-hold 평형 0.2863~0.2864m → 0.286으로 설정
-    # 기존 0.31은 joint-forced kinematic 측정값; PD 평형(0.286)과 2.4cm 어긋나
-    # r_height(target 0.31)가 success Cond2(default 자세)와 충돌 → strict success 0% 유발
-    # bidirectional r_height 이미 적용돼 있으므로 낮춰도 sitting 문제 없음
-    target_height: float = 0.286
+    # joint-forced kinematic 측정값 0.31 (baseline, 현재 best)
+    # 0.286(PD 평형 실측)으로 낮춘 실험: Cond2 47%→4.4%, Cond1 77%→60% 악화 → 역효과 확인, 0.31 복원
+    target_height: float = 0.31
     # r_pose 지수 감쇠 계수 (exp(-k·weighted_pose_err))
     # 참조(Genesis legged_env_recovery.py:1267): exp(-0.6·pose_err)
     # 1.0 → 0.6(참조)보다 완만히 강화. 1.5/3.0(과도, 앉기 유발) 미만.
@@ -237,7 +235,16 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
     # success 달성 시 일회성 bonus reward
     success_reward_scale: float = 5.0
     # success 도달 env를 terminated에 포함 (early termination, 학습 효율↑)
-    terminate_on_success: bool = True
+    # Lever A: False로 전환 — crouch-to-timeout의 continuation value 우위 제거.
+    # terminate=True 시 success bonus(+0.10 실효) < crouch r_stand 포기분(~1.8) → 성공 anti-incentive.
+    # rsl_rl PPO는 time_out만 value-bootstrap하고 terminated는 bootstrap 없음(ppo.py:181-208) →
+    # terminate-off 없이는 성공이 crouch보다 advantage 음수. (RECOVERY_POSE_PLAN.md §0)
+    terminate_on_success: bool = False
+    # 연속 in-region 보상 scale (Lever A): 순간 3조건(upright∧near-default∧low-vel) 동시충족 시 매 step 지급.
+    # 실효값 = success_region_reward_scale × step_dt(0.02) ≈ 0.06/step.
+    # 목적: crouch r_stand(≈0.0196/step)를 명확히 상회 → default-pose가 crouch보다 reward-최적점으로 전환.
+    # 짧은 런 캘리브레이션 대상 (crouch 잔존 시 값 상향 조정).
+    success_region_reward_scale: float = 3.0
 
     # ── Settle phase (학습 시 공중낙하→자연 안착 후 복구 시작) ──────────────────
     # 0이면 비활성(기존 동작). 양수이면 env별 randint(0, settle_max_steps+1) step
