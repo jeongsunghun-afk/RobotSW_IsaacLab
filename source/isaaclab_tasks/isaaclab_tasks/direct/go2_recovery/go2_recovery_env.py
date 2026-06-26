@@ -212,15 +212,22 @@ class Go2RecoveryEnv(DirectRLEnv):
         # 여기서는 policy가 출력한 clipped action을 기준으로 smoothness 측정
         self._processed_actions = self.cfg.action_scale * scaled + self._robot.data.default_joint_pos
 
-        # settle override: settle-active env는 target=default_joint_pos로 강제
-        # PD controller가 default 자세를 유지하며 중력으로 자연 안착되게 함
+        # settle override: settle-active env의 sim target을 mode에 따라 강제
         # policy action(_actions, _processed_actions) 자체는 보존 — sim에 반영되는 target만 override
+        #   "hold"   : default_joint_pos → PD가 default 자세로 유인하며 안착
+        #   "passive": 현재 측정 joint_pos → stiffness 오차≈0, 중력으로 자연스럽게 흩어진 채 안착
         if self.cfg.settle_max_steps > 0:
             settle_active = self._settle_counter < self._settle_steps  # (num_envs,) bool
             if settle_active.any():
+                if self.cfg.settle_mode == "passive":
+                    # 현재 측정 위치를 target으로 → stiffness 오차≈0, 관절이 default로 이주하지 않고
+                    # 중력으로 자연 안착 (Genesis reset 방식에 가까움)
+                    settle_target = self._robot.data.joint_pos
+                else:  # "hold" (legacy — 기존 default-hold 동작과 byte-identical)
+                    settle_target = self._robot.data.default_joint_pos
                 self._processed_actions = torch.where(
                     settle_active.unsqueeze(1),  # (num_envs, 1) → broadcast over (num_envs, 12)
-                    self._robot.data.default_joint_pos,
+                    settle_target,
                     self._processed_actions,
                 )
 

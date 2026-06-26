@@ -248,9 +248,16 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
 
     # ── Settle phase (학습 시 공중낙하→자연 안착 후 복구 시작) ──────────────────
     # 0이면 비활성(기존 동작). 양수이면 env별 randint(0, settle_max_steps+1) step
-    # 동안 action=default_joint_pos로 override하여 자연 안착 후 복구 학습 시작.
+    # 동안 action override하여 자연 안착 후 복구 학습 시작.
     # settle_max_steps=100 (2s at 50Hz policy) — episode_length_s=10s와 충분한 여유
     settle_max_steps: int = 100
+    # settle_mode: settle 구간 action target 결정 방식
+    #   "passive" (기본): 현재 측정 joint_pos를 target으로 — stiffness 오차≈0, 관절이
+    #                     default로 이주하지 않고 중력으로 자연스럽게 흩어진 채 안착.
+    #                     배포 분포(settle 없음)에 가까운 다양한 fallen 자세에서 복구 학습.
+    #   "hold"          : default_joint_pos로 PD 유지 — 관절을 default 자세로 유인하며 안착 (legacy).
+    # passive를 기본값으로 채택 (A/B: 복구율 99.8→100%, strict 99.6→100%, stillness 동등, 회귀 0).
+    settle_mode: str = "passive"
 
     # ── Fall lerp exponent (cubic lerp 지수) ─────────────────────────────────
     # rand^exponent: exponent=3 → 평균 α=0.25 (default 근방 밀도 ↑)
