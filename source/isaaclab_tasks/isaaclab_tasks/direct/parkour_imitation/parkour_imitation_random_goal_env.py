@@ -201,7 +201,10 @@ class Go2ParkourImitationRandomGoalEnv(Go2ParkourImitationEnv):
             # Always clear mode for all reset envs first.
             self._random_goal_mode[ids] = False
             # Graduated envs get a per-episode coin-flip.
-            grad_mask = self._graduated[ids]  # [n] bool
+            # Viewer-forced envs (_skip_curriculum[ids] == True) are excluded so
+            # _change_terrain_for_viewer's forced terrain type/level is not overwritten
+            # by the flat-override block in _update_terrain_curriculum.
+            grad_mask = self._graduated[ids] & ~self._skip_curriculum[ids]  # [n] bool
             grad_env_ids = ids[grad_mask]
             if grad_env_ids.numel() > 0:
                 coin = torch.rand(grad_env_ids.numel(), device=self.device)
