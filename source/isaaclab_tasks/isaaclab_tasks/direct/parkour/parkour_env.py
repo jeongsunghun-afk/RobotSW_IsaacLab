@@ -398,6 +398,20 @@ class Go2ParkourEnv(DirectRLEnv):
             on_press=lambda: self._change_terrain_for_viewer(type_delta=+1),
         )
 
+        # Clearance 3D ray debug visualisation: register only when clearance scanner is enabled.
+        # default_on=False ensures train (headless) is never affected.
+        # Key "C" toggles the visualisation (V is taken by voxel; G by free-fly; P/K/J/L also taken).
+        if self.cfg.enable_clearance_scanner:
+            self._debug_viewer.register_debug_vis(
+                "clearance_rays",
+                lambda dt: self._draw_clearance_rays(),
+                default_on=False,
+            )
+            self._debug_viewer.register_key(
+                "C",
+                on_press=self._toggle_clearance_rays,
+            )
+
         # Activate goal marker visualisation (respects cfg.debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
@@ -2046,6 +2060,177 @@ class Go2ParkourEnv(DirectRLEnv):
         new_state = not self._debug_viewer.vis_is_enabled("contact_print")
         self._debug_viewer.set_debug_vis("contact_print", new_state)
         print(f"[parkour] Contact debug: {'ON' if new_state else 'OFF'}")
+
+    def _toggle_clearance_rays(self) -> None:
+        """Toggle the clearance-ray debug visualisation (C key).
+
+        On the disable branch, explicitly hides persistent markers because
+        DebugViewer.set_debug_vis() only flips the callback flag — it does not
+        call any teardown or hide previously drawn geometry.
+        """
+        new_state = not self._debug_viewer.vis_is_enabled("clearance_rays")
+        self._debug_viewer.set_debug_vis("clearance_rays", new_state)
+        if not new_state:
+            if hasattr(self, "_clearance_hit_up_vis"):
+                self._clearance_hit_up_vis.set_visibility(False)
+            if hasattr(self, "_clearance_hit_down_vis"):
+                self._clearance_hit_down_vis.set_visibility(False)
+            if hasattr(self, "_clearance_miss_up_vis"):
+                self._clearance_miss_up_vis.set_visibility(False)
+            if hasattr(self, "_clearance_miss_down_vis"):
+                self._clearance_miss_down_vis.set_visibility(False)
+        print(f"[parkour] Clearance ray vis: {'ON' if new_state else 'OFF'}")
+
+    def _draw_clearance_rays(self) -> None:
+        """Draw clearance 3D ray-cast results for the active viewer env.
+
+        Called every render frame by DebugViewer when ``clearance_rays`` debug-vis
+        is enabled (C key toggle).
+
+        Visualisation strategy (point-only, no arrows — avoids USD anchor ambiguity):
+        - **Hit points**: actual ``ray_hits_w`` world positions.  Colour by elevation:
+          up-rays (local z > 0, ceiling)  → blue spheres
+          down-rays (local z < 0, floor)  → red spheres
+        - **Miss endpoints**: ``sensor_origin + world_dir * 4.0`` for rays that had
+          no hit (ray_hits_w == inf).  Colour by elevation:
+          up-rays  → cyan (lighter blue)
+          down-rays → green
+
+        Design decisions mirror ``_draw_voxel_occupied``:
+        - Single env only (active viewer env).
+        - Lazy marker creation on first call.
+        - World transform: ``quat_apply_yaw(robot_quat, local_dirs)`` — identical to
+          the yaw-aligned scanner frame used by the clearance scanner itself.
+        - Local ray dirs are cached in ``_clearance_dirs_local`` (computed once).
+          Intentionally independent from ``_c3d_up_mask`` (only exists when
+          ``clearance_as_scan=False``) to avoid false assumption about prior state.
+
+        Coverage visible at a glance:
+        - Blue cluster overhead → ceiling geometry detected.
+        - Red cluster below → floor detected (normal locomotion).
+        - Cyan rays at 4 m → forward/ceiling direction open space.
+        - Green rays at 4 m → floor not detected within 4 m (e.g., gap/edge).
+        """
+        # ------------------------------------------------------------------
+        # Lazy-create four sphere-marker sets (up-hit/down-hit/up-miss/down-miss).
+        # ------------------------------------------------------------------
+        if not hasattr(self, "_clearance_hit_up_vis"):
+            # Hit up: blue (ceiling detections)
+            cfg_hit_up = SPHERE_MARKER_CFG.copy()
+            cfg_hit_up.prim_path = "/Visuals/Parkour/clearance_hit_up"
+            cfg_hit_up.markers["sphere"].radius = 0.04
+            cfg_hit_up.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.0, 0.3, 1.0)  # blue
+            )
+            self._clearance_hit_up_vis = VisualizationMarkers(cfg_hit_up)
+
+            # Hit down: red (floor detections)
+            cfg_hit_down = SPHERE_MARKER_CFG.copy()
+            cfg_hit_down.prim_path = "/Visuals/Parkour/clearance_hit_down"
+            cfg_hit_down.markers["sphere"].radius = 0.04
+            cfg_hit_down.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 0.1, 0.0)  # red
+            )
+            self._clearance_hit_down_vis = VisualizationMarkers(cfg_hit_down)
+
+            # Miss up: cyan (open ceiling/forward space, extends to max_distance)
+            cfg_miss_up = SPHERE_MARKER_CFG.copy()
+            cfg_miss_up.prim_path = "/Visuals/Parkour/clearance_miss_up"
+            cfg_miss_up.markers["sphere"].radius = 0.025
+            cfg_miss_up.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.0, 0.9, 0.9)  # cyan
+            )
+            self._clearance_miss_up_vis = VisualizationMarkers(cfg_miss_up)
+
+            # Miss down: green (open floor, e.g. gap / edge)
+            cfg_miss_down = SPHERE_MARKER_CFG.copy()
+            cfg_miss_down.prim_path = "/Visuals/Parkour/clearance_miss_down"
+            cfg_miss_down.markers["sphere"].radius = 0.025
+            cfg_miss_down.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.0, 0.9, 0.2)  # green
+            )
+            self._clearance_miss_down_vis = VisualizationMarkers(cfg_miss_down)
+
+        # ------------------------------------------------------------------
+        # Cache local ray directions (294, 3) — computed once per env lifetime.
+        # Independent of _c3d_up_mask to avoid dependency on clearance_as_scan state.
+        # ------------------------------------------------------------------
+        if not hasattr(self, "_clearance_dirs_local"):
+            _cfg_tmp = Clearance3DPatternCfg(
+                num_azimuth=21,
+                num_elevation=14,
+                azimuth_range=(-100.0, 100.0),
+                elevation_range=(-75.0, 60.0),
+            )
+            _, _dirs = clearance_3d_pattern(_cfg_tmp, self.device)  # (294, 3)
+            self._clearance_dirs_local = _dirs  # (294, 3) unit vectors, sensor-local yaw frame
+
+        # ------------------------------------------------------------------
+        # Active viewer env (tracks [ / ] keyboard env switching).
+        # ------------------------------------------------------------------
+        e = self._get_active_viewer_env_id()
+
+        # ------------------------------------------------------------------
+        # World-frame ray directions for env e.
+        # quat_apply_yaw strips roll/pitch → matches ray_alignment="yaw" of scanner.
+        # ------------------------------------------------------------------
+        N = self._clearance_dirs_local.shape[0]  # 294
+        robot_quat = self._robot.data.root_quat_w[e].unsqueeze(0).expand(N, -1)  # (294, 4)
+        world_dirs = math_utils.quat_apply_yaw(robot_quat, self._clearance_dirs_local)  # (294, 3)
+
+        sensor_origin = self._clearance_scanner.data.pos_w[e]  # (3,)
+
+        # ------------------------------------------------------------------
+        # Elevation mask: z-component of local dirs (yaw-rotation preserves z).
+        # z = sin(elevation) > 0 → up-ray (ceiling), < 0 → down-ray (floor).
+        # ------------------------------------------------------------------
+        up_mask = self._clearance_dirs_local[:, 2] > 0  # (294,) bool
+
+        # ------------------------------------------------------------------
+        # Hit / miss split based on ray_hits_w (world-frame, inf on miss).
+        # ------------------------------------------------------------------
+        hits_w = self._clearance_scanner.data.ray_hits_w[e]  # (294, 3)
+        finite_mask = torch.isfinite(hits_w).all(dim=-1)  # (294,) bool
+
+        hit_mask = finite_mask
+        miss_mask = ~finite_mask
+
+        # Hit points: raw world coords from scanner (no transform needed)
+        hit_up_pts = hits_w[hit_mask & up_mask]      # (K, 3)
+        hit_down_pts = hits_w[hit_mask & ~up_mask]    # (M, 3)
+
+        # Miss endpoints: sensor_origin + world_dir * max_distance
+        _max_dist = 4.0
+        miss_endpoints = sensor_origin.unsqueeze(0) + world_dirs * _max_dist  # (294, 3)
+        miss_up_pts = miss_endpoints[miss_mask & up_mask]    # (P, 3)
+        miss_down_pts = miss_endpoints[miss_mask & ~up_mask]  # (Q, 3)
+
+        # ------------------------------------------------------------------
+        # Draw (set_visibility(False) if nothing to draw in that category).
+        # ------------------------------------------------------------------
+        if hit_up_pts.shape[0] > 0:
+            self._clearance_hit_up_vis.set_visibility(True)
+            self._clearance_hit_up_vis.visualize(translations=hit_up_pts)
+        else:
+            self._clearance_hit_up_vis.set_visibility(False)
+
+        if hit_down_pts.shape[0] > 0:
+            self._clearance_hit_down_vis.set_visibility(True)
+            self._clearance_hit_down_vis.visualize(translations=hit_down_pts)
+        else:
+            self._clearance_hit_down_vis.set_visibility(False)
+
+        if miss_up_pts.shape[0] > 0:
+            self._clearance_miss_up_vis.set_visibility(True)
+            self._clearance_miss_up_vis.visualize(translations=miss_up_pts)
+        else:
+            self._clearance_miss_up_vis.set_visibility(False)
+
+        if miss_down_pts.shape[0] > 0:
+            self._clearance_miss_down_vis.set_visibility(True)
+            self._clearance_miss_down_vis.visualize(translations=miss_down_pts)
+        else:
+            self._clearance_miss_down_vis.set_visibility(False)
 
     def _change_terrain_for_viewer(self, level_delta: int = 0, type_delta: int = 0) -> None:
         """Force a terrain level/type change on the currently-viewed env and reset it.
