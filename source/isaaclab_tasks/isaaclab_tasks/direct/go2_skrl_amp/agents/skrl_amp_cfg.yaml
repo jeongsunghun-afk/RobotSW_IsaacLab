@@ -1,0 +1,114 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Go2 skrl AMP 학습 설정
+# AMP obs: 43-dim per step, num_amp_observations=2 → amp_observation_size=86
+
+seed: 42
+
+# Models
+# https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
+models:
+  separate: True
+  policy:  # GaussianMixin
+    class: GaussianMixin
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: -1.0
+    fixed_log_std: False
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [512, 256]
+        activations: elu
+    output: ACTIONS
+  value:  # DeterministicMixin
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [512, 256]
+        activations: elu
+    output: ONE
+  discriminator:  # DeterministicMixin — input: amp_observation_size=86
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [1024, 512]
+        activations: relu
+    output: ONE
+
+
+# Rollout memory
+memory:
+  class: RandomMemory
+  memory_size: -1  # automatically determined
+
+# AMP reference motion dataset
+motion_dataset:
+  class: RandomMemory
+  memory_size: 200000
+
+# Replay buffer (discriminator 과적합 방지)
+reply_buffer:
+  class: RandomMemory
+  memory_size: 1000000
+
+
+# AMP agent configuration
+# https://skrl.readthedocs.io/en/latest/api/agents/amp.html
+agent:
+  class: AMP
+  rollouts: 16
+  learning_epochs: 6
+  mini_batches: 2
+  discount_factor: 0.99
+  gae_lambda: 0.95
+  learning_rate: 5.0e-05
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: null
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+  amp_observation_preprocessor: RunningStandardScaler
+  amp_observation_preprocessor_kwargs: null
+  random_timesteps: 0
+  learning_starts: 0
+  grad_norm_clip: 1.0
+  ratio_clip: 0.2
+  value_clip: 0.2
+  entropy_loss_scale: 0.0
+  value_loss_scale: 2.5
+  discriminator_loss_scale: 5.0
+  amp_batch_size: 512
+  task_reward_scale: 0.3
+  style_reward_scale: 0.85
+  discriminator_batch_size: 4096
+  discriminator_logit_regularization_scale: 0.05
+  discriminator_gradient_penalty_scale: 5.0
+  discriminator_weight_decay_scale: 1.0e-04
+  time_limit_bootstrap: False
+  experiment:
+    directory: "go2_skrl_amp"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+
+# Sequential trainer
+trainer:
+  class: SequentialTrainer
+  timesteps: 3000000
+  environment_info: log

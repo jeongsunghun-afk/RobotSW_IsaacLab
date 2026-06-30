@@ -56,7 +56,10 @@ logger = logging.getLogger(__name__)
 with contextlib.suppress(ImportError):
     import isaaclab_tasks_experimental  # noqa: F401
 
-RSL_RL_VERSION = "5.0.1"
+# Lowered from 5.0.1 to allow vendored rsl_rl (3.2.0) with custom AMP/parkour runners.
+# Stock isaac-6.0 (rsl-rl-lib 5.0.1) still satisfies this gate (5.0.1 >= 3.2.0), so stock
+# task runs are unaffected; this only widens acceptance for the vendored package.
+RSL_RL_VERSION = "3.2.0"
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -220,9 +223,113 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         # create runner from rsl-rl
         if agent_cfg.class_name == "OnPolicyRunner":
-            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+            # 6.0-migration: vendored rsl_rl (3.2.0) PPO predates IsaacLab-3.0 stock algorithm cfg
+            # fields (share_cnn_encoders, check_for_nan). Filter algorithm cfg to the vendored PPO
+            # signature so standard-PPO tasks don't crash on the unknown kwarg (mirrors custom branches).
+            import inspect
+
+            from rsl_rl.algorithms.ppo import PPO as _VendoredStockPPO
+
+            _accepted_ppo_params = set(inspect.signature(_VendoredStockPPO.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+            runner = OnPolicyRunner(env, _cfg_dict, log_dir=log_dir, device=agent_cfg.device)
         elif agent_cfg.class_name == "DistillationRunner":
             runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerAMPBase":
+            # Guarded (branch-local) import: only resolved when a vendored custom AMP runner
+            # is requested. Stock isaac-6.0 (rsl-rl-lib 5.0.1, no custom classes) never enters
+            # this branch, so the missing import cannot break stock task runs.
+            import inspect
+
+            from rsl_rl.algorithms.ppo import PPO as _VendoredPPO
+            from rsl_rl.runners import OnPolicyRunnerAMPBase
+
+            # Sanitize algorithm cfg: IsaacLab 3.0 (rsl-rl-lib 5.0.1) adds fields to
+            # RslRlPpoAlgorithmCfg (e.g. share_cnn_encoders, optimizer) that the vendored
+            # PPO 3.2.0 __init__() does not accept. Filter to accepted params only,
+            # keeping class_name which PPOAMPBase pops before calling super().__init__().
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPO.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+
+            runner = OnPolicyRunnerAMPBase(env, _cfg_dict, log_dir=log_dir, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerParkour":
+            # Guarded (branch-local) import for the vendored custom RMA/parkour runner.
+            # Stock isaac-6.0 never enters this branch.
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerParkour
+
+            # Sanitize algorithm cfg: drop IsaacLab 3.0 (rsl-rl-lib 5.0.1) fields the vendored
+            # PPOParkour 3.2.0 __init__() does not accept (e.g. share_cnn_encoders).
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+
+            runner = OnPolicyRunnerParkour(env, _cfg_dict, log_dir=log_dir, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerAMP":
+            # Guarded (branch-local) import for the vendored custom AMP runner (go2_amp, R_Skeleton_amp).
+            # Stock isaac-6.0 never enters this branch.
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerAMP
+
+            # OnPolicyRunnerAMP constructs PPOAMP, whose __init__(*args, amp_cfg=None, **kwargs) pops
+            # class_name and forwards the named algorithm cfg to PPOParkour.__init__ via **kwargs. So the
+            # algorithm-cfg filter target is PPOParkour, not PPOAMP (whose signature is var-args only and
+            # would strip every field). amp_cfg comes from the separate top-level "amp" key, untouched here.
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+
+            runner = OnPolicyRunnerAMP(env, _cfg_dict, log_dir=log_dir, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
+            # Guarded (branch-local) import for the vendored custom parkour-AMP runner (parkour_imitation).
+            # Stock isaac-6.0 never enters this branch.
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerParkourAMP
+
+            # OnPolicyRunnerParkourAMP inherits _construct_algorithm from OnPolicyRunnerAMP and constructs
+            # PPOAMP, which forwards the named algorithm cfg to PPOParkour.__init__ (see OnPolicyRunnerAMP
+            # branch above). Filter target is therefore PPOParkour.
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+
+            runner = OnPolicyRunnerParkourAMP(env, _cfg_dict, log_dir=log_dir, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPVoxel":
+            # Guarded (branch-local) import for the vendored custom voxel parkour-AMP runner
+            # (parkour_imitation voxel). Stock isaac-6.0 never enters this branch.
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerParkourAMPVoxel
+
+            # OnPolicyRunnerParkourAMPVoxel inherits _construct_algorithm from OnPolicyRunnerAMP and
+            # constructs PPOAMP (only the actor-critic class differs, ActorCriticRMAVoxel), which forwards
+            # the named algorithm cfg to PPOParkour.__init__. Filter target is therefore PPOParkour.
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+
+            runner = OnPolicyRunnerParkourAMPVoxel(env, _cfg_dict, log_dir=log_dir, device=agent_cfg.device)
         else:
             raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
         # configure_seed must be called after runner construction so that PyTorch deterministic settings
