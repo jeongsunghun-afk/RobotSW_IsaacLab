@@ -3,46 +3,66 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Go2 ParkourImitation-RandomGoal + Livox Mid-360 LiDAR environment.
+"""Go2 ParkourImitation-RandomGoal + Livox Mid-360 LiDAR environment (R1 + R2).
 
+R1 — Raw point cloud side-channel (unchanged)
+----------------------------------------------
 Attaches a Livox Mid-360 LiDAR to ``Go2ParkourImitationRandomGoalEnv`` and exposes
 the raw 3D hit geometry as an extras side-channel.  The policy obs pipeline is
-byte-identical to the base RandomGoal env — no obs group is added or modified.
+byte-identical to the base RandomGoal env.
 
-Side-channel contract
----------------------
-After each ``_get_observations()`` call:
+R1 extras contract:
+    self.extras["lidar_hits_w"]  — (N, R, 3) float32, world-frame 3-D hit points (miss=inf)
+    self.extras["lidar_pos_w"]   — (N, 3)    float32, sensor origin in world frame (m)
+    self.extras["lidar_quat_w"]  — (N, 4)    float32, sensor orientation (wxyz)
 
-    self.extras["lidar_hits_w"]  — torch.Tensor, shape (num_envs, num_rays, 3), float32
-                                   World-frame 3-D hit points.  Missed / dropped rays
-                                   carry inf values.  Cloned so callers own the data.
+R2 — Range-image obs group
+---------------------------
+Projects the Mid-360 scan into a stacked range image and exposes it as
+``obs["lidar"]``.
 
-    self.extras["lidar_pos_w"]   — torch.Tensor, shape (num_envs, 3), float32
-                                   Sensor origin in world frame (metres).
+R2 obs contract:
+    obs["lidar"]  — (N, K*C*H*W)  float32, flattened from (N, K, C=2, H, W)
+                    K = lidar_frame_stack (default 3)
+                    C = 2  ch0=range_norm, ch1=hit_mask
+                    H = lidar_image_h (default 24)
+                    W = lidar_image_w (default 96)
 
-    self.extras["lidar_quat_w"]  — torch.Tensor, shape (num_envs, 4), float32
-                                   Sensor orientation in world frame (wxyz).
+    ch0  range_norm: clamp(d, 0, max_range) / max_range for a hit; 1.0 for miss/occluded.
+    ch1  hit_mask:   1.0 for valid hit, 0.0 for miss/occluded/dropout.
 
-Why ray_hits_w instead of distances
--------------------------------------
-LidarSensor._update_dynamic_rays() rotates the ray-direction array in-place each
-update (Z-axis spin for Livox pattern).  The per-ray direction is an internal
-attribute not exposed in LidarSensorData, so a scalar distance[i] alone cannot be
-back-projected to a 3-D point.  ray_hits_w is self-sufficient — it already encodes
-the cast geometry — and is therefore the correct estimator input.
+Frame stack:
+    Newest frame at k=0, older frames k=1..K-1.
+    Flattened via ``.reshape(N, -1)`` (C-order) so r2-net recovers layout with
+    ``obs.reshape(N, K*C, H, W)``  ← kc = k*C + c (K-major-then-channel).
 
-Estimator usage
----------------
-    base_hits = quat_apply_inverse(lidar_quat_w, lidar_hits_w - lidar_pos_w)
-    mask      = torch.isfinite(base_hits).all(-1)   # valid-ray boolean mask
-    # apply point-level domain-randomisation on base_hits before feeding estimator
-    # supervision target: obs["scan"]  (187-dim GT heightmap, base frame, metres)
+Projection method (per-step, body-local ray directions)
+--------------------------------------------------------
+LidarSensor._update_dynamic_rays() rotates ``self.ray_directions`` in-place each
+sensor update (cumulative z-axis spin).  A precomputed bin map would therefore
+accumulate an unbounded azimuth error (~57° per 10 s).  Instead the ray→bin map is
+recomputed EVERY step from current ``ray_directions[0]`` (~24k atan2 — negligible):
 
-GT height_scan (obs["scan"], 187-dim) is preserved as the estimator supervision
-target.  Replacing it with LiDAR data is out of scope for this env.
+    az  = atan2(y, x) % 2π     → az_bin ∈ [0, W)
+    el  = atan2(z, √(x²+y²))   → el_bin ∈ [0, H) over measured elevation span
+    bin = el_bin * W + az_bin   (R,) int64
 
-No new persistent buffers are added.  The sensor data is read live each step, so no
-``_reset_idx`` override is needed.
+scatter_reduce(amin) for range; scatter_reduce(amax) for hit_mask.
+Empty bins default to range_norm=1.0, mask=0.0.
+
+Occlusion-as-miss:
+    ``data.distances`` is computed in _update_buffers_impl BEFORE body-occlusion
+    runs (R1 sets hits_w[occluded]=inf in _get_observations, which post-dates the
+    sensor update).  We re-derive ``occluded`` and set those rays' hit_valid=False.
+
+Miss / dropout detection:
+    ``data.distances`` stores ``max_distance`` (sensor cfg, 40.0 m) for miss and
+    dropout rays.  ``hit_valid = (distances < max_distance) & ~occluded``.
+
+Why ray_hits_w for R1 but distances for R2:
+    R1 needs 3-D geometry for the point-cloud estimator — only ray_hits_w provides
+    that (per-ray directions change dynamically so distance alone cannot back-project).
+    R2 needs only scalars per ray + a body-local bin map — distances field suffices.
 
 Inheritance chain:
     Go2ParkourImitationRandomGoalLidarEnv
@@ -54,29 +74,41 @@ Inheritance chain:
 
 from __future__ import annotations
 
+import math
+import warnings
+from pathlib import Path
+
+import numpy as np
+import torch
+
 from isaaclab.sensors.lidar_sensor import LidarSensor
 
 from .parkour_imitation_random_goal_env import Go2ParkourImitationRandomGoalEnv
 from .parkour_imitation_random_goal_lidar_env_cfg import ParkourImitationRandomGoalLidarEnvCfg
 
+# Path to precomputed body self-occlusion az/el grid.
+# Generated by _workspace/parkour_imitation_lidar/r1_throughput/compute_body_mask.py.
+# Gracefully disabled if file is missing (warn, no crash).
+_BODY_OCC_GRID_PATH: Path = (
+    Path(__file__).parents[5] / "_workspace/parkour_imitation_lidar/r1_throughput/body_occ_azel_grid.npy"
+)
+
 
 class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
-    """Go2 ParkourImitation-RandomGoal env with attached Livox Mid-360 LiDAR.
+    """Go2 ParkourImitation-RandomGoal env with Livox Mid-360 LiDAR (R1 + R2).
 
-    The only additions over the parent env are:
+    R1 additions over the parent env:
+        1. ``self._mid360`` (``LidarSensor``) — created in ``_setup_scene``.
+        2. Three extras keys populated in ``_get_observations`` each step (R1 contract).
 
-    1. ``self._mid360`` (``LidarSensor``) — created in ``_setup_scene`` after all base
-       sensors and terrain, appended to ``self.scene.sensors``.
+    R2 additions:
+        3. ``obs["lidar"]`` shape (N, K*C*H*W) — range-image frame stack.
+           Buffer layout (N, K, C=2, H, W) flattened via ``.reshape(N, -1)``.
+           ch0 = range_norm, ch1 = hit_mask (see module docstring for full contract).
+        4. ``self._lidar_frame_buf`` (N, K, 2, H, W) — ring buffer; reset in _reset_idx.
 
-    2. Three extras keys — populated in ``_get_observations`` each step:
-       - ``extras["lidar_hits_w"]``  shape (num_envs, num_rays, 3)  world-frame hits, miss=inf
-       - ``extras["lidar_pos_w"]``   shape (num_envs, 3)            sensor world position
-       - ``extras["lidar_quat_w"]``  shape (num_envs, 4)            sensor orientation (wxyz)
-
-       The obs dict returned is the unmodified parent result.
-
-    Policy obs dimensions (policy/scan/priv_explicit/priv_latent/history) and amp_obs
-    are byte-identical to ``Go2ParkourImitationRandomGoalEnv``.
+    Policy obs dimensions (policy/scan/priv_explicit/priv_latent/history/amp) are
+    byte-identical to ``Go2ParkourImitationRandomGoalEnv``.
     """
 
     cfg: ParkourImitationRandomGoalLidarEnvCfg
@@ -94,33 +126,238 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         self._mid360 = LidarSensor(self.cfg.mid360_lidar)
         self.scene.sensors["mid360_lidar"] = self._mid360
 
+        # Static body self-occlusion az/el grid (nominal upright pose).
+        # Computed once by compute_body_mask.py (body-only raycast + min_range offset).
+        # Runtime masking is direction-based (not per-index) — immune to sensor_t
+        # quadratic rotation accumulation in _update_dynamic_rays().
+        self._body_occ_grid: torch.Tensor | None = None
+        self._body_occ_res: float = 1.0  # degrees per grid bin (inferred from grid shape)
+        self._body_occ_n_el: int = 180  # number of elevation bins
+        self._body_occ_n_az: int = 360  # number of azimuth bins
+        if _BODY_OCC_GRID_PATH.exists():
+            grid_np = np.load(str(_BODY_OCC_GRID_PATH))
+            self._body_occ_grid = torch.as_tensor(grid_np, dtype=torch.bool, device=self.device)
+            self._body_occ_n_el, self._body_occ_n_az = grid_np.shape
+            self._body_occ_res = 180.0 / self._body_occ_n_el
+        else:
+            warnings.warn(
+                f"Body self-occlusion grid not found at {_BODY_OCC_GRID_PATH}. "
+                "Run _workspace/parkour_imitation_lidar/r1_throughput/compute_body_mask.py "
+                "to generate it.  Mask disabled (no body occlusion applied).",
+                stacklevel=2,
+            )
+
     # ------------------------------------------------------------------
-    # Observation hook — obs untouched; lidar exposed via extras
+    # R2 init — frame-stack ring buffer
+    # ------------------------------------------------------------------
+
+    def __init__(self, cfg: ParkourImitationRandomGoalLidarEnvCfg, render_mode: str | None = None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+
+        # Frame-stack ring buffer: (N, K, C=2, H, W), float32, zero-initialised.
+        # Newest frame at k=0 (contract); older frames at k=1..K-1.
+        # Flattened to (N, K*C*H*W) as obs["lidar"] via .reshape(N, -1) (C-order).
+        # r2-net recovers the layout via obs.reshape(N, K*C, H, W) → kc = k*C + c.
+        K = cfg.lidar_frame_stack
+        H = cfg.lidar_image_h
+        W = cfg.lidar_image_w
+        self._lidar_frame_buf: torch.Tensor = torch.zeros(
+            self.num_envs,
+            K,
+            2,
+            H,
+            W,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+    # ------------------------------------------------------------------
+    # R2 reset — zero frame buffer for reset envs
+    # ------------------------------------------------------------------
+
+    def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
+        """Delegate to parent reset; zero the lidar frame buffer for reset envs."""
+        super()._reset_idx(env_ids)
+        if not hasattr(self, "_lidar_frame_buf") or self._lidar_frame_buf is None:
+            # Guard: _reset_idx can fire during parent __init__ before our __init__ runs.
+            return
+        if env_ids is None:
+            self._lidar_frame_buf.zero_()
+        else:
+            self._lidar_frame_buf[env_ids] = 0.0
+
+    # ------------------------------------------------------------------
+    # R2 helpers
+    # ------------------------------------------------------------------
+
+    def _compute_range_image(self, distances: torch.Tensor, hit_valid: torch.Tensor) -> torch.Tensor:
+        """Project (N, R) sensor distances + validity mask to (N, 2, H, W) range image.
+
+        Bin map is recomputed every call from current ``ray_directions[0]`` to track
+        the Livox pattern's cumulative z-axis rotation from ``_update_dynamic_rays()``.
+        Precomputing at init would accumulate an unbounded azimuth error (~57° per 10 s).
+
+        Projection:
+            az  = atan2(y, x) % 2π  →  az_bin ∈ [0, W)
+            el  = atan2(z, √(x²+y²)) →  el_bin ∈ [0, H) over measured elevation span
+            bin = el_bin * W + az_bin        (R,)
+
+        Scatter:
+            range grid  init = 1.0  (empty bin → range_norm = 1.0)
+            mask  grid  init = 0.0  (empty bin → no hit)
+            scatter_reduce amin for range (closest hit per bin wins)
+            scatter_reduce amax for mask  (1 if any hit maps to this bin)
+
+        Elevation span:
+            Derived from actual body-local ray_directions[0] each step — not from
+            Mid-360 datasheet (−7° / +52°) because the dome-down ⊗ pitch-30° mount
+            offset moves the pattern into a different body-frame span.
+            Stored on self._lidar_el_min_deg / _lidar_el_max_deg for diagnostics.
+
+        Args:
+            distances:  (N, R) float32, sensor-measured distances in metres.
+                        Miss and dropout already stored as max_distance (40 m).
+            hit_valid:  (N, R) bool, True = genuine hit (not miss, dropout, occluded).
+
+        Returns:
+            (N, 2, H, W) float32.  ch0 = range_norm, ch1 = hit_mask.
+        """
+        N = distances.shape[0]
+        H = self.cfg.lidar_image_h
+        W = self.cfg.lidar_image_w
+        max_range: float = self.cfg.lidar_max_range
+
+        # --- Per-step bin map from current body-local ray directions -----------
+        # ray_directions: (N, R, 3), body-local (ray_alignment="base").
+        # All envs share identical directions after init; _update_dynamic_rays
+        # operates on the shared tensor → env 0 is representative.
+        dirs = self._mid360.ray_directions[0]  # (R, 3)
+
+        az = torch.atan2(dirs[:, 1], dirs[:, 0]) % (2.0 * math.pi)  # [0, 2π)
+        az_bin = (az / (2.0 * math.pi) * W).long().clamp(0, W - 1)
+
+        el = torch.atan2(dirs[:, 2], torch.sqrt(dirs[:, 0] ** 2 + dirs[:, 1] ** 2))
+        el_min = el.min()
+        el_max = el.max()
+        # Store for external diagnostics (final value each episode reflects stable
+        # elevation span — z-rotation does not change el).
+        self._lidar_el_min_deg = float(el_min.item() * 180.0 / math.pi)
+        self._lidar_el_max_deg = float(el_max.item() * 180.0 / math.pi)
+
+        el_bin = ((el - el_min) / (el_max - el_min + 1e-8) * H).long().clamp(0, H - 1)
+        ray_bin = el_bin * W + az_bin  # (R,) flat index in [0, H*W)
+        bin_idx = ray_bin.unsqueeze(0).expand(N, -1)  # (N, R)
+
+        # --- Scatter into (N, H*W) grids ----------------------------------------
+        # range_norm_flat: normalised distance for hits, 1.0 for misses (= empty default).
+        dist_norm = distances.clamp(0.0, max_range) / max_range  # (N, R)
+        range_norm_flat = torch.where(hit_valid, dist_norm, torch.ones_like(dist_norm))
+
+        # Range grid: init=1.0 so empty bins stay at range_norm=1.0.
+        range_grid = torch.ones(N, H * W, device=self.device, dtype=torch.float32)
+        range_grid.scatter_reduce_(1, bin_idx, range_norm_flat, reduce="amin", include_self=True)
+
+        # Mask grid: init=0.0 so empty bins stay at 0.
+        mask_flat = hit_valid.float()
+        mask_grid = torch.zeros(N, H * W, device=self.device, dtype=torch.float32)
+        mask_grid.scatter_reduce_(1, bin_idx, mask_flat, reduce="amax", include_self=True)
+
+        # Stack channels: (N, C=2, H, W) — ch0=range_norm, ch1=hit_mask.
+        img = torch.stack(
+            [range_grid.view(N, H, W), mask_grid.view(N, H, W)],
+            dim=1,
+        )  # (N, 2, H, W)
+        return img
+
+    @staticmethod
+    def _mirror_range_image(img: torch.Tensor) -> torch.Tensor:
+        """Horizontal flip of a range image for L/R symmetry data-augmentation.
+
+        Approximates az → −az by flipping the W (azimuth) axis.  There is a half-bin
+        offset vs the exact forward-beam convention — negligible for conv-based encoders.
+
+        NOT active during training.  To be enabled in the symmetry aug pass:
+            aug_obs = self._mirror_range_image(
+                self._lidar_frame_buf.reshape(N, K, 2, H, W)
+            ).reshape(N, -1)
+
+        Args:
+            img: (..., H, W) range image tensor (any leading dims).
+
+        Returns:
+            (..., H, W) with W axis flipped.
+        """
+        return torch.flip(img, dims=[-1])
+
+    # ------------------------------------------------------------------
+    # Observation hook — R1 extras + R2 obs["lidar"]
     # ------------------------------------------------------------------
 
     def _get_observations(self) -> dict:
-        """Return the parent obs dict unchanged; expose LiDAR geometry in extras.
+        """Return parent obs dict with R1 extras and R2 obs["lidar"].
 
-        The parent obs dict (policy / scan / priv_explicit / priv_latent / history /
-        amp) is returned with zero modifications.  Three extras keys are written with
-        cloned copies of the sensor's geometry tensors.
+        R1 (unchanged):
+            Calls super()._get_observations() which runs the base parkour obs pipeline
+            (byte-identical policy/scan/priv groups) and appends:
+            - extras["lidar_hits_w"] (N,R,3) — body-occluded rays set to inf
+            - extras["lidar_pos_w"]  (N,3)
+            - extras["lidar_quat_w"] (N,4)
 
-        Note: self.extras is NOT reassigned — only individual keys are set — to prevent
-        silently dropping other keys (amp_obs, terminal_amp_obs, log) written earlier
-        in the step by the parent chain.
+        R2 (new):
+            Re-derives the body occlusion mask (R1's ``occluded`` is a local variable)
+            to zero hit_valid for body-blocked rays.  Then:
+            1. Build hit_valid = (distances < max_distance) & ~occluded.
+            2. Project to (N, 2, H, W) range image via per-step bin recomputation.
+            3. Roll frame-stack ring buffer; insert new frame at k=0.
+            4. Set obs["lidar"] = buf.reshape(N, -1).
 
-        ray_hits_w rationale: LidarSensor rotates the ray-direction array in-place each
-        update (_update_dynamic_rays), so the per-ray direction is not exposed in
-        LidarSensorData.  A scalar distance alone cannot be back-projected to a 3-D
-        point.  ray_hits_w encodes the full cast geometry and is therefore the correct
-        estimator input.
+        Note: self.extras is NOT reassigned — only individual keys are set — to avoid
+        silently dropping amp_obs / terminal_amp_obs / log written by the parent chain.
         """
+        # ── R1: base obs + lidar extras (triggers sensor update + ray directions update) ──
         obs = super()._get_observations()
 
-        # Expose raw LiDAR geometry as top-level extras keys.  Never nested under
-        # extras["observations"] to avoid being picked up by symmetry / obs groups.
-        self.extras["lidar_hits_w"] = self._mid360.data.ray_hits_w.clone()  # (N, R, 3) world, miss=inf
-        self.extras["lidar_pos_w"] = self._mid360.data.pos_w.clone()  # (N, 3) sensor world pos
-        self.extras["lidar_quat_w"] = self._mid360.data.quat_w.clone()  # (N, 4) wxyz
+        # ── R2: range-image frame stack ──────────────────────────────────────────────────
+
+        # Re-derive body occlusion mask for the distance channel.
+        # data.distances is computed in _update_buffers_impl BEFORE R1's mask runs,
+        # so body-occluded rays retain their physical distance there.
+        if self._body_occ_grid is not None:
+            ray_dirs = self._mid360.ray_directions  # (N, R, 3) body-local, current step
+            az_bin_occ = (
+                (torch.atan2(ray_dirs[..., 1], ray_dirs[..., 0]) * (180.0 / math.pi) % 360.0 / self._body_occ_res)
+                .long()
+                .clamp(0, self._body_occ_n_az - 1)
+            )
+            el_bin_occ = (
+                ((torch.asin(ray_dirs[..., 2].clamp(-1.0, 1.0)) * (180.0 / math.pi) + 90.0) / self._body_occ_res)
+                .long()
+                .clamp(0, self._body_occ_n_el - 1)
+            )
+            occluded = self._body_occ_grid[el_bin_occ, az_bin_occ]  # (N, R) bool
+        else:
+            occluded = torch.zeros(self.num_envs, self._mid360.num_rays, dtype=torch.bool, device=self.device)
+
+        # data.distances: (N, R) with noise + dropout applied.
+        # Miss (inf hits) and dropout → stored as max_distance (40.0 m) by sensor.
+        raw_dist = self._mid360.data.distances  # cached — no re-update in same step
+
+        # hit_valid: genuine hit AND not body-occluded.
+        max_sensor_dist: float = self.cfg.mid360_lidar.max_distance  # 40.0 m
+        hit_valid = (raw_dist < max_sensor_dist) & ~occluded  # (N, R) bool
+
+        # Project to range image; roll ring buffer; expose obs["lidar"].
+        frame = self._compute_range_image(raw_dist, hit_valid)  # (N, 2, H, W)
+
+        # Ring buffer roll: shift older frames from k=0..K-2 → k=1..K-1, insert at k=0.
+        K = self.cfg.lidar_frame_stack
+        if K > 1:
+            self._lidar_frame_buf[:, 1:] = self._lidar_frame_buf[:, :-1].clone()
+        self._lidar_frame_buf[:, 0] = frame
+
+        # obs["lidar"]: (N, K*C*H*W) via C-order reshape.
+        # CONTRACT: layout is (N, K, C, H, W).reshape(N, -1).
+        # r2-net reshapes back to (N, K*C, H, W) → kc = k*C + c (K-major-then-channel).
+        obs["lidar"] = self._lidar_frame_buf.reshape(self.num_envs, -1)
 
         return obs

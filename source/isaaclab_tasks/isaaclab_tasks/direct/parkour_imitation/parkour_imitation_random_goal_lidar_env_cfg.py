@@ -68,7 +68,8 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
 
     All policy-facing fields (observation_space, height_scanner, obs_groups, amp_obs, etc.)
     are inherited UNCHANGED from ParkourImitationRandomGoalEnvCfg.  Only ``mid360_lidar``
-    is added.
+    and the range-image projection parameters (lidar_image_h/w, lidar_max_range,
+    lidar_frame_stack) are added.
 
     Mount parameters (pos / rot) and noise settings are identical to those in
     ``parkour_lidar_env_cfg.ParkourLidarEnvCfg``, which was verified with the Go2
@@ -76,7 +77,30 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
 
     ``debug_vis=False`` is intentional — this cfg is intended for large-scale training
     where viewport point-cloud rendering would add unnecessary overhead.
+
+    Range-image contract (R2)
+    -------------------------
+    ``obs["lidar"]`` shape = ``(N, lidar_frame_stack * 2 * lidar_image_h * lidar_image_w)``
+    produced by flattening a ``(N, K, C=2, H, W)`` buffer via ``.reshape(N, -1)``.
+
+    - ch0 = range_norm: ``clamp(d, 0, lidar_max_range) / lidar_max_range`` for a hit;
+      ``1.0`` for miss/occluded.
+    - ch1 = hit_mask: ``1.0`` for valid hit, ``0.0`` for miss/occluded/dropout.
+    - Frame stack: newest frame at index k=0, older frames at k=1..K-1.
     """
+
+    # ------------------------------------------------------------------
+    # Range-image projection parameters (R2 contract)
+    # ------------------------------------------------------------------
+    # Elevation bins for the range image (H).
+    lidar_image_h: int = 24
+    # Azimuth bins for the range image (W).  Full 360° coverage.
+    lidar_image_w: int = 96
+    # Maximum range for range normalisation (m).  Hits beyond this clamp to 1.0
+    # in range_norm but still carry hit_mask=1 (distinct from empty bins).
+    lidar_max_range: float = 20.0
+    # Number of temporal frames stacked in the obs["lidar"] buffer (K).
+    lidar_frame_stack: int = 3
 
     # Mid-360 LiDAR — side-channel only, NEVER concatenated into obs.
     # Exposed as: extras["lidar_hits_w"] (N,R,3), extras["lidar_pos_w"] (N,3), extras["lidar_quat_w"] (N,4).
@@ -97,7 +121,24 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
         ),
         ray_alignment="base",
         mesh_prim_paths=["/World/ground"],
-        dynamic_env_mesh_prim_paths=_GO2_SELF_OCCLUSION_PRIMS,
+        # R1 throughput fix (2026-06-30): dynamic body-mesh self-occlusion removed.
+        # The 17-prim dynamic mesh path (see _GO2_SELF_OCCLUSION_PRIMS above) caused a
+        # second full raycast_mesh + per-fire warp.refit() of 17 prims × N_env, inflating
+        # step-time from ~21 ms to ~45 s/step and causing 16 GB GPU OOM at 512 envs.
+        #
+        # Static self-occlusion mask is DEFERRED pending two blockers:
+        #   1. Sensor-inside-body-mesh artifact: all 24000 rays hit the inner mesh surface
+        #      at 0.07–0.16 m (_bc_ON.npy probe) — body-only cast returns all-blocked.
+        #   2. sensor_t quadratic rotation: _update_dynamic_rays applies an incremental
+        #      rotation of sensor_t*0.1 each call (not absolute from initial), so the total
+        #      rotation = Σ(k*0.01) — quadratic in update count — making a per-index mask
+        #      meaningless within ~100 sensor updates (~10 s).
+        # Correct approach: _workspace/parkour_imitation_lidar/r1_throughput/compute_body_mask.py
+        # uses body-mesh-only raycast (_GO2_SELF_OCCLUSION_PRIMS as static mesh_prim_paths)
+        # with ray starts offset by min_range (0.2 m) to clear the inside-mesh artifact.
+        # Requires GPU run + sensor_t fix decision before wiring into env.
+        # Residual sim-to-real gap is covered by the existing 10% pixel_dropout_prob DR.
+        dynamic_env_mesh_prim_paths=[],
         max_distance=40.0,
         min_range=0.2,
         debug_vis=False,  # disabled for training — no viewport overhead

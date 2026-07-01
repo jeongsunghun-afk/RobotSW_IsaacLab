@@ -90,8 +90,11 @@ class ParkourLidarEnvCfg(ParkourEnvCfg):
         ),
         ray_alignment="base",
         mesh_prim_paths=["/World/ground"],
-        dynamic_env_mesh_prim_paths=_GO2_SELF_OCCLUSION_PRIMS,
-        # dynamic_env_mesh_prim_paths=[],
+        # R1 throughput fix (2026-06-30): dynamic body-mesh self-occlusion removed.
+        # See parkour_imitation_random_goal_lidar_env_cfg.py for full rationale.
+        # Static body-occlusion mask DEFERRED — see
+        # _workspace/parkour_imitation_lidar/r1_throughput/compute_body_mask.py.
+        dynamic_env_mesh_prim_paths=[],
         max_distance=40.0,
         min_range=0.2,
         debug_vis=True,  # GUI point-cloud overlay in viewport (no perf cost on play-only tasks)
