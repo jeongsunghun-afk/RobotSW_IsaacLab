@@ -72,7 +72,11 @@ import pandas as pd
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP, OnPolicyRunnerAMPBase
-from rsl_rl.runners.on_policy_runner_parkour_amp import OnPolicyRunnerParkourAMP
+from rsl_rl.runners.on_policy_runner_parkour_amp import (
+    OnPolicyRunnerParkourAMP,
+    OnPolicyRunnerParkourAMPLidar,
+    OnPolicyRunnerParkourAMPVoxel,
+)
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -282,6 +286,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = OnPolicyRunnerAMPBase(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
         runner = OnPolicyRunnerParkourAMP(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPVoxel":
+        runner = OnPolicyRunnerParkourAMPVoxel(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPLidar":
+        runner = OnPolicyRunnerParkourAMPLidar(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
@@ -312,7 +320,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    if agent_cfg.class_name in ("OnPolicyRunnerParkour", "OnPolicyRunnerParkourAMP"):
+    if agent_cfg.class_name in (
+        "OnPolicyRunnerParkour",
+        "OnPolicyRunnerParkourAMP",
+        "OnPolicyRunnerParkourAMPVoxel",
+        "OnPolicyRunnerParkourAMPLidar",
+    ):
         # Bundle estimator into exported graph if the algorithm has one (predicts priv_explicit from proprio).
         estimator = getattr(runner.alg, "estimator", None)
         export_policy_as_jit_parkour(

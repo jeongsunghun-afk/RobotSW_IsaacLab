@@ -87,7 +87,11 @@ import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP, OnPolicyRunnerAMPBase
-from rsl_rl.runners.on_policy_runner_parkour_amp import OnPolicyRunnerParkourAMP
+from rsl_rl.runners.on_policy_runner_parkour_amp import (
+    OnPolicyRunnerParkourAMP,
+    OnPolicyRunnerParkourAMPLidar,
+    OnPolicyRunnerParkourAMPVoxel,
+)
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -225,6 +229,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = OnPolicyRunnerAMPBase(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
         runner = OnPolicyRunnerParkourAMP(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPVoxel":
+        runner = OnPolicyRunnerParkourAMPVoxel(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPLidar":
+        runner = OnPolicyRunnerParkourAMPLidar(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:

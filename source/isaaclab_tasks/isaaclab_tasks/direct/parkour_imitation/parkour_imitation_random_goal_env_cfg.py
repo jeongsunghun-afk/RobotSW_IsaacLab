@@ -153,3 +153,26 @@ class ParkourImitationRandomGoalTeacher3DEnvCfg(ParkourImitationRandomGoalEnvCfg
         self.terrain.terrain_generator.sub_terrains["parkour_gap"].proportion = 0.15
         self.terrain.terrain_generator.sub_terrains["parkour_stair"].proportion = 0.15
         self.terrain.terrain_generator.sub_terrains["parkour_crawl"].proportion = 0.25
+
+
+@configclass
+class ParkourImitationRandomGoalTeacher3DVoxelEnvCfg(ParkourImitationRandomGoalTeacher3DEnvCfg):
+    """Voxel-teacher arm: RandomGoal + 3D clearance scan + voxel occupancy grid.
+
+    Extends ParkourImitationRandomGoalTeacher3DEnvCfg with:
+    - enable_voxel_scanner=True : activates voxel occupancy grid fill (27×21×13=7371)
+      and routes a flat (N,7371) ``"voxel"`` tensor into the obs dict.
+
+    Controlled variables (D8 in voxel_teacher_arm_plan.md):
+    - enable_clearance_scanner=True and clearance_as_scan=True are **inherited unchanged**
+      so the critic still consumes raw clearance-294.
+    - Terrain mix is **identical** to Teacher3D (parkour_crawl=0.25) for a fair comparison.
+
+    Intended difference vs Teacher3D:
+        Actor terrain encoder: clearance scandot-MLP(294→32) → voxel CNN(7371→32, VoxelEncoder).
+        Critic: raw clearance-294 (same in both arms — controlled variable).
+    """
+
+    # Activate voxel grid builder.  clearance scanner is inherited (enable_clearance_scanner=True)
+    # because voxel filling reuses the clearance ray hits (see parkour_env.py logic).
+    enable_voxel_scanner: bool = True

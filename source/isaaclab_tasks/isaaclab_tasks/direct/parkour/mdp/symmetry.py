@@ -55,6 +55,12 @@ _SCAN_LON = 17
 # Values are distances (no sign flip needed — only permutation).
 _CLEAR_AZ = 21
 _CLEAR_EL = 14
+# voxel flat layout: (nx=27, ny=21, nz=13), C-order → flat_index = ix*(ny*nz)+iy*nz+iz.
+# Mirror = y-flip (iy → ny-1-iy). ny=21 odd → center slice (iy=10) self-maps.
+_VOXEL_NX = 27
+_VOXEL_NY = 21
+_VOXEL_NZ = 13
+_VOXEL_DIM = 7371  # 27 * 21 * 13
 
 
 def _flip_side(prefix: str) -> str:
@@ -190,7 +196,7 @@ def _build_clearance_mirror_perm(num_azimuth: int, num_elevation: int, device: t
     """
     perm = torch.zeros(num_azimuth * num_elevation, dtype=torch.long, device=device)
     for az_idx in range(num_azimuth):
-        mirror_az = (num_azimuth - 1 - az_idx)
+        mirror_az = num_azimuth - 1 - az_idx
         for el_idx in range(num_elevation):
             src = mirror_az * num_elevation + el_idx
             dst = az_idx * num_elevation + el_idx
@@ -200,6 +206,37 @@ def _build_clearance_mirror_perm(num_azimuth: int, num_elevation: int, device: t
 
 # Module-level cache for the clearance perm (built once on first use, device-agnostic key).
 _clearance_perm_cache: dict[str, torch.Tensor] = {}
+
+# Module-level cache for the voxel y-flip perm.
+_voxel_perm_cache: dict[str, torch.Tensor] = {}
+
+
+def _build_voxel_mirror_perm(nx: int, ny: int, nz: int, device: torch.device) -> torch.Tensor:
+    """Build the L/R y-flip permutation index for the flat voxel occupancy layout.
+
+    Flat layout (C-order, matches voxel_occupancy.py flat_idx and parkour_env.py .reshape):
+        flat_index = ix*(ny*nz) + iy*nz + iz
+
+    Mirror rule: iy → ny-1-iy (y-axis flip = left/right swap).
+    Occupancy is a scalar categorical → permutation only, no sign flip required.
+    ny=21 is odd → center slice (iy=10) self-maps (involution centre).
+    Involution property: mirror(mirror(x)) == x by construction.
+
+    Returns:
+        perm: (nx*ny*nz,) LongTensor where ``output[dst] = input[perm[dst]]``
+              gives the y-mirrored voxel grid.
+    """
+    assert nx * ny * nz == _VOXEL_DIM, f"[parkour symmetry] voxel grid {nx}×{ny}×{nz} = {nx * ny * nz} ≠ {_VOXEL_DIM}"
+    # Vectorised construction — no Python triple-loop needed.
+    gx = torch.arange(nx, device=device)
+    gy = torch.arange(ny, device=device)
+    gz = torch.arange(nz, device=device)
+    gx3, gy3, gz3 = torch.meshgrid(gx, gy, gz, indexing="ij")  # (nx, ny, nz) each
+    mirror_gy = ny - 1 - gy3  # y-flip
+    # For each destination (ix, iy, iz), the source is (ix, ny-1-iy, iz).
+    src = gx3 * (ny * nz) + mirror_gy * nz + gz3  # (nx, ny, nz) source flat indices
+    # C-order flatten: perm[dst_flat] = src[ix, iy, iz] where dst_flat = ix*(ny*nz)+iy*nz+iz
+    return src.reshape(-1)  # (nx*ny*nz,)
 
 
 def _mirror_scan(scan: torch.Tensor) -> torch.Tensor:
@@ -223,9 +260,7 @@ def _mirror_scan(scan: torch.Tensor) -> torch.Tensor:
         # Clearance 3D: az-reversal permutation (L/R flip, values are distances — no sign change).
         device_key = str(scan.device)
         if device_key not in _clearance_perm_cache:
-            _clearance_perm_cache[device_key] = _build_clearance_mirror_perm(
-                _CLEAR_AZ, _CLEAR_EL, scan.device
-            )
+            _clearance_perm_cache[device_key] = _build_clearance_mirror_perm(_CLEAR_AZ, _CLEAR_EL, scan.device)
         perm = _clearance_perm_cache[device_key]
         return scan[..., perm]
     else:
@@ -233,6 +268,25 @@ def _mirror_scan(scan: torch.Tensor) -> torch.Tensor:
             f"[parkour symmetry] _mirror_scan: unsupported scan dim {dim}. "
             f"Expected {_SCAN_DIM} (height_scan) or {_SCAN_DIM_3D} (clearance_3d)."
         )
+
+
+def _mirror_voxel(voxel: torch.Tensor) -> torch.Tensor:
+    """Mirror flat voxel occupancy obs (..., 7371) along the y-axis (L/R flip).
+
+    Applies the cached ``_build_voxel_mirror_perm`` permutation. Occupancy values
+    are scalar categoricals — no sign flip, permutation only.
+
+    Args:
+        voxel: (..., 7371) float tensor (already flattened from (N,27,21,13) by parkour_env).
+
+    Returns:
+        Mirrored tensor with the same shape.
+    """
+    device_key = str(voxel.device)
+    if device_key not in _voxel_perm_cache:
+        _voxel_perm_cache[device_key] = _build_voxel_mirror_perm(_VOXEL_NX, _VOXEL_NY, _VOXEL_NZ, voxel.device)
+    perm = _voxel_perm_cache[device_key]
+    return voxel[..., perm]
 
 
 def _mirror_priv_explicit(pe: torch.Tensor) -> torch.Tensor:
@@ -297,6 +351,11 @@ def compute_parkour_symmetric_states(*, env, obs: TensorDict | None = None, acti
                 f"({_SCAN_DIM}, {_SCAN_DIM_3D}). "
                 "Add new dimension or check env scan output."
             )
+        if "voxel" in obs.keys() and obs["voxel"].shape[-1] != _VOXEL_DIM:
+            raise AssertionError(
+                f"[parkour symmetry] voxel dim {obs['voxel'].shape[-1]} != {_VOXEL_DIM}; "
+                "check enable_voxel_scanner and parkour_env flatten order (C-order expected)."
+            )
         if obs["priv_latent"].shape[-1] != _PRIV_LATENT_DIM:
             raise AssertionError(
                 f"[parkour symmetry] priv_latent dim {obs['priv_latent'].shape[-1]} != {_PRIV_LATENT_DIM}; "
@@ -306,6 +365,9 @@ def compute_parkour_symmetric_states(*, env, obs: TensorDict | None = None, acti
         out = obs.repeat(2)  # [original B; (to-be-filled) mirror B]
         out["policy"][b:] = _mirror_proprio(obs["policy"], joint_swap, hip_idx, contact_foot_swap)
         out["scan"][b:] = _mirror_scan(obs["scan"])
+        # voxel (voxel-arm only — baseline obs do not contain this key; skip silently)
+        if "voxel" in obs.keys():
+            out["voxel"][b:] = _mirror_voxel(obs["voxel"])
         out["priv_explicit"][b:] = _mirror_priv_explicit(obs["priv_explicit"])
         out["priv_latent"][b:] = _mirror_priv_latent(obs["priv_latent"], joint_swap, friction_foot_swap)
         # history (N, T, 46): apply proprio mirror per time-frame (last dim = proprio).

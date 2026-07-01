@@ -13,7 +13,7 @@
 from .actor_critic import ActorCritic
 from .actor_critic_cnn import ActorCriticCNN
 from .actor_critic_moe import ActorCriticMoE
-from .actor_critic_parkour import ActorCriticRMA
+from .actor_critic_parkour import ActorCriticRMA, ActorCriticRMALidar, ActorCriticRMAVoxel, LidarEncoder, VoxelEncoder
 from .actor_critic_parkour_moe import ActorCriticRMAMoE
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .amp_discriminator import AMPDiscriminator
@@ -28,10 +28,14 @@ __all__ = [
     "ActorCriticCNN",
     "ActorCriticMoE",
     "ActorCriticRMA",
+    "ActorCriticRMALidar",
     "ActorCriticRMAMoE",
+    "ActorCriticRMAVoxel",
     "ActorCriticRecurrent",
+    "LidarEncoder",
     "RandomNetworkDistillation",
     "StudentTeacher",
+    "VoxelEncoder",
     "resolve_rnd_config",
     "resolve_symmetry_config",
 ]

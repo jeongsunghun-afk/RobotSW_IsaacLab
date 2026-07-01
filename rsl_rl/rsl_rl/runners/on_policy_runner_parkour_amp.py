@@ -48,6 +48,7 @@ import os
 import time
 import torch
 
+from rsl_rl.modules.actor_critic_parkour import ActorCriticRMALidar, ActorCriticRMAVoxel
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP
 from rsl_rl.runners.on_policy_runner_parkour import _rename_joint_keys
 
@@ -302,3 +303,40 @@ class OnPolicyRunnerParkourAMP(OnPolicyRunnerAMP):
         self.alg.discriminator.eval()  # fixed: parent had .train() here by mistake
         if self.alg_cfg.get("rnd_cfg") and hasattr(self.alg, "rnd"):
             self.alg.rnd.eval()
+
+
+class OnPolicyRunnerParkourAMPVoxel(OnPolicyRunnerParkourAMP):
+    """Variant of OnPolicyRunnerParkourAMP that uses ActorCriticRMAVoxel as the policy.
+
+    Voxel teacher arm for the clearance ablation experiment (design doc D1–D8 in
+    ``_workspace/parkour_imitation_lidar/voxel_teacher_arm_plan.md``).
+
+    The only change vs the parent is the actor-critic class: ``ActorCriticRMAVoxel``
+    replaces ``ActorCriticRMA`` so that the actor's terrain encoder is a voxel-occupancy
+    CNN (``VoxelEncoder``) instead of the clearance scandot MLP.  The critic is identical
+    to the clearance arm (raw clearance-294, D8) — critic capacity is the controlled variable.
+
+    Everything else (reward fusion, flat_env_mask, spawn scheduler, save/load, disc/estimator)
+    is inherited unchanged from ``OnPolicyRunnerParkourAMP``.
+    """
+
+    def _get_actor_critic_class(self):
+        return ActorCriticRMAVoxel
+
+
+class OnPolicyRunnerParkourAMPLidar(OnPolicyRunnerParkourAMP):
+    """Variant of OnPolicyRunnerParkourAMP that uses ActorCriticRMALidar as the policy.
+
+    R2 LiDAR student-only (SL) arm.
+
+    The only change vs the parent is the actor-critic class: ``ActorCriticRMALidar``
+    replaces ``ActorCriticRMA`` so that the actor's terrain encoder is a range-image CNN
+    (``LidarEncoder``) instead of the clearance scandot MLP.  The critic is identical
+    to the clearance arm (raw clearance-294, D8) — critic capacity is the controlled variable.
+
+    Everything else (reward fusion, flat_env_mask, spawn scheduler, save/load, disc/estimator)
+    is inherited unchanged from ``OnPolicyRunnerParkourAMP``.
+    """
+
+    def _get_actor_critic_class(self):
+        return ActorCriticRMALidar

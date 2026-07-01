@@ -14,6 +14,9 @@ from rsl_rl.modules.estimator import Estimator
 from rsl_rl.runners.on_policy_runner_parkour import OnPolicyRunnerParkour
 from rsl_rl.storage import RolloutStorage
 
+# Type alias kept for backward-compat (referenced by external code, e.g. import guards).
+_DEFAULT_ACTOR_CRITIC_CLASS = ActorCriticRMA
+
 
 class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
     """AMP 학습 기능을 지원하는 OnPolicyRunner."""
@@ -26,6 +29,14 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
         # AMP Reward 로깅용 버퍼
         self.amp_reward_sums = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
+    def _get_actor_critic_class(self):
+        """Return the actor-critic class to instantiate.
+
+        Override in subclasses to swap the terrain encoder without copying the full
+        ``_construct_algorithm`` body.  Default returns ``ActorCriticRMA``.
+        """
+        return ActorCriticRMA
+
     def _construct_algorithm(self, obs: TensorDict) -> PPOAMP:
         """PPOAMP 알고리즘 생성"""
         # Resolve symmetry config if used (inject env into symmetry_cfg["_env"]).
@@ -35,7 +46,7 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
         # so the non-symmetry path (Go2-ParkourImitation-v0) is unaffected.
         self.alg_cfg = resolve_symmetry_config(self.alg_cfg, self.env)
         # AMP 특화 알고리즘
-        actor_critic_class = ActorCriticRMA
+        actor_critic_class = self._get_actor_critic_class()
         actor_critic = actor_critic_class(obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg).to(
             self.device
         )

@@ -153,6 +153,51 @@ class _TorchPolicyExporter(nn.Module):
             # Dim: scandot_encoder is an MLP; first Linear's in_features
             self._scan_dim = int(self.scandot_encoder[0].in_features)
 
+        # Voxel encoder: present in ActorCriticRMAVoxel (replaces scandot_encoder for actor terrain path).
+        # When voxel is active, scandot_encoder is None — these two paths are mutually exclusive.
+        self._has_voxel = (
+            (not self.is_recurrent) and hasattr(policy, "voxel_encoder") and policy.voxel_encoder is not None
+        )
+        if self._has_voxel:
+            assert not self._has_scan, (
+                "exporter: _has_scan and _has_voxel are both True — they must be mutually exclusive. "
+                "Check that ActorCriticRMAVoxel sets scandot_encoder=None after __init__."
+            )
+            self.voxel_encoder = copy.deepcopy(policy.voxel_encoder)
+            # Voxel normalizer is always nn.Identity (D4: occupancy {-1,0,1} is categorical).
+            if hasattr(policy, "voxel_obs_normalizer"):
+                self.voxel_obs_normalizer = copy.deepcopy(policy.voxel_obs_normalizer)
+            else:
+                self.voxel_obs_normalizer = nn.Identity()
+            # Flat voxel input dim: nx*ny*nz stored on VoxelEncoder.
+            self._voxel_dim = int(self.voxel_encoder.nx * self.voxel_encoder.ny * self.voxel_encoder.nz)
+            # Latent output dim: last Linear in VoxelEncoder.fc (Sequential: Linear, act, Linear(128, out_dim)).
+            self._voxel_latent_dim = int(self.voxel_encoder.fc[-1].out_features)
+
+        # Lidar encoder: present in ActorCriticRMALidar (replaces scandot_encoder for actor terrain path).
+        # When lidar is active, scandot_encoder is None — mutually exclusive with scan and voxel.
+        self._has_lidar = (
+            (not self.is_recurrent) and hasattr(policy, "lidar_encoder") and policy.lidar_encoder is not None
+        )
+        if self._has_lidar:
+            assert not self._has_scan, (
+                "exporter: _has_scan and _has_lidar are both True — they must be mutually exclusive. "
+                "Check that ActorCriticRMALidar sets scandot_encoder=None after __init__."
+            )
+            assert not self._has_voxel, (
+                "exporter: _has_voxel and _has_lidar are both True — they must be mutually exclusive."
+            )
+            self.lidar_encoder = copy.deepcopy(policy.lidar_encoder)
+            # lidar_obs_normalizer is nn.Identity (range_norm already [0,1], hit_mask binary {0,1}).
+            if hasattr(policy, "lidar_obs_normalizer"):
+                self.lidar_obs_normalizer = copy.deepcopy(policy.lidar_obs_normalizer)
+            else:
+                self.lidar_obs_normalizer = nn.Identity()
+            # Flat lidar input dim: in_channels * H * W (all stored on LidarEncoder).
+            self._lidar_dim = int(self.lidar_encoder.in_channels * self.lidar_encoder.H * self.lidar_encoder.W)
+            # Latent output dim: last Linear in LidarEncoder.fc (Sequential: Linear, act, Linear(256, out_dim)).
+            self._lidar_latent_dim = int(self.lidar_encoder.fc[-1].out_features)
+
         # priv_only fallback: policy has priv_encoder but no history_encoder (unusual but handled)
         self._has_priv_only = (
             (not self.is_recurrent)
@@ -208,9 +253,24 @@ class _TorchPolicyExporter(nn.Module):
                 encoder_out += int(self.history_encoder.linear_output[-2].out_features)
             if self._has_scan:
                 encoder_out += int(self.scandot_encoder[-1].out_features)
+            if self._has_voxel:
+                encoder_out += self._voxel_latent_dim
+            if self._has_lidar:
+                encoder_out += self._lidar_latent_dim
             if self._has_priv_only:
                 encoder_out += int(self.priv_encoder[-1].out_features)
             self._proprio_dim = actor_in - encoder_out
+            assert self._proprio_dim > 0, (
+                f"exporter (_TorchPolicyExporter): inferred proprio_dim={self._proprio_dim} <= 0 "
+                f"(actor_in={actor_in}, encoder_out={encoder_out}). "
+                "Check that all encoder output dims are accounted for in encoder_out."
+            )
+            assert self._proprio_dim + encoder_out == actor_in, (
+                f"exporter (_TorchPolicyExporter): dim mismatch — "
+                f"proprio_dim({self._proprio_dim}) + encoder_out({encoder_out}) = "
+                f"{self._proprio_dim + encoder_out} != actor_in({actor_in}). "
+                "A new encoder latent may not be reflected in encoder_out."
+            )
 
     def forward_lstm(self, x):
         x = self.actor_obs_normalizer(x)
@@ -265,6 +325,19 @@ class _TorchPolicyExporter(nn.Module):
             # No scan normalizer applied here — mirrors act_inference behavior
             scan_latent = self.scandot_encoder(scan)
             actor_input_parts.append(scan_latent)
+            extras_idx += 1
+
+        if self._has_voxel:
+            voxel = extras[extras_idx]
+            # voxel_obs_normalizer is nn.Identity (D4: occupancy {-1,0,1} is categorical)
+            voxel_latent = self.voxel_encoder(self.voxel_obs_normalizer(voxel))
+            actor_input_parts.append(voxel_latent)
+
+        if self._has_lidar:
+            lidar = extras[extras_idx]
+            # lidar_obs_normalizer is nn.Identity (range_norm already [0,1], hit_mask binary)
+            lidar_latent = self.lidar_encoder(self.lidar_obs_normalizer(lidar))
+            actor_input_parts.append(lidar_latent)
 
         return self.actor(torch.cat(actor_input_parts, dim=-1))
 
@@ -291,6 +364,10 @@ class _TorchPolicyExporter(nn.Module):
             dummy_inputs.append(torch.zeros(1, self._priv_dim))
         if self._has_scan:
             dummy_inputs.append(torch.zeros(1, self._scan_dim))
+        if self._has_voxel:
+            dummy_inputs.append(torch.zeros(1, self._voxel_dim))
+        if self._has_lidar:
+            dummy_inputs.append(torch.zeros(1, self._lidar_dim))
         traced_script_module = torch.jit.trace(self, tuple(dummy_inputs))
         traced_script_module.save(path)
 
@@ -372,6 +449,51 @@ class _OnnxPolicyExporter(nn.Module):
             # Dim: scandot_encoder is an MLP; first Linear's in_features
             self._scan_dim = int(self.scandot_encoder[0].in_features)
 
+        # Voxel encoder: present in ActorCriticRMAVoxel (replaces scandot_encoder for actor terrain path).
+        # When voxel is active, scandot_encoder is None — these two paths are mutually exclusive.
+        self._has_voxel = (
+            (not self.is_recurrent) and hasattr(policy, "voxel_encoder") and policy.voxel_encoder is not None
+        )
+        if self._has_voxel:
+            assert not self._has_scan, (
+                "exporter: _has_scan and _has_voxel are both True — they must be mutually exclusive. "
+                "Check that ActorCriticRMAVoxel sets scandot_encoder=None after __init__."
+            )
+            self.voxel_encoder = copy.deepcopy(policy.voxel_encoder)
+            # Voxel normalizer is always nn.Identity (D4: occupancy {-1,0,1} is categorical).
+            if hasattr(policy, "voxel_obs_normalizer"):
+                self.voxel_obs_normalizer = copy.deepcopy(policy.voxel_obs_normalizer)
+            else:
+                self.voxel_obs_normalizer = nn.Identity()
+            # Flat voxel input dim: nx*ny*nz stored on VoxelEncoder.
+            self._voxel_dim = int(self.voxel_encoder.nx * self.voxel_encoder.ny * self.voxel_encoder.nz)
+            # Latent output dim: last Linear in VoxelEncoder.fc (Sequential: Linear, act, Linear(128, out_dim)).
+            self._voxel_latent_dim = int(self.voxel_encoder.fc[-1].out_features)
+
+        # Lidar encoder: present in ActorCriticRMALidar (replaces scandot_encoder for actor terrain path).
+        # When lidar is active, scandot_encoder is None — mutually exclusive with scan and voxel.
+        self._has_lidar = (
+            (not self.is_recurrent) and hasattr(policy, "lidar_encoder") and policy.lidar_encoder is not None
+        )
+        if self._has_lidar:
+            assert not self._has_scan, (
+                "exporter: _has_scan and _has_lidar are both True — they must be mutually exclusive. "
+                "Check that ActorCriticRMALidar sets scandot_encoder=None after __init__."
+            )
+            assert not self._has_voxel, (
+                "exporter: _has_voxel and _has_lidar are both True — they must be mutually exclusive."
+            )
+            self.lidar_encoder = copy.deepcopy(policy.lidar_encoder)
+            # lidar_obs_normalizer is nn.Identity (range_norm already [0,1], hit_mask binary {0,1}).
+            if hasattr(policy, "lidar_obs_normalizer"):
+                self.lidar_obs_normalizer = copy.deepcopy(policy.lidar_obs_normalizer)
+            else:
+                self.lidar_obs_normalizer = nn.Identity()
+            # Flat lidar input dim: in_channels * H * W (all stored on LidarEncoder).
+            self._lidar_dim = int(self.lidar_encoder.in_channels * self.lidar_encoder.H * self.lidar_encoder.W)
+            # Latent output dim: last Linear in LidarEncoder.fc (Sequential: Linear, act, Linear(256, out_dim)).
+            self._lidar_latent_dim = int(self.lidar_encoder.fc[-1].out_features)
+
         # priv_only fallback: policy has priv_encoder but no history_encoder
         self._has_priv_only = (
             (not self.is_recurrent)
@@ -426,9 +548,24 @@ class _OnnxPolicyExporter(nn.Module):
                 encoder_out += int(self.history_encoder.linear_output[-2].out_features)
             if self._has_scan:
                 encoder_out += int(self.scandot_encoder[-1].out_features)
+            if self._has_voxel:
+                encoder_out += self._voxel_latent_dim
+            if self._has_lidar:
+                encoder_out += self._lidar_latent_dim
             if self._has_priv_only:
                 encoder_out += int(self.priv_encoder[-1].out_features)
             self._proprio_dim = actor_in - encoder_out
+            assert self._proprio_dim > 0, (
+                f"exporter (_OnnxPolicyExporter): inferred proprio_dim={self._proprio_dim} <= 0 "
+                f"(actor_in={actor_in}, encoder_out={encoder_out}). "
+                "Check that all encoder output dims are accounted for in encoder_out."
+            )
+            assert self._proprio_dim + encoder_out == actor_in, (
+                f"exporter (_OnnxPolicyExporter): dim mismatch — "
+                f"proprio_dim({self._proprio_dim}) + encoder_out({encoder_out}) = "
+                f"{self._proprio_dim + encoder_out} != actor_in({actor_in}). "
+                "A new encoder latent may not be reflected in encoder_out."
+            )
 
     def forward_lstm(self, x_in, h_in, c_in):
         x_in = self.actor_obs_normalizer(x_in)
@@ -480,6 +617,19 @@ class _OnnxPolicyExporter(nn.Module):
             # No scan normalizer applied here — mirrors act_inference behavior
             scan_latent = self.scandot_encoder(scan)
             actor_input_parts.append(scan_latent)
+            extras_idx += 1
+
+        if self._has_voxel:
+            voxel = extras[extras_idx]
+            # voxel_obs_normalizer is nn.Identity (D4: occupancy {-1,0,1} is categorical)
+            voxel_latent = self.voxel_encoder(self.voxel_obs_normalizer(voxel))
+            actor_input_parts.append(voxel_latent)
+
+        if self._has_lidar:
+            lidar = extras[extras_idx]
+            # lidar_obs_normalizer is nn.Identity (range_norm already [0,1], hit_mask binary)
+            lidar_latent = self.lidar_encoder(self.lidar_obs_normalizer(lidar))
+            actor_input_parts.append(lidar_latent)
 
         return self.actor(torch.cat(actor_input_parts, dim=-1))
 
@@ -538,6 +688,14 @@ class _OnnxPolicyExporter(nn.Module):
             if self._has_scan:
                 dummy_inputs.append(torch.zeros(1, self._scan_dim))
                 input_names.append("scan")
+
+            if self._has_voxel:
+                dummy_inputs.append(torch.zeros(1, self._voxel_dim))
+                input_names.append("voxel")
+
+            if self._has_lidar:
+                dummy_inputs.append(torch.zeros(1, self._lidar_dim))
+                input_names.append("lidar")
 
             torch.onnx.export(
                 self,

@@ -14,7 +14,11 @@ from .on_policy_runner import OnPolicyRunner  # noqa: I001
 from .distillation_runner import DistillationRunner
 from .on_policy_runner_parkour import OnPolicyRunnerParkour
 from .on_policy_runner_amp import OnPolicyRunnerAMP, OnPolicyRunnerAMPBase
-from .on_policy_runner_parkour_amp import OnPolicyRunnerParkourAMP
+from .on_policy_runner_parkour_amp import (
+    OnPolicyRunnerParkourAMP,
+    OnPolicyRunnerParkourAMPLidar,
+    OnPolicyRunnerParkourAMPVoxel,
+)
 
 
 __all__ = [
@@ -24,4 +28,6 @@ __all__ = [
     "OnPolicyRunnerAMPBase",
     "OnPolicyRunnerParkour",
     "OnPolicyRunnerParkourAMP",
+    "OnPolicyRunnerParkourAMPLidar",
+    "OnPolicyRunnerParkourAMPVoxel",
 ]

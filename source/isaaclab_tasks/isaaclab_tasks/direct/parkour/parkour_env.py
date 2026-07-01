@@ -16,7 +16,7 @@ import omni.kit.app
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.markers import VisualizationMarkers
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.markers.config import SPHERE_MARKER_CFG
 from isaaclab.sensors import ContactSensor, RayCaster, RayCasterCfg
 from isaaclab.terrains import TerrainImporter
@@ -26,7 +26,6 @@ from isaaclab.utils import math as math_utils
 from isaaclab_tasks.direct._common import DebugKeyBindingCfg, DebugViewer, DebugViewerCfg
 
 from .clearance_3d_pattern import Clearance3DPatternCfg, clearance_3d_pattern  # noqa: F401
-from .voxel_occupancy import VoxelOccupancyCfg, build_ray_dirs, fill_voxel_grid, voxel_grid_shape
 from .parkour_env_cfg import (
     TERRAIN_CLASS_BALANCE_BEAM,
     TERRAIN_CLASS_CRAWL,
@@ -41,6 +40,7 @@ from .parkour_env_cfg import (
     TERRAIN_CLASS_ZIGZAG_HURDLES,
     ParkourEnvCfg,
 )
+from .voxel_occupancy import VoxelOccupancyCfg, build_ray_dirs, fill_voxel_grid, voxel_grid_shape
 
 # Mapping from terrain class ID → short name used as WandB metric suffix.
 # Only classes that are active (proportion > 0) will actually appear in logs
@@ -146,8 +146,10 @@ class Go2ParkourEnv(DirectRLEnv):
             )
             # Cache ray directions once (same pattern as _c3d_up_mask in clearance debug block).
             _c3d_cfg_v = Clearance3DPatternCfg(
-                num_azimuth=21, num_elevation=14,
-                azimuth_range=(-100.0, 100.0), elevation_range=(-75.0, 60.0),
+                num_azimuth=21,
+                num_elevation=14,
+                azimuth_range=(-100.0, 100.0),
+                elevation_range=(-75.0, 60.0),
             )
             self._voxel_ray_dirs = build_ray_dirs(_c3d_cfg_v, self.device)  # (294, 3)
 
@@ -397,6 +399,19 @@ class Go2ParkourEnv(DirectRLEnv):
             "L",
             on_press=lambda: self._change_terrain_for_viewer(type_delta=+1),
         )
+
+        # Voxel occupancy debug visualisation: register only when voxel scanner is enabled.
+        # default_on=False ensures train (headless) is never affected.
+        if self.cfg.enable_voxel_scanner:
+            self._debug_viewer.register_debug_vis(
+                "voxel_occupied",
+                lambda dt: self._draw_voxel_occupied(),
+                default_on=False,
+            )
+            self._debug_viewer.register_key(
+                "V",
+                on_press=self._toggle_voxel_occupied,
+            )
 
         # Clearance 3D ray debug visualisation: register only when clearance scanner is enabled.
         # default_on=False ensures train (headless) is never affected.
@@ -846,8 +861,10 @@ class Go2ParkourEnv(DirectRLEnv):
 
                 if not hasattr(self, "_c3d_up_mask"):
                     _cfg_tmp = _C3DCfg(
-                        num_azimuth=21, num_elevation=14,
-                        azimuth_range=(-100.0, 100.0), elevation_range=(-75.0, 60.0),
+                        num_azimuth=21,
+                        num_elevation=14,
+                        azimuth_range=(-100.0, 100.0),
+                        elevation_range=(-75.0, 60.0),
                     )
                     _, _dirs = _c3d_fn(_cfg_tmp, self.device)  # (294, 3)
                     self._c3d_el = torch.rad2deg(torch.asin(_dirs[:, 2].clamp(-1.0, 1.0)))
@@ -939,7 +956,7 @@ class Go2ParkourEnv(DirectRLEnv):
                     # A non-zero count means rays are marking through-surface voxels free → god's-eye.
                     # Only applies to hit rays (is_hit=True for env 0).
                     _bad_ray_count = 0
-                    _is_hit_e0 = _is_hit[0]   # (R,) bool — hit rays for env 0
+                    _is_hit_e0 = _is_hit[0]  # (R,) bool — hit rays for env 0
                     _dist_e0 = _dist[0].clamp(max=self._voxel_cfg.max_distance)  # (R,)
                     if _is_hit_e0.any():
                         _res_v = self._voxel_cfg.resolution
@@ -963,9 +980,7 @@ class Go2ParkourEnv(DirectRLEnv):
                             _aiy = ((_pts_after[:, 1] - _y_min_v) / _res_v).round().long()
                             _aiz = ((_pts_after[:, 2] - _z_min_v) / _res_v).round().long()
                             _aib = (
-                                (_aix >= 0) & (_aix < _vnx)
-                                & (_aiy >= 0) & (_aiy < _vny)
-                                & (_aiz >= 0) & (_aiz < _vnz)
+                                (_aix >= 0) & (_aix < _vnx) & (_aiy >= 0) & (_aiy < _vny) & (_aiz >= 0) & (_aiz < _vnz)
                             )
                             if not _aib.any():
                                 continue
@@ -1320,7 +1335,7 @@ class Go2ParkourEnv(DirectRLEnv):
         else:
             scan_obs = self._scan  # (N, 187), height-scan baseline
 
-        return {
+        obs_out: dict = {
             "policy": proprio,
             # "critic": critic_obs,
             "scan": scan_obs,
@@ -1328,6 +1343,13 @@ class Go2ParkourEnv(DirectRLEnv):
             "priv_latent": priv_latent,
             "history": self._proprio_history,
         }
+        if self.cfg.enable_voxel_scanner:
+            # Flatten (N, nx, ny, nz) int8 → (N, 7371) float.
+            # C-order (contiguous torch.full tensor) → matches voxel_occupancy flat_idx layout
+            # (ix*(ny*nz)+iy*nz+iz) and symmetry.py voxel permutation. No normalisation: {-1,0,1}
+            # categorical values must reach the encoder unchanged (D4).
+            obs_out["voxel"] = self._voxel_grid.reshape(self.num_envs, -1).float()
+        return obs_out
 
     def _get_rewards(self) -> torch.Tensor:
         # Save and update previous joint velocity for acceleration computation
@@ -2061,6 +2083,105 @@ class Go2ParkourEnv(DirectRLEnv):
         self._debug_viewer.set_debug_vis("contact_print", new_state)
         print(f"[parkour] Contact debug: {'ON' if new_state else 'OFF'}")
 
+    def _toggle_voxel_occupied(self) -> None:
+        """Toggle the voxel occupied debug visualisation (V key).
+
+        On the disable branch, explicitly hides persistent markers because
+        DebugViewer.set_debug_vis() only flips the callback flag — it does not
+        call any teardown or hide previously drawn geometry.
+        """
+        new_state = not self._debug_viewer.vis_is_enabled("voxel_occupied")
+        self._debug_viewer.set_debug_vis("voxel_occupied", new_state)
+        if not new_state and hasattr(self, "_voxel_occupied_visualizer"):
+            self._voxel_occupied_visualizer.set_visibility(False)
+        print(f"[parkour] Voxel occupancy vis: {'ON' if new_state else 'OFF'}")
+
+    def _draw_voxel_occupied(self) -> None:
+        """Draw occupied voxels for the active viewer env as orange cuboid markers.
+
+        Called every render frame by the DebugViewer post-update subscription
+        when the ``voxel_occupied`` debug-vis is enabled (V key toggle).
+
+        Design decisions:
+        - **Single env only**: only the env currently tracked by the viewport
+          camera is drawn.  Drawing all envs would spawn thousands of cubes and
+          stall the renderer.
+        - **Single prototype**: occupied cells only (grid == 1), orange cuboids
+          at full voxel resolution.  free/unknown cells are not visualised.
+        - **Lazy marker creation**: ``_voxel_occupied_visualizer`` is created on
+          the first call and reused thereafter (hasattr guard).
+        - **Coordinate transform**: voxel grid is in sensor-local yaw-aligned
+          frame (x=fwd, y=left, z=up) with origin at
+          ``_clearance_scanner.data.pos_w[e]``.  The clearance scanner uses
+          ``ray_alignment="yaw"``, so the inverse transform is:
+          ``world = quat_apply_yaw(robot_quat, local) + scanner_pos_w``.
+        - **Fill convention**: ``fill_voxel_grid`` uses
+          ``ix = round((x - x_min) / res)``, so cell centre = ``x_min + ix * res``
+          (identical inverse used here).
+        """
+        # ------------------------------------------------------------------
+        # Lazy-create single-prototype cuboid marker (occupied = orange).
+        # ------------------------------------------------------------------
+        if not hasattr(self, "_voxel_occupied_visualizer"):
+            res = self._voxel_cfg.resolution
+            vox_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/Parkour/voxel_occupied",
+                markers={
+                    "occupied": sim_utils.CuboidCfg(
+                        size=(res, res, res),
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 0.5, 0.0),  # orange
+                            opacity=0.6,
+                        ),
+                    ),
+                },
+            )
+            self._voxel_occupied_visualizer = VisualizationMarkers(vox_cfg)
+
+        # ------------------------------------------------------------------
+        # Active viewer env (tracks [ / ] keyboard env switching).
+        # ------------------------------------------------------------------
+        e = self._get_active_viewer_env_id()
+        grid = self._voxel_grid[e]  # (X, Y, Z) int8
+
+        # ------------------------------------------------------------------
+        # Collect occupied voxel indices only (grid == 1).
+        # ------------------------------------------------------------------
+        occ_idx = (grid == 1).nonzero(as_tuple=False)  # (M, 3)
+
+        if occ_idx.shape[0] == 0:
+            self._voxel_occupied_visualizer.set_visibility(False)
+            return
+
+        # ------------------------------------------------------------------
+        # Reconstruct sensor-local cell-centre positions.
+        # Fill convention: ix = round((pts[...,0] - x_min) / res)
+        # → inverse:       x  = x_min + ix * res
+        # quat_apply_yaw strips roll/pitch from the quaternion before rotating,
+        # which is exactly what the yaw-aligned scanner frame requires.
+        # ------------------------------------------------------------------
+        x_min = self._voxel_cfg.x_range[0]
+        y_min = self._voxel_cfg.y_range[0]
+        z_min = self._voxel_cfg.z_range[0]
+        res = self._voxel_cfg.resolution
+        sensor_origin = self._clearance_scanner.data.pos_w[e]  # (3,)
+        robot_quat_1 = self._robot.data.root_quat_w[e]  # (4,)
+
+        local = torch.stack(
+            [
+                x_min + occ_idx[:, 0].float() * res,
+                y_min + occ_idx[:, 1].float() * res,
+                z_min + occ_idx[:, 2].float() * res,
+            ],
+            dim=-1,
+        )  # (M, 3) sensor-local yaw-aligned frame
+        N = local.shape[0]
+        quat = robot_quat_1.unsqueeze(0).expand(N, -1)  # (N, 4)
+        occ_world = math_utils.quat_apply_yaw(quat, local) + sensor_origin  # (M, 3)
+
+        self._voxel_occupied_visualizer.set_visibility(True)
+        self._voxel_occupied_visualizer.visualize(translations=occ_world)
+
     def _toggle_clearance_rays(self) -> None:
         """Toggle the clearance-ray debug visualisation (C key).
 
@@ -2196,13 +2317,13 @@ class Go2ParkourEnv(DirectRLEnv):
         miss_mask = ~finite_mask
 
         # Hit points: raw world coords from scanner (no transform needed)
-        hit_up_pts = hits_w[hit_mask & up_mask]      # (K, 3)
-        hit_down_pts = hits_w[hit_mask & ~up_mask]    # (M, 3)
+        hit_up_pts = hits_w[hit_mask & up_mask]  # (K, 3)
+        hit_down_pts = hits_w[hit_mask & ~up_mask]  # (M, 3)
 
         # Miss endpoints: sensor_origin + world_dir * max_distance
         _max_dist = 4.0
         miss_endpoints = sensor_origin.unsqueeze(0) + world_dirs * _max_dist  # (294, 3)
-        miss_up_pts = miss_endpoints[miss_mask & up_mask]    # (P, 3)
+        miss_up_pts = miss_endpoints[miss_mask & up_mask]  # (P, 3)
         miss_down_pts = miss_endpoints[miss_mask & ~up_mask]  # (Q, 3)
 
         # ------------------------------------------------------------------
