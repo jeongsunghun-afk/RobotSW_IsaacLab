@@ -307,3 +307,60 @@ class Go2ParkourImitationSymmetryRandomGoalTeacher3DVoxelPPOAMPRunnerCfg(
         # when running with --video (Isaac Sim non-PyTorch overhead ≈12.5 GB).
         self.num_steps_per_env = 16
         self.algorithm.num_mini_batches = 8
+
+
+@configclass
+class Go2ParkourImitationSymmetryRandomGoalLidarSLPPOAMPRunnerCfg(
+    Go2ParkourImitationSymmetryRandomGoalTeacher3DPPOAMPRunnerCfg
+):
+    """Go2 ParkourImitation + symmetry + random-goal + LiDAR student-only (SL) arm (R2).
+
+    R2 LiDAR SL arm — end-to-end PPO+AMP where the actor's terrain encoder is a
+    range-image CNN (``LidarEncoder``) instead of the clearance scandot MLP.
+    The critic is unchanged from the Teacher3D arm (raw clearance-294, D8 controlled variable).
+
+    Inherits ``Go2ParkourImitationSymmetryRandomGoalTeacher3DPPOAMPRunnerCfg`` in full:
+    - PPO + AMP discriminator (BCE loss)
+    - L/R mirror data-augmentation (symmetry_cfg, num_aug=2)
+    - AMP obs 49-dim/frame × 10 history = 490-dim (unchanged)
+    - 360° random-goal curriculum (±60° forward cone)
+    - scan group = clearance-294 (critic controlled variable, D8)
+
+    Differences vs Teacher3D runner cfg:
+    - class_name → ``OnPolicyRunnerParkourAMPLidar``
+    - policy.class_name → ``ActorCriticRMALidar``
+    - obs_groups gains ``"lidar": ["lidar"]``
+    - experiment_name → ``parkour_imitation_go2_lidar_sl``
+
+    LidarEncoder defaults (no overrides needed):
+        lidar_image_shape   = (24, 96)    H×W
+        lidar_num_channels  = 2           ch0=range_norm, ch1=hit_mask
+        lidar_frame_stack   = 3           K temporal frames
+        → in_channels = 6, flat lidar dim = 6*24*96 = 13824
+
+    actor input (computed at runtime):
+        proprio(46) + priv_explicit(6) + priv_latent(20) + lidar_latent(32) = 104
+    critic input:
+        policy(46) + scan(294) + priv_explicit(6) + priv_latent(33) = 379
+
+    Note: the runner classes ``OnPolicyRunnerParkourAMPLidar`` / ``ActorCriticRMALidar`` are
+    owned by the rsl_rl SL session — referenced here by class-name string only.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Switch runner to the LiDAR-arm variant (selects ActorCriticRMALidar in _construct_algorithm).
+        self.class_name = "OnPolicyRunnerParkourAMPLidar"
+        # Inform policy cfg (informational; actual selection is via runner._get_actor_critic_class).
+        self.policy.class_name = "ActorCriticRMALidar"
+        # Add lidar obs group — actor terrain encoder reads this, critic is unaffected.
+        # A fresh dict is created to avoid mutating the parent class-level default.
+        self.obs_groups = {**self.obs_groups, "lidar": ["lidar"]}
+        self.experiment_name = "parkour_imitation_go2_lidar_sl"
+        # Disable symmetry entirely for this first LiDAR SL run.
+        # Even with use_data_augmentation=False and use_mirror_loss=False, PPO update still calls
+        # data_augmentation_func + act_inference on a 2× mini-batch for logging — runs LidarEncoder
+        # over a doubled CNN batch without no_grad, causing OOM at any practical num_envs.
+        # The lidar range-image mirror (H-flip) is also not wired yet; re-enable symmetry once
+        # _mirror_range_image is integrated into compute_parkour_imitation_symmetric_states.
+        self.algorithm.symmetry_cfg = None

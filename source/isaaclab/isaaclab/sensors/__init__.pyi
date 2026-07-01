@@ -54,6 +54,9 @@ __all__ = [
     "RayCasterCameraCfg",
     "RayCasterCfg",
     "RayCasterData",
+    "LidarSensor",
+    "LidarSensorCfg",
+    "LidarSensorData",
     "patterns",
 ]
 
@@ -110,3 +113,6 @@ from .ray_caster import (
     RayCasterData,
     patterns,
 )
+from .lidar_sensor import LidarSensor
+from .lidar_sensor_cfg import LidarSensorCfg
+from .lidar_sensor_data import LidarSensorData

@@ -180,3 +180,148 @@ def lidar_pattern(cfg: patterns_cfg.LidarPatternCfg, device: str) -> tuple[torch
     ray_starts = torch.zeros_like(ray_directions).to(device)
 
     return ray_starts, ray_directions
+
+
+def livox_pattern(cfg: patterns_cfg.LivoxPatternCfg, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Livox LiDAR sensor pattern for ray casting.
+
+    Generates ray patterns that mimic real Livox sensor behavior. It either uses a predefined
+    scan pattern loaded from a packaged ``.npy`` file or falls back to a simple grid pattern.
+
+    Args:
+        cfg: The configuration instance for the pattern.
+        device: The device to create the pattern on.
+
+    Returns:
+        The starting positions and directions of the rays.
+    """
+    if cfg.use_simple_grid:
+        return _livox_simple_grid_pattern(cfg, device)
+    return _livox_scan_pattern(cfg, device)
+
+
+def _livox_simple_grid_pattern(cfg: patterns_cfg.LivoxPatternCfg, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate a simple grid pattern for a Livox sensor (fallback)."""
+    horizontal_fov_min = math.radians(cfg.horizontal_fov_deg_min)
+    horizontal_fov_max = math.radians(cfg.horizontal_fov_deg_max)
+    vertical_fov_min = math.radians(cfg.vertical_fov_deg_min)
+    vertical_fov_max = math.radians(cfg.vertical_fov_deg_max)
+
+    ray_directions = torch.zeros((cfg.vertical_line_num, cfg.horizontal_line_num, 3), dtype=torch.float32, device=device)
+
+    for i in range(cfg.vertical_line_num):
+        for j in range(cfg.horizontal_line_num):
+            if cfg.vertical_line_num > 1:
+                vertical_angle = vertical_fov_min + (vertical_fov_max - vertical_fov_min) * i / (
+                    cfg.vertical_line_num - 1
+                )
+            else:
+                vertical_angle = (vertical_fov_min + vertical_fov_max) / 2
+
+            if cfg.horizontal_line_num > 1:
+                horizontal_angle = horizontal_fov_min + (horizontal_fov_max - horizontal_fov_min) * j / (
+                    cfg.horizontal_line_num - 1
+                )
+            else:
+                horizontal_angle = (horizontal_fov_min + horizontal_fov_max) / 2
+
+            # LidarSensor coordinate system: x=forward, y=left, z=up
+            cos_theta = math.cos(horizontal_angle)
+            sin_theta = math.sin(horizontal_angle)
+            cos_phi = math.cos(vertical_angle)
+            sin_phi = math.sin(vertical_angle)
+
+            x = cos_theta * cos_phi  # forward component
+            y = sin_theta * cos_phi  # left component
+            z = sin_phi  # up component
+
+            ray_directions[i, j] = torch.tensor([x, y, z], device=device)
+
+    ray_directions = ray_directions.reshape(-1, 3)
+    ray_directions = ray_directions / torch.norm(ray_directions, dim=1, keepdim=True)
+    ray_starts = torch.zeros_like(ray_directions)
+    return ray_starts, ray_directions
+
+
+def _livox_scan_pattern(cfg: patterns_cfg.LivoxPatternCfg, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate a realistic Livox scan pattern based on sensor type.
+
+    Loads a precomputed scan pattern from a packaged ``.npy`` file. The file stores ``[theta, phi]``
+    angles (radians) captured from a real Livox sensor.
+
+    Note (Sim 6.0 migration):
+        The Sim 5.1 OmniPerception "6-levels-up" pattern lookup is removed. Patterns are loaded
+        only from the packaged ``scan_patterns/`` directory next to this module.
+    """
+    import os
+
+    import numpy as np
+
+    # Livox sensor parameters and pattern file mapping.
+    livox_params = {
+        "avia": {"horizontal_fov": 70.4, "vertical_fov": 77.2, "samples": 24000, "pattern_file": "avia.npy"},
+        "horizon": {"horizontal_fov": 81.7, "vertical_fov": 25.1, "samples": 24000, "pattern_file": "horizon.npy"},
+        "HAP": {"horizontal_fov": 81.7, "vertical_fov": 25.1, "samples": 45300, "pattern_file": "HAP.npy"},
+        "mid360": {"horizontal_fov": 360, "vertical_fov": 59, "samples": 20000, "pattern_file": "mid360.npy"},
+        "mid40": {"horizontal_fov": 81.7, "vertical_fov": 25.1, "samples": 24000, "pattern_file": "mid40.npy"},
+        "mid70": {"horizontal_fov": 70.4, "vertical_fov": 70.4, "samples": 10000, "pattern_file": "mid70.npy"},
+        "tele": {"horizontal_fov": 14.5, "vertical_fov": 16.1, "samples": 24000, "pattern_file": "tele.npy"},
+    }
+
+    if cfg.sensor_type not in livox_params:
+        raise ValueError(f"Unsupported Livox sensor type: {cfg.sensor_type}")
+
+    params = livox_params[cfg.sensor_type]
+
+    # Packaged scan pattern location (next to this module).
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    pattern_path = os.path.join(script_dir, "scan_patterns", params["pattern_file"])
+
+    if os.path.exists(pattern_path):
+        # Load precomputed pattern. Shape: (N, 2) with columns [theta, phi].
+        pattern_data = np.load(pattern_path)
+        total_pattern_size = pattern_data.shape[0]
+        samples = min(cfg.samples, total_pattern_size)
+
+        # Rolling-window sampling for temporal consistency.
+        start_idx = cfg.rolling_window_start % total_pattern_size
+        if start_idx + samples <= total_pattern_size:
+            selected_pattern = pattern_data[start_idx : start_idx + samples]
+        else:
+            end_samples = total_pattern_size - start_idx
+            begin_samples = samples - end_samples
+            selected_pattern = np.vstack([pattern_data[start_idx:], pattern_data[:begin_samples]])
+
+        theta = torch.from_numpy(selected_pattern[:, 0]).to(device)  # horizontal angles
+        phi = torch.from_numpy(selected_pattern[:, 1]).to(device)  # vertical angles
+    else:
+        # Fallback: random pattern within FOV if the .npy file is missing.
+        print(f"Warning: Pattern file {pattern_path} not found. Using random pattern generation.")
+        samples = min(cfg.samples, params["samples"])
+        h_fov = math.radians(params["horizontal_fov"])
+        v_fov = math.radians(params["vertical_fov"])
+        torch.manual_seed(42)
+        theta = (torch.rand(samples, device=device) - 0.5) * h_fov
+        phi = (torch.rand(samples, device=device) - 0.5) * v_fov
+
+    # Optional downsampling.
+    if cfg.downsample > 1:
+        indices = torch.arange(0, len(theta), cfg.downsample, device=device)
+        theta = theta[indices]
+        phi = phi[indices]
+
+    # Spherical to Cartesian (LidarSensor convention: x=forward, y=left, z=up).
+    cos_theta = torch.cos(theta)
+    sin_theta = torch.sin(theta)
+    cos_phi = torch.cos(phi)
+    sin_phi = torch.sin(phi)
+
+    x = cos_theta * cos_phi  # forward component
+    y = sin_theta * cos_phi  # left component
+    z = sin_phi  # up component
+
+    ray_directions = torch.stack([x, y, z], dim=1)
+    ray_directions = ray_directions / torch.norm(ray_directions, dim=1, keepdim=True)
+    ray_directions = ray_directions.to(torch.float32)
+    ray_starts = torch.zeros_like(ray_directions)
+    return ray_starts, ray_directions

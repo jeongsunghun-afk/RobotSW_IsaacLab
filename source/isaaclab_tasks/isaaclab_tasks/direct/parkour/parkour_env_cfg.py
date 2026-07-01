@@ -17,7 +17,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
-from isaaclab.sim import SimulationCfg
+from isaaclab.sim import RenderCfg, SimulationCfg
 from isaaclab_physx.physics import PhysxCfg
 from isaaclab.terrains import FlatPatchSamplingCfg, TerrainImporterCfg
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
@@ -470,6 +470,19 @@ class ParkourEnvCfg(DirectRLEnvCfg):
             gpu_max_rigid_patch_count=2**23,
             gpu_found_lost_pairs_capacity=2**23,
             gpu_total_aggregate_pairs_capacity=2**23,
+        ),
+        render=RenderCfg(
+            # Isaac Sim 6.0 headless rendering kit (apps/isaaclab.python.headless.rendering.kit)
+            # leaves spawned light prims (DomeLight/DistantLight) inert in the offscreen
+            # video-capture path. Verified no-ops (all yield identical near-black frame mean
+            # ~3.9): dome intensity 0/2000/20000, an added DistantLight, enable_direct_lighting,
+            # and enable_global_illumination+max_bounces. The only working brightness lever in
+            # this path is scene ambient (rtx.sceneDb.ambientLightIntensity, kit default 1.0);
+            # 12.0 lifts the recorded video to frame mean ~63 (no clipping). NOTE: tuned on the
+            # headless top-down capture (camera follow needs vcc, which is None in headless);
+            # re-check after a camera-follow fix lands since the framing then includes the robot.
+            ambient_light_intensity=12.0,
+            carb_settings={"rtx.rendermode": "RaytracedLighting"},
         ),
     )
 

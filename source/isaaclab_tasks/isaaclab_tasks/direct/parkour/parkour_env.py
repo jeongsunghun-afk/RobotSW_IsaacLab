@@ -487,8 +487,12 @@ class Go2ParkourEnv(DirectRLEnv):
         # ---- Build Genesis-style edge mask from captured terrain mesh ----
         self._build_edge_mask()
         self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped for terrain-based Direct envs
+        # (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs unfiltered —
+        # with num_envs >> terrain tiles, ~15 robots share each tile origin and physically
+        # collide (collision penalty exploded to -132). Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
@@ -1991,10 +1995,14 @@ class Go2ParkourEnv(DirectRLEnv):
         self._edge_mask_visualizer.visualize(translations=translations)
 
     def _camera_follow_callback(self, _event):
-        """Update side camera every render frame, regardless of debug_vis state."""
+        """Update side camera every render frame, regardless of debug_vis state.
+
+        Works in both GUI (viewport_camera_controller) and headless (direct Kit RTX camera)
+        modes.  In headless the viewport_camera_controller is None, so we drive the
+        /OmniverseKit_Persp camera directly via set_kit_renderer_camera_view — the same
+        camera the video recorder captures.
+        """
         del _event
-        if self.viewport_camera_controller is None:
-            return
         # When DebugViewer free-fly is active, the helper drives camera translation via
         # update(dt); skip parkour's robot-yaw tracking to avoid conflicting writes.
         if hasattr(self, "_debug_viewer") and self._debug_viewer is not None and self._debug_viewer.is_free_fly_camera:
@@ -2030,9 +2038,25 @@ class Go2ParkourEnv(DirectRLEnv):
         eye_world = robot_pos_np + np.array([eye_x.item(), eye_y.item(), eye_z], dtype=float)
         look_world = robot_pos_np + np.array([look_x.item(), look_y.item(), look_z], dtype=float)
 
-        # update_view_location stores new offsets as default_cam_eye/lookat so the
-        # controller's own tick (fired in the same post-update stream) also uses them.
-        self.viewport_camera_controller.update_view_location(eye=eye_world, lookat=look_world)
+        if self.viewport_camera_controller is not None:
+            # GUI path: update_view_location stores new offsets as default_cam_eye/lookat
+            # so the controller's own tick (fired in the same post-update stream) uses them.
+            self.viewport_camera_controller.update_view_location(eye=eye_world, lookat=look_world)
+        else:
+            # Headless path: drive the Kit RTX camera directly so video recording sees the
+            # robot-following view.  Wrapped in try/except to be safe on Newton-only installs
+            # that have no isaaclab_physx (mirrors the guard in ViewportCameraController).
+            try:
+                from isaaclab_physx.renderers.kit_viewport_utils import set_kit_renderer_camera_view
+
+                cam_prim_path = getattr(self.cfg.viewer, "cam_prim_path", "/OmniverseKit_Persp")
+                set_kit_renderer_camera_view(
+                    eye=eye_world.tolist(),
+                    target=look_world.tolist(),
+                    camera_prim_path=cam_prim_path,
+                )
+            except Exception:
+                pass
 
     def _debug_vis_callback(self, _event):
         """Update goal-waypoint sphere markers and yaw arrows every render frame (only when debug_vis is True)."""
