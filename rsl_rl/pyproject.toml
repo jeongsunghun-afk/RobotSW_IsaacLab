@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rsl-rl-lib"
-version = "3.2.0"
+version = "5.0.1"
 keywords = ["reinforcement-learning", "robotics"]
 maintainers = [
   { name="Clemens Schwarke", email="cschwarke@ethz.ch" },
@@ -18,7 +18,7 @@ authors = [
 ]
 description = "Fast and simple RL algorithms implemented in PyTorch"
 readme = { file = "README.md", content-type = "text/markdown" }
-license = "BSD-3-Clause"
+license = { text = "BSD-3-Clause" }
 requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -42,8 +42,7 @@ Issues = "https://github.com/leggedrobotics/rsl_rl/issues"
 where = ["."]
 include = ["rsl_rl*"]
 
-[tool.setuptools.package-data]
-"rsl_rl" = ["config/*", "licenses/*"]
+[tool.setuptools]
 
 [tool.pyright]
 include = ["rsl_rl"]

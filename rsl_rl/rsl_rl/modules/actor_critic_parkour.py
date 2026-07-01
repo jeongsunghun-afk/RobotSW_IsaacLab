@@ -614,3 +614,203 @@ class ActorCriticRMAVoxel(ActorCriticRMA):
         voxel_latent = self.voxel_encoder(self.voxel_obs_normalizer(self.get_voxel_obs(obs)))
         actor_input = torch.cat([actor_input, voxel_latent], dim=-1)
         return actor_input
+
+
+class LidarEncoder(nn.Module):
+    """2D-CNN encoder for range-image observations from a spinning LiDAR (e.g. Livox Mid-360).
+
+    Encodes a stacked range-image tensor — ``K`` frames × ``C`` channels × ``H`` rows × ``W`` cols —
+    into a fixed-size latent vector.  The obs pipeline delivers a **flat** ``(N, K*C*H*W)`` tensor;
+    the reshape to ``(N, K*C, H, W)`` is performed inside ``forward``.
+
+    Layout contract (must match r2-env):
+        ``obs["lidar"]`` is flattened C-order from ``(N, K, C, H, W)``.
+        ``reshape(N, K*C, H, W)`` recovers the spatial image with channel index
+        ``kc = k*C + c`` (k-major then channel) — the Conv2d sees K*C input feature maps.
+        This is valid because C-order flattening of ``(K, C, H, W)`` is identical to
+        C-order flattening of ``(K*C, H, W)``.
+
+    The conv output dim is derived from a dummy forward pass (robust to H/W changes).
+    No output activation — mirrors :class:`VoxelEncoder` and the scandot MLP style.
+
+    Conv stack for H=24, W=96 (3 strided convolutions):
+        (N, K*C, 24, 96) → Conv(stride=2) → (N, 32, 12, 48)
+                         → Conv(stride=2) → (N, 64,  6, 24)
+                         → Conv(stride=2) → (N, 128, 3, 12)
+        flatten → (N, 4608) → FC(256) → ELU → FC(out_dim=32)
+
+    Attributes:
+        H (int): Image height (rows). Stored for the exporter.
+        W (int): Image width (cols). Stored for the exporter.
+        in_channels (int): K*C — total input feature maps. Stored for the exporter.
+    """
+
+    def __init__(
+        self,
+        out_dim: int = 32,
+        H: int = 24,
+        W: int = 96,
+        in_channels: int = 6,
+        activation: str = "elu",
+    ) -> None:
+        super().__init__()
+        self.H = H
+        self.W = W
+        self.in_channels = in_channels
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
+            resolve_nn_activation(activation),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            resolve_nn_activation(activation),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            resolve_nn_activation(activation),
+        )
+        # Derive the conv-output flatten dim from a dummy pass (robust to H/W resolution changes).
+        with torch.no_grad():
+            conv_flat_dim = self.conv(torch.zeros(1, in_channels, H, W)).flatten(1).shape[-1]
+        self.fc = nn.Sequential(
+            nn.Linear(conv_flat_dim, 256),
+            resolve_nn_activation(activation),
+            nn.Linear(256, out_dim),
+            # No final activation — mirrors VoxelEncoder output-layer style.
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (N, in_channels*H*W) flat, C-order from (N, K, C, H, W) → (N, K*C, H, W).
+        # reshape is safe on non-contiguous tensors; equivalent to .view when contiguous.
+        x = x.reshape(x.shape[0], self.in_channels, self.H, self.W).float()
+        return self.fc(self.conv(x).flatten(1))
+
+
+class ActorCriticRMALidar(ActorCriticRMA):
+    """ActorCriticRMA whose actor terrain encoder is a range-image CNN (LidarEncoder).
+
+    R2 LiDAR student-only (SL) arm for the clearance ablation experiment.
+
+    Design (parent built, terrain encoder swapped — same pattern as ``ActorCriticRMAVoxel``):
+
+    - ``super().__init__()`` builds the full RMA stack.  Because the env keeps the ``"scan"``
+      group (clearance-294, consumed by the **critic** per D8), the parent sizes ``self.actor``
+      with ``scan_latent_dim = scan_encoder_dims[-1]`` (= 32) and builds a scandot MLP.
+      We discard that MLP (``scandot_encoder = None``) and route the actor's terrain latent
+      through a :class:`LidarEncoder` instead.
+    - Because the lidar latent dim equals the scan latent dim (32 = scan_encoder_dims[-1]), the
+      parent's actor MLP input width is already correct — **no actor rebuild needed**.
+    - Obs groups: the actor terrain encoder reads ``obs_groups["lidar"]``; the **critic is
+      UNCHANGED** (reads ``obs_groups["critic"]`` = raw clearance-294, D8).
+    - The lidar normalizer is :class:`torch.nn.Identity` (ch0 range_norm is already [0,1],
+      ch1 hit_mask is binary {0,1} — EmpiricalNormalization would distort both).
+
+    Binding contract (cfg/runner worker must match these names):
+        scan_encoder_dims   list  default [128, 64, 32]   (last entry = lidar latent dim)
+        lidar_image_shape   tuple default (24, 96)         (H, W)
+        lidar_num_channels  int   default 2                (C: ch0=range_norm, ch1=hit_mask)
+        lidar_frame_stack   int   default 3                (K: temporal frames stacked)
+    """
+
+    is_recurrent: bool = False
+
+    def __init__(
+        self,
+        obs: TensorDict,
+        obs_groups: dict[str, list[str]],
+        num_actions: int,
+        scan_encoder_dims: tuple[int] | list[int] = [128, 64, 32],
+        lidar_image_shape: tuple[int, int] = (24, 96),
+        lidar_num_channels: int = 2,
+        lidar_frame_stack: int = 3,
+        **kwargs: Any,
+    ) -> None:
+        # Parent builds the scandot MLP + actor sized with scan_latent_dim = scan_encoder_dims[-1].
+        super().__init__(obs, obs_groups, num_actions, scan_encoder_dims=scan_encoder_dims, **kwargs)
+
+        assert "lidar" in obs_groups, (
+            "ActorCriticRMALidar requires a 'lidar' obs group for the actor terrain encoder. "
+            f"Got obs_groups keys: {list(obs_groups)}"
+        )
+        assert self.scandot_encoder is not None, (
+            "ActorCriticRMALidar requires the 'scan' obs group to remain present so the parent sizes "
+            "the actor MLP with the terrain-latent slot (the critic also consumes scan=clearance-294, D8)."
+        )
+
+        H, W = lidar_image_shape
+        in_channels = lidar_num_channels * lidar_frame_stack  # K*C
+        num_lidar_obs = sum(obs[g].shape[-1] for g in obs_groups["lidar"])
+        assert num_lidar_obs == in_channels * H * W, (
+            f"lidar obs dim {num_lidar_obs} != in_channels*H*W "
+            f"{in_channels}*{H}*{W}={in_channels * H * W} "
+            f"(lidar_num_channels={lidar_num_channels}, lidar_frame_stack={lidar_frame_stack})."
+        )
+
+        lidar_latent_dim = scan_encoder_dims[-1]
+        activation: str = kwargs.get("activation", "elu")
+        self.lidar_encoder = LidarEncoder(
+            out_dim=lidar_latent_dim, H=H, W=W, in_channels=in_channels, activation=activation
+        )
+        # ch0 range_norm is already [0,1]; ch1 hit_mask is binary {0,1}.
+        # EmpiricalNormalization would distort both channels.
+        self.lidar_obs_normalizer = torch.nn.Identity()
+
+        # Discard the parent's scandot terrain MLP — the lidar encoder replaces it.
+        # Same mechanism as ActorCriticRMAVoxel: assigning None de-registers the submodule so its
+        # params drop out of .parameters()/optimizer.  The parent's `scandot_encoder is not None`
+        # guards then take the no-terrain path, which is why act/act_inference/get_actor_input are
+        # overridden below.
+        self.scandot_encoder = None
+
+        print(
+            f"ActorCriticRMALidar: lidar {lidar_image_shape} H×W, {lidar_num_channels} ch, "
+            f"{lidar_frame_stack} frames (in_channels={in_channels}, flat={num_lidar_obs}) -> "
+            f"latent {lidar_latent_dim}"
+        )
+        print(f"Lidar Encoder: {self.lidar_encoder}")
+
+    def get_lidar_obs(self, obs: TensorDict) -> torch.Tensor:
+        obs_list = [obs[obs_group] for obs_group in self.obs_groups["lidar"]]
+        return torch.cat(obs_list, dim=-1)
+
+    def act(self, obs: TensorDict, hist_encoding=False, **kwargs: dict[str, Any]) -> torch.Tensor:
+        obs_actor = self.get_actor_obs(obs)
+        obs_actor = self.actor_obs_normalizer(obs_actor)
+        priv_explicit = self.priv_explicit_obs_normalizer(self.get_priv_explicit_obs(obs))
+        if hist_encoding:
+            history_latent = self.get_hist_latent(obs)
+            obs_actor = torch.cat([obs_actor, priv_explicit, history_latent], dim=-1)
+        else:
+            priv_latent = self.get_priv_latent(obs)
+            obs_actor = torch.cat([obs_actor, priv_explicit, priv_latent], dim=-1)
+
+        lidar_latent = self.lidar_encoder(self.lidar_obs_normalizer(self.get_lidar_obs(obs)))
+        obs_actor = torch.cat([obs_actor, lidar_latent], dim=-1)
+
+        self._update_distribution(obs_actor)
+        return self.distribution.sample()
+
+    def act_inference(self, obs: TensorDict) -> torch.Tensor:
+        obs_actor = self.get_actor_obs(obs)
+        obs_actor = self.actor_obs_normalizer(obs_actor)
+        priv_explicit = self.priv_explicit_obs_normalizer(self.get_priv_explicit_obs(obs))
+        history_latent = self.get_hist_latent(obs)
+        obs_actor = torch.cat([obs_actor, priv_explicit, history_latent], dim=-1)
+
+        lidar_latent = self.lidar_encoder(self.lidar_obs_normalizer(self.get_lidar_obs(obs)))
+        obs_actor = torch.cat([obs_actor, lidar_latent], dim=-1)
+
+        if self.state_dependent_std:
+            return self.actor(obs_actor)[..., 0, :]
+        else:
+            return self.actor(obs_actor)
+
+    def get_actor_input(self, obs: TensorDict) -> torch.Tensor:
+        """Build the immediate MLP input (post-norm, post-concat) via the *priv_latent* path.
+
+        LiDAR analogue of :meth:`ActorCriticRMA.get_actor_input` — used by the LCP gradient
+        penalty in PPOParkour.  Terrain latent comes from the lidar encoder instead of scandot.
+        """
+        obs_actor = self.actor_obs_normalizer(self.get_actor_obs(obs))
+        priv_explicit = self.priv_explicit_obs_normalizer(self.get_priv_explicit_obs(obs))
+        priv_latent = self.get_priv_latent(obs)
+        actor_input = torch.cat([obs_actor, priv_explicit, priv_latent], dim=-1)
+        lidar_latent = self.lidar_encoder(self.lidar_obs_normalizer(self.get_lidar_obs(obs)))
+        actor_input = torch.cat([actor_input, lidar_latent], dim=-1)
+        return actor_input

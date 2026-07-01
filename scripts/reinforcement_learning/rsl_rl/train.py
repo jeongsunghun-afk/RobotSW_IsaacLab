@@ -136,7 +136,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
         # handle deprecated configurations
-        agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
+        # NOTE: The vendored custom runners (parkour / AMP; rsl-rl 3.2.0-style) consume the
+        # deprecated `policy` config directly (including `policy.class_name` and its network
+        # dims). With rsl-rl-lib >= 4.0.0 the deprecation handler infers `actor`/`critic` model
+        # configs and clears `policy`, which breaks those runners. Only run the handler for the
+        # stock runners that expect the new model-config format.
+        if agent_cfg.class_name in ("OnPolicyRunner", "DistillationRunner"):
+            agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
 
         # set the environment seed
         # note: certain randomizations occur in the environment initialization so we set the seed here

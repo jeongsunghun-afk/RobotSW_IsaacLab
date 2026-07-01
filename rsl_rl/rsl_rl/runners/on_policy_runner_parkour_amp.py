@@ -50,7 +50,7 @@ import torch
 
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP
 from rsl_rl.runners.on_policy_runner_parkour import _rename_joint_keys
-from rsl_rl.modules.actor_critic_parkour import ActorCriticRMAVoxel
+from rsl_rl.modules.actor_critic_parkour import ActorCriticRMALidar, ActorCriticRMAVoxel
 
 
 class OnPolicyRunnerParkourAMP(OnPolicyRunnerAMP):
@@ -322,3 +322,21 @@ class OnPolicyRunnerParkourAMPVoxel(OnPolicyRunnerParkourAMP):
 
     def _get_actor_critic_class(self):
         return ActorCriticRMAVoxel
+
+
+class OnPolicyRunnerParkourAMPLidar(OnPolicyRunnerParkourAMP):
+    """Variant of OnPolicyRunnerParkourAMP that uses ActorCriticRMALidar as the policy.
+
+    R2 LiDAR student-only (SL) arm.
+
+    The only change vs the parent is the actor-critic class: ``ActorCriticRMALidar``
+    replaces ``ActorCriticRMA`` so that the actor's terrain encoder is a range-image CNN
+    (``LidarEncoder``) instead of the clearance scandot MLP.  The critic is identical
+    to the clearance arm (raw clearance-294, D8) — critic capacity is the controlled variable.
+
+    Everything else (reward fusion, flat_env_mask, spawn scheduler, save/load, disc/estimator)
+    is inherited unchanged from ``OnPolicyRunnerParkourAMP``.
+    """
+
+    def _get_actor_critic_class(self):
+        return ActorCriticRMALidar

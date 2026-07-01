@@ -18,7 +18,7 @@ from tensordict import TensorDict
 
 from rsl_rl.modules import ActorCritic, ActorCriticCNN, ActorCriticRecurrent, ActorCriticRMA
 from rsl_rl.modules.rnd import RandomNetworkDistillation
-from rsl_rl.storage import RolloutStorage
+from rsl_rl.storage.rollout_storage_legacy import RolloutStorage
 from rsl_rl.utils import string_to_callable
 
 

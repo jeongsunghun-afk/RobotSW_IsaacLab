@@ -28,9 +28,9 @@ from rsl_rl.modules import (
     resolve_symmetry_config,
 )
 from rsl_rl.modules.estimator import Estimator
-from rsl_rl.storage import RolloutStorage
+from rsl_rl.storage.rollout_storage_legacy import RolloutStorage
 from rsl_rl.utils import resolve_obs_groups
-from rsl_rl.utils.logger import Logger
+from rsl_rl.utils.logger_legacy import Logger
 
 _JOINT_KEY_RE = re.compile(r"^(action_stats|policy_std)/joint_(\d+)(/.+)?$")
 

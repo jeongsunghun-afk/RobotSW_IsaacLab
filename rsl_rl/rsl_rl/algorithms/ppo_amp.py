@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from rsl_rl.algorithms.ppo import PPO
+from rsl_rl.algorithms.ppo_legacy import PPO
 from rsl_rl.algorithms.ppo_parkour import PPOParkour
 from rsl_rl.modules.amp_discriminator import AMPDiscriminator
 

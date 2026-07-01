@@ -105,7 +105,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 
         # handle deprecated configurations
-        agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
+        # NOTE: The vendored custom runners (parkour / AMP; rsl-rl 3.2.0-style) consume the
+        # deprecated `policy` config directly (including `policy.class_name` and its network
+        # dims). With rsl-rl-lib >= 4.0.0 the deprecation handler infers `actor`/`critic` model
+        # configs and clears `policy`, which breaks those runners. Only run the handler for the
+        # stock runners that expect the new model-config format.
+        if agent_cfg.class_name in ("OnPolicyRunner", "DistillationRunner"):
+            agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
 
         # set the environment seed
         # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -161,6 +167,74 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         elif agent_cfg.class_name == "DistillationRunner":
             runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerAMPBase":
+            # Guarded (branch-local) import: only resolved when a vendored custom AMP runner is
+            # requested. Stock isaac-6.0 (rsl-rl-lib 5.0.1, no custom classes) never enters here.
+            import inspect
+
+            from rsl_rl.algorithms.ppo import PPO as _VendoredPPO
+            from rsl_rl.runners import OnPolicyRunnerAMPBase
+
+            # Keep class_name (PPOAMPBase pops it before super().__init__); drop 5.0.1-only fields.
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPO.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+            runner = OnPolicyRunnerAMPBase(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerParkour":
+            # Guarded (branch-local) import for the vendored custom RMA/parkour runner.
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerParkour
+
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+            runner = OnPolicyRunnerParkour(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerAMP":
+            # Guarded (branch-local) import for the vendored custom AMP runner (go2_amp, R_Skeleton_amp).
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerAMP
+
+            # PPOAMP forwards the named algorithm cfg to PPOParkour.__init__, so filter target is PPOParkour.
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+            runner = OnPolicyRunnerAMP(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
+            # Guarded (branch-local) import for the vendored custom parkour-AMP runner (parkour_imitation).
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerParkourAMP
+
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+            runner = OnPolicyRunnerParkourAMP(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPVoxel":
+            # Guarded (branch-local) import for the vendored custom voxel parkour-AMP runner.
+            import inspect
+
+            from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
+            from rsl_rl.runners import OnPolicyRunnerParkourAMPVoxel
+
+            _accepted_ppo_params = set(inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
+            _cfg_dict = agent_cfg.to_dict()
+            _cfg_dict["algorithm"] = {
+                k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted_ppo_params or k == "class_name"
+            }
+            runner = OnPolicyRunnerParkourAMPVoxel(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
         else:
             raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
         runner.load(resume_path)
@@ -171,7 +245,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # export the trained policy to JIT and ONNX formats
         export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
 
-        if version.parse(installed_version) >= version.parse("4.0.0"):
+        # Vendored custom runners (parkour / AMP; rsl-rl 3.2.0-style) do not implement the 5.0.1
+        # runner.export_policy_to_* methods; export their actor-critic via the standalone exporter.
+        _custom_runner = agent_cfg.class_name in (
+            "OnPolicyRunnerParkour",
+            "OnPolicyRunnerAMP",
+            "OnPolicyRunnerAMPBase",
+            "OnPolicyRunnerParkourAMP",
+            "OnPolicyRunnerParkourAMPVoxel",
+        )
+        if version.parse(installed_version) >= version.parse("4.0.0") and not _custom_runner:
             # use the new export functions for rsl-rl >= 4.0.0
             runner.export_policy_to_jit(path=export_model_dir, filename="policy.pt")
             runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
@@ -211,7 +294,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     # env stepping
                     obs, _, dones, _ = env.step(actions)
                     # reset recurrent states for episodes that have terminated
-                    if version.parse(installed_version) >= version.parse("4.0.0"):
+                    # policy_nn is set for the standalone-export path (rsl-rl < 4.0.0 and the
+                    # vendored 3.2.0-style custom runners); reset the actor-critic directly there.
+                    if policy_nn is None:
                         policy.reset(dones)
                     else:
                         policy_nn.reset(dones)

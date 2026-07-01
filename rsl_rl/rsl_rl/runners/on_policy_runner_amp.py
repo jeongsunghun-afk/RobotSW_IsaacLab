@@ -12,7 +12,7 @@ from rsl_rl.algorithms import PPOAMP, PPOAMPBase
 from rsl_rl.modules import ActorCritic, ActorCriticRMA, resolve_symmetry_config
 from rsl_rl.modules.estimator import Estimator
 from rsl_rl.runners.on_policy_runner_parkour import OnPolicyRunnerParkour
-from rsl_rl.storage import RolloutStorage
+from rsl_rl.storage.rollout_storage_legacy import RolloutStorage
 
 # Type alias kept for backward-compat (referenced by external code, e.g. import guards).
 _DEFAULT_ACTOR_CRITIC_CLASS = ActorCriticRMA
