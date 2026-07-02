@@ -102,6 +102,19 @@ class RslRlVecEnvWrapper(VecEnv):
         """Returns the string representation of the wrapper."""
         return str(self)
 
+    def __getattr__(self, name: str):
+        """위임(Delegation): Wrapper에 정의되지 않은 속성/메서드는 내부 unwrapped 환경에서 찾습니다.
+
+        이를 통해 `get_amp_observations` 등 커스텀 env 메서드가 Wrapper를 통해 투명하게 노출됩니다.
+        NOTE: 5.1 로컬 커스터마이즈로, IsaacLab 3.0 stock에는 없음. 상류 재동기화 시 유실되지 않도록 유지할 것.
+        (유실 시 AMP discriminator 학습 게이트 hasattr(self.env, "get_amp_observations")가 False가 되어
+         discriminator가 전혀 학습되지 않음.)
+        """
+        # 무한 재귀 방지: __init__에서 self.env가 아직 없을 수 있으므로
+        if name == "env":
+            raise AttributeError(name)
+        return getattr(self.unwrapped, name)
+
     """
     Properties -- Gym.Wrapper
     """
