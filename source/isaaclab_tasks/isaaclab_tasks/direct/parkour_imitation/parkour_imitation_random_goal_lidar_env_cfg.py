@@ -83,8 +83,10 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
     ``obs["lidar"]`` shape = ``(N, lidar_frame_stack * 2 * lidar_image_h * lidar_image_w)``
     produced by flattening a ``(N, K, C=2, H, W)`` buffer via ``.reshape(N, -1)``.
 
-    - ch0 = range_norm: ``clamp(d, 0, lidar_max_range) / lidar_max_range`` for a hit;
-      ``1.0`` for miss/occluded.
+    - ch0 = range encoding (mode selected by ``lidar_range_encoding``):
+        - "inverse" (default): ``closeness = 1 / (1 + d)`` for a hit; ``0.0`` for miss/occluded.
+          near→high (0.67@0.5m), far→low (0.05@20m), empty/miss→0.0.
+        - "linear": ``clamp(d, 0, lidar_max_range) / lidar_max_range`` for a hit; ``1.0`` for miss/occluded.
     - ch1 = hit_mask: ``1.0`` for valid hit, ``0.0`` for miss/occluded/dropout.
     - Frame stack: newest frame at index k=0, older frames at k=1..K-1.
     """
@@ -96,11 +98,45 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
     lidar_image_h: int = 24
     # Azimuth bins for the range image (W).  Full 360° coverage.
     lidar_image_w: int = 96
-    # Maximum range for range normalisation (m).  Hits beyond this clamp to 1.0
-    # in range_norm but still carry hit_mask=1 (distinct from empty bins).
+    # Maximum range used for distance clamping in linear mode (m).
+    # In inverse-depth mode far values are auto-compressed; this field is kept for
+    # reproducibility and linear-mode backward compat.  Value unchanged: 20.0.
     lidar_max_range: float = 20.0
     # Number of temporal frames stacked in the obs["lidar"] buffer (K).
     lidar_frame_stack: int = 3
+    # ch0 encoding mode for the range image.
+    #   "inverse" (default): closeness = 1 / (1 + d).  near→high, far→low, miss/occluded→0.0.
+    #              d=0.5→0.67  d=1→0.50  d=2→0.33  d=5→0.17  d=20→0.05  miss→0.0
+    #              Empty/miss bins: 0.0.  Scatter: amax (closest hit = highest closeness).
+    #   "linear":  range_norm = clamp(d, 0, lidar_max_range) / lidar_max_range.
+    #              miss/occluded→1.0.  Empty bins: 1.0.  Scatter: amin (closest = lowest norm).
+    #              Preserved for A/B comparison and checkpoint reproduction.
+    lidar_range_encoding: str = "inverse"
+
+    # Temporal ring-buffer push cadence.
+    #
+    # False (default): push a new range-image frame into the ring buffer on EVERY env
+    #     control step.  With step_dt=0.02 s and K=3 this spans only 0.06 s — the three
+    #     slots carry nearly-identical content because the scene barely changes in 0.06 s.
+    #     This is the current (default) behaviour; the running GPU3 experiment uses it.
+    #
+    # True: push to the ring buffer only once every
+    #     push_every = round(1 / (update_frequency * step_dt))
+    #   env steps — the same cadence as the intended Mid-360 measurement rate (10 Hz).
+    #   At step_dt=0.02 s this gives push_every=5, so K=3 slots span 3×0.1 s = 0.3 s of
+    #   real temporal context.  Non-push steps hold the previous ring-buffer content
+    #   unchanged (obs["lidar"] is constant between pushes), which also matches the
+    #   real 10 Hz deployment: the on-robot policy receives the same scan for 5 control
+    #   cycles.
+    #
+    # Note on sensor update_period: LidarSensorCfg inherits update_period=0.0 from
+    #   SensorBaseCfg, so the sensor's _is_outdated gate fires on every physics step
+    #   regardless of update_frequency.  push_every is therefore derived from
+    #   update_frequency directly (not from update_period) to achieve the intended rate.
+    #
+    # Activation: set this to True in the next experiment after the current GPU3
+    #   inverse-depth run completes (attribution isolation).
+    lidar_stack_at_sensor_rate: bool = False
 
     # Mid-360 LiDAR — side-channel only, NEVER concatenated into obs.
     # Exposed as: extras["lidar_hits_w"] (N,R,3), extras["lidar_pos_w"] (N,3), extras["lidar_quat_w"] (N,4).

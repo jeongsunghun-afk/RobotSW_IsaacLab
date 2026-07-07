@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 #
@@ -31,15 +36,14 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.utils import configclass
-
 from isaaclab.sensors.ray_caster.patterns.patterns_cfg import PatternBaseCfg
+from isaaclab.utils import configclass
 
 if TYPE_CHECKING:
     pass
 
 
-def clearance_3d_pattern(cfg: "Clearance3DPatternCfg", device: str) -> tuple[torch.Tensor, torch.Tensor]:
+def clearance_3d_pattern(cfg: Clearance3DPatternCfg, device: str) -> tuple[torch.Tensor, torch.Tensor]:
     """Generate a forward-hemisphere spherical grid pattern for 3D clearance sensing.
 
     Produces a fixed-dimension grid of rays spanning:
@@ -64,13 +68,13 @@ def clearance_3d_pattern(cfg: "Clearance3DPatternCfg", device: str) -> tuple[tor
 
     # Outer loop = azimuth, inner = elevation  → index layout: [az0*ne+el0, az0*ne+el1, ..., az1*ne+el0, ...]
     # R2 symmetry: flip y + reverse az-axis to mirror left/right.
-    az_rad = torch.deg2rad(azimuth_deg)   # (num_azimuth,)
+    az_rad = torch.deg2rad(azimuth_deg)  # (num_azimuth,)
     el_rad = torch.deg2rad(elevation_deg)  # (num_elevation,)
 
     # Meshgrid: az as outer dim, el as inner dim
     az_grid, el_grid = torch.meshgrid(az_rad, el_rad, indexing="ij")  # both (num_azimuth, num_elevation)
-    az_flat = az_grid.reshape(-1)   # (N,)
-    el_flat = el_grid.reshape(-1)   # (N,)
+    az_flat = az_grid.reshape(-1)  # (N,)
+    el_flat = el_grid.reshape(-1)  # (N,)
 
     cos_az = torch.cos(az_flat)
     sin_az = torch.sin(az_flat)
@@ -78,9 +82,9 @@ def clearance_3d_pattern(cfg: "Clearance3DPatternCfg", device: str) -> tuple[tor
     sin_el = torch.sin(el_flat)
 
     # x=forward, y=left, z=up  (same convention as lidar_pattern in IsaacLab core)
-    x = cos_az * cos_el   # forward
-    y = sin_az * cos_el   # left
-    z = sin_el             # up (+elevation → ceiling, -elevation → floor)
+    x = cos_az * cos_el  # forward
+    y = sin_az * cos_el  # left
+    z = sin_el  # up (+elevation → ceiling, -elevation → floor)
 
     ray_directions = torch.stack([x, y, z], dim=-1)  # (N, 3)
     # Normalize (should be unit vectors already, but numerical safety)

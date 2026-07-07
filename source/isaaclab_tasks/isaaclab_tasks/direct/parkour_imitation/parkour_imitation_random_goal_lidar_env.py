@@ -28,7 +28,10 @@ R2 obs contract:
                     H = lidar_image_h (default 24)
                     W = lidar_image_w (default 96)
 
-    ch0  range_norm: clamp(d, 0, max_range) / max_range for a hit; 1.0 for miss/occluded.
+    ch0  range encoding (mode: cfg.lidar_range_encoding, default "inverse"):
+         "inverse": closeness = 1/(1+d) for a hit; 0.0 for miss/occluded/empty.
+                    near→high (0.67@0.5m, 0.50@1m, 0.33@2m, 0.17@5m, 0.05@20m).
+         "linear":  clamp(d, 0, max_range)/max_range for a hit; 1.0 for miss/occluded.
     ch1  hit_mask:   1.0 for valid hit, 0.0 for miss/occluded/dropout.
 
 Frame stack:
@@ -171,6 +174,34 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             dtype=torch.float32,
         )
 
+        # Sensor-rate push cadence (default OFF — activated via cfg.lidar_stack_at_sensor_rate).
+        #
+        # Background: LidarSensorCfg inherits update_period=0.0 from SensorBaseCfg, so the
+        # sensor's _is_outdated gate fires on EVERY physics step regardless of update_frequency.
+        # With step_dt=0.02 s and K=3, per-step push means the ring buffer spans only 0.06 s of
+        # temporal context — the three slots carry near-identical content.
+        #
+        # When True, each env's ring buffer is pushed only once every
+        #   push_every = round(1 / (update_frequency * step_dt))
+        # env steps (=5 at 10 Hz / 0.02 s), so K=3 slots span 3×0.1 s = 0.3 s.
+        # Non-push steps hold the previous buffer unchanged, matching real 10 Hz deployment.
+        #
+        # Mechanism: per-env int32 step counter (_lidar_push_ctr).  Initialized to push_every
+        # (not 0) so the first push fires on the very first control step after init/reset,
+        # matching the sensor's _is_outdated=True-on-reset behaviour.
+        #
+        # _mirror_range_image, inverse-depth encoding, and obs["lidar"] shape (N,13824) are
+        # all orthogonal to this flag.
+        if cfg.lidar_stack_at_sensor_rate:
+            self._lidar_push_every: int = max(1, round(1.0 / (cfg.mid360_lidar.update_frequency * self.step_dt)))
+            # Initialise at push_every → triggers a push on the first step (before first sensor cycle).
+            self._lidar_push_ctr: torch.Tensor = torch.full(
+                (self.num_envs,),
+                self._lidar_push_every,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
     # ------------------------------------------------------------------
     # R2 reset — zero frame buffer for reset envs
     # ------------------------------------------------------------------
@@ -185,6 +216,15 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             self._lidar_frame_buf.zero_()
         else:
             self._lidar_frame_buf[env_ids] = 0.0
+
+        # Reset push counter for sensor-rate cadence (only allocated when flag=True).
+        # Re-initialise to push_every (not 0) so reset envs push on their very first step,
+        # matching the sensor's _is_outdated=True-on-reset semantics.
+        if hasattr(self, "_lidar_push_ctr"):
+            if env_ids is None:
+                self._lidar_push_ctr.fill_(self._lidar_push_every)
+            else:
+                self._lidar_push_ctr[env_ids] = self._lidar_push_every
 
     # ------------------------------------------------------------------
     # R2 helpers
@@ -202,11 +242,23 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             el  = atan2(z, √(x²+y²)) →  el_bin ∈ [0, H) over measured elevation span
             bin = el_bin * W + az_bin        (R,)
 
-        Scatter:
-            range grid  init = 1.0  (empty bin → range_norm = 1.0)
+        Scatter (mode-dependent, see ch0 below):
             mask  grid  init = 0.0  (empty bin → no hit)
-            scatter_reduce amin for range (closest hit per bin wins)
             scatter_reduce amax for mask  (1 if any hit maps to this bin)
+
+        ch0 — range encoding (``cfg.lidar_range_encoding``):
+
+            "inverse" (default):
+                closeness = 1 / (1 + d) for hit rays; 0.0 for miss/occluded.
+                near→high (0.67@0.5m, 0.50@1m, 0.33@2m, 0.17@5m, 0.05@20m).
+                range_grid init = 0.0 (empty/miss bins → 0.0).
+                scatter_reduce amax  (closest hit = highest closeness → wins max).
+                nan_to_num guard applied before scatter.
+
+            "linear" (backward compat, A/B comparison):
+                range_norm = clamp(d, 0, max_range) / max_range for hit; 1.0 for miss.
+                range_grid init = 1.0 (empty bins → range_norm = 1.0).
+                scatter_reduce amin  (closest hit = lowest norm → wins min).
 
         Elevation span:
             Derived from actual body-local ray_directions[0] each step — not from
@@ -214,18 +266,25 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             offset moves the pattern into a different body-frame span.
             Stored on self._lidar_el_min_deg / _lidar_el_max_deg for diagnostics.
 
+        Note on miss representation:
+            data.distances stores ``max_distance`` (40.0 m) for miss/dropout rays — not inf.
+            For inverse mode, 1/(1+40)=0.024 ≠ 0.  The ``torch.where(hit_valid, ...)``
+            call is therefore the authoritative miss→0.0 mechanism; nan_to_num is a
+            secondary guard for rare genuine-inf edge cases.
+
         Args:
             distances:  (N, R) float32, sensor-measured distances in metres.
                         Miss and dropout already stored as max_distance (40 m).
             hit_valid:  (N, R) bool, True = genuine hit (not miss, dropout, occluded).
 
         Returns:
-            (N, 2, H, W) float32.  ch0 = range_norm, ch1 = hit_mask.
+            (N, 2, H, W) float32.  ch0 = range encoding, ch1 = hit_mask.
         """
         N = distances.shape[0]
         H = self.cfg.lidar_image_h
         W = self.cfg.lidar_image_w
         max_range: float = self.cfg.lidar_max_range
+        use_inverse: bool = getattr(self.cfg, "lidar_range_encoding", "inverse") == "inverse"
 
         # --- Per-step bin map from current body-local ray directions -----------
         # ray_directions: (N, R, 3), body-local (ray_alignment="base").
@@ -248,21 +307,33 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         ray_bin = el_bin * W + az_bin  # (R,) flat index in [0, H*W)
         bin_idx = ray_bin.unsqueeze(0).expand(N, -1)  # (N, R)
 
-        # --- Scatter into (N, H*W) grids ----------------------------------------
-        # range_norm_flat: normalised distance for hits, 1.0 for misses (= empty default).
-        dist_norm = distances.clamp(0.0, max_range) / max_range  # (N, R)
-        range_norm_flat = torch.where(hit_valid, dist_norm, torch.ones_like(dist_norm))
+        # --- Channel 0: range encoding (mode-switched) --------------------------
+        if use_inverse:
+            # Inverse-depth: closeness = 1/(1+d).  near→high, far→low, miss/occluded→0.0.
+            # clamp(min=0) handles rare negative-noise distances.
+            # torch.where assigns 0.0 to miss/occluded rays BEFORE scatter — this is the
+            # authoritative miss→0 mechanism (data.distances stores 40m for miss, not inf).
+            closeness = 1.0 / (1.0 + distances.clamp(min=0.0))  # (N, R)
+            range_val_flat = torch.where(hit_valid, closeness, torch.zeros_like(closeness))
+            range_val_flat = torch.nan_to_num(range_val_flat, nan=0.0, posinf=0.0, neginf=0.0)
+            # Range grid: init=0.0 (empty/miss bins → 0.0).
+            # amax: closest hit = highest closeness → wins.
+            range_grid = torch.zeros(N, H * W, device=self.device, dtype=torch.float32)
+            range_grid.scatter_reduce_(1, bin_idx, range_val_flat, reduce="amax", include_self=True)
+        else:
+            # Linear (original, preserved for A/B comparison and checkpoint reproduction).
+            dist_norm = distances.clamp(0.0, max_range) / max_range  # (N, R)
+            range_norm_flat = torch.where(hit_valid, dist_norm, torch.ones_like(dist_norm))
+            # Range grid: init=1.0 so empty bins stay at range_norm=1.0.
+            range_grid = torch.ones(N, H * W, device=self.device, dtype=torch.float32)
+            range_grid.scatter_reduce_(1, bin_idx, range_norm_flat, reduce="amin", include_self=True)
 
-        # Range grid: init=1.0 so empty bins stay at range_norm=1.0.
-        range_grid = torch.ones(N, H * W, device=self.device, dtype=torch.float32)
-        range_grid.scatter_reduce_(1, bin_idx, range_norm_flat, reduce="amin", include_self=True)
-
-        # Mask grid: init=0.0 so empty bins stay at 0.
+        # --- Channel 1: hit mask (unchanged across modes) -----------------------
         mask_flat = hit_valid.float()
         mask_grid = torch.zeros(N, H * W, device=self.device, dtype=torch.float32)
         mask_grid.scatter_reduce_(1, bin_idx, mask_flat, reduce="amax", include_self=True)
 
-        # Stack channels: (N, C=2, H, W) — ch0=range_norm, ch1=hit_mask.
+        # Stack channels: (N, C=2, H, W) — ch0=range_encoding, ch1=hit_mask.
         img = torch.stack(
             [range_grid.view(N, H, W), mask_grid.view(N, H, W)],
             dim=1,
@@ -349,11 +420,25 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         # Project to range image; roll ring buffer; expose obs["lidar"].
         frame = self._compute_range_image(raw_dist, hit_valid)  # (N, 2, H, W)
 
-        # Ring buffer roll: shift older frames from k=0..K-2 → k=1..K-1, insert at k=0.
         K = self.cfg.lidar_frame_stack
-        if K > 1:
-            self._lidar_frame_buf[:, 1:] = self._lidar_frame_buf[:, :-1].clone()
-        self._lidar_frame_buf[:, 0] = frame
+        if getattr(self.cfg, "lidar_stack_at_sensor_rate", False):
+            # Sensor-rate cadence: push only when the per-env step counter reaches push_every.
+            # Non-push steps leave the ring buffer (and thus obs["lidar"]) unchanged — this
+            # correctly models the real 10 Hz deployment where the policy receives the same
+            # scan for push_every consecutive control cycles.
+            self._lidar_push_ctr += 1
+            should_push = self._lidar_push_ctr >= self._lidar_push_every  # (N,) bool
+            push_env_ids = should_push.nonzero(as_tuple=False).squeeze(-1)  # (M,)
+            if push_env_ids.numel() > 0:
+                if K > 1:
+                    self._lidar_frame_buf[push_env_ids, 1:] = self._lidar_frame_buf[push_env_ids, :-1].clone()
+                self._lidar_frame_buf[push_env_ids, 0] = frame[push_env_ids]
+                self._lidar_push_ctr[push_env_ids] = 0
+        else:
+            # Default (False): push every control step — original behaviour, unchanged.
+            if K > 1:
+                self._lidar_frame_buf[:, 1:] = self._lidar_frame_buf[:, :-1].clone()
+            self._lidar_frame_buf[:, 0] = frame
 
         # obs["lidar"]: (N, K*C*H*W) via C-order reshape.
         # CONTRACT: layout is (N, K, C, H, W).reshape(N, -1).

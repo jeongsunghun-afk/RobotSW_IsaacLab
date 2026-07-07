@@ -263,6 +263,34 @@ class Go2ParkourImitationSymmetryRandomGoalLidarPPOAMPRunnerCfg(Go2ParkourImitat
 
 
 @configclass
+class Go2ParkourImitationSymmetryRandomGoalTeacher3DNoCrawlPPOAMPRunnerCfg(
+    Go2ParkourImitationSymmetryRandomGoalTeacher3DPPOAMPRunnerCfg
+):
+    """Run-B ablation runner: clearance-294 scan + original no-crawl terrain.
+
+    Inherits ``Go2ParkourImitationSymmetryRandomGoalTeacher3DPPOAMPRunnerCfg`` in full:
+    - ``OnPolicyRunnerParkourAMP`` reward fusion, spawn-scheduler, save/load
+    - PPO + AMP discriminator (BCE loss)
+    - L/R mirror data-augmentation (symmetry_cfg, num_aug=2)
+    - AMP obs 49-dim/frame × 10 history = 490-dim (unchanged)
+    - scan group = clearance-294 (via clearance_as_scan=True in env cfg)
+    - num_steps_per_env=24, num_mini_batches=4 (identical to baseline and Teacher3D)
+
+    Only ``experiment_name`` differs from Teacher3D runner — logs written to
+    ``parkour_imitation_go2_teacher3d_nocrawl`` for clean ablation separation.
+
+    Ablation triangle:
+        baseline (RandomGoal-v0)     : scan=187,  terrain=5×0.2 crawl=0
+        Run B (Teacher3DNoCrawl-v0)  : scan=294,  terrain=5×0.2 crawl=0  ← this runner
+        Teacher3D (Teacher3D-v0)     : scan=294,  terrain=5×0.15 crawl=0.25
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_teacher3d_nocrawl"
+
+
+@configclass
 class Go2ParkourImitationSymmetryRandomGoalTeacher3DVoxelPPOAMPRunnerCfg(
     Go2ParkourImitationSymmetryRandomGoalTeacher3DPPOAMPRunnerCfg
 ):
@@ -364,3 +392,18 @@ class Go2ParkourImitationSymmetryRandomGoalLidarSLPPOAMPRunnerCfg(
         # The lidar range-image mirror (H-flip) is also not wired yet; re-enable symmetry once
         # _mirror_range_image is integrated into compute_parkour_imitation_symmetric_states.
         self.algorithm.symmetry_cfg = None
+
+        # ── Entropy coefficient decay schedule (opt-in, PPOParkour) ──────────────────
+        # debug-worker RCA: fixed entropy_coef=0.01 becomes an amplifier once the surrogate
+        # gradient weakens late in training (~iter 8000+), driving action_std 0.59->1.42
+        # in a runaway that ends in irreversible policy collapse. Decaying entropy_coef in
+        # the back half of training removes that amplifier. This is opt-in via 4 cfg fields
+        # (all-or-nothing) on PPOParkour/PPOAMP — every other runner cfg in this file leaves
+        # them unset, so those tasks keep the original fixed entropy_coef behavior unchanged.
+        #   it < 5000            : entropy_coef = 0.01   (unchanged from other tasks)
+        #   5000 <= it <= 15000   : linear decay 0.01 -> 0.002
+        #   it > 15000            : entropy_coef = 0.002
+        self.algorithm.entropy_coef_start = 0.01
+        self.algorithm.entropy_coef_end = 0.002
+        self.algorithm.entropy_decay_start_iter = 5000
+        self.algorithm.entropy_decay_end_iter = 15000

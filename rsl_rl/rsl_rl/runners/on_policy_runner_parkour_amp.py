@@ -201,6 +201,10 @@ class OnPolicyRunnerParkourAMP(OnPolicyRunnerAMP):
                 amp_loss_dict = {}
 
             # ── Policy + Estimator Update ────────────────────────────────────
+            # Wire current iteration into the algorithm for PPOParkour's opt-in entropy_coef
+            # decay schedule (only active when the algorithm cfg sets the 4 schedule params;
+            # a no-op attribute-set for every other task, see ppo_parkour.py `current_iteration`).
+            self.alg.current_iteration = it
             loss_dict = self.alg.update()
             loss_dict.update(amp_loss_dict)
             loss_dict["hist_latent_loss"] = self.alg.update_dagger()

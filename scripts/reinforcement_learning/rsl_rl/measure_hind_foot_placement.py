@@ -247,7 +247,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             f"   contact: id={int(foot_contact_ids[k])}"
             f" name='{contact_names_raw[contact_order[k]]}'"
         )
-    print(f"  front = k{{0,1}} = {{FL,FR}}   hind = k{{2,3}} = {{RL,RR}}\n")
+    print("  front = k{0,1} = {FL,FR}   hind = k{2,3} = {RL,RR}\n")
 
     # ── Terrain height sources ─────────────────────────────────────────────────
     # Height-field (v1, kept for roughness and comparison).
@@ -255,7 +255,9 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     hf_origin = base_env._edge_mask_origin  # (2,) world-frame lower-left corner (x, y)
     hf_inv_scale = base_env._edge_mask_inv_scale  # cells / metre (scalar)
     H, W = hf.shape
-    print(f"[{SCRIPT_VERSION}] height_field shape=({H},{W}) origin={hf_origin.cpu().numpy()} inv_scale={hf_inv_scale:.4f}")
+    print(
+        f"[{SCRIPT_VERSION}] height_field shape=({H},{W}) origin={hf_origin.cpu().numpy()} inv_scale={hf_inv_scale:.4f}"
+    )
 
     # Pre-pad hf for safe 3×3 window std (replicate edges).
     hf_pad = torch.nn.functional.pad(hf[None, None], (1, 1, 1, 1), mode="replicate")[0, 0]  # (H+2, W+2)
@@ -409,6 +411,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         # raycast_mesh expects (N,3) flat tensors; returns (ray_hits (N,3), None, None, None)
         # mesh.device may be a string like "cuda:0"; ensure inputs are on same device.
         import warp as wp
+
         _mesh_torch_dev = wp.device_to_torch(warp_mesh.device)
         ray_starts_d = ray_starts.to(_mesh_torch_dev).contiguous()
         ray_dirs_d = ray_dirs.to(_mesh_torch_dev).contiguous()
@@ -425,9 +428,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         ev_terrain_h_rc = ray_hits[:, 2].cpu().numpy()  # (M,) — floor Z from downward hit
         ev_terrain_h = ev_terrain_h_rc
         floor_source_label = f"raycast(eps={args_cli.ray_eps}m,max_dist=2.0m)"
-        print(
-            f"[{SCRIPT_VERSION}] raycast done: hits_finite={np.isfinite(ev_terrain_h_rc).sum()}/{n_events_raw}"
-        )
+        print(f"[{SCRIPT_VERSION}] raycast done: hits_finite={np.isfinite(ev_terrain_h_rc).sum()}/{n_events_raw}")
     else:
         ev_terrain_h = ev_foot_xyz_hf_th
         floor_source_label = "heightfield"
@@ -441,10 +442,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     ev_placement_err_hf = ev_foot_z - ev_foot_xyz_hf_th  # (M,) always available
 
     finite_mask = (
-        np.isfinite(ev_placement_err)
-        & np.isfinite(ev_peakfz)
-        & np.isfinite(ev_rough)
-        & np.isfinite(ev_foot_z)
+        np.isfinite(ev_placement_err) & np.isfinite(ev_peakfz) & np.isfinite(ev_rough) & np.isfinite(ev_foot_z)
     )
     ev_ishind = ev_k >= 2  # RL=2, RR=3
 
@@ -565,8 +563,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     emit("(1) PLACEMENT ERROR  terrain × {front, hind}")
     emit("─" * 70)
     emit(
-        f"{'terrain':<18}{'grp':<7}{'n':>7}{'median':>9}{'mean':>9}"
-        f"{'p90(|.|)':>11}{'std':>8}{'peakFz':>10}{'rough':>9}"
+        f"{'terrain':<18}{'grp':<7}{'n':>7}{'median':>9}{'mean':>9}{'p90(|.|)':>11}{'std':>8}{'peakFz':>10}{'rough':>9}"
     )
     stat_cache = {}
     for cls in class_ids:
@@ -588,10 +585,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     emit("─" * 70)
     emit("(2) HIND − FRONT GAP  (primary: median_gap; secondary: mean_gap)")
     emit("─" * 70)
-    emit(
-        f"{'terrain':<18}{'n_front':>8}{'n_hind':>8}"
-        f"{'median_gap':>12}{'mean_gap':>10}{'p90_gap':>10}"
-    )
+    emit(f"{'terrain':<18}{'n_front':>8}{'n_hind':>8}{'median_gap':>12}{'mean_gap':>10}{'p90_gap':>10}")
     gap_cache = {}
     for cls in class_ids:
         cname = _TERRAIN_CLASS_NAMES.get(cls, f"cls{cls}")
@@ -650,7 +644,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     # ── (4) Crawl sanity block (already printed above, repeat inline) ──────────
     if crawl_id is not None:
-        crawl_mask_ev = (ev_class == crawl_id)
+        crawl_mask_ev = ev_class == crawl_id
         n_crawl_valid = int(crawl_mask_ev.sum())
         emit("─" * 70)
         emit(f"(4) CRAWL SANITY  (valid+finite landing events = {n_crawl_valid})")

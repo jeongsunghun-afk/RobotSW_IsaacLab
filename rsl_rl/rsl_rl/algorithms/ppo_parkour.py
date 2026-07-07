@@ -39,6 +39,19 @@ class PPOParkour:
         lam: float = 0.95,
         value_loss_coef: float = 1.0,
         entropy_coef: float = 0.01,
+        # Entropy coefficient decay schedule (opt-in, iteration-based).
+        # All four must be set together to enable; if any is None, entropy_coef stays
+        # fixed at the value above for the whole run (default, backward-compatible).
+        # Purpose: prevent late-training action_std runaway when the surrogate gradient
+        # weakens and a fixed entropy bonus dominates the PPO objective (see LiDAR-SL
+        # iter-8000+ divergence, debug-worker RCA).
+        #   it < entropy_decay_start_iter                       -> entropy_coef_start
+        #   entropy_decay_start_iter <= it <= entropy_decay_end_iter -> linear interpolation
+        #   it > entropy_decay_end_iter                          -> entropy_coef_end
+        entropy_coef_start: float | None = None,
+        entropy_coef_end: float | None = None,
+        entropy_decay_start_iter: int | None = None,
+        entropy_decay_end_iter: int | None = None,
         learning_rate: float = 0.001,
         max_grad_norm: float = 1.0,
         use_clipped_value_loss: bool = True,
@@ -152,6 +165,38 @@ class PPOParkour:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
+        # Entropy coefficient decay schedule (opt-in; see __init__ docstring above).
+        # Enabled only when all four schedule params are provided — otherwise entropy_coef
+        # stays fixed (default, backward-compatible for parkour/parkour_symmetry/etc.).
+        self.entropy_coef_start = entropy_coef_start
+        self.entropy_coef_end = entropy_coef_end
+        self.entropy_decay_start_iter = entropy_decay_start_iter
+        self.entropy_decay_end_iter = entropy_decay_end_iter
+        # Guard first on a local (not self.attr) so pyright narrows int|None -> int inside
+        # this block; only then is it safe to compare/subtract entropy_decay_end_iter and
+        # entropy_decay_start_iter. If any of the four is None, decay stays disabled and no
+        # arithmetic on the None-typed params ever executes (this is the default for every
+        # other parkour task — required for the no-regression guarantee).
+        if (
+            entropy_coef_start is None
+            or entropy_coef_end is None
+            or entropy_decay_start_iter is None
+            or entropy_decay_end_iter is None
+        ):
+            self._entropy_decay_enabled = False
+        else:
+            if entropy_decay_end_iter <= entropy_decay_start_iter:
+                raise ValueError(
+                    "entropy_decay_end_iter must be > entropy_decay_start_iter "
+                    f"(got start={entropy_decay_start_iter}, end={entropy_decay_end_iter})."
+                )
+            self._entropy_decay_enabled = True
+        # Current training iteration, set externally by the runner's learn() loop
+        # (e.g. `self.alg.current_iteration = it` before calling update()). Stays 0 if the
+        # runner never sets it, in which case the decay schedule (if enabled) behaves as if
+        # it is always before entropy_decay_start_iter -> entropy_coef_start is used.
+        self.current_iteration = 0
+
         # SPO parameters
         self.surrogate_type = surrogate_type
         self.spo_epsilon = spo_epsilon
@@ -238,7 +283,39 @@ class PPOParkour:
         if not self.normalize_advantage_per_mini_batch:
             st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
 
+    def _current_entropy_coef(self) -> float:
+        """Return entropy_coef for the current iteration, applying the decay schedule if enabled.
+
+        Disabled (any schedule param is None) -> returns the fixed self.entropy_coef unchanged
+        (exact prior behavior). Enabled -> piecewise: hold / linear-decay / hold, keyed off
+        self.current_iteration (set by the runner before update()).
+        """
+        # Read into locals first so pyright narrows int|None -> int/float for this whole
+        # function body. The None-check on these four locals (not on the cached
+        # self._entropy_decay_enabled bool) is what makes the narrowing valid: pyright cannot
+        # infer that self._entropy_decay_enabled implies these self.attrs are non-None, but it
+        # can infer that from a direct `x is None` check on the local itself.
+        start = self.entropy_coef_start
+        end = self.entropy_coef_end
+        decay_start_iter = self.entropy_decay_start_iter
+        decay_end_iter = self.entropy_decay_end_iter
+        if start is None or end is None or decay_start_iter is None or decay_end_iter is None:
+            # Disabled (default for every task except the LiDAR-SL cfg) -> fixed entropy_coef,
+            # no arithmetic on the None-typed schedule params ever executes.
+            return self.entropy_coef
+        it = self.current_iteration
+        if it <= decay_start_iter:
+            return start
+        if it >= decay_end_iter:
+            return end
+        frac = (it - decay_start_iter) / (decay_end_iter - decay_start_iter)
+        return start + frac * (end - start)
+
     def update(self) -> dict[str, float]:
+        # Entropy coefficient for this update() call — fixed for the whole rollout update
+        # (self.current_iteration does not change mid-update). Decay disabled -> self.entropy_coef.
+        entropy_coef_current = self._current_entropy_coef()
+
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_entropy = 0
@@ -385,7 +462,7 @@ class PPOParkour:
             loss = (
                 surrogate_loss
                 + self.value_loss_coef * value_loss
-                - self.entropy_coef * entropy_batch.mean()
+                - entropy_coef_current * entropy_batch.mean()
                 + priv_reg_coef * priv_reg_loss
             )
 
@@ -554,6 +631,10 @@ class PPOParkour:
             "entropy": mean_entropy,
             "priv_reg_loss": mean_priv_reg_loss,
         }
+        # Log the entropy coefficient actually applied this update — always emitted so the
+        # decay schedule (when enabled) is directly observable in TensorBoard/WandB, and so
+        # the fixed value is visible too when disabled (sanity check for other tasks).
+        loss_dict["entropy_coef"] = entropy_coef_current
         if self.rnd:
             loss_dict["rnd"] = mean_rnd_loss
         if self.estimator:

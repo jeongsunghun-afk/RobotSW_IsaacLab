@@ -625,13 +625,22 @@ class LidarEncoder(nn.Module):
         C-order flattening of ``(K*C, H, W)``.
 
     The conv output dim is derived from a dummy forward pass (robust to H/W changes).
-    No output activation — mirrors :class:`VoxelEncoder` and the scandot MLP style.
+    No output activation (mirrors :class:`VoxelEncoder` and the scandot MLP style), but the
+    output *is* passed through a final LayerNorm — see below.
 
     Conv stack for H=24, W=96 (3 strided convolutions):
         (N, K*C, 24, 96) → Conv(stride=2) → (N, 32, 12, 48)
                          → Conv(stride=2) → (N, 64,  6, 24)
                          → Conv(stride=2) → (N, 128, 3, 12)
-        flatten → (N, 4608) → FC(256) → ELU → FC(out_dim=32)
+        flatten → (N, 4608) → FC(256) → ELU → FC(out_dim=32) → LayerNorm(32)
+
+    The final projection Linear is small-gain-initialized (orthogonal, gain=0.01, bias=0) and its
+    output is passed through a parameter-free LayerNorm. Together these keep the lidar latent's
+    initial contribution to the actor MLP input small and unit-scale, instead of an arbitrarily
+    large raw CNN activation dominating the (small) proprioceptive channels at the start of
+    training. Unlike the scandot MLP / VoxelEncoder (whose inputs are already small, well-scaled
+    heightfield/occupancy features), the from-scratch CNN here has no such prior, hence the
+    LiDAR-specific stabilization.
 
     Attributes:
         H (int): Image height (rows). Stored for the exporter.
@@ -662,11 +671,20 @@ class LidarEncoder(nn.Module):
         # Derive the conv-output flatten dim from a dummy pass (robust to H/W resolution changes).
         with torch.no_grad():
             conv_flat_dim = self.conv(torch.zeros(1, in_channels, H, W)).flatten(1).shape[-1]
+        output_proj = nn.Linear(256, out_dim)
+        # Small-gain init on the final projection so the lidar latent starts near zero — the
+        # from-scratch CNN otherwise emits an arbitrarily large, noisy latent at init that
+        # dominates the small, well-scaled proprioceptive channels it is concatenated with.
+        nn.init.orthogonal_(output_proj.weight, gain=0.01)
+        nn.init.zeros_(output_proj.bias)
         self.fc = nn.Sequential(
             nn.Linear(conv_flat_dim, 256),
             resolve_nn_activation(activation),
-            nn.Linear(256, out_dim),
-            # No final activation — mirrors VoxelEncoder output-layer style.
+            output_proj,
+            # Parameter-free per-sample normalization: guarantees unit-scale output from the very
+            # first forward pass (no running-stat warm-up, unlike EmpiricalNormalization/BatchNorm),
+            # directly countering the initial-noise-dominates-control failure mode.
+            nn.LayerNorm(out_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

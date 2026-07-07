@@ -156,6 +156,47 @@ class ParkourImitationRandomGoalTeacher3DEnvCfg(ParkourImitationRandomGoalEnvCfg
 
 
 @configclass
+class ParkourImitationRandomGoalTeacher3DNoCrawlEnvCfg(ParkourImitationRandomGoalEnvCfg):
+    """Run-B ablation env: RandomGoal + clearance-294 scan + original no-crawl terrain mix.
+
+    Controlled variable vs. Teacher3D (``ParkourImitationRandomGoalTeacher3DEnvCfg``):
+        ONLY terrain proportions differ — crawl=0.0 here vs crawl=0.25 in Teacher3D.
+
+    Controlled variable vs. baseline (``ParkourImitationRandomGoalEnvCfg``):
+        ONLY scan dimension differs — clearance-294 here vs height_scan-187 in baseline.
+
+    Terrain proportions (inherited from ParkourImitationEnvCfg.terrain_sub_terrain_proportions
+    applied in ParkourImitationEnvCfg.__post_init__ — NO __post_init__ override here):
+        parkour_flat   = 0.2
+        parkour_hurdle = 0.2
+        parkour_step   = 0.2
+        parkour_gap    = 0.2
+        parkour_stair  = 0.2
+        parkour_crawl  = 0.0   ← unchanged from PARKOUR_TERRAINS_CFG default
+
+    Scan routing (parkour_env.py:1328–1334):
+        enable_clearance_scanner=True  → _clearance_vec allocated as (N, 294)
+        clearance_as_scan=True         → scan_obs = (_clearance_vec - 2.0) / 2.0, shape (N, 294)
+
+    Note on critic width:
+        critic obs_groups = policy(46) + scan(294) + priv_explicit(6) + priv_latent(33) = 379
+        (vs. baseline 272; same as Teacher3D — this is the intended treatment, not a confound).
+
+    IMPORTANT: This class intentionally inherits ParkourImitationRandomGoalEnvCfg (the base
+    RandomGoal env), NOT ParkourImitationRandomGoalTeacher3DEnvCfg.  Inheriting Teacher3D
+    would pull in Teacher3D.__post_init__ which resets terrain to crawl=0.25 × 5-terrain=0.15,
+    defeating the no-crawl isolation. The base class's __post_init__ (5×0.2, crawl=0) is correct.
+    """
+
+    # Activate clearance scanner and route it into the scan slot (identical to Teacher3D).
+    enable_clearance_scanner: bool = True
+    clearance_as_scan: bool = True
+
+    # Terrain proportions: NOT overridden — inherited 5×0.2 / crawl=0.0 from base __post_init__.
+    # All other random-goal / AMP / reward / actuator / sensor parameters unchanged.
+
+
+@configclass
 class ParkourImitationRandomGoalTeacher3DVoxelEnvCfg(ParkourImitationRandomGoalTeacher3DEnvCfg):
     """Voxel-teacher arm: RandomGoal + 3D clearance scan + voxel occupancy grid.
 
