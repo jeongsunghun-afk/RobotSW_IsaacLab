@@ -52,6 +52,13 @@ parser.add_argument(
     help="Which single sub-terrain to isolate (proportion 1.0, all others 0.0).",
 )
 parser.add_argument("--out_path", type=str, required=True, help="Exact output mp4 path for the recorded video.")
+parser.add_argument(
+    "--sensor",
+    type=str,
+    default="none",
+    choices=["none", "height_scan", "clearance", "voxel", "lidar"],
+    help="Which perception-sensor visualization to overlay (goal markers stay OFF). 'none' = no overlay.",
+)
 # append RSL-RL cli arguments (adds --load_run, --checkpoint, --experiment_name, ...)
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -85,6 +92,7 @@ from rsl_rl.runners.on_policy_runner_parkour_amp import (
     OnPolicyRunnerParkourAMPVoxel,
 )
 
+import isaaclab.sim as sim_utils
 from isaaclab.envs import (
     DirectMARLEnv,
     DirectMARLEnvCfg,
@@ -92,6 +100,8 @@ from isaaclab.envs import (
     ManagerBasedRLEnvCfg,
     multi_agent_to_single_agent,
 )
+from isaaclab.markers import VisualizationMarkers
+from isaaclab.markers.config import SPHERE_MARKER_CFG
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 
@@ -143,6 +153,81 @@ def _isolate_terrain(env_cfg, terrain_name: str) -> None:
     print(f"[per-terrain] isolated terrain='{terrain_name}' key='{target_key}'. active proportions: {resolved}")
 
 
+def _pick_target_view_env(env_unwrapped, terrain_name: str) -> int:
+    """Return an env id guaranteed to sit on the *target* terrain (not the reserved flat col).
+
+    ``TerrainImporter`` assigns ``terrain_types = floor(arange(num_envs) / (num_envs/num_cols))``,
+    so **env 0 always lands in terrain column 0**, which ``_isolate_terrain`` reserves for the
+    single flat column (AMP flat-mask assert).  The parkour camera follows
+    ``cfg.viewer.env_index`` (default 0) via ``_camera_follow_callback``, so it records that lone
+    flat column — the observed bug.
+
+    We instead pick a target-terrain env with the *highest* terrain level so the obstacle is
+    prominent: level-0 patches are nearly flat and would still look like flat on camera.
+    Returns 0 for ``terrain_name == 'flat'`` (env 0 is the flat column we want).
+    """
+    env_class = env_unwrapped._env_class  # [num_envs] class id per env
+    flat_class = int(env_unwrapped._col_to_class[0].item())  # class of column 0 == flat
+    if terrain_name == "flat":
+        return 0
+    target_mask = env_class != flat_class
+    if not bool(target_mask.any()):
+        return 0
+    levels = env_unwrapped._terrain_levels.clone().float()
+    levels[~target_mask] = -1.0  # exclude the flat-column env(s) from the argmax
+    return int(torch.argmax(levels).item())
+
+
+def _make_point_markers(prim_path: str, color: tuple[float, float, float], radius: float) -> VisualizationMarkers:
+    """Single-prototype sphere marker set (mirrors the env's clearance-vis / perception-viz pattern)."""
+    cfg = SPHERE_MARKER_CFG.copy()
+    cfg.prim_path = prim_path
+    cfg.markers["sphere"].radius = radius
+    cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+    return VisualizationMarkers(cfg)
+
+
+def _draw_sensor_overlay(env_unwrapped, sensor: str, view_idx: int, hs_vis, lidar_vis, max_lidar_pts: int = 6000):
+    """Draw the per-method perception-sensor markers for the *tracked* env (goal markers stay off).
+
+    - clearance / voxel: use the env's own ``_draw_clearance_rays`` / ``_draw_voxel_occupied``,
+      which target ``_get_active_viewer_env_id()`` — equal to ``view_idx`` (we set the viewport
+      env-index there). They create their own markers lazily and update every call.
+    - height_scan / lidar: custom sphere point clouds at the tracked env's ray hits.
+    """
+    if sensor == "height_scan":
+        hs = getattr(env_unwrapped, "_height_scanner", None)
+        if hs is None:
+            return
+        pts = hs.data.ray_hits_w[view_idx]  # (187, 3)
+        pts = pts[torch.isfinite(pts).all(dim=-1)]
+        if pts.shape[0] > 0:
+            hs_vis.set_visibility(True)
+            hs_vis.visualize(translations=pts)
+    elif sensor == "clearance":
+        if hasattr(env_unwrapped, "_draw_clearance_rays"):
+            env_unwrapped._draw_clearance_rays()
+    elif sensor == "voxel":
+        if hasattr(env_unwrapped, "_draw_voxel_occupied"):
+            env_unwrapped._draw_voxel_occupied()
+    elif sensor == "lidar":
+        mid = getattr(env_unwrapped, "_mid360", None)
+        if mid is None:
+            return
+        hits = mid.data.ray_hits_w[view_idx]  # (R, 3)
+        valid = torch.isfinite(hits).all(dim=-1)
+        if hasattr(mid.data, "distances"):
+            mid_cfg = getattr(env_unwrapped.cfg, "mid360_lidar", None)
+            max_range = float(getattr(mid_cfg, "max_distance", None) or getattr(env_unwrapped.cfg, "lidar_max_range", 20.0))
+            valid = valid & (mid.data.distances[view_idx] < max_range - 0.1)
+        pts = hits[valid]
+        if pts.shape[0] > max_lidar_pts:
+            pts = pts[torch.randperm(pts.shape[0], device=pts.device)[:max_lidar_pts]]
+        if pts.shape[0] > 0:
+            lidar_vis.set_visibility(True)
+            lidar_vis.visualize(translations=pts)
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with an RSL-RL agent on a single isolated terrain and record a video."""
@@ -173,16 +258,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ── terrain isolation (must run before gym.make) ──────────────────────────
     _isolate_terrain(env_cfg, args_cli.terrain)
 
-    # enable debug visualizations exactly like play.py (edge mask / height scanner rays)
-    env_cfg.debug_vis = True
+    # Prevent the RandomGoal env from teleporting graduated random-goal envs onto the
+    # reserved flat column mid-rollout (``random_goal_force_flat``), which would drag the
+    # tracked camera env back onto flat.  Disabling random-goal pins every env to its
+    # natural terrain column; the flat-column assert is independent of this flag so the
+    # env still constructs.  No-op for tasks that lack the attribute.
+    if hasattr(env_cfg, "enable_random_goal"):
+        env_cfg.enable_random_goal = False
+        print("[per-terrain] enable_random_goal=False (pin envs to natural terrain column)")
+
+    # Turn OFF all parkour goal/edge/height debug markers: the goal-direction dot arrows
+    # (cur_goal / future_goals / HeadingDots / TargetDots) and edge-mask spheres are gated
+    # by ``debug_vis`` / ``debug_vis_edge_mask``. We replace them with a per-method sensor
+    # overlay drawn manually in the rollout loop (see _draw_sensor_overlay).
+    env_cfg.debug_vis = False
     if hasattr(env_cfg.scene, "height_scanner") and hasattr(env_cfg.scene.height_scanner, "debug_vis"):
-        env_cfg.scene.height_scanner.debug_vis = True
+        env_cfg.scene.height_scanner.debug_vis = False
     if hasattr(env_cfg, "debug_vis_edge_mask"):
-        env_cfg.debug_vis_edge_mask = True
+        env_cfg.debug_vis_edge_mask = False
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
-    env.unwrapped.set_debug_vis(getattr(env_cfg, "debug_vis", True))
+    env.unwrapped.set_debug_vis(False)  # ensure goal-marker visualizers stay hidden
+
+    # ── retarget the follow camera onto a target-terrain env ──────────────────
+    # (env 0 is the reserved flat column; the camera would otherwise record flat.)
+    view_idx = _pick_target_view_env(env.unwrapped, args_cli.terrain)
+    env.unwrapped.cfg.viewer.env_index = view_idx  # read live each frame by _camera_follow_callback
+    _vcc = getattr(env.unwrapped, "viewport_camera_controller", None)
+    if _vcc is not None:
+        _vcc.cfg.env_index = view_idx  # also drives edge-mask viz + fallback path
+    tracked_class = int(env.unwrapped._env_class[view_idx].item())
+    flat_class = int(env.unwrapped._col_to_class[0].item())
+    tracked_level = int(env.unwrapped._terrain_levels[view_idx].item())
+    print(
+        f"[per-terrain] camera tracks env={view_idx}: terrain_class={tracked_class} "
+        f"(flat_class={flat_class}), terrain_level={tracked_level}, terrain='{args_cli.terrain}'"
+    )
+
+    # ── perception-sensor overlay markers (goal markers already OFF) ───────────
+    # height_scan / lidar need custom point-cloud markers; clearance / voxel use the env's
+    # own lazily-created marker sets inside _draw_clearance_rays / _draw_voxel_occupied.
+    hs_vis = lidar_vis = None
+    if args_cli.sensor == "height_scan":
+        hs_vis = _make_point_markers("/Visuals/Viz/height_scan", (1.0, 0.85, 0.0), radius=0.03)  # yellow
+    elif args_cli.sensor == "lidar":
+        lidar_vis = _make_point_markers("/Visuals/Viz/lidar", (0.7, 0.1, 0.9), radius=0.02)  # purple
+    print(f"[per-terrain] sensor overlay = '{args_cli.sensor}'")
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
@@ -248,6 +370,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     fwd_vel_sum = 0.0
     fwd_vel_count = 0
 
+    # ── tracked-env base-z series ───────────────────────────────────────────────
+    # Proves the *recorded* env traverses an obstacle: flat gait keeps z ~constant,
+    # climbing/crawling makes z vary. Uses view_idx only (NOT a global mean).
+    z_series: list[float] = []
+
     timestep = 0
     while simulation_app.is_running():
         with torch.inference_mode():
@@ -267,6 +394,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if robot is not None and hasattr(robot.data, "root_lin_vel_b"):
                 fwd_vel_sum += float(robot.data.root_lin_vel_b[:, 0].mean().item())
                 fwd_vel_count += 1
+            if robot is not None and hasattr(robot.data, "root_pos_w"):
+                z_series.append(float(robot.data.root_pos_w[view_idx, 2].item()))
+
+            # draw the method's perception-sensor overlay for the tracked env; the markers
+            # persist as USD prims and are captured on RecordVideo's next-frame render pass.
+            if args_cli.sensor != "none":
+                _draw_sensor_overlay(env.unwrapped, args_cli.sensor, view_idx, hs_vis, lidar_vis)
 
         timestep += 1
         if timestep == args_cli.video_length:
@@ -277,6 +411,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"[per-terrain] LIVENESS terrain={args_cli.terrain} steps={fwd_vel_count} "
         f"mean_forward_vel_b_x={mean_fwd_vel:.3f} m/s"
     )
+
+    # ── tracked-env base-z verdict (obstacle traversal on the recorded env) ─────
+    if z_series:
+        z_t = torch.tensor(z_series)
+        z_min = float(z_t.min())
+        z_max = float(z_t.max())
+        z_std = float(z_t.std())
+        z_rng = z_max - z_min
+        # flat gait keeps z within a narrow crouch band (range < ~0.05m). Stepping over an
+        # obstacle (hurdle/step/stair climb, gap dip, crawl crouch) lifts/drops the base well
+        # beyond that; 0.06m separates the two robustly (a level-3 hurdle already gives ~0.08m).
+        verdict = "OBSTACLE-VARIATION" if z_rng > 0.06 else "FLAT-LIKE(SUSPECT)"
+        print(
+            f"[per-terrain] TRACKED_Z terrain={args_cli.terrain} env={view_idx} "
+            f"class={tracked_class} level={tracked_level} z_min={z_min:.3f} z_max={z_max:.3f} "
+            f"z_range={z_rng:.3f} z_std={z_std:.3f} -> {verdict}"
+        )
 
     env.close()
 
