@@ -105,6 +105,40 @@ sys.argv = [sys.argv[0]] + remaining_args
 installed_version = metadata.version("rsl-rl-lib")
 
 
+def use_noninstanceable_go2_for_render(env_cfg) -> None:
+    """Swap the stock instanceable ``go2.usd`` for a flattened non-instanceable copy.
+
+    The stock instanceable Unitree Go2 asset triggers an Isaac Sim 6.0 render-path issue
+    (see IsaacLab issue 2925 / IsaacSim issue 227) where the visual meshes expand only
+    partially in the play/viewer camera path, so recorded videos and the viewport show a
+    fragmented robot (body and some legs missing). Flattening the asset and clearing the
+    ``instanceable`` flag makes every link carry its own visual geometry, which renders
+    reliably. This is applied to the visualization path (play) only; training keeps the
+    instanceable asset, which is memory-efficient at large environment counts.
+    """
+    from isaaclab_assets import ISAACLAB_ASSETS_DATA_DIR
+
+    # Locate the robot articulation cfg (Direct envs expose ``cfg.robot``; manager-based
+    # envs expose ``cfg.scene.robot``).
+    robot_cfg = getattr(env_cfg, "robot", None)
+    if robot_cfg is None and hasattr(env_cfg, "scene"):
+        robot_cfg = getattr(env_cfg.scene, "robot", None)
+    spawn_cfg = getattr(robot_cfg, "spawn", None) if robot_cfg is not None else None
+    usd_path = getattr(spawn_cfg, "usd_path", None) if spawn_cfg is not None else None
+    if spawn_cfg is None or not (isinstance(usd_path, str) and usd_path.endswith("/Robots/Unitree/Go2/go2.usd")):
+        return  # not the stock instanceable Go2 asset; nothing to swap
+
+    noninst_path = os.path.join(ISAACLAB_ASSETS_DATA_DIR, "Robots", "Go2_noninstanceable", "go2.usd")
+    if not os.path.isfile(noninst_path):
+        print(
+            f"[WARN] Non-instanceable Go2 asset not found at {noninst_path}; the robot may render fragmented. "
+            "Generate it once with: ./isaaclab.sh -p scripts/tools/make_go2_noninstanceable.py"
+        )
+        return
+    spawn_cfg.usd_path = noninst_path
+    print(f"[INFO] Rendering with non-instanceable Go2 asset (Isaac Sim 6.0 render fix): {noninst_path}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -149,6 +183,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         # set the log directory for the environment
         env_cfg.log_dir = log_dir
+
+        # work around the Isaac Sim 6.0 instanceable-render issue for Go2 in the play path
+        use_noninstanceable_go2_for_render(env_cfg)
 
         # create isaac environment
         env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
