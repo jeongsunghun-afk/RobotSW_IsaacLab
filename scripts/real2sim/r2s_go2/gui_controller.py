@@ -35,6 +35,7 @@ Visual styling is a self-contained QSS stylesheet applied in :func:`main` (see
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 
@@ -290,6 +291,10 @@ class MainWindow(QMainWindow):
         self._sine_base_pose: list[float] = list(motions.DEFAULT_POSE)
         self._sine_start_time: float = 0.0
 
+        # Monitor 는 **별도 프로세스**로 spawn 한다 (렌더를 gui heartbeat 에서 격리; CONTRACT §11).
+        # None=미실행. subprocess.Popen 핸들.
+        self._monitor_proc: subprocess.Popen | None = None
+
         self.setWindowTitle("R2S-GO2 Controller")
         self._build_ui()
 
@@ -314,10 +319,16 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("titleLabel")
         subtitle_label = QLabel("Unitree GO2 — real2sim /lowcmd publisher")
         subtitle_label.setObjectName("subtitleLabel")
-        header_layout = QVBoxLayout()
-        header_layout.setSpacing(2)
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(subtitle_label)
+        header_title = QVBoxLayout()
+        header_title.setSpacing(2)
+        header_title.addWidget(title_label)
+        header_title.addWidget(subtitle_label)
+        header_layout = QHBoxLayout()
+        header_layout.addLayout(header_title)
+        header_layout.addStretch(1)
+        monitor_btn = QPushButton("Monitor")
+        monitor_btn.clicked.connect(self._on_monitor_clicked)
+        header_layout.addWidget(monitor_btn, alignment=Qt.AlignTop)
         layout.addLayout(header_layout)
 
         divider = QFrame()
@@ -442,6 +453,17 @@ class MainWindow(QMainWindow):
         self._status_label.setText("Standing up (go2_stand_example trajectory)...")
         self._play_poses(motions.stand_up_sequence(self._current_pose, FRAME_HZ))
 
+    def _on_monitor_clicked(self) -> None:
+        # 별도 프로세스로 monitor.py 를 spawn — 무거운 matplotlib 렌더를 gui 의 50Hz /lowcmd
+        # heartbeat event loop 에서 완전히 격리한다 (CONTRACT §11). env(RMW/도메인/CYCLONEDDS_URI)
+        # 는 자동 상속되어 같은 토픽을 관측한다. 이미 실행 중이면(살아있으면) 무시.
+        if self._monitor_proc is not None and self._monitor_proc.poll() is None:
+            self._status_label.setText("Monitor already running")
+            return
+        monitor_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.py")
+        self._monitor_proc = subprocess.Popen([sys.executable, monitor_py])
+        self._status_label.setText("Monitor launched (separate process)")
+
     def _on_default_clicked(self) -> None:
         self._status_label.setText("Moving to default pose...")
         self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)
@@ -508,6 +530,8 @@ class MainWindow(QMainWindow):
             self.close()
             return
         try:
+            # GuiNode has only the /lowcmd publisher (no subscriptions) — the monitor runs in
+            # its own process, so nothing here competes with the publish heartbeat.
             rclpy.spin_once(self._node, timeout_sec=0.0)
         except KeyboardInterrupt:
             # Ctrl+C landed inside spin_once: close the window to exit the Qt loop cleanly.
@@ -519,6 +543,9 @@ class MainWindow(QMainWindow):
         self._spin_timer.stop()
         self._sequence_timer.stop()
         self._sine_timer.stop()
+        # monitor 자식 프로세스가 살아있으면 정리 (orphan 방지).
+        if self._monitor_proc is not None and self._monitor_proc.poll() is None:
+            self._monitor_proc.terminate()
         super().closeEvent(event)
 
 

@@ -50,9 +50,11 @@ FIXED_BASE_HEIGHT_M: float = 0.5
 # 엎드린(prone) 초기 자세 — 실기 GO2가 엎드려 시작하므로 sim도 동일하게 초기화(Real2Sim 정합).
 # GUI "Stand Up" 버튼이 여기서 go2_stand_example 궤적으로 일어선다.
 # ⚠ scripts/real2sim/r2s_go2/motions.py 의 STAND_FOLDED 와 값 일치 필수(다른 패키지라 중복 정의).
-#   값 출처: unitree_ros2 go2_stand_example target_pos_1.
+#   값 출처: unitree_ros2 go2_stand_example target_pos_1. 단 calf 는 -2.65→-2.6 완화 —
+#   -2.65 는 GO2 calf soft limit(soft_lo≈-2.628, soft_joint_pos_limit_factor=0.9)를 벗어나
+#   sim 이 position target 을 silently 클램프하므로, 명령이 soft limit 안에 들도록 -2.6 사용.
 PRONE_HEIGHT_M: float = 0.10  # 엎드림 base 스폰 높이 [m] — sim 실측 정착 base_z≈0.088 위 소폭 마진(정착 확인됨).
-_STAND_FOLDED: list[float] = [0.0, 1.36, -2.65, 0.0, 1.36, -2.65, -0.2, 1.36, -2.65, 0.2, 1.36, -2.65]
+_STAND_FOLDED: list[float] = [0.0, 1.36, -2.6, 0.0, 1.36, -2.6, -0.2, 1.36, -2.6, 0.2, 1.36, -2.6]
 PRONE_JOINT_POS: dict[str, float] = {JOINT_ORDER[i]: _STAND_FOLDED[i] for i in range(NUM_JOINTS)}
 
 

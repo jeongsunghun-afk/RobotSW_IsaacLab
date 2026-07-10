@@ -190,3 +190,30 @@ GUI 버튼 한 번의 `/lowcmd`가 **sim과 실로봇 양쪽**에 도달하게 �
 - **gui가 t=0부터 STAND_FOLDED(prone) kp=25를 연속 발행** → shared gui 시작 즉시 실로봇도 명령 받음. **실로봇을 안전 위치(prone/매달기) + sport release 상태로 둔 뒤** shared gui를 켤 것.
 - **게인 한계**: gui는 kp=25 발행. sim은 cfg PD(25)로 기립하지만 **실로봇은 `/lowcmd`의 kp=25를 직접** 써서 go2_stand_example의 kp=60보다 약함 → **실로봇은 kp=25로 못 일어설 수 있음**. 실로봇 기립엔 per-motion 게인(stand=60) 필요(후속).
 - 검증(2026-07-10): 격리 도메인 42에서 cyclonedds same-host 디스커버리 + remap + sim 기립 PASS. 실로봇 도메인0 미개입.
+
+## 11. Monitor (선택 모터 action/sim/robot 실시간 plot) — 검증 완료 2026-07-10
+
+gui "Monitor" 버튼 → `monitor.py`를 **별도 프로세스**로 spawn. 선택 모터의 **q / tau_est / dq** 세 plot(matplotlib Qt5Agg 임베드).
+
+### 11.1 데이터 소스 (모터 i)
+- **action**: `/lowcmd` `motor_cmd[i].q` — gui가 발행 중인 목표각(q plot에 점선 오버레이).
+- **sim**: `R2S_SIM_STATE_TOPIC` `motor_state[i]` (q/dq/tau_est).
+- **robot**: `R2S_ROBOT_STATE_TOPIC`(기본 `/lowstate`) `motor_state[i]`.
+- 토픽 해석: shared → sim=`/sim/lowstate`, robot=`/lowstate`(분리). 비-shared(sim 전용) → 둘 다 `/lowstate` → monitor가 **robot 구독 dedup**(sim only 표시). `run_gui_controller.sh`가 `R2S_SIM_STATE_TOPIC`을 모드별로 export.
+
+### 11.2 왜 별도 프로세스인가 (heartbeat 보호, 핵심)
+- monitor를 gui와 **같은 Qt event loop**에 두면 실제 디스플레이의 무거운 matplotlib draw가 50Hz `/lowcmd` 발행 타이머(§8 heartbeat)를 막아 gap이 생긴다. matplotlib/Qt가 GIL을 쥐므로 **background thread로도 못 푼다** → 진짜 격리는 **별도 프로세스**뿐.
+- gui 버튼은 `subprocess.Popen([sys.executable, monitor.py])`로 spawn만. env(RMW/`ROS_DOMAIN_ID`/`CYCLONEDDS_URI`) 상속 → 같은 토픽 관측. gui 종료 시 자식 프로세스 terminate.
+- 프로세스 내부: 수집/렌더(15Hz) 분리 + **decimate**(실로봇 500Hz → `DECIM_HZ`=60Hz, QoS depth=1 latest-wins). 렌더는 `draw_idle()` full redraw — blit 은 쓰지 않는다(별도 프로세스라 heartbeat 무관이고, blit on-screen 합성이 일부 X 환경에서 창을 까맣게 남기는 문제가 있었음).
+
+### 11.3 검증 (2026-07-10, sim-free · 실로봇 미개입)
+판별 프로브(실제 X=Xvfb, dual-topic 500Hz)로 in-process vs 별도-프로세스 대조:
+
+| 지표 | in-process (구) | **별도 프로세스 (현)** |
+|---|---|---|
+| `/lowcmd` rate | 48.8Hz | **50.1Hz** |
+| gaps >30ms | 12 | **0** |
+| maxgap | 54.9ms | **21.3ms** |
+
+- decimation: robot 500Hz 유입 → 버퍼 ~51Hz(≤60Hz), 데이터 정상. sim 50Hz 그대로.
+- 결론: heartbeat가 렌더에서 완전 격리됨(gui 프로세스는 발행만, 렌더 0).

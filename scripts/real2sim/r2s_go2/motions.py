@@ -73,19 +73,21 @@ SIT_POSE: list[float] = [
 
 # go2_stand_example(unitree_ros2) 기립 궤적 자세 — Unitree idx 순서(JOINT_NAMES와 동일).
 # ⚠ r2s_go2_env_cfg.py 의 _STAND_FOLDED(prone 초기자세)와 값이 반드시 일치해야 함(다른 패키지라 중복 정의).
+# calf 는 example 원값 -2.65 대신 -2.6 사용 — -2.65 는 GO2 calf soft limit(≈-2.628)를 벗어나
+# sim 이 position target 을 클램프하므로 soft limit 안쪽 값으로 완화(r2s_go2_env_cfg.py 참조).
 STAND_FOLDED: list[float] = [
     0.0,
     1.36,
-    -2.65,
+    -2.6,
     0.0,
     1.36,
-    -2.65,
+    -2.6,
     -0.2,
     1.36,
-    -2.65,
+    -2.6,
     0.2,
     1.36,
-    -2.65,
+    -2.6,
 ]  # 엎드림(target_pos_1)
 STAND_UP: list[float] = [0.0, 0.67, -1.3, 0.0, 0.67, -1.3, 0.0, 0.67, -1.3, 0.0, 0.67, -1.3]  # 기립(target_pos_2)
 

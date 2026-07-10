@@ -43,7 +43,13 @@ if [ "${R2S_SHARED:-0}" = "1" ]; then
   _iface="${R2S_ROBOT_IFACE:-$(ip -o -4 addr show 2>/dev/null | awk '/192\.168\.123\./{print $2; exit}')}"
   _iface="${_iface:-ens10f1}"
   export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"$_iface\" priority=\"default\" multicast=\"default\" /></Interfaces></General></Domain></CycloneDDS>"
+  # Monitor 창의 sim 소스: shared 에서 sim_bridge 는 /sim/lowstate 로 remap 발행(실로봇 /lowstate 와 분리).
+  export R2S_SIM_STATE_TOPIC="${R2S_SIM_STATE_TOPIC:-/sim/lowstate}"
   echo "[run_gui_controller] SHARED mode: RMW=cyclonedds iface=$_iface  ⚠ 실로봇도 /lowcmd 수신"
+else
+  # 비-shared(sim 전용): sim_bridge 는 /lowstate 로 발행. Monitor 의 sim 소스를 여기에 맞춘다
+  # (실로봇 부재 → robot 토픽과 같아져 monitor 가 robot 구독을 dedup, "sim only" 로 표시).
+  export R2S_SIM_STATE_TOPIC="${R2S_SIM_STATE_TOPIC:-/lowstate}"
 fi
 
 echo "[run_gui_controller] python=$(command -v python3)  ROS_DISTRO=${ROS_DISTRO:-?}  ROS_DOMAIN_ID=${ROS_DOMAIN_ID}  RMW=${RMW_IMPLEMENTATION:-fastdds(default)}"
