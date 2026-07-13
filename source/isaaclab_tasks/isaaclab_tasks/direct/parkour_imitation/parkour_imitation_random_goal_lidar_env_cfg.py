@@ -74,6 +74,25 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
     # Number of temporal frames stacked in the obs["lidar"] buffer (K).
     lidar_frame_stack: int = 3
 
+    # Temporal ring-buffer push cadence.
+    #
+    # False (default): push a new range-image frame into the ring buffer on EVERY env
+    #     control step.  With step_dt=0.02 s and K=3 this spans only 0.06 s — the three
+    #     slots carry near-identical content (near-duplicate frames).
+    #
+    # True: push to the ring buffer only once every
+    #     push_every = round(1 / (update_frequency * step_dt))
+    #   env steps — matching the Mid-360 measurement rate (10 Hz).  At step_dt=0.02 s
+    #   this gives push_every=5, so K=3 slots span 3x0.1 s = 0.3 s of real temporal
+    #   context.  Non-push steps hold the previous ring-buffer content unchanged
+    #   (obs["lidar"] is constant between pushes), matching real 10 Hz deployment.
+    #
+    # Note: LidarSensorCfg inherits update_period=0.0 from SensorBaseCfg, so the
+    #   sensor's _is_outdated gate fires on every physics step regardless of
+    #   update_frequency; push_every is therefore derived from update_frequency
+    #   directly, not from update_period.
+    lidar_stack_at_sensor_rate: bool = False
+
     # Mid-360 LiDAR — range-image side-channel only, NEVER concatenated into policy obs.
     # Exposed as: obs["lidar"] (N, K*2*H*W).
     mid360_lidar: LidarSensorCfg = LidarSensorCfg(
@@ -106,3 +125,20 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
         random_angle_noise=0.0,
         pixel_std_dev_multiplier=0.0,
     )
+
+
+@configclass
+class ParkourImitationRandomGoalLidarSLEnvCfg(ParkourImitationRandomGoalLidarEnvCfg):
+    """SL (R2 student-learning) arm cfg for ``Go2-ParkourImitation-Symmetry-RandomGoal-Lidar-SL-v0``.
+
+    Identical to :class:`ParkourImitationRandomGoalLidarEnvCfg` (policy obs, amp_obs, LiDAR
+    range-image side-channel — all unchanged) except the LiDAR temporal frame-stack is pushed
+    at the sensor rate instead of the control rate.
+
+    With the default control-rate cadence, K=3 frames span only step_dt*3 = 0.06 s of
+    near-duplicate content.  Setting ``lidar_stack_at_sensor_rate = True`` pushes frames every
+    ``push_every`` control steps so K=3 spans ~0.3 s (matching the 10 Hz sensor cadence).
+    Obs shape is unchanged (``obs["lidar"]`` stays (N, 3*2*24*96=13824)).
+    """
+
+    lidar_stack_at_sensor_rate: bool = True

@@ -156,6 +156,31 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             dtype=torch.float32,
         )
 
+        # Sensor-rate push cadence (default OFF — activated via cfg.lidar_stack_at_sensor_rate).
+        #
+        # Background: LidarSensorCfg inherits update_period=0.0 from SensorBaseCfg, so the
+        # sensor's _is_outdated gate fires on EVERY physics step regardless of update_frequency.
+        # With step_dt=0.02 s and K=3, per-step push means the ring buffer spans only 0.06 s of
+        # temporal context — the three slots carry near-identical content.
+        #
+        # When True, each env's ring buffer is pushed only once every
+        #   push_every = round(1 / (update_frequency * step_dt))
+        # env steps (=5 at 10 Hz / 0.02 s), so K=3 slots span 3x0.1 s = 0.3 s.
+        # Non-push steps hold the previous buffer unchanged, matching real 10 Hz deployment.
+        #
+        # Mechanism: per-env int32 step counter (_lidar_push_ctr).  Initialized to push_every
+        # (not 0) so the first push fires on the very first control step after init/reset,
+        # matching the sensor's _is_outdated=True-on-reset behaviour.
+        if cfg.lidar_stack_at_sensor_rate:
+            self._lidar_push_every: int = max(1, round(1.0 / (cfg.mid360_lidar.update_frequency * self.step_dt)))
+            # Initialise at push_every -> triggers a push on the first step (before first sensor cycle).
+            self._lidar_push_ctr: torch.Tensor = torch.full(
+                (self.num_envs,),
+                self._lidar_push_every,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
     # ------------------------------------------------------------------
     # R2 reset — zero frame buffer for reset envs
     # ------------------------------------------------------------------
@@ -170,6 +195,15 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             self._lidar_frame_buf.zero_()
         else:
             self._lidar_frame_buf[env_ids] = 0.0
+
+        # Reset push counter for sensor-rate cadence (only allocated when flag=True).
+        # Re-initialise to push_every (not 0) so reset envs push on their very first step,
+        # matching the sensor's _is_outdated=True-on-reset semantics.
+        if hasattr(self, "_lidar_push_ctr"):
+            if env_ids is None:
+                self._lidar_push_ctr.fill_(self._lidar_push_every)
+            else:
+                self._lidar_push_ctr[env_ids] = self._lidar_push_every
 
     # ------------------------------------------------------------------
     # R2 helpers
@@ -322,9 +356,24 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
 
         # Ring buffer roll: shift older frames from k=0..K-2 → k=1..K-1, insert at k=0.
         K = self.cfg.lidar_frame_stack
-        if K > 1:
-            self._lidar_frame_buf[:, 1:] = self._lidar_frame_buf[:, :-1].clone()
-        self._lidar_frame_buf[:, 0] = frame
+        if getattr(self.cfg, "lidar_stack_at_sensor_rate", False):
+            # Sensor-rate cadence: push only when the per-env step counter reaches push_every.
+            # Non-push steps leave the ring buffer (and thus obs["lidar"]) unchanged — this
+            # correctly models the real 10 Hz deployment where the policy receives the same
+            # scan for push_every consecutive control cycles.
+            self._lidar_push_ctr += 1
+            should_push = self._lidar_push_ctr >= self._lidar_push_every  # (N,) bool
+            push_env_ids = should_push.nonzero(as_tuple=False).squeeze(-1)  # (M,)
+            if push_env_ids.numel() > 0:
+                if K > 1:
+                    self._lidar_frame_buf[push_env_ids, 1:] = self._lidar_frame_buf[push_env_ids, :-1].clone()
+                self._lidar_frame_buf[push_env_ids, 0] = frame[push_env_ids]
+                self._lidar_push_ctr[push_env_ids] = 0
+        else:
+            # Default (False): push every control step — original behaviour, unchanged.
+            if K > 1:
+                self._lidar_frame_buf[:, 1:] = self._lidar_frame_buf[:, :-1].clone()
+            self._lidar_frame_buf[:, 0] = frame
 
         # obs["lidar"]: (N, K*C*H*W) via C-order reshape.
         # CONTRACT: layout is (N, K, C, H, W).reshape(N, -1).
