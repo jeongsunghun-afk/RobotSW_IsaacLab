@@ -111,7 +111,7 @@ gym.register(
     entry_point=f"{__name__}.parkour_imitation_random_goal_lidar_env:Go2ParkourImitationRandomGoalLidarEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.parkour_imitation_random_goal_lidar_env_cfg:ParkourImitationRandomGoalLidarEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.parkour_imitation_random_goal_lidar_env_cfg:ParkourImitationRandomGoalLidarSLEnvCfg",
         "rsl_rl_cfg_entry_point": (
             f"{agents.__name__}.rsl_rl_amp_cfg:Go2ParkourImitationSymmetryRandomGoalLidarSLPPOAMPRunnerCfg"
         ),

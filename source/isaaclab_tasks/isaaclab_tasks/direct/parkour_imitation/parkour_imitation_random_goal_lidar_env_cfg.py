@@ -188,3 +188,31 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
         random_angle_noise=0.0,
         pixel_std_dev_multiplier=0.0,
     )
+
+
+@configclass
+class ParkourImitationRandomGoalLidarSLEnvCfg(ParkourImitationRandomGoalLidarEnvCfg):
+    """SL (R2 student-learning) arm cfg for ``Go2-ParkourImitation-Symmetry-RandomGoal-Lidar-SL-v0``.
+
+    Identical to :class:`ParkourImitationRandomGoalLidarEnvCfg` (policy obs, amp_obs, LiDAR
+    side-channel — all unchanged) except the LiDAR temporal frame-stack is stacked at the
+    sensor rate instead of the control rate.
+
+    Rationale (user reframing + Explore diagnosis, 2026-07-07): the SL policy's stair/step
+    failure roots in a *sensor-observation* deficit, not the curriculum. The teacher arms
+    (clearance/voxel, privileged, base-centred el −75° scan) cover the robot's feet directly
+    and clear stair/step; the LiDAR actor sees only ``obs["lidar"]``. Its K=3 temporal stack is
+    structurally present but degenerate: with the default control-rate cadence the three frames
+    span only step_dt*3 = 0.06 s (near-duplicate content), while proprioception gets 10 frames
+    (0.2 s) through a dedicated temporal encoder — an asymmetry that leaves foot-level terrain
+    (occluded / min-range / mount-tilt blind in a single frame) with no temporal accumulation.
+
+    Setting ``lidar_stack_at_sensor_rate = True`` pushes frames every 5 control steps so K=3
+    spans 0.3 s (~sensor 10 Hz cadence, logic already implemented in the base env). Obs shape is
+    unchanged (K/C/H/W identical -> ``obs["lidar"]`` stays (N, 3*2*24*96=13824)). The curriculum
+    is left untouched (``curriculum_move_down_ratio`` unset -> inherits ``None`` -> 0.4 fallback)
+    so this run isolates the temporal fix: if it is the true root cause, stair/step levels should
+    stop collapsing and terrain should recover *without* any curriculum change.
+    """
+
+    lidar_stack_at_sensor_rate: bool = True
