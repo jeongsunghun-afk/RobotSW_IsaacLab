@@ -84,6 +84,13 @@ class R2SGo2EnvCfg(DirectRLEnvCfg):
     # 공중 고정(fix_base) 토글 — True면 base를 fixed articulation root로 공중 스폰 (CONTRACT §5).
     fix_base: bool = False
 
+    # 시스템 식별(sysid) 모드 토글 — opt-in. live(UDP) 경로는 기본값 False로 완전히 불변이다.
+    #   True면 `actions`(관절 목표각, articulation 관절 순서)를 slew limiter 없이 그대로 적용한다.
+    #   PACE CMA-ES는 chirp 명령을 매 스텝 재생하므로 slew(0.6 rad/step)가 고주파를 왜곡하면 안 되고,
+    #   setpoint은 UDP가 아니라 env.step(actions)로 들어온다.
+    # 설정은 r2s_go2_sysid_cfg.R2SGo2SysidEnvCfg 참고.
+    sysid: bool = False
+
     # 로봇 (fix_base=False 기본: 지면 자유 spawn, CONTRACT §6 물성 그대로)
     # 초기 자세를 prone(엎드림)으로 오버라이드 — 실기 시작 자세와 정합.
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(

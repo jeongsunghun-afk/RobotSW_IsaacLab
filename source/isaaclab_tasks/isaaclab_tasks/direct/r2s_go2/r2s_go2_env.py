@@ -168,7 +168,13 @@ class R2SGo2Env(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        del actions  # setpoint은 self._setpoint에서 직접 주입
+        if self.cfg.sysid:
+            # sysid 모드: actions = 절대 관절 목표각 [rad], **articulation 관절 순서**.
+            # PACE(fit.py / collect_chirp_sim.py)가 관절 인덱스로 직접 채워 넣는 규약이며,
+            # slew limiter는 chirp 고주파를 왜곡하므로 우회한다.
+            self.robot.set_joint_position_target_index(target=actions)
+            return
+        del actions  # live 모드: setpoint은 self._setpoint에서 직접 주입
         # Slew rate limiter: 한 step에서 max_step 이상 이동 불가
         delta = (self._setpoint - self._prev_setpoint).clamp(-self._max_step, self._max_step)
         smoothed = self._prev_setpoint + delta

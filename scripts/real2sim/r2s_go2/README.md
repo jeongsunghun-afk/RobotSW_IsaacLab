@@ -10,6 +10,8 @@ GUI 버튼 ─▶ ROS2 /lowcmd ─▶ sim_bridge ─▶ UDP:9871 ─▶ sim_runn
  Monitor(별도 프로세스): /lowcmd(action) + /lowstate(sim/robot) 실시간 plot
 ```
 
+그리고 **매달린 실기의 chirp 데이터로 GO2 물성(armature/마찰/지연/바이어스)을 식별**한다 → [§10 PACE](#10-pace-시스템-식별--go2-물성-실측-contract-12).
+
 고정 계약(토픽/패킷/조인트 순서/게인)은
 [`CONTRACT.md`](../../../source/isaaclab_tasks/isaaclab_tasks/direct/r2s_go2/CONTRACT.md) 참고.
 
@@ -38,12 +40,30 @@ GUI 버튼 ─▶ ROS2 /lowcmd ─▶ sim_bridge ─▶ UDP:9871 ─▶ sim_runn
 source scripts/real2sim/r2s_go2/r2s_commands.sh
 ```
 
+**실시간 구동 (M1/M2)**
+
 | 별칭 | 터미널 | 실제 스크립트 |
 |---|---|---|
 | `r2s_sim` | 1 (Isaac) | `run_sim_runner.sh` — conda `isaac-6.0` 활성화 + livestream + sim_runner |
 | `r2s_udp` | 2 (ROS2) | `run_sim_bridge.sh` — 브릿지 |
 | `r2s_gui` | 3 (ROS2) | `run_gui_controller.sh` — GUI |
 | `r2s_all` | (선택) | `run_all.sh` — tmux 3-pane 동시 기동 (`r2s_all stop`으로 종료) |
+
+**PACE 시스템 식별 (CONTRACT §12)** — GO2 물성(armature/마찰/지연/바이어스)을 실측으로 식별
+
+| 별칭 | 세계 | 하는 일 |
+|---|---|---|
+| `r2s_gain` | ROS2 (실기) | Unitree kp가 IsaacLab과 같은 N·m/rad인지 실측 (**수집 전 필수**). `--selftest`는 로봇 불필요 |
+| `r2s_chirp` | ROS2 (실기) | 매달린 GO2에서 500 Hz chirp 수집 → `.npz`. `--dry-run` / 저진폭 공진 스윕 지원 |
+| `r2s_convert` | Isaac | `.npz` → PACE `.pt` 변환 + **품질·리그 공진 판정** |
+| `r2s_collect` | Isaac | 합성 chirp 생성(GT 주입) — 실로봇 없이 파이프라인 검증용 |
+| `r2s_fit` | Isaac | 다중 시퀀스 CMA-ES 적합 (49개 파라미터) |
+| `r2s_validate` | Isaac | hold-out 검증 — 식별값 vs 현재 nominal cfg 비교 |
+| `r2s_tb` | Isaac | 텐서보드 |
+
+> ⚠ 실기 수집 전 **필수 2건**: ① `r2s_gain`으로 kp 규약 확인, ② `r2s_chirp --amplitude_scale 0.3`
+> 저진폭 스윕으로 **매다는 거치대의 공진 주파수** 확인. 거치대가 흔들린 대역의 데이터로는 관절을
+> 식별할 수 없다(논문도 같은 이유로 매단 ANYmal의 chirp를 2 Hz로 제한했다).
 
 각 별칭은 인자를 그대로 전달한다: `r2s_sim --headless`, `GPU=0 r2s_sim`, `FIX_BASE=0 r2s_sim`.
 
@@ -158,8 +178,17 @@ bash scripts/real2sim/r2s_go2/check_go2_comms.sh [iface]
 | `R2S_SIM_STATE_TOPIC` | 모드별 자동 | Monitor의 sim 소스 토픽(shared=`/sim/lowstate`, sim전용=`/lowstate`) |
 | `R2S_ROBOT_STATE_TOPIC` | `/lowstate` | Monitor의 robot 소스 토픽 |
 | `ROS_DOMAIN_ID` | 0 | 모든 ROS2 터미널이 동일해야 discovery됨 |
-| `GPU` | 2 | sim_runner CUDA 디바이스 |
+| `GPU` | 2 | sim_runner / PACE CUDA 디바이스 |
 | `R2S_LOG_BASEZ` | off | 1이면 sim_runner가 base_z + mean thigh 디버그 로그 출력 |
+
+PACE 식별(§10) 전용:
+
+| 변수 | 기본 | 의미 |
+|---|---|---|
+| `NUM_ENVS` | 4096 | `r2s_fit`의 CMA-ES population (= 시뮬 환경 수) |
+| `ROBOT` | `go2_sim` | `r2s_tb`가 볼 로그 디렉터리(`logs/pace/<ROBOT>`). 실기는 `go2_real` |
+| `SIM_ENV` | `isaac-6.0` | Isaac conda env 이름 |
+| `R2S_ROBOT_IFACE` | 자동탐지 | `r2s_gain` / `r2s_chirp`가 쓸 로봇 인터페이스 |
 
 ---
 
@@ -177,7 +206,91 @@ bash scripts/real2sim/r2s_go2/check_go2_comms.sh [iface]
 
 ---
 
-## 10. 파일
+## 10. PACE 시스템 식별 — GO2 물성 실측 (CONTRACT §12)
+
+CONTRACT §6이 "튜닝 대상"으로 남겨둔 GO2 물성(armature / 마찰 / 지연 / 엔코더 바이어스)을 **매달린
+실기의 chirp 데이터로부터 자동 식별**한다. 기반은 [PACE](https://github.com/leggedrobotics/pace-sim2real)
+(ETH RSL, arXiv:2509.06342)이며 `source/pace_sim2real/`에 벤더링되어 있다.
+
+식별하는 것은 **12관절 × 4 + 1 = 49개**: armature, viscous 마찰, Coulomb 마찰, 엔코더 바이어스, 전역 지연.
+CMA-ES가 **후보 파라미터 1개 = 시뮬 환경 1개**로 4096개를 동시에 굴려, 실측 궤적을 가장 잘 재현하는
+조합을 찾는다(`Isaac-R2S-Go2-Sysid-v0`, 500 Hz, 공중 고정).
+
+### 10.1 파이프라인
+
+```
+[실기]  r2s_gain    kp 규약 실측 (필수 선행)
+        r2s_chirp   매달린 GO2에 500Hz chirp → /lowstate 수집 → .npz
+                       │
+[Isaac] r2s_convert  .npz → .pt  (+ 품질·거치대 공진 판정)
+        r2s_fit      다중 시퀀스 CMA-ES (49개 파라미터)
+        r2s_validate hold-out 검증 — 식별값 vs 현재 nominal cfg
+```
+
+여기신호는 `chirp.py` **한 곳**에서 나온다(순수 stdlib → Isaac 3.12 / ROS2 3.10 양쪽에서 임포트).
+sim 재생과 실기 수집이 같은 함수를 써야 식별이 성립한다.
+
+### 10.2 ⚠ 실기 수집 전 필수 2건
+
+**① kp 단위 규약 실측** (`r2s_gain`)
+
+PACE는 PD 게인을 식별하지 않는다 — `{armature, damping, kp, kd}`의 **공통 스케일이 폐루프 거동을
+보존**해서 최적해가 축퇴하기 때문이다(논문 명시). 따라서 Unitree kp가 IsaacLab과 다른 단위면,
+CMA-ES는 armature/마찰을 그만큼 편향시켜 **위치 궤적은 완벽히 재현하면서 물리값은 틀린** 답을 낸다.
+score는 훌륭하게 나온다. **이 오차는 식별 데이터로 잡을 수 없다** — 사전 측정이 유일한 방어다.
+
+원리는 모델이 필요 없다: PD 법칙 자체가 `τ = kp·e`이므로, 목표각을 조금씩 옮겨 `(e, tau_est)`를 모아
+**직선의 기울기**를 뽑으면 그게 실효 kp다.
+
+**② 거치대 공진 확인** (`r2s_chirp --amplitude_scale 0.3` → `r2s_convert`)
+
+로봇을 매다는 구조물이 흔들리면, 측정된 관절 움직임에 "몸통이 출렁여서 생긴 것"이 섞인다. PACE는
+base 고정을 전제하므로 그 데이터로는 관절을 식별할 수 없다. 논문도 같은 이유로 매단 ANYmal의 chirp를
+**2 Hz까지만** 올렸다("structural constraints").
+
+그래서 수집기는 **IMU를 함께 기록**하고, `r2s_convert`가 chirp 순시 주파수 대역별 base 각속도를
+표로 뽑아 공진 대역을 경고한다. 여기서 나온 값으로 `--max_frequency` 상한을 정한다.
+
+### 10.3 실기 순서
+
+```bash
+r2s_gain  --selftest                                               # 추정기만 검증 (로봇 불필요)
+r2s_gain  --suspended --joint 1 --kp 25                            # ① kp 규약 실측
+r2s_chirp --dry-run                                                # 계획/리밋 검사 (무모션)
+r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz  # ② 공진 스윕
+r2s_convert --capture data/go2_real/sweep_check.npz                #    → 몇 Hz부터 흔들리는지
+r2s_chirp --suspended --kp 25 --kd 0.5 --out chirp_kp25.npz        # 본 수집 (게인 세트별 반복)
+r2s_convert --capture data/go2_real/chirp_kp25.npz
+r2s_fit ; r2s_validate                                             # 적합 → hold-out 검증
+```
+
+**게인은 여러 세트로 수집한다.** 데이터셋마다 kp/kd가 함께 저장되고 재생 시 복원된다 — 틀린 게인으로
+재생하면 잡음이 아니라 **편향**이 생긴다. 논문 방식대로 여러 시퀀스로 적합하고, **보지 않은 게인**을
+hold-out으로 빼서 검증한다. 게인이 높은 세트는 **진폭을 줄인다**(토크가 effort limit 23.5 N·m에
+포화하면 그 구간은 파라미터에 무감각해져 정보를 파괴한다).
+
+### 10.4 안전
+
+- sport(고수준) 서비스를 먼저 내릴 것 (리모컨 L2+A → L2+B).
+- **`--suspended` 없이는 발행하지 않는다.** 발이 지면에 닿으면 접촉력이 모델 밖 항으로 들어가 식별이 오염된다.
+- 목표각은 chirp 중심 ±`max_dev` clamp + **발행 전 soft limit 검사**(calf가 가장 빡빡하다).
+- 추종오차가 `abort_dev`를 넘으면 즉시 중단 → 부분 데이터 저장 → kp 램프-다운.
+- `--dry-run`은 `/lowcmd`를 전혀 발행하지 않는다.
+
+### 10.5 실로봇 없이 검증된 것
+
+`r2s_collect`가 **알려진 GT를 주입한 합성 chirp**를 만들고 `r2s_fit`이 그걸 되찾아오는지로 파이프라인
+정확성을 검증한다(Phase 0/1 게이트 통과: GT 소수 4자리 복원, hold-out RMSE 5e-6 rad).
+단 이건 sim-to-sim 결정론이라 **파이프라인만** 증명한다 — 실데이터 합격선은 score < 0.005이고
+수렴에 10–24시간이 걸린다.
+
+계획 전문: `.omc/plans/pace-go2-sim2real-plan.md` · 포팅 내역: `source/pace_sim2real/VENDORING.md`
+
+---
+
+## 11. 파일
+
+**Real2Sim 실시간 구동 (M1/M2)**
 
 | 파일 | 역할 |
 |---|---|
@@ -190,5 +303,26 @@ bash scripts/real2sim/r2s_go2/check_go2_comms.sh [iface]
 | `r2s_udp.py` | UDP 패킷 스키마(공유, stdlib만) — 재구현 금지 |
 | `read_lowstate.py` / `safe_joint_test.py` | 실로봇 상태 읽기 / 안전 관절 테스트 |
 | `check_go2_comms.sh` | 실로봇 통신 점검 |
-| `run_*.sh` / `r2s_commands.sh` | 원커맨드 런처 + 별칭 |
+
+**PACE 시스템 식별 (§10)**
+
+| 파일 | 세계 | 역할 |
+|---|---|---|
+| `chirp.py` | **공유** (stdlib) | 여기신호 정의 + soft limit 검사. sim/실기가 **같은 함수**를 쓴다 |
+| `gain_check.py` | ROS2 | Unitree kp 단위 규약 실측 (`--selftest`는 로봇 불필요) |
+| `chirp_collector.py` | ROS2 | 매달린 GO2에서 500Hz chirp 수집 → `.npz` (IMU 포함) |
+| `convert_capture_to_pt.py` (상위 폴더) | Isaac | `.npz` → PACE `.pt` (ZOH 정렬 + 품질·공진 판정) |
+| `collect_chirp_sim_go2.py` (상위 폴더) | Isaac | 합성 chirp 생성(GT 주입) — 파이프라인 검증용 |
+| `fit_go2.py` (상위 폴더) | Isaac | 다중 시퀀스 CMA-ES 적합 |
+| `validate_go2.py` (상위 폴더) | Isaac | hold-out 검증 (식별값 vs nominal) |
+
+**런처**
+
+| 파일 | 역할 |
+|---|---|
+| `r2s_commands.sh` | 별칭 등록 (`r2s_sim`/`r2s_gui`/… + `r2s_gain`/`r2s_chirp`/`r2s_fit`/…) |
+| `run_sim_runner.sh` / `run_sim_bridge.sh` / `run_gui_controller.sh` / `run_all.sh` | 실시간 구동 |
+| `run_real_py.sh` | 실기 ROS2 공통 런처(conda off + humble + cyclonedds + iface) |
+| `run_gain_check.sh` / `run_chirp_collector.sh` | 실기 PACE 도구 |
+| `run_pace.sh` | Isaac PACE 파이프라인 (`collect`/`fit`/`validate`/`convert`/`tb`) |
 | `robot_env.sh` / `example_env.sh` | ROS2/로봇 env 소싱 헬퍼 |

@@ -88,3 +88,6 @@ _build
 
 # Superpowers (Claude Code plugin artifacts)
 docs/superpowers/
+
+# PACE sim2real identification data (chirp captures, plots)
+/data/

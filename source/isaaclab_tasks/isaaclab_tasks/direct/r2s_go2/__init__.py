@@ -23,3 +23,14 @@ gym.register(
         "env_cfg_entry_point": f"{__name__}.r2s_go2_env_cfg:R2SGo2EnvCfg",
     },
 )
+
+# 시스템 식별(PACE CMA-ES) 모드 — live 환경과 asset/관절순서를 공유하는 배치 적합용.
+#   python scripts/pace/fit.py --headless --num_envs 4096 --task Isaac-R2S-Go2-Sysid-v0
+gym.register(
+    id="Isaac-R2S-Go2-Sysid-v0",
+    entry_point=f"{__name__}.r2s_go2_env:R2SGo2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.r2s_go2_sysid_cfg:R2SGo2SysidEnvCfg",
+    },
+)

@@ -217,3 +217,127 @@ gui "Monitor" 버튼 → `monitor.py`를 **별도 프로세스**로 spawn. 선�
 
 - decimation: robot 500Hz 유입 → 버퍼 ~51Hz(≤60Hz), 데이터 정상. sim 50Hz 그대로.
 - 결론: heartbeat가 렌더에서 완전 격리됨(gui 프로세스는 발행만, 렌더 0).
+
+---
+
+## 12. sysid 모드 (`Isaac-R2S-Go2-Sysid-v0`) — PACE 시스템 식별 (2026-07-13 추가)
+
+§6이 "튜닝 대상"으로 남겨둔 GO2 물성을 실측 데이터로부터 식별하기 위한 **배치 적합 모드**.
+live 경로(`Isaac-R2S-Go2-v0`)는 **완전히 불변**이며, sysid는 `R2SGo2EnvCfg.sysid=False` 기본값 뒤의
+opt-in이다.
+
+### 12.1 왜 별도 태스크가 아니라 같은 env인가
+GO2 asset cfg / `JOINT_ORDER` / actuator 정의가 두 벌로 갈라지면 drift한다(§2의 `STAND_FOLDED`
+중복이 이미 그 위험을 보여준다). 따라서 **`R2SGo2Env` 한 클래스가 두 모드를 갖는다.**
+
+| | live (`Isaac-R2S-Go2-v0`) | sysid (`Isaac-R2S-Go2-Sysid-v0`) |
+|---|---|---|
+| num_envs | 1 | CMA-ES population (기본 4096) |
+| sim.dt / decimation | 1/200, 4 (50Hz 제어) | **1/500, 1 (500Hz 제어)** |
+| setpoint 경로 | UDP → `set_setpoint()` | **`env.step(actions)`** |
+| slew limiter | 적용 (0.6 rad/step) | **우회** |
+| actuator | `DCMotorCfg` | **`PaceDCMotorCfg`** (encoder bias + torque delay) |
+| fix_base | 기본 False | **True** (공중 고정) |
+| UDP/ROS2 | 사용 | **미사용** |
+
+### 12.2 sysid action 규약 (불변)
+`sysid=True`일 때 `actions`는 **절대 관절 목표각 [rad], articulation 관절 순서**다.
+(§2의 `JOINT_ORDER`가 아니다 — PACE `fit.py`가 `joint_names.index()`로 인덱스를 채우는 규약과 맞춘다.)
+slew 없이 `set_joint_position_target_index(target=actions)`로 직행한다.
+
+### 12.3 500Hz인 이유
+live의 50Hz는 RL 배포용 명령률이다(§8). chirp는 10Hz까지 올라가므로 50Hz ZOH로 계단화하면
+위상이 왜곡되어 식별이 오염된다. 실기 `/lowcmd`는 500Hz 발행이 가능하므로(Unitree C++ example),
+**수집·재생·delay 단위를 모두 500Hz로 통일**한다. delay 1 step = 2ms.
+
+### 12.4 PD 게인 (⚠ 식별 대상 아님 — 논문 근거)
+PACE는 kp/kd를 **의도적으로** 식별하지 않는다. 논문 원문:
+
+> *"any common scaling u_c of {I_a, d, P_τ, D_τ} preserves closed-loop behavior, creating degenerate
+> optima. We therefore do not include PD gains in the identification and assume these to be known."*
+
+즉 게인을 미지수로 두면 최적해가 **수학적으로 축퇴**한다. 두 가지 따름정리를 기억할 것:
+
+1. **게인 스케일 오차는 어떤 데이터로도 식별할 수 없다.** 실제 토크가 `α·kp`라면, 모델
+   `(kp, armature/α, viscous/α, Coulomb/α)`가 **모든 게인 세트에서** 동일한 위치 궤적을 낸다.
+   게인을 여러 개 모아도 깨지지 않는다. → 위치 궤적 재현에는 무해하지만 **토크 크기가 α배 틀어져**
+   effort limit 포화 거동과 에너지 지표가 오염된다(논문은 이걸 별도의 계측 단일드라이브 단계로 잡는다).
+2. **kd 오차는 viscous 마찰과 구분 불가능하다** (둘 다 관절 속도에 곱해진다). 식별된 viscous 값은
+   "실제 점성 마찰 + kd 오차"의 합이다.
+
+따라서 **데이터셋마다 녹화 당시의 kp/kd를 함께 저장하고, 재생 시 그 게인을 복원한다**(§12.8).
+게인을 틀리게 재생하면 잡음이 아니라 **편향**이 생긴다.
+
+explicit actuator(DCMotor 계열)의 게인은 PhysX가 아니라 파이썬 `actuator.stiffness/damping` 텐서에
+산다. `write_joint_stiffness_to_sim*`(PhysX)와 `write_actuator_stiffness_to_sim`(Newton 전용)은 이
+경로에서 **효과가 없다** — `MultiTrajectoryCMAES.apply_gains()`를 쓸 것.
+
+### 12.8 데이터셋 스키마 + 다중 시퀀스 적합
+`chirp_data.pt` 키: `time`, `dof_pos`(엔코더 = 실제각 − bias), `des_dof_pos`, **`kp`, `kd`**,
+`joint_order`, `meta`. `kp`/`kd`가 없는 파일은 `fit_go2.py`가 거부한다.
+
+논문의 게인 사용 방식을 그대로 따른다:
+- **식별**: 여러 시퀀스를 동시 적합 (`Go2PaceCfg.datasets`). 논문도 진폭이 다른 여러 시퀀스를 쓰고,
+  단일 드라이브 단계에서는 30 chirp(게인 3종 × 부하 5종 × 펌웨어 2종)를 결합 적합한다.
+- **검증**: **보지 않은 PD 게인**의 hold-out (`Go2PaceCfg.holdout`). 논문 전신 단계도 이 방식이다
+  (Tytan: ID at kp=60/kd=2 → validation at kp=145/kd=5).
+- 게인이 높은 시퀀스는 **진폭을 줄인다** — 토크가 effort limit(23.5 N·m)에 포화하면 그 구간은
+  파라미터에 무감각해져 정보를 파괴한다.
+
+적합: `python scripts/real2sim/fit_go2.py --headless --num_envs 4096`
+
+### 12.9 논문에서 가져온 수치 (Go2 설계 근거)
+| 항목 | 논문 | 우리 반영 |
+|---|---|---|
+| 식별된 global delay | Tytan / ANYmal D 모두 **≈7.5 ms** | 500 Hz에서 3.75 step → bound 0–10 step의 한가운데 |
+| 전신 식별 armature | 단일드라이브 예측의 **~4배**까지 (ANYmal LF-HFE **0.106 kg·m²**) — CAD 링크 관성 오차를 흡수 | armature 상한을 0.1 → **0.5**로 확대 (bound가 구속조건이 되면 안 됨) |
+| ANYmal viscous | **~5 N·m·s/rad** | viscous 상한 1.0 → **2.0** (kd 흡수분 포함) |
+| 매단 로봇 chirp | ANYmal은 **2 Hz까지만** — *"due to structural constraints"* | ⚠ **매다는 리그가 공진한다.** 실기 수집 전 스윕으로 리그 공진을 확인하고 상한 주파수를 정할 것 |
+| 실데이터 수렴 | **10–24 시간** | 합성 예제의 2h15m을 기대치로 삼지 말 것 |
+| 학습 단계 | 동역학 랜덤화 **없이** zero-shot 배포 | 우리는 우선 DR 유지 + nominal 교체(보수적 경로) |
+
+### 12.5 식별 파라미터 (12관절 → 49개)
+`[armature(12) | viscous(12) | Coulomb(12) | encoder bias(12) | delay(1)]`
+탐색 범위는 `Go2PaceCfg.bounds_params` (`r2s_go2_sysid_cfg.py`).
+
+### 12.6 여기신호 (sim/실기 공유)
+`scripts/real2sim/r2s_go2/chirp.py` — **순수 stdlib**이라 Isaac(3.12)과 ROS2(3.10) 양쪽에서 임포트된다
+(`r2s_udp.py`와 동일 계약). sim 재생과 실기 수집이 **같은 함수**를 쓰는 것이 식별의 전제다.
+진폭은 GO2 soft limit(`soft_joint_pos_limit_factor=0.9`) 안에 들도록 잡혀 있다 —
+특히 calf(soft `[-2.628, -0.932]`)가 가장 빡빡하므로 진폭 0.5를 넘기지 말 것.
+
+### 12.7 실행 (별칭 — `r2s_sim`/`r2s_gui`와 같은 계열)
+```bash
+source scripts/real2sim/r2s_go2/r2s_commands.sh   # 한 번만 (또는 ~/.bashrc)
+
+# --- 실기 (ROS2 py3.10 + CycloneDDS; 런처가 conda를 끄고 humble/iface를 잡는다) ---
+r2s_gain  --selftest                                  # 추정기만 검증 (로봇 불필요)
+r2s_gain  --suspended --joint 1 --kp 25               # ① Unitree kp 단위 규약 실측 (필수 선행)
+r2s_chirp --dry-run                                   # 무모션 계획 확인
+r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz   # ② 리그 공진 확인 (필수 선행)
+r2s_chirp --suspended --kp 25 --kd 0.5 --out chirp_kp25.npz         # 본 수집 (게인 세트별 반복)
+
+# --- Isaac (conda isaac-6.0) ---
+r2s_convert  --capture data/go2_real/chirp_kp25.npz   # .npz -> .pt (+ 품질·공진 판정)
+r2s_collect                                           # 합성 chirp (GT 주입, 실로봇 불필요)
+r2s_fit                                               # 다중 시퀀스 CMA-ES 적합
+r2s_validate                                          # hold-out 검증 (식별 vs nominal)
+r2s_tb                                                # 텐서보드
+```
+런처: `run_gain_check.sh` / `run_chirp_collector.sh`(→ `run_real_py.sh`), `run_pace.sh`.
+환경변수: `GPU=2 NUM_ENVS=4096 SIM_ENV=isaac-6.0 ROBOT=go2_sim R2S_ROBOT_IFACE=ens10f1`.
+
+### 12.10 실기 수집 계약 (`chirp_collector.py`)
+- **출력은 `.npz`(원시 스트림)**. 시스템 python3.10에 torch가 없다(numpy만 있음) → PACE가 먹는 `.pt`는
+  Isaac conda의 `convert_capture_to_pt.py`가 만든다 (§1의 두 파이썬 세계 분리).
+- **명령/상태 시각은 둘 다 수집기의 monotonic 시계**로 찍는다. 따라서 식별되는 `delay`는
+  **왕복 전송지연 + 액추에이터 지연의 합(총지연)**이며 항상 양수다. 학습/배포에는 오히려 이게 맞다.
+- **정렬은 수집 루프가 아니라 변환 단계에서** 한다 — 500 Hz 발행 루프에서 처리를 하면 heartbeat가 굶는다(§11).
+  변환기가 균일 격자에 **명령=ZOH**(모터가 마지막 목표를 유지하므로 물리적으로 맞다), **엔코더=선형보간**으로 얹는다.
+- **IMU를 함께 기록한다.** 매단 로봇의 base는 이상적으로 정지해 있어야 한다(PACE의 `fix_root_link` 전제).
+  변환기가 chirp 순시 주파수 대역별 base 각속도를 표로 뽑아, `|w| > 0.5 rad/s`인 대역을 **리그 공진**으로
+  경고한다. 그 대역 위 데이터는 관절이 아니라 리그를 측정한 것이다.
+- 안전: sport 서비스 해제 필요, `--suspended` 없으면 발행 거부, 목표각은 chirp 중심 ±`max_dev` clamp +
+  발행 전 soft limit 검사, 추종오차 > `abort_dev`면 즉시 중단·부분저장·부드러운 해제, kp 램프-인/아웃.
+
+계획 전문: `.omc/plans/pace-go2-sim2real-plan.md` · PACE 포팅 내역: `source/pace_sim2real/VENDORING.md`
