@@ -95,15 +95,15 @@ class Go2PaceCfg(PaceCfg):
     # 논문도 진폭이 다른 여러 시퀀스를 쓰고, 단일 드라이브 단계에서는 게인 3종을 결합 적합한다.
     # 각 .pt는 녹화 당시의 kp/kd를 담고 있으며 재생 시 그 게인이 actuator에 복원된다.
     datasets: list[str] = [
-        "go2_sim/chirp_kp25.pt",  # kp=25 kd=0.5, 진폭 100%
-        "go2_sim/chirp_kp40.pt",  # kp=40 kd=1.0, 진폭  80%
-        "go2_sim/chirp_kp60.pt",  # kp=60 kd=1.5, 진폭  60% (게인이 높을수록 진폭을 줄여 토크 포화를 피한다 —
+        "go2_real/chirp_kp15.pt",  # kp=25 kd=0.5, 진폭 100%
+        # "go2_real/chirp_kp25.pt",  # kp=40 kd=1.0, 진폭  80%
+        "go2_real/chirp_kp35.pt",  # kp=60 kd=1.5, 진폭  60% (게인이 높을수록 진폭을 줄여 토크 포화를 피한다 —
         #                            포화 구간은 토크가 파라미터에 무감각해져 정보를 파괴한다)
     ]
 
     # hold-out 검증용 (적합에 절대 쓰지 않는다). 논문의 전신 단계 검증 방식 = **보지 않은 PD 게인**
     # 및 보지 않은 궤적에서 재현되는지 확인 (Tytan: ID at kp=60/kd=2 → validation at kp=145/kd=5).
-    holdout: list[str] = ["go2_sim/chirp_holdout.pt"]  # kp=35 kd=0.8, 진폭 90%, 0.1–6 Hz
+    holdout: list[str] = ["go2_real/chirp_kp25.pt"]  # kp=35 kd=0.8, 진폭 90%, 0.1–6 Hz
     # 49 = armature(12) + viscous(12) + coulomb(12) + bias(12) + delay(1)
     bounds_params: torch.Tensor = torch.zeros((4 * NUM_JOINTS + 1, 2))
 

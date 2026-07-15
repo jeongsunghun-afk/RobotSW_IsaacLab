@@ -21,11 +21,17 @@ constraints"). 그래서 이 스크립트는 **IMU(자세/각속도/가속도)�
 base가 크게 흔들린 주파수 구간이 보이면 그 데이터는 관절이 아니라 리그를 잰 것이다.
 본 수집 전에 **``--amplitude_scale 0.3`` 저진폭 스윕으로 공진을 먼저 확인**할 것.
 
+단계(--interactive 대화형 흐름, 권장):
+  ① 현재 자세에서 kp를 램프-인(``--engage``)한 뒤 천천히 **stand-up**(``--standup_time``).
+  ② 로봇을 공중에 매달고 발이 지면에 안 닿는지 확인한 뒤 **Enter** — 대기 중에도 heartbeat는 유지된다.
+  ③ chirp 중심으로 이동(``--approach``) → 정착(``--hold``) → **chirp 발행+기록** → kp 램프-다운.
+비-대화형(``--suspended``)은 로봇이 이미 매달린 전제로 stand-up/Enter 없이 곧바로 ①→③으로 간다.
+
 안전:
   - ``/lowcmd``가 먹으려면 sport(고수준) 서비스를 먼저 내려야 한다 (리모컨 L2+A → L2+B).
   - 전 관절 목표각은 chirp 중심 ± ``--max_dev``로 clamp되고, 발행 전에 GO2 soft limit을 검사한다.
-  - 시작 시 현재 자세 q0 → chirp 중심으로 보간 이동(``--approach``), kp는 0에서 램프-인(``--engage``).
-  - 추종오차가 ``--abort_dev``를 넘으면 즉시 중단하고 부드럽게 해제한다(부분 데이터는 저장).
+  - kp는 항상 현재 자세에서 0→kp로 램프-인(``--engage``) — 명령이 갑자기 꽂히지 않는다.
+  - 추종오차가 ``--abort_dev``를 넘으면 즉시 중단하고 부드럽게 해제한다(부분 데이터는 저장). Ctrl+C도 soft release.
   - ``--dry-run``은 ``/lowcmd``를 **전혀 발행하지 않고** 계획/리밋 검사만 출력한다.
 
 실행 (시스템 python3.10 + CycloneDDS)::
@@ -33,17 +39,18 @@ base가 크게 흔들린 주파수 구간이 보이면 그 데이터는 관절�
     source scripts/real2sim/r2s_go2/robot_env.sh
     # 0) 무모션 계획 확인
     /usr/bin/python3 scripts/real2sim/r2s_go2/chirp_collector.py --dry-run
-    # 1) 리그 공진 확인 (저진폭)
+    # 1) 리그 공진 확인 (저진폭) — 로봇을 매단 상태로
     /usr/bin/python3 scripts/real2sim/r2s_go2/chirp_collector.py --suspended \
         --amplitude_scale 0.3 --out sweep_check.npz
-    # 2) 본 수집 (게인 세트별로 반복)
-    /usr/bin/python3 scripts/real2sim/r2s_go2/chirp_collector.py --suspended --kp 25 --kd 0.5 --out chirp_kp25.npz
+    # 2) 본 수집 (대화형: stand-up → 매달고 Enter → chirp), 게인 세트별 반복
+    /usr/bin/python3 scripts/real2sim/r2s_go2/chirp_collector.py --interactive --kp 25 --kd 0.5 --out chirp_kp25.npz
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import select
 import sys
 import time
 
@@ -65,6 +72,11 @@ MAX_KD = 3.0
 MAX_AMPLITUDE_SCALE = 1.0  # chirp.CHIRP_AMPLITUDE 대비 배율
 MAX_DEV_CAP = 0.8  # rad, chirp 중심 대비 clamp 밴드 상한
 DEFAULT_ABORT_DEV = 0.6  # rad, 추종오차가 이걸 넘으면 중단
+# ⚠ 종료 주파수 안전 상한 [Hz]. 논문이 매단 ANYmal에서 쓴 값. 고주파일수록 명령 각속도가
+# 폭증하고(calf ∝ f) 리그가 공진하며 모터가 지속 포화한다. 리그 공진을 실측(--amplitude_scale 0.3
+# 스윕)으로 확인해 안전을 검증한 뒤에만 이 상수를 직접 올릴 것. sim 재생(chirp.py DEFAULT_F1_HZ=10)은
+# 리그가 없어 무관 — 이 캡은 실기 발행에만 적용된다.
+MAX_FREQUENCY = 2.0
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -159,6 +171,13 @@ class ChirpCollector(Node):
         amp_scale = _clamp(a.amplitude_scale, 0.0, MAX_AMPLITUDE_SCALE)
         max_dev = _clamp(a.max_dev, 0.0, MAX_DEV_CAP)
         abort_dev = _clamp(a.abort_dev, 0.0, MAX_DEV_CAP)
+        max_freq = _clamp(a.max_frequency, 0.0, MAX_FREQUENCY)
+        if a.max_frequency > MAX_FREQUENCY:
+            print(
+                f"[chirp] ⚠ --max_frequency {a.max_frequency:.1f} → {MAX_FREQUENCY:.1f} Hz로 캡 (안전 상한). "
+                "리그 공진을 실측 확인한 뒤에만 chirp_collector.MAX_FREQUENCY 상수를 올릴 것.",
+                flush=True,
+            )
         period = 1.0 / a.rate
 
         # ---- 궤적 생성 + 리밋 검사 (발행 전에) ----
@@ -167,7 +186,7 @@ class ChirpCollector(Node):
             duration=a.duration,
             rate_hz=a.rate,
             f0=a.min_frequency,
-            f1=a.max_frequency,
+            f1=max_freq,
             amplitude=amplitude,
         )
         violations = chirp.check_within_soft_limits(traj)
@@ -207,10 +226,11 @@ class ChirpCollector(Node):
             print("[chirp] --dry-run: /lowcmd 발행 안 함(모션 0). 계획만 출력하고 종료.", flush=True)
             return 0
 
-        if not a.suspended:
+        if not a.suspended and not a.interactive:
             print(
                 "[chirp] ✗ --suspended 가 없다. PACE는 base 고정을 전제한다 — 로봇을 공중에 매달고,\n"
-                "        발이 지면/장애물에 닿지 않는지 확인한 뒤 --suspended 를 붙여 다시 실행할 것.",
+                "        발이 지면/장애물에 닿지 않는지 확인한 뒤 --suspended 를 붙여 다시 실행할 것.\n"
+                "        (또는 --interactive: stand-up 후 매달고 Enter로 확인하는 대화형 흐름)",
                 flush=True,
             )
             return 1
@@ -220,8 +240,18 @@ class ChirpCollector(Node):
         try:
             # ---- 1) engage: q0 홀드, kp 0 → kp 램프-인 ----
             self._ramp(q0, q0, 0.0, kp, kd, a.engage, period)
-            # ---- 2) approach: q0 → chirp 중심으로 보간 이동 ----
-            self._ramp(q0, center, kp, kp, kd, a.approach, period)
+            if a.interactive:
+                # ---- 1b) 천천히 stand-up: q0 → STAND_UP ----
+                standup = list(motions.STAND_UP)
+                print(f"[chirp] 천천히 stand up ({a.standup_time:.0f}s)...", flush=True)
+                self._ramp(q0, standup, kp, kp, kd, a.standup_time, period)
+                # ---- 1c) 매달림 확인 대기 (heartbeat 유지하며 Enter 폴링) ----
+                self._wait_for_suspend_confirm(standup, kp, kd, period)
+                # ---- 2) approach: STAND_UP → chirp 중심 ----
+                self._ramp(standup, center, kp, kp, kd, a.approach, period)
+            else:
+                # ---- 2) approach: q0 → chirp 중심으로 보간 이동 (--suspended 전제) ----
+                self._ramp(q0, center, kp, kp, kd, a.approach, period)
             # ---- 3) hold: 정착 ----
             self._ramp(center, center, kp, kp, kd, a.hold, period)
 
@@ -300,6 +330,30 @@ class ChirpCollector(Node):
             self._sleep_until(t0 + (k + 1) * period)
         return False
 
+    def _wait_for_suspend_confirm(self, hold_q: list[float], kp: float, kd: float, period: float) -> None:
+        """hold 자세를 계속 발행(heartbeat 유지)하면서 사용자의 Enter 입력을 기다린다.
+
+        블로킹 ``input()`` 으로 Enter 를 받으면 그동안 ``/lowcmd`` heartbeat 가 끊겨 로봇이
+        protection fault 로 빠진다. 그래서 stand-up 자세를 rate 로 계속 발행하며 stdin 을
+        non-blocking(``select``)으로 폴링한다. Ctrl+C 는 바깥 try 에서 soft release 로 처리된다.
+        """
+        print(
+            "\n[chirp] ✋ 로봇을 공중에 매달고, 발이 지면/장애물에 닿지 않는지 확인한 뒤 Enter 를 누르세요.\n"
+            "        (대기 중에도 stand-up 자세를 계속 홀드합니다. Ctrl+C = 취소)",
+            flush=True,
+        )
+        t0 = time.monotonic()
+        s = 0
+        while True:
+            rclpy.spin_once(self, timeout_sec=0.0)
+            self._publish(hold_q, kp, kd)
+            if select.select([sys.stdin], [], [], 0.0)[0]:  # non-blocking stdin 확인
+                sys.stdin.readline()
+                print("[chirp] ✅ 매달림 확인됨 — chirp 로 진행합니다.", flush=True)
+                return
+            s += 1
+            self._sleep_until(t0 + s * period)
+
     @staticmethod
     def _sleep_until(deadline: float) -> None:
         """절대시각까지 대기 — ``sleep(period)`` 누적 드리프트를 막는다(500 Hz에서 치명적)."""
@@ -313,6 +367,7 @@ class ChirpCollector(Node):
 
     def _save(self, kp: float, kd: float, amp_scale: float, aborted: bool) -> None:
         a = self.args
+        max_freq = _clamp(a.max_frequency, 0.0, MAX_FREQUENCY)  # 발행에 쓴 캡된 상한 (run과 동일)
         out_dir = a.out_dir
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, a.out)
@@ -342,7 +397,7 @@ class ChirpCollector(Node):
             joint_order=np.asarray(motions.JOINT_NAMES),
             rate_hz=np.float64(a.rate),
             f0_hz=np.float64(a.min_frequency),
-            f1_hz=np.float64(a.max_frequency),
+            f1_hz=np.float64(max_freq),  # 실제 발행에 쓴 캡된 상한 (공진 판정이 이 값 기준)
             duration_s=np.float64(a.duration),
             amplitude_scale=np.float64(amp_scale),
             aborted=np.bool_(aborted),
@@ -381,8 +436,9 @@ def main() -> None:
     p.add_argument(
         "--max_frequency",
         type=float,
-        default=chirp.DEFAULT_F1_HZ,
-        help="종료 주파수 [Hz]. ⚠ 리그 공진을 넘지 말 것 — 논문은 매단 ANYmal에서 2 Hz로 제한했다.",
+        default=MAX_FREQUENCY,
+        help=f"종료 주파수 [Hz]. 기본=안전 상한 {MAX_FREQUENCY} Hz(논문의 매단 ANYmal 값). "
+        "고주파는 명령 각속도 폭증·리그 공진·모터 포화를 부른다 — 리그 공진을 실측한 뒤에만 올릴 것.",
     )
     p.add_argument(
         "--amplitude_scale",
@@ -392,8 +448,17 @@ def main() -> None:
     )
     p.add_argument("--rate", type=float, default=chirp.DEFAULT_RATE_HZ, help="/lowcmd 발행률 [Hz] = sim 제어율.")
     p.add_argument("--engage", type=float, default=2.0, help="kp 램프-인/아웃 시간 [s].")
-    p.add_argument("--approach", type=float, default=3.0, help="q0 → chirp 중심 보간 이동 시간 [s].")
+    p.add_argument("--approach", type=float, default=3.0, help="stand-up/q0 → chirp 중심 보간 이동 시간 [s].")
     p.add_argument("--hold", type=float, default=1.5, help="chirp 전 정착 홀드 시간 [s].")
+    p.add_argument(
+        "--interactive",
+        action="store_true",
+        help="대화형 흐름: ① 현재 자세에서 천천히 stand-up → ② 로봇을 매달고 Enter 확인 → ③ chirp. "
+        "이 모드에선 --suspended 불필요(Enter가 매달림 확인). heartbeat는 대기 중에도 유지된다.",
+    )
+    p.add_argument(
+        "--standup_time", type=float, default=3.0, help="대화형 모드에서 현재 자세 → stand-up 보간 시간 [s]."
+    )
     p.add_argument("--max_dev", type=float, default=0.7, help=f"목표각 clamp 밴드 [rad] (상한 {MAX_DEV_CAP}).")
     p.add_argument("--abort_dev", type=float, default=DEFAULT_ABORT_DEV, help="추종오차가 이 값을 넘으면 중단 [rad].")
     p.add_argument("--out", type=str, default="chirp_capture.npz", help="출력 파일명.")

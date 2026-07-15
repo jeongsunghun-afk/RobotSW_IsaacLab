@@ -203,7 +203,8 @@ GUI 버튼 한 번의 `/lowcmd`가 **sim과 실로봇 양쪽**에 도달하게 �
 | 3 gui | `R2S_SHARED=1 r2s_gui` | cyclonedds 도메인0 ⚠ **실로봇도 /lowcmd 수신** |
 
 ### 10.3 ⚠ 안전 / 한계
-- **gui가 t=0부터 STAND_FOLDED(prone) kp=25를 연속 발행** → shared gui 시작 즉시 실로봇도 명령 받음. **실로봇을 안전 위치(prone/매달기) + sport release 상태로 둔 뒤** shared gui를 켤 것.
+- **gui 시작 자세 접근(startup approach)**: gui는 기동 시 `/lowstate`로 **로봇 현재 자세를 읽어** 그 자세에서 STAND_FOLDED로 `STARTUP_DURATION_S`(기본 2.5s) 동안 **보간**한다. 첫 `/lowstate`를 받기 전까지는 `/lowcmd`를 발행하지 않는다(현재 자세를 모른 채 고정 자세를 쏘면 로봇이 툭 스냅하므로). 이를 위해 gui가 `/lowstate`에 **경량 구독**(QoS depth=1, 콜백은 관절각 저장만)을 하나 갖는다 — §11이 경계하는 무거운 렌더가 아니라 heartbeat에 무해하다. shared gui 시작 즉시 실로봇도 명령 받으므로 **실로봇을 안전 위치 + sport release 상태로 둔 뒤** 켤 것.
+- **⚠ `/lowcmd` 단일 publisher 전제**: 저수준 제어 전 로봇의 **sport(고수준) 서비스를 반드시 내릴 것**(리모컨 L2+A→L2+B). sport가 살아 있으면 `_CREATED_BY_BARE_DDS_APP_`가 `/lowcmd`에 자기 명령을 ~450Hz로 co-publish해 gui(50Hz)와 경합 → 로봇이 두 목표 사이를 튕기며 "드르륵" 떤다. 확인: `ros2 topic info /lowcmd --verbose | grep "Publisher count"` = **1**이어야 정상.
 - **게인 한계**: gui는 kp=25 발행. sim은 cfg PD(25)로 기립하지만 **실로봇은 `/lowcmd`의 kp=25를 직접** 써서 go2_stand_example의 kp=60보다 약함 → **실로봇은 kp=25로 못 일어설 수 있음**. 실로봇 기립엔 per-motion 게인(stand=60) 필요(후속).
 - 검증(2026-07-10): 격리 도메인 42에서 cyclonedds same-host 디스커버리 + remap + sim 기립 PASS. 실로봇 도메인0 미개입.
 
@@ -232,7 +233,20 @@ gui "Monitor" 버튼 → `monitor.py`를 **별도 프로세스**로 spawn. 선�
 | maxgap | 54.9ms | **21.3ms** |
 
 - decimation: robot 500Hz 유입 → 버퍼 ~51Hz(≤60Hz), 데이터 정상. sim 50Hz 그대로.
-- 결론: heartbeat가 렌더에서 완전 격리됨(gui 프로세스는 발행만, 렌더 0).
+- 결론: heartbeat가 렌더에서 완전 격리됨(monitor는 별도 프로세스).
+
+### 11.3 `/lowcmd` 발행도 별도 프로세스 (2026-07-15)
+
+monitor뿐 아니라 **`/lowcmd` 발행 자체를 별도 프로세스(`gui_controller.publisher_process_main`)로 분리**했다. 이유는 monitor와 동일 계열 — gui의 50Hz 발행이 Qt QTimer라 **UI 조작(슬라이더 드래그·버튼 홀드)으로 event loop가 바쁘면 타이머가 밀려** 스트림에 gap이 생기고 실로봇이 툭툭 끊긴다. 스레드로는 GIL 때문에 UI 콜백 처리 중 발행 스레드가 굶어 안 된다.
+
+구조: **UI 프로세스**(순수 Qt, rclpy 없음)는 **모션 스펙**(mode + 시작시각 + 목표/프레임버퍼/사인 파라미터)만 공유 메모리(`multiprocessing.Array('d')`)에 쓰고, **publisher 프로세스**(rclpy)가 50Hz 루프에서 **경과 시간 기반으로 목표를 계산**해 CRC 붙여 발행 + `/lowstate` 구독으로 실측 관절각을 공유 메모리에 되써 준다.
+
+핵심: **발행뿐 아니라 목표 생성(보간·사인)까지 publisher 프로세스로 옮겼다.** 처음엔 발행만 분리했는데 hz는 50 유지돼도 로봇이 끊겼다 — UI의 모션 타이머(목표값 생성)가 조작에 밀려 **목표값이 띄엄띄엄 갱신**됐기 때문(측정으로 확인: hz=50 고정, 끊김은 목표 갱신 지연). 목표 계산을 publisher가 50Hz 균일하게 하니 UI가 멈춰도 목표가 매끄럽다.
+
+- mode: HOLD(고정) / SEQUENCE(프레임버퍼를 경과시간으로 인덱싱 — Stand/Sit/Step/StandUp/시작보간) / SINE(관절 사인). `time.monotonic()`은 프로세스 간 공통이라 UI가 찍은 start_time을 publisher가 그대로 쓴다.
+- publisher는 현재 출력 목표를 `_SM_CURRENT_Q`에 되써, UI가 새 모션의 보간 시작점으로 읽는다(모션 중 버튼 눌러도 정확).
+- `/lowcmd` publisher는 여전히 1개(publisher 프로세스)라 sport 단일-publisher 조건 유지.
+- 검증(격리 도메인, 2026-07-15): fork된 publisher가 50.2Hz 발행 PASS; sequence 스펙 A→B가 매끄러운 선형보간(중간 0.25, 단조, 끝 홀드)으로 발행됨 PASS.
 
 ---
 

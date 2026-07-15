@@ -105,6 +105,16 @@ GUI가 뜨면 로봇은 **엎드린(prone) 자세**로 시작한다(실기 GO2�
 모든 명령은 `kp=25, kd=0.5`(전 관절), `mode=0x01`, `dq=0`, `tau=0`으로 50Hz 연속 발행된다
 (실로봇 watchdog heartbeat + CRC/헤더 포함, `CONTRACT.md` §6·§8).
 
+**시작 자세 접근(startup approach)**: gui를 켜면 `/lowstate`로 **로봇의 현재 자세를 먼저 읽어** 그
+자세에서 시작 자세(STAND_FOLDED)로 약 2.5초에 걸쳐 **부드럽게 보간**한다(첫 상태를 받기 전엔 발행
+보류). 예전처럼 켜자마자 고정 자세를 쏴서 툭 스냅하지 않는다. 보간 시간은 `STARTUP_DURATION_S`.
+
+**발행 + 목표 생성이 별도 프로세스**: `/lowcmd` 50Hz 발행과 **목표 보간·사인 생성**을 UI가 아니라
+**별도 publisher 프로세스**가 한다. UI(슬라이더·버튼)로 Qt event loop가 바빠도 목표가 매끄럽게(50Hz
+균일) 갱신된다 — 예전엔 UI 조작 시 목표값이 띄엄띄엄 갱신돼 로봇이 툭툭 끊겼다(hz는 50이어도).
+UI는 공유 메모리에 **"모션 스펙"(어디로 몇 초에 걸쳐 가라)만** 쓰고, publisher가 경과 시간으로 목표를
+계산해 발행한다(monitor 격리와 동일 이유, `CONTRACT.md` §11.3).
+
 ---
 
 ## 5. Monitor — 실시간 plot
@@ -205,6 +215,10 @@ PACE 식별(§10) 전용:
 - **Monitor 창이 안 뜸/에러**: 디스플레이가 있는 환경인지, 이미 실행 중인지 확인(중복 실행 방지됨).
 - **엎드린 자세에서 sim≠robot, 목표 미도달**: 버그 아님 — kp=25가 약해 뒷 hip이 벌어지고 calf는
   기계 한계에 박힌다(접촉). Real2Sim gap의 실측 신호. 자세한 분석은 `CONTRACT.md` 참고.
+- **실로봇이 "드르륵드륵" 떨며 명령을 제대로 안 따름 (shared 모드)**: 통신 속도 문제가 아니라
+  `/lowcmd`에 **publisher가 2개**라서다 — gui(50Hz) + 로봇 sport 서비스(`_CREATED_BY_BARE_DDS_APP_`,
+  ~450Hz)가 상충하는 명령을 쏘면 로봇이 두 목표 사이를 튕긴다. **sport를 내리면**(리모컨 L2+A→L2+B)
+  해결된다. 확인: `ros2 topic info /lowcmd --verbose | grep "Publisher count"` → **1**이어야 정상.
 
 ---
 
@@ -317,11 +331,17 @@ r2s_gain  --suspended --joint 1 --kp 25                            # A: kp 규�
 r2s_chirp --dry-run                                                # B-1: 계획/리밋 검사 (무모션)
 r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz  # B: 공진 스윕
 r2s_convert --capture data/go2_real/sweep_check.npz                #    → 몇 Hz부터 흔들리는지
-# ↑ 공진 첫 주파수 f_res 확인 → 아래 본 수집에 --max_frequency <f_res 아래> 적용
-r2s_chirp --suspended --kp 25 --kd 0.5 --max_frequency 5 --out chirp_kp25.npz  # 본 수집 (게인 세트별 반복)
+# ↑ 공진 첫 주파수 확인 (기본 캡은 2 Hz — chirp_collector.MAX_FREQUENCY)
+r2s_chirp --interactive --kp 25 --kd 0.5 --out chirp_kp25.npz      # 본 수집 (게인 세트별 반복)
+#   대화형: ① 현재 자세에서 천천히 stand-up → ② 로봇 매달고 Enter → ③ chirp 발행+기록
 r2s_convert --capture data/go2_real/chirp_kp25.npz
 r2s_fit ; r2s_validate                                             # 적합 → hold-out 검증
 ```
+
+**본 수집 흐름(`--interactive`)**: kp 램프-인 → **천천히 stand-up**(`--standup_time`, 기본 3s) →
+**"로봇을 매달고 Enter"** 프롬프트(대기 중에도 자세 홀드=heartbeat 유지, Ctrl+C 취소) → chirp 중심
+이동 → chirp 발행+기록 → kp 램프-다운. `--suspended`는 stand-up/Enter 없이 이미 매달린 전제로 바로
+간다(반복·자동 수집용). 주파수는 기본 **2 Hz**로 캡된다(`MAX_FREQUENCY`, 논문의 매단 ANYmal 값).
 
 **게인은 여러 세트로 수집한다.** 데이터셋마다 kp/kd가 함께 저장되고 재생 시 복원된다 — 틀린 게인으로
 재생하면 잡음이 아니라 **편향**이 생긴다. 논문 방식대로 여러 시퀀스로 적합하고, **보지 않은 게인**을
