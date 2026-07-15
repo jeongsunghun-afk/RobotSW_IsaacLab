@@ -3,61 +3,79 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Go2Recovery-RisePacing-v0 환경.
+"""Go2Recovery-FlipVel-v0 환경 (IsaacLab-6.0).
 
-base(Go2RecoveryEnv) 상속. base 파일은 절대 수정하지 않는다.
+Go2RecoveryRiseSlowEnv 상속. base/RiseSlow 파일은 절대 수정하지 않는다.
 
 추가 메커니즘:
-  1. _get_rewards override (option A — 전체 복사):
-     - super()._get_rewards() 호출 금지 (side-effect 이중실행 방지).
-     - action_smoothness_1/2, dof_acc_l2 항에 uprightness state-gate(g) 곱.
-     - 그 외 모든 줄은 base와 byte-identical (side-effect 누락 방지).
-  2. cfg override(dof_acc/smoothness scale, smooth_gate_cos_lo/hi/floor)는 cfg 파일에서 선언됨.
-     → 복사된 _get_rewards가 self.cfg.*를 읽으므로 자동 반영.
+  r_joint_vel: belly-up flip 시 발생하는 과도한 관절 속도(whip)를 억제하는
+    threshold-excess 페널티.
 
-state-gate (floor 적용):
-  g_raw = ((cos_dist - lo) / (hi - lo)).clamp(0, 1)
-  g     = floor + (1 - floor) * g_raw
-  cos 낮음 → g=floor(0.3) → flip 단계 30% penalty (1차 회귀 방지 + 부드러움 일부 확보)
-  cos 높음 → g=1.0         → 정착 단계 smoothness 전활성 (anti-snap)
+수식:
+    joint_speed_excess = (|q̇| - thr).clamp(min=0)      # (N, 12)
+    r_joint_vel        = scale × sum(excess, dim=1)      # (N,), scale < 0 → 페널티
+    _ct                = min(1, max(0, (step - warmup) / ramp))
+    r_joint_vel       *= _ct                             # curriculum ramp
+
+파라미터 (측정 근거):
+  joint_vel_thr = 8.0 rad/s  — 정상 기립 동작 max 7.8 / whip 8~22 → 8이 분리점
+  joint_vel_scale = -0.15    — sweet-spot 확정
+  joint_vel_warmup_steps = 48000  — 복구 먼저 학습 후 ramp 시작
+  joint_vel_ramp_steps   = 48000  — 48k~96k 스텝에 걸쳐 선형 증가
+
+self-gating 설계: threshold=8이 정상동작(<8)을 자동 배제하므로 cos-gate 불필요.
+
+6.0 API 차이:
+  - root_quat_w: 6.0에서 wrapped attr → quat_apply 전에 `.torch` 필요.
+    joint_vel 등은 6.0에서도 `.torch` 불필요 (RiseSlow에서 이미 plain으로 읽음 — 재사용).
+
+신규 buffer: 없음 (common_step_counter 사용, joint_vel은 매 step 읽음).
+신규 _episode_sums 키: "r_joint_vel" (__init__에서 시딩 — 미시딩 시 첫 step KeyError).
+obs 42 불변.
 """
 
 from __future__ import annotations
 
 import torch
 
-from .go2_recovery_env import Go2RecoveryEnv
-from .go2_recovery_rise_pacing_env_cfg import Go2RecoveryRisePacingEnvCfg
+from .go2_recovery_flip_vel_env_cfg import Go2RecoveryFlipVelEnvCfg
+from .go2_recovery_rise_slow_env import Go2RecoveryRiseSlowEnv
 
 
-class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
-    """Go2 fall-recovery + uprightness state-gate 환경.
+class Go2RecoveryFlipVelEnv(Go2RecoveryRiseSlowEnv):
+    """Go2 fall-recovery + rise-pace penalty + joint velocity whip suppression 환경.
 
-    uprightness(cos_dist)로 smoothness penalty를 게이팅:
-      - cos 낮음(뒤집힘/넘어짐): g=floor(0.3) → penalty 30%, flip 임펄스 허용
-      - cos 높음(거의 일어섬): g=1 → penalty 전활성, 정착만 부드럽게
+    Go2RecoveryRiseSlowEnv를 상속:
+      - 기존 r_rise_pace (high-cos uprightness-rate 페널티) 그대로 유지.
+      - 신규 항: r_joint_vel — threshold 초과 관절 속도 페널티.
 
-    obs / amp: 변경 없음 (observation_space=42 불변).
-    _reset_idx / _get_observations: override 없음 (base 그대로).
+    obs / buffer: 변경 없음 (observation_space=42 불변).
+    _reset_idx / _get_observations: override 없음 (RiseSlow/base 그대로).
     """
 
-    cfg: Go2RecoveryRisePacingEnvCfg
+    cfg: Go2RecoveryFlipVelEnvCfg
+
+    def __init__(self, cfg: Go2RecoveryFlipVelEnvCfg, render_mode: str | None = None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+
+        # r_joint_vel episode 누적 버퍼 시딩.
+        # base _episode_sums dict에 없는 키이므로, rewards loop의
+        #   self._episode_sums[key] += weighted 가 첫 step에 KeyError를 일으킨다.
+        # super().__init__() 직후(= _episode_sums dict 생성 직후)에만 삽입 가능.
+        self._episode_sums["r_joint_vel"] = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
     # ── rewards ───────────────────────────────────────────────────────────────
 
     def _get_rewards(self) -> torch.Tensor:
-        """_get_rewards 전체 override (option A).
+        """_get_rewards 전체 override (option A — 6.0 RiseSlow 전체 복사 + r_joint_vel 삽입).
 
         super()._get_rewards() 호출 금지 — side-effect 이중실행(buffer 갱신, episode_sums 누적) 방지.
-        base의 모든 side-effect 줄을 포함하되, action_smoothness_1/2 와 dof_acc_l2 에만 g(gate) 곱.
-
-        변경된 항 (3개):
-            action_smoothness_1 *= g
-            action_smoothness_2 *= g
-            dof_acc_l2         *= g
+        6.0 RiseSlow 대비 변경점 (★ 표시):
+          1. dof_pos_limits 계산 직후 r_joint_vel 블록 삽입 (기존 joint_vel 변수 재사용).
+          2. rewards dict에 "r_joint_vel": r_joint_vel 추가.
+          그 외 모든 줄은 6.0 RiseSlow와 byte-identical (side-effect 누락 방지).
         """
         # ── cos_dist: upright 정렬도 ──────────────────────────────────────────
-        # base와 byte-identical
         from isaaclab.utils.math import quat_apply
 
         _up_world = torch.zeros(self.num_envs, 3, device=self.device)
@@ -65,10 +83,7 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         root_up = quat_apply(self._robot.data.root_quat_w.torch, _up_world)
         cos_dist = (root_up * _up_world).sum(dim=-1)
 
-        # ★ state-gate g 계산 (cos_dist 직후, rewards dict 구성 전)
-        # g=floor(0.3): 뒤집힘/넘어짐(cos≤lo) → penalty 30% 유지, flip 임펄스는 허용
-        # g=1: 거의 일어섬(cos≥hi) → smoothness penalty 전활성, 정착만 부드럽게
-        # (num_envs,) shape — 항과 elementwise 정합
+        # smoothness state-gate g (RiseSlow과 동일: floor 적용)
         g_raw = (
             (cos_dist - self.cfg.smooth_gate_cos_lo) / (self.cfg.smooth_gate_cos_hi - self.cfg.smooth_gate_cos_lo)
         ).clamp(0.0, 1.0)
@@ -82,6 +97,15 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         r_roll_progress = delta_cos * self.cfg.roll_progress_weight
         self._prev_cos_dist = cos_dist.clone()  # side-effect: 반드시 포함
 
+        # ── r_rise_pace: high-cos 영역에서만 작동하는 uprightness-rate 초과 페널티 ──
+        g_high = (
+            (cos_dist - self.cfg.rise_pace_gate_cos_lo)
+            / (self.cfg.rise_pace_gate_cos_hi - self.cfg.rise_pace_gate_cos_lo)
+        ).clamp(0.0, 1.0)
+        rise_rate = delta_cos / self.step_dt
+        rise_excess = (rise_rate - self.cfg.rise_pace_target_rate).clamp(min=0.0)
+        r_rise_pace = g_high * rise_excess.square() * self.cfg.rise_pace_scale
+
         # ── r_stand ──────────────────────────────────────────────────────────
         r_stand = self._calc_r_stand()
         stand_active = cos_dist > self.cfg.stand_cos_threshold
@@ -93,13 +117,11 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         ) * self.cfg.reward_reset_scale
 
         # ── smoothness / regularization penalties ─────────────────────────────
-        # cfg.* scale은 Go2RecoveryRisePacingEnvCfg에서 override됨 → 자동 반영
         action_rate_l2 = (
             torch.sum(torch.square(self._actions - self._previous_actions), dim=1) * self.cfg.action_rate_l2_scale
         )
 
         first_step_mask = (self._previous_actions != 0).float()
-        # ★ g 곱: rewards dict 구성 전에 적용 → reward + episode_sums 양쪽 정직하게 반영
         action_smoothness_1 = (
             torch.sum(
                 torch.square(self._processed_actions - self._last_joint_pos_target) * first_step_mask,
@@ -109,7 +131,6 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
             * g
         )
 
-        # ★ g 곱
         action_smoothness_2 = (
             torch.sum(
                 torch.square(self._actions - 2.0 * self._previous_actions + self._last_last_actions),
@@ -126,10 +147,8 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
 
         joint_vel = self._robot.data.joint_vel
         dof_acc = (joint_vel - self._previous_joint_vel) / self.step_dt
-        # ★ g 곱
         dof_acc_l2 = torch.sum(torch.square(dof_acc), dim=1) * self.cfg.dof_acc_l2_scale * g
 
-        # dof_vel_l2: cfg.dof_vel_l2_scale = 0.0 → 자동 무효 (1차 회귀 원인 — 되돌림)
         dof_vel_l2 = torch.sum(torch.square(joint_vel), dim=1) * self.cfg.dof_vel_l2_scale
 
         dof_torques_l2 = torch.sum(torch.square(current_torque), dim=1) * self.cfg.dof_torques_l2_scale
@@ -141,6 +160,24 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         out_of_limits += (joint_pos - soft_upper).clamp(min=0.0)
         dof_pos_limits = torch.sum(out_of_limits, dim=1) * self.cfg.dof_pos_limits_scale
 
+        # ★ r_joint_vel: threshold-excess 관절 속도 페널티 (신규)
+        # ──────────────────────────────────────────────────────────────────────
+        # joint_vel은 위에서 이미 읽은 변수를 재사용 (중복 읽기 없음).
+        # self-gating: threshold=8.0이 정상 기립 동작(<7.8)을 자동 배제 → cos-gate 불필요.
+        # curriculum ramp: warmup 이후 ramp_steps에 걸쳐 0→1 선형 증가.
+        joint_speed_excess = (joint_vel.abs() - self.cfg.joint_vel_thr).clamp(min=0.0)  # (N, 12)
+        r_joint_vel = self.cfg.joint_vel_scale * joint_speed_excess.sum(dim=1)  # (N,), ≤0
+        _ct = min(
+            1.0,
+            max(
+                0.0,
+                (float(self.common_step_counter) - float(self.cfg.joint_vel_warmup_steps))
+                / max(1.0, float(self.cfg.joint_vel_ramp_steps)),
+            ),
+        )
+        r_joint_vel = r_joint_vel * _ct
+        # ──────────────────────────────────────────────────────────────────────
+
         # ── buffer 갱신: side-effect — 반드시 포함 ───────────────────────────
         self._previous_joint_vel = joint_vel.clone()
         self._last_joint_pos_target = self._processed_actions.clone()
@@ -149,13 +186,14 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         # ── success judgment ──────────────────────────────────────────────────
         success_bonus = self._update_success(cos_dist)  # side-effect: _success_region_mask 갱신
 
-        # r_success_region: base와 동일 (ramp 없음)
         r_success_region = self._success_region_mask.float() * self.cfg.success_region_reward_scale
 
         # ── 전체 reward 합산 ──────────────────────────────────────────────────
         rewards = {
             "reward_reset": reward_reset,
             "r_roll_progress": r_roll_progress,
+            "r_rise_pace": r_rise_pace,
+            "r_joint_vel": r_joint_vel,  # ★ 신규
             "action_rate_l2": action_rate_l2,
             "action_smoothness_1": action_smoothness_1,
             "action_smoothness_2": action_smoothness_2,

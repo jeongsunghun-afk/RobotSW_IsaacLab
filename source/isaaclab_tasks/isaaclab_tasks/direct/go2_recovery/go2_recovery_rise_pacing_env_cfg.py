@@ -9,13 +9,18 @@
 base(Go2RecoveryEnvCfg)는 절대 수정하지 않는다.
 
 새 파라미터:
-  smooth_gate_cos_lo: float = 0.0  — gate 시작 cos 값 (이하: g=0, penalty 비활성)
+  smooth_gate_cos_lo: float = 0.0  — gate 시작 cos 값 (이하: g=floor, penalty 최소 활성)
   smooth_gate_cos_hi: float = 0.5  — gate 포화 cos 값 (이상: g=1, penalty 전활성)
+  smooth_gate_floor:  float = 0.3  — flip 구간 최소 게이트 값
+                                     flip 구간(cos≤lo)에서도 30% penalty 유지
+                                     → 완전면제(floor=0) 시 "부드러움 0" 문제 해결
 
   게이트 함수 (per-env):
-    g = ((cos_dist - lo) / (hi - lo)).clamp(0, 1)
-    cos=-1/0 → g=0 (뒤집힘/넘어짐: smoothness 면제, flip 임펄스 자유)
-    cos=0.5+ → g=1 (거의 일어섬: smoothness 전활성, 정착만 부드럽게)
+    g_raw = ((cos_dist - lo) / (hi - lo)).clamp(0, 1)
+    g     = floor + (1 - floor) * g_raw
+    cos=-1/0 → g=floor=0.3 (flip 구간: 30% penalty, 회전 임펄스 허용)
+    cos=0.25 → g=0.65        (상승 중간)
+    cos=0.5+ → g=1.0         (거의 일어섬: penalty 전활성)
 
 Override scale:
   dof_acc_l2_scale:          -2.5e-7 → -2.5e-6  (10× 강화, gate 적용)
@@ -43,12 +48,18 @@ class Go2RecoveryRisePacingEnvCfg(Go2RecoveryEnvCfg):
     """
 
     # ── state-gate 파라미터 ───────────────────────────────────────────────────
-    # gate 시작 cos 값: cos≤lo → g=0 (penalty 완전 비활성)
+    # gate 시작 cos 값: cos≤lo → g=floor (penalty 최소 활성)
     smooth_gate_cos_lo: float = 0.0
 
     # gate 포화 cos 값: cos≥hi → g=1 (penalty 전활성)
-    # 기본값 0.5 → cos=0.25에서 g=0.5 (선형 보간 중간점)
+    # 기본값 0.5 → cos=0.25에서 g_raw=0.5 (선형 보간 중간점)
     smooth_gate_cos_hi: float = 0.5
+
+    # flip 구간 최소 게이트 값: g = floor + (1 - floor) * g_raw
+    # floor=0(완전면제)이면 뒤집힌 구간에서 smoothness/dof_acc penalty가 전부 0이 되어
+    # 관절을 무제한 휘두르는 동작이 방치된다("부드러움 0" 문제). 30%를 남겨 회전
+    # 임펄스는 허용하되 whip은 억제한다. IsaacLab-5.1에서 검증된 값.
+    smooth_gate_floor: float = 0.3
 
     # ── penalty override ──────────────────────────────────────────────────────
     # joint 가속도 penalty 강화: -2.5e-7 → -2.5e-6 (10× 강화, gate 적용)

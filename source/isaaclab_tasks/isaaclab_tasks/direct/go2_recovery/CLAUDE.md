@@ -66,11 +66,14 @@ fall init 파라미터는 cfg 필드로 노출: `fall_height`, `fall_standing_ra
 - `terminated`: base_z < -0.1m (파국, 넘어짐 자체는 종료 아님)
 - `time_out`: episode_length_buf >= max_episode_length - 1
 
-## API 근거
+## API 근거 (IsaacLab 3.0 / 6.0 기준)
 
-- 쿼터니언 변환: `isaaclab.utils.math.quat_from_euler_xyz(roll, pitch, yaw)` → `(w, x, y, z)` 순서
+- 쿼터니언 변환: `isaaclab.utils.math.quat_from_euler_xyz(roll, pitch, yaw)` → **(x, y, z, w)** 순서
+  - 6.0에서 wxyz → **xyzw** 전면 변경됨 (math.py:301: `torch.stack([qx, qy, qz, qw])`)
+  - `quat_apply` / `quat_apply_inverse` 도 xyzw 입력 기대 (math.py:640 docstring 확인)
+  - `root_quat_w` 는 `ProxyArray`(warp-first) → torch 접근 시 `.torch` 사용 (`root_quat_w.torch`)
   - `quat_from_axis_angle`는 이 코드베이스에 존재하지 않음 (확인됨)
-- root state write: `write_root_pose_to_sim(pos_quat_7, env_ids)` / `write_root_velocity_to_sim(vel_6, env_ids)` / `write_joint_state_to_sim(pos, vel, None, env_ids)`
+- root state write (6.0 API): `write_root_pose_to_sim_index(root_pose, env_ids)` / `write_root_velocity_to_sim_index(root_velocity, env_ids)` / `write_joint_state_to_sim_index(position, velocity, env_ids)`
 
 ## 수정 시 주의사항
 

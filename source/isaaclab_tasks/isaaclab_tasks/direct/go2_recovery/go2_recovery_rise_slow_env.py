@@ -3,61 +3,78 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Go2Recovery-RisePacing-v0 환경.
+"""Go2Recovery-RiseSlow-v0 환경 (IsaacLab-6.0).
 
-base(Go2RecoveryEnv) 상속. base 파일은 절대 수정하지 않는다.
+Go2RecoveryRisePacingEnv 상속. 기존 base / RisePacing 파일은 절대 수정하지 않는다.
 
 추가 메커니즘:
-  1. _get_rewards override (option A — 전체 복사):
-     - super()._get_rewards() 호출 금지 (side-effect 이중실행 방지).
-     - action_smoothness_1/2, dof_acc_l2 항에 uprightness state-gate(g) 곱.
-     - 그 외 모든 줄은 base와 byte-identical (side-effect 누락 방지).
-  2. cfg override(dof_acc/smoothness scale, smooth_gate_cos_lo/hi/floor)는 cfg 파일에서 선언됨.
-     → 복사된 _get_rewards가 self.cfg.*를 읽으므로 자동 반영.
+  r_rise_pace: high-cos 영역에서만 작동하는 uprightness-rate 초과 페널티.
+    cos < gate_lo(0.5) → g_high=0 → 페널티 0 (flip 단계 자유 보존)
+    cos > gate_hi(0.75) → g_high=1 → 페널티 전활성
 
-state-gate (floor 적용):
-  g_raw = ((cos_dist - lo) / (hi - lo)).clamp(0, 1)
-  g     = floor + (1 - floor) * g_raw
-  cos 낮음 → g=floor(0.3) → flip 단계 30% penalty (1차 회귀 방지 + 부드러움 일부 확보)
-  cos 높음 → g=1.0         → 정착 단계 smoothness 전활성 (anti-snap)
+수식:
+    g_high      = ((cos_dist - lo) / (hi - lo)).clamp(0, 1)
+    rise_rate   = delta_cos / step_dt              # per-second
+    rise_excess = (rise_rate - target_rate).clamp(min=0)
+    r_rise_pace = g_high × rise_excess² × scale   (scale < 0 → 페널티)
+
+캘리브레이션:
+    passive_baseline high-cos(>0.5) positive-only rise window median = 0.0225/step (per-step)
+    step_dt = 0.02s → 1.124/s.  target_rate = 45% × 1.124 ≈ 0.506 → 0.5/s.
+
+floor 없음: 설계 명시. cos < lo → g_high=0 → 페널티 0. 절대 floor 추가 금지.
+
+6.0 API 차이:
+  - root_quat_w: 6.0에서 wrapped attr → quat_apply 전에 `.torch` 필요.
+    joint_vel/applied_torque/joint_pos 등은 6.0에서도 `.torch` 불필요.
+
+신규 buffer: 없음 (_prev_cos_dist는 base _reset_idx에서 0 초기화).
+신규 _episode_sums 키: "r_rise_pace" (__init__에서 시딩 — 미시딩 시 첫 step KeyError).
 """
 
 from __future__ import annotations
 
 import torch
 
-from .go2_recovery_env import Go2RecoveryEnv
-from .go2_recovery_rise_pacing_env_cfg import Go2RecoveryRisePacingEnvCfg
+from .go2_recovery_rise_pacing_env import Go2RecoveryRisePacingEnv
+from .go2_recovery_rise_slow_env_cfg import Go2RecoveryRiseSlowEnvCfg
 
 
-class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
-    """Go2 fall-recovery + uprightness state-gate 환경.
+class Go2RecoveryRiseSlowEnv(Go2RecoveryRisePacingEnv):
+    """Go2 fall-recovery + smoothness state-gate + rise-pace penalty 환경.
 
-    uprightness(cos_dist)로 smoothness penalty를 게이팅:
-      - cos 낮음(뒤집힘/넘어짐): g=floor(0.3) → penalty 30%, flip 임펄스 허용
-      - cos 높음(거의 일어섬): g=1 → penalty 전활성, 정착만 부드럽게
+    Go2RecoveryRisePacingEnv를 상속:
+      - 기존 smoothness state-gate (g, smooth_gate_*) 그대로 유지 (floor 적용).
+      - 신규 항: r_rise_pace — high-cos 구간에서 빠른 uprightness 상승률 억제.
 
-    obs / amp: 변경 없음 (observation_space=42 불변).
-    _reset_idx / _get_observations: override 없음 (base 그대로).
+    obs / buffer: 변경 없음 (observation_space=42 불변).
+    _reset_idx / _get_observations: override 없음 (RisePacing/base 그대로).
     """
 
-    cfg: Go2RecoveryRisePacingEnvCfg
+    cfg: Go2RecoveryRiseSlowEnvCfg
+
+    def __init__(self, cfg: Go2RecoveryRiseSlowEnvCfg, render_mode: str | None = None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+
+        # r_rise_pace episode 누적 버퍼 시딩.
+        # base _episode_sums dict에 없는 키이므로, rewards loop의
+        #   self._episode_sums[key] += weighted 가 첫 step에 KeyError를 일으킨다.
+        # super().__init__() 직후(= _episode_sums dict 생성 직후)에만 삽입 가능.
+        self._episode_sums["r_rise_pace"] = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
     # ── rewards ───────────────────────────────────────────────────────────────
 
     def _get_rewards(self) -> torch.Tensor:
-        """_get_rewards 전체 override (option A).
+        """_get_rewards 전체 override (option A — 6.0 RisePacing 전체 복사 + r_rise_pace 삽입).
 
         super()._get_rewards() 호출 금지 — side-effect 이중실행(buffer 갱신, episode_sums 누적) 방지.
-        base의 모든 side-effect 줄을 포함하되, action_smoothness_1/2 와 dof_acc_l2 에만 g(gate) 곱.
-
-        변경된 항 (3개):
-            action_smoothness_1 *= g
-            action_smoothness_2 *= g
-            dof_acc_l2         *= g
+        6.0 RisePacing 대비 변경점 (★ 표시):
+          1. delta_cos 계산 직후 r_rise_pace 블록 삽입.
+          2. rewards dict에 "r_rise_pace": r_rise_pace 추가.
+          그 외 모든 줄은 6.0 RisePacing과 byte-identical (side-effect 누락 방지).
         """
         # ── cos_dist: upright 정렬도 ──────────────────────────────────────────
-        # base와 byte-identical
+        # 6.0 RisePacing과 byte-identical (root_quat_w.torch)
         from isaaclab.utils.math import quat_apply
 
         _up_world = torch.zeros(self.num_envs, 3, device=self.device)
@@ -65,10 +82,10 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         root_up = quat_apply(self._robot.data.root_quat_w.torch, _up_world)
         cos_dist = (root_up * _up_world).sum(dim=-1)
 
-        # ★ state-gate g 계산 (cos_dist 직후, rewards dict 구성 전)
+        # ★ smoothness state-gate g (RisePacing과 동일: floor 적용)
         # g=floor(0.3): 뒤집힘/넘어짐(cos≤lo) → penalty 30% 유지, flip 임펄스는 허용
         # g=1: 거의 일어섬(cos≥hi) → smoothness penalty 전활성, 정착만 부드럽게
-        # (num_envs,) shape — 항과 elementwise 정합
+        # 주의: 아래 r_rise_pace의 g_high는 별개 게이트로, floor를 두지 않는다(설계 명시).
         g_raw = (
             (cos_dist - self.cfg.smooth_gate_cos_lo) / (self.cfg.smooth_gate_cos_hi - self.cfg.smooth_gate_cos_lo)
         ).clamp(0.0, 1.0)
@@ -81,6 +98,24 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         delta_cos = cos_dist - self._prev_cos_dist
         r_roll_progress = delta_cos * self.cfg.roll_progress_weight
         self._prev_cos_dist = cos_dist.clone()  # side-effect: 반드시 포함
+
+        # ★ r_rise_pace: high-cos 영역에서만 작동하는 uprightness-rate 초과 페널티 (신규)
+        # ──────────────────────────────────────────────────────────────────────
+        # g_high: cos가 gate_lo ~ gate_hi 사이에서 0→1로 선형 증가.
+        #   cos < lo(0.5)  → g_high=0 → 페널티 0 (flip 구간 자유 보존)
+        #   cos > hi(0.75) → g_high=1 → 페널티 전활성
+        # rise_rate: per-second (delta_cos / step_dt)
+        # rise_excess: target_rate 초과분만 페널티. 느린 상승은 무해.
+        # rise_pace_scale < 0 → 페널티 (설계 명시).
+        # floor 없음: 절대 추가 금지 (설계 명시).
+        g_high = (
+            (cos_dist - self.cfg.rise_pace_gate_cos_lo)
+            / (self.cfg.rise_pace_gate_cos_hi - self.cfg.rise_pace_gate_cos_lo)
+        ).clamp(0.0, 1.0)
+        rise_rate = delta_cos / self.step_dt
+        rise_excess = (rise_rate - self.cfg.rise_pace_target_rate).clamp(min=0.0)
+        r_rise_pace = g_high * rise_excess.square() * self.cfg.rise_pace_scale
+        # ──────────────────────────────────────────────────────────────────────
 
         # ── r_stand ──────────────────────────────────────────────────────────
         r_stand = self._calc_r_stand()
@@ -99,7 +134,7 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         )
 
         first_step_mask = (self._previous_actions != 0).float()
-        # ★ g 곱: rewards dict 구성 전에 적용 → reward + episode_sums 양쪽 정직하게 반영
+        # ★ g 곱: smoothness state-gate (6.0 RisePacing 동일)
         action_smoothness_1 = (
             torch.sum(
                 torch.square(self._processed_actions - self._last_joint_pos_target) * first_step_mask,
@@ -109,7 +144,7 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
             * g
         )
 
-        # ★ g 곱
+        # ★ g 곱 (6.0 RisePacing 동일)
         action_smoothness_2 = (
             torch.sum(
                 torch.square(self._actions - 2.0 * self._previous_actions + self._last_last_actions),
@@ -126,10 +161,10 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
 
         joint_vel = self._robot.data.joint_vel
         dof_acc = (joint_vel - self._previous_joint_vel) / self.step_dt
-        # ★ g 곱
+        # ★ g 곱 (6.0 RisePacing 동일)
         dof_acc_l2 = torch.sum(torch.square(dof_acc), dim=1) * self.cfg.dof_acc_l2_scale * g
 
-        # dof_vel_l2: cfg.dof_vel_l2_scale = 0.0 → 자동 무효 (1차 회귀 원인 — 되돌림)
+        # dof_vel_l2: cfg.dof_vel_l2_scale = 0.0 → 자동 무효 (6.0 RisePacing 동일)
         dof_vel_l2 = torch.sum(torch.square(joint_vel), dim=1) * self.cfg.dof_vel_l2_scale
 
         dof_torques_l2 = torch.sum(torch.square(current_torque), dim=1) * self.cfg.dof_torques_l2_scale
@@ -156,6 +191,7 @@ class Go2RecoveryRisePacingEnv(Go2RecoveryEnv):
         rewards = {
             "reward_reset": reward_reset,
             "r_roll_progress": r_roll_progress,
+            "r_rise_pace": r_rise_pace,  # ★ 신규
             "action_rate_l2": action_rate_l2,
             "action_smoothness_1": action_smoothness_1,
             "action_smoothness_2": action_smoothness_2,
