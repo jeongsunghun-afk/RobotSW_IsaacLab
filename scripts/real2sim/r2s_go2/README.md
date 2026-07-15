@@ -60,6 +60,8 @@ source scripts/real2sim/r2s_go2/r2s_commands.sh
 | `r2s_fit` | Isaac | 다중 시퀀스 CMA-ES 적합 (49개 파라미터) |
 | `r2s_validate` | Isaac | hold-out 검증 — 식별값 vs 현재 nominal cfg 비교 |
 | `r2s_tb` | Isaac | 텐서보드 |
+| `r2s_tuner_sim` | Isaac | tuner: chirp/replay 재생 + 슬라이더 물성 실시간 반영 (§10.6) |
+| `r2s_tuner_gui` | (UDP) | tuner: 물성 슬라이더 GUI + 오버레이 플롯 (§10.6) |
 
 > ⚠ 실기 수집 전 **필수 2건**: ① `r2s_gain`으로 kp 규약 확인, ② `r2s_chirp --amplitude_scale 0.3`
 > 저진폭 스윕으로 **매다는 거치대의 공진 주파수** 확인. 거치대가 흔들린 대역의 데이터로는 관절을
@@ -230,36 +232,93 @@ CMA-ES가 **후보 파라미터 1개 = 시뮬 환경 1개**로 4096개를 동시
 여기신호는 `chirp.py` **한 곳**에서 나온다(순수 stdlib → Isaac 3.12 / ROS2 3.10 양쪽에서 임포트).
 sim 재생과 실기 수집이 같은 함수를 써야 식별이 성립한다.
 
-### 10.2 ⚠ 실기 수집 전 필수 2건
+### 10.2 ⚠ 실기 수집 전 필수 2건 — 절차
 
-**① kp 단위 규약 실측** (`r2s_gain`)
+두 절차 모두 **로봇을 매달고 sport(고수준) 서비스를 내린 뒤**(리모컨 L2+A → L2+B) 실행한다.
+`--suspended` 플래그가 없으면 도구는 `/lowcmd`를 전혀 발행하지 않는다(안전 가드).
 
-PACE는 PD 게인을 식별하지 않는다 — `{armature, damping, kp, kd}`의 **공통 스케일이 폐루프 거동을
-보존**해서 최적해가 축퇴하기 때문이다(논문 명시). 따라서 Unitree kp가 IsaacLab과 다른 단위면,
-CMA-ES는 armature/마찰을 그만큼 편향시켜 **위치 궤적은 완벽히 재현하면서 물리값은 틀린** 답을 낸다.
+#### A. kp 단위 규약 실측 (`r2s_gain`)
+
+**왜 필요한가.** PACE는 PD 게인을 식별하지 않는다 — `{armature, damping, kp, kd}`의 **공통 스케일이
+폐루프 거동을 보존**해서 최적해가 축퇴하기 때문이다(논문 명시). Unitree kp가 IsaacLab과 다른 단위면
+CMA-ES는 armature/마찰을 그만큼 편향시켜 **위치는 완벽히 재현하면서 물리값은 틀린** 답을 낸다.
 score는 훌륭하게 나온다. **이 오차는 식별 데이터로 잡을 수 없다** — 사전 측정이 유일한 방어다.
-
-원리는 모델이 필요 없다: PD 법칙 자체가 `τ = kp·e`이므로, 목표각을 조금씩 옮겨 `(e, tau_est)`를 모아
+원리엔 모델이 필요 없다: PD 법칙이 `τ = kp·e`이므로, 목표각을 조금씩 옮겨 `(e, tau_est)`를 모아
 **직선의 기울기**를 뽑으면 그게 실효 kp다.
 
-**② 거치대 공진 확인** (`r2s_chirp --amplitude_scale 0.3` → `r2s_convert`)
+**절차**
 
-로봇을 매다는 구조물이 흔들리면, 측정된 관절 움직임에 "몸통이 출렁여서 생긴 것"이 섞인다. PACE는
-base 고정을 전제하므로 그 데이터로는 관절을 식별할 수 없다. 논문도 같은 이유로 매단 ANYmal의 chirp를
-**2 Hz까지만** 올렸다("structural constraints").
+1. **추정기 자체검증**(로봇 불필요). 합성 데이터로 직선 적합기가 맞는지부터 확인한다.
+   ```bash
+   r2s_gain --selftest
+   ```
+   → `selftest OK — kp_true=25.0, 추정=24.96 … R²=0.9998` 가 나오면 도구는 정상.
+2. **실측**. FR_thigh(관절 1)를 여러 오프셋으로 옮기며 정착 후 `(e, tau_est)`를 모아 기울기를 뽑는다.
+   ```bash
+   r2s_gain --suspended --joint 1 --kp 25
+   ```
+   `--settle`(오프셋마다 정착 대기, 기본 1.5 s) · `--window`(정착 후 평균 구간 0.5 s) · `--engage`(kp
+   램프-인/아웃 2 s)로 조정한다.
+3. **출력 읽기**. 표 아래 요약을 본다:
+   ```
+   실효 kp (기울기): 24.9  N·m/rad
+   절편 b         : +0.02 N·m      (0에 가까워야 정상 — 크면 오프셋/마찰)
+   R²             : 0.997          (1에 가까워야 PD 법칙대로 동작)
+   ▶ α = 실효/명령 = 0.998
+   ```
+4. **판정.**
+   - `α ≈ 1` 그리고 `R² > ~0.95` → Unitree kp가 IsaacLab과 **같은 N·m/rad 규약**이다. 그대로 진행.
+   - `α`가 1에서 벗어남 → sysid/학습 cfg의 `stiffness`를 실효값으로 쓰거나, 원인(단위/기어비)을 먼저 규명.
+   - `R²`가 낮음 → 정착이 덜 됐거나 마찰/포화가 지배. `--settle`을 늘리거나 오프셋(kp)을 키운다.
+5. **관절 대표 3종 반복 권장** — hip/thigh/calf는 기어비·마찰이 달라 규약이 관절마다 다를 수 있다:
+   `--joint 0`(hip) · `--joint 1`(thigh) · `--joint 2`(calf).
 
-그래서 수집기는 **IMU를 함께 기록**하고, `r2s_convert`가 chirp 순시 주파수 대역별 base 각속도를
-표로 뽑아 공진 대역을 경고한다. 여기서 나온 값으로 `--max_frequency` 상한을 정한다.
+#### B. 리그(매다는 거치대) 공진 스윕 (`r2s_chirp --amplitude_scale 0.3` → `r2s_convert`)
+
+**왜 필요한가.** 로봇을 매다는 구조물이 흔들리면 측정된 관절 움직임에 "몸통이 출렁여서 생긴 것"이
+섞인다. PACE는 base 고정을 전제하므로 그 데이터로는 관절을 식별할 수 없다. 논문도 같은 이유로 매단
+ANYmal의 chirp를 **2 Hz까지만** 올렸다("structural constraints"). 수집기는 **IMU를 함께 기록**하고,
+`r2s_convert`가 chirp 순시 주파수 대역별 base 각속도를 표로 뽑아 공진 대역을 경고한다.
+
+**절차**
+
+1. **dry-run으로 계획 확인**(무모션, 발행 없음). 궤적·soft limit·리밋 캡을 검사한다.
+   ```bash
+   r2s_chirp --dry-run
+   ```
+2. **저진폭 스윕 수집**. 진폭 30%(`--amplitude_scale 0.3`)라 관절 정보는 거의 없지만, 넓은 주파수로
+   거치대를 훑어 공진을 드러낸다. IMU가 함께 기록된다.
+   ```bash
+   r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz
+   ```
+   (기본 chirp: 0.1→10 Hz, 20 s, 500 Hz 발행. `--min_frequency` / `--max_frequency`로 대역 조정.)
+3. **공진 판정**. Isaac 쪽에서 변환기를 돌리면 "리그 공진 점검" 표가 나온다.
+   ```bash
+   r2s_convert --capture data/go2_real/sweep_check.npz
+   ```
+   ```
+   === 리그 공진 점검 (chirp 순시 주파수 대역별 base 각속도) ===
+           대역 [Hz]   |w| mean    |w| max
+        0.10–  1.10      0.031      0.088
+        …
+        5.10–  6.10      0.402      0.713  ⚠
+   ⚠ 5.54 Hz 부터 base가 크게 움직인다(|w| > 0.5 rad/s).
+     --max_frequency 를 5.5 Hz 아래로 낮춰 다시 수집할 것.
+   ```
+   판정 임계는 `RIG_RESONANCE_GYRO_WARN = 0.5 rad/s`(`convert_capture_to_pt.py`).
+4. **상한 결정.** 경고가 나온 **첫 공진 주파수보다 낮게** 본 수집의 `--max_frequency`를 잡는다.
+   전 대역이 `< 0.5 rad/s`(✅)면 기본 10 Hz를 그대로 써도 된다.
 
 ### 10.3 실기 순서
 
 ```bash
-r2s_gain  --selftest                                               # 추정기만 검증 (로봇 불필요)
-r2s_gain  --suspended --joint 1 --kp 25                            # ① kp 규약 실측
-r2s_chirp --dry-run                                                # 계획/리밋 검사 (무모션)
-r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz  # ② 공진 스윕
+r2s_gain  --selftest                                               # A-1: 추정기 검증 (로봇 불필요)
+r2s_gain  --suspended --joint 1 --kp 25                            # A: kp 규약 실측 (관절 0/1/2 반복)
+r2s_chirp --dry-run                                                # B-1: 계획/리밋 검사 (무모션)
+r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz  # B: 공진 스윕
 r2s_convert --capture data/go2_real/sweep_check.npz                #    → 몇 Hz부터 흔들리는지
-r2s_chirp --suspended --kp 25 --kd 0.5 --out chirp_kp25.npz        # 본 수집 (게인 세트별 반복)
+# ↑ 공진 첫 주파수 f_res 확인 → 아래 본 수집에 --max_frequency <f_res 아래> 적용
+r2s_chirp --suspended --kp 25 --kd 0.5 --max_frequency 5 --out chirp_kp25.npz  # 본 수집 (게인 세트별 반복)
 r2s_convert --capture data/go2_real/chirp_kp25.npz
 r2s_fit ; r2s_validate                                             # 적합 → hold-out 검증
 ```
@@ -283,6 +342,26 @@ hold-out으로 빼서 검증한다. 게인이 높은 세트는 **진폭을 줄�
 정확성을 검증한다(Phase 0/1 게이트 통과: GT 소수 4자리 복원, hold-out RMSE 5e-6 rad).
 단 이건 sim-to-sim 결정론이라 **파이프라인만** 증명한다 — 실데이터 합격선은 score < 0.005이고
 수렴에 10–24시간이 걸린다.
+
+### 10.6 tuner 모드 — 물성 실시간 튜닝 (bounds/초기분포 잡기)
+
+CMA-ES가 자동으로 49개를 찾기 전에, **사람이 전역 스칼라 6개(armature/viscous/Coulomb/kp/kd/delay)를
+슬라이더로 쓸어보며** 실기 궤적과 겹쳐 보고 `Go2PaceCfg`의 **bounds와 초기 분포**를 실측 기반으로
+잡는 도구다. `Isaac-R2S-Go2-Sysid-v0`를 num_envs=1로 재사용한다(live 경로 불변, 별도 UDP 포트 9875/9876).
+
+```bash
+# 터미널 1 (Isaac): chirp 재생 + 슬라이더 값 실시간 반영
+r2s_tuner_sim
+#   녹화 실기 궤적과 겹쳐 보려면: r2s_tuner_sim --replay data/go2_real/chirp_kp25.pt
+# 터미널 2: 물성 슬라이더 GUI (순수 UDP, ROS2 불필요). "Launch Plot"으로 오버레이 창.
+r2s_tuner_gui
+```
+
+- 슬라이더를 움직이면 `write_joint_*_to_sim`으로 sim 물성이 **즉시** 바뀐다.
+- **Launch Plot** → 선택 관절의 `q_cmd`(점선) / `q_sim`(파랑) / `q_real`(빨강, `--replay` 시) 오버레이 +
+  롤링 RMSE. `--replay`가 없으면 chirp만 구동하며 `q_sim`이 물성에 반응하는지만 본다.
+- 전역 스칼라만 다룬다(per-joint 49개는 CMA-ES 몫). 여기서 잡은 대략적 범위를 `r2s_go2_sysid_cfg.py`의
+  `bounds_params`에 반영한다.
 
 계획 전문: `.omc/plans/pace-go2-sim2real-plan.md` · 포팅 내역: `source/pace_sim2real/VENDORING.md`
 
@@ -315,6 +394,9 @@ hold-out으로 빼서 검증한다. 게인이 높은 세트는 **진폭을 줄�
 | `collect_chirp_sim_go2.py` (상위 폴더) | Isaac | 합성 chirp 생성(GT 주입) — 파이프라인 검증용 |
 | `fit_go2.py` (상위 폴더) | Isaac | 다중 시퀀스 CMA-ES 적합 |
 | `validate_go2.py` (상위 폴더) | Isaac | hold-out 검증 (식별값 vs nominal) |
+| `sim_runner_tuner_go2.py` (상위 폴더) | Isaac | tuner: sysid env(num_envs=1) chirp/replay 재생 + 실시간 물성 write |
+| `tuner_gui.py` | (UDP) | tuner: PyQt5 물성 슬라이더 6개 → UDP:9875 |
+| `tuner_monitor.py` | (UDP) | tuner: telem(:9876) → q 오버레이 + 롤링 RMSE (별도 프로세스) |
 
 **런처**
 
@@ -325,4 +407,5 @@ hold-out으로 빼서 검증한다. 게인이 높은 세트는 **진폭을 줄�
 | `run_real_py.sh` | 실기 ROS2 공통 런처(conda off + humble + cyclonedds + iface) |
 | `run_gain_check.sh` / `run_chirp_collector.sh` | 실기 PACE 도구 |
 | `run_pace.sh` | Isaac PACE 파이프라인 (`collect`/`fit`/`validate`/`convert`/`tb`) |
+| `run_tuner_sim.sh` / `run_tuner_gui.sh` | tuner 모드 (§10.6) |
 | `robot_env.sh` / `example_env.sh` | ROS2/로봇 env 소싱 헬퍼 |
