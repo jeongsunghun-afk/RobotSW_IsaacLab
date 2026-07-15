@@ -15,6 +15,11 @@
 #   r2s_gui   # 터미널3: PyQt GUI 컨트롤러 (gui_controller)
 #   r2s_all   # (선택) tmux 3-pane 동시 기동
 #
+# ── tuner 모드: 물성 실시간 튜닝 (Phase 2.5) ──────────────────────────────
+#   r2s_tuner_sim   # 터미널1: Isaac sim_runner_tuner (chirp/replay 재생 + 실시간 물성 반영)
+#                   #          replay 겹쳐보기: r2s_tuner_sim --replay data/go2_real/chirp_kp25.pt
+#   r2s_tuner_gui   # 터미널2: PyQt 슬라이더(armature/viscous/coulomb/kp/kd/delay). "Launch Plot"로 오버레이.
+#
 # ── PACE 시스템 식별 (CONTRACT §12) ───────────────────────────────────────
 #   실기 (ROS2 py3.10, 로봇을 매달고 sport 해제 후):
 #     r2s_gain   --selftest                        # 추정기만 검증(로봇 불필요)
@@ -39,6 +44,10 @@ r2s_sim() { bash "$_R2S_DIR/run_sim_runner.sh" "$@"; }      # 터미널1: Isaac 
 r2s_udp() { bash "$_R2S_DIR/run_sim_bridge.sh" "$@"; }      # 터미널2: ROS2<->UDP 브릿지
 r2s_gui() { bash "$_R2S_DIR/run_gui_controller.sh" "$@"; }  # 터미널3: PyQt GUI
 r2s_all() { bash "$_R2S_DIR/run_all.sh" "$@"; }             # (선택) tmux 3-pane 동시 기동
+
+# ── tuner 모드: 물성 실시간 튜닝 (Phase 2.5) ──
+r2s_tuner_sim() { bash "$_R2S_DIR/run_tuner_sim.sh" "$@"; }  # 터미널1: Isaac sim_runner_tuner
+r2s_tuner_gui() { bash "$_R2S_DIR/run_tuner_gui.sh" "$@"; }  # 터미널2: 물성 슬라이더 GUI
 
 # ── PACE 식별: 실기 (ROS2 py3.10 + CycloneDDS) ──
 r2s_gain()  { bash "$_R2S_DIR/run_gain_check.sh" "$@"; }        # kp 단위 규약 실측

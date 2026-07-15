@@ -86,6 +86,22 @@ imu (10 float32):
 ```
 `struct` 포맷: `"<IIf" + "4f"*12 + "10f"` → 12 + 192 + 40 = 244 bytes. <!-- codespell:ignore -->
 
+### 4.3 tuner 모드 채널 (Phase 2.5) — **additive, live 경로(9871/9872)와 독립**
+
+물성 실시간 튜닝(`sim_runner_tuner_go2.py` ↔ `tuner_gui.py`/`tuner_monitor.py`)용 순수 UDP 채널.
+live 명령/상태 패킷은 절대 건드리지 않는다. 정의는 `r2s_udp.py`(pack/unpack_tuner_params, _telem).
+
+- **파라미터 패킷** (tuner_gui → sim_runner_tuner), 포트 `9875`, magic `0x52325450`("R2TP"), 32 bytes:
+  `magic(I) seq(I)` + 전역 스칼라 6 float32 = `armature, viscous, coulomb, kp, kd, delay`.
+  12관절 공통 스칼라 — 사람이 눈으로 bounds/초기분포를 잡는 용도(per-joint 49개는 CMA-ES 몫).
+- **텔레메트리 패킷** (sim_runner_tuner → tuner_monitor), 포트 `9876`, magic `0x52325454`("R2TT"), 160 bytes:
+  `magic(I) seq(I) sim_time(f) has_real(I)` + `q_sim(12) q_cmd(12) q_real(12)` float32.
+  `has_real=0`이면 `--replay` 없이 chirp만 구동 중이라 `q_real`은 무의미.
+
+sysid env(`Isaac-R2S-Go2-Sysid-v0`)를 num_envs=1로 재사용한다(PaceDCMotor + slew 우회 + fix_base 공유).
+파라미터 적용은 `write_joint_*_to_sim`(cma_es.update_simulator와 동일 API) — 반드시 `torch.inference_mode()`
+안에서 부른다(DelayBuffer가 inference tensor를 in-place 갱신하므로, 밖이면 RuntimeError).
+
 
 ## 5. sim 환경 계약 (`Isaac-R2S-Go2-v0`)
 
