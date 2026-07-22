@@ -105,6 +105,64 @@ class ParkourImitationRandomGoalEnvCfg(ParkourImitationEnvCfg):
     # 120 = ±60°.  Set to 360 to restore the original omnidirectional behaviour.
     random_goal_forward_cone_deg: float = 120.0
 
+    def __post_init__(self):
+        super().__post_init__()
+        self.reward_scales["collision"] = -10.0
+
+
+@configclass
+class ParkourImitationRandomGoalEasyEntryEnvCfg(ParkourImitationRandomGoalEnvCfg):
+    """RandomGoal with a lowered level-0 obstacle floor ("re-entry rung").
+
+    Motivation
+    ----------
+    Both Isaac Sim 5.1 and 6.0 follow the same early curriculum trajectory: the policy
+    first learns flat walking and every obstacle sub-terrain is demoted to level 0 by
+    roughly iteration 300.  Recovery is where they diverge.  On 5.1 the flat walker
+    starts clearing level-0 obstacles around iteration 800 and climbs the ladder
+    (hurdle 0.05 → 7.20 by iteration 1600); on 6.0 the same terrains stay pinned at
+    0.00 indefinitely, because promotion requires travelling 80 % of the expected
+    distance (see :meth:`~isaaclab_tasks.direct.parkour.parkour_env.Go2ParkourEnv.
+    _update_terrain_curriculum`) and the 6.0 walker does not clear even the smallest
+    obstacle.  With no rung below level 0 the curriculum has no gradient to re-enter.
+
+    This variant lowers only the *easiest* end of each obstacle range so a flat walker
+    can be promoted at all.  The hardest end is unchanged, so the final skill target is
+    identical to the parent task.
+
+    Everything else — rewards, AMP, sensors, actuators, random-goal behaviour — is
+    inherited unchanged, so this is a controlled single-variable change against
+    :class:`ParkourImitationRandomGoalEnvCfg`.
+    """
+
+    # Lowered lower-bounds for the difficulty-0 end of each obstacle sub-terrain [m].
+    # Upper bounds are left at the parent values.
+    easy_entry_hurdle_height: float = 0.01
+    easy_entry_gap_length: float = 0.02
+    easy_entry_step_height: float = 0.02
+    easy_entry_stair_height: float = 0.02
+
+    def __post_init__(self):
+        super().__post_init__()
+        # ``tg`` is instance-local: @configclass deep-copies every mutable member during
+        # super().__post_init__(), so mutating sub-terrain ranges here cannot leak into
+        # the module-level PARKOUR_TERRAINS_CFG shared by the other parkour tasks.
+        sub = self.terrain.terrain_generator.sub_terrains
+
+        # parkour_flat also uses MeshParkourHurdleTerrainCfg but with a (0.0, 0.0) height
+        # range — it must stay perfectly flat, so it is deliberately not touched here.
+        hurdle = sub["parkour_hurdle"]
+        hurdle.hurdle_height_range = (self.easy_entry_hurdle_height, hurdle.hurdle_height_range[1])
+
+        gap = sub["parkour_gap"]
+        gap.gap_length_range = (self.easy_entry_gap_length, gap.gap_length_range[1])
+
+        step = sub["parkour_step"]
+        step.step_height_range = (self.easy_entry_step_height, step.step_height_range[1])
+
+        stair = sub["parkour_stair"]
+        stair.stair_height_range = (self.easy_entry_stair_height, stair.stair_height_range[1])
+
 
 @configclass
 class ParkourImitationRandomGoalTeacher3DEnvCfg(ParkourImitationRandomGoalEnvCfg):
