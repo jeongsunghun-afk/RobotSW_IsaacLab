@@ -120,8 +120,10 @@ class Go2PaceCfg(PaceCfg):
         #   여기에는 실제 점성 마찰뿐 아니라 **kd 오차가 통째로 흡수**된다(둘 다 q̇에 곱해져 수학적으로
         #   구분 불가 — 논문의 게인 축퇴 논거와 동일). GO2 kd=0.5 자체가 이 항과 같은 크기라 여유가 필요하다.
         #   참고: ANYmal 식별값 ~5 N·m·s/rad.
+        #   ⚠ 실기 kp15/25/35 1차 적합(26_07_15)에서 12관절 viscous가 전부 상한 2.0에 레일 포화 →
+        #   진짜 최적점이 박스 밖. 상한을 5.0으로 올려 재적합한다. 재차 5.0에 붙으면 더 올릴 것.
         self.bounds_params[n : 2 * n, 0] = 0.0
-        self.bounds_params[n : 2 * n, 1] = 2.0
+        self.bounds_params[n : 2 * n, 1] = 5.0
         # Coulomb friction [N·m] — Isaac ≥5.0에서 계수가 아니라 effort. GO2 기어비 ~6.33 기어박스 마찰.
         self.bounds_params[2 * n : 3 * n, 0] = 0.0
         self.bounds_params[2 * n : 3 * n, 1] = 1.5

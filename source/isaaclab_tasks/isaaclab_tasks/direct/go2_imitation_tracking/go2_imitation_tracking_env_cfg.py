@@ -27,6 +27,61 @@ from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "smr_mirror_pkl")
 
+# ---------------------------------------------------------------------------
+# PACE 시스템 식별 결과 (mean_094, 26_07_20 재적합 · viscous 상한 5.0)
+# ---------------------------------------------------------------------------
+# scripts/real2sim/validate_go2.py 에서 hold-out RMSE 0.017 rad(nominal 대비 9.4×)로 검증된
+# 실기 GO2 액추에이터 플랜트. 관절 타입별 값(다리별 편차 <5%라 타입 대표값으로 반영).
+# ⚠ kp=25/kd=0.5 는 유지한다 — viscous 가 kd 오차를 흡수하도록 함께 식별된 조합이므로
+#   (validate 가 재현한 조합) 게인을 바꾸면 안 된다.
+PACE_ARMATURE: dict[str, float] = {"hip": 0.173, "thigh": 0.168, "calf": 0.200}  # [kg·m²]
+PACE_VISCOUS: dict[str, float] = {"hip": 2.41, "thigh": 2.33, "calf": 2.49}  # [N·m·s/rad]
+PACE_COULOMB: dict[str, float] = {"hip": 0.023, "thigh": 0.010, "calf": 0.020}  # [N·m]
+PACE_ENCODER_BIAS_MAG: float = 0.05  # [rad] 식별된 |encoder bias| 대표값 → 관측 DR 범위의 근거
+PACE_KP: float = 25.0  # 식별 당시 게인 (UNITREE_GO2_CFG 와 동일)
+PACE_KD: float = 0.5
+
+
+@configclass
+class DomainRandCfg:
+    """Domain Randomization 설정 — 식별된 PACE 값을 중심으로 ± 범위 랜덤화.
+
+    잔여 sim2real gap(모델링 안 된 마찰 비선형·질량 오차·지연·센서 노이즈)에 정책이 강건해지도록
+    한다. 물리 파라미터·질량·마찰은 env 별로 리셋마다 재샘플(각 env = 서로 다른 로봇),
+    push·관측 노이즈는 스텝 단위 동적 적용.
+    """
+
+    # ── 물리 파라미터 (per-env, 리셋마다 재샘플) ──────────────────
+    randomize_mass: bool = True
+    added_base_mass_range: tuple[float, float] = (-1.0, 2.0)  # base 링크 payload [kg]
+    randomize_material: bool = True
+    foot_friction_range: tuple[float, float] = (0.4, 1.4)  # 발 static·dynamic 마찰 계수
+    randomize_armature: bool = True
+    armature_scale_range: tuple[float, float] = (0.8, 1.2)  # PACE armature 곱 스케일
+    randomize_joint_friction: bool = True
+    joint_friction_scale_range: tuple[float, float] = (0.8, 1.2)  # PACE viscous·Coulomb 공통 스케일
+
+    # ── 액추에이터 게인·지연 ─────────────────────────────────────
+    randomize_gains: bool = True
+    kp_scale_range: tuple[float, float] = (0.9, 1.1)
+    kd_scale_range: tuple[float, float] = (0.9, 1.1)
+    randomize_action_delay: bool = True
+    max_action_delay_steps: int = 1  # policy step(50Hz=20ms) 단위. 식별 delay~1ms 는 0 step에 근접
+
+    # ── 지형·외란 ────────────────────────────────────────────────
+    push_robot: bool = True
+    push_interval_s: float = 5.0  # 외란 주입 주기 [s]
+    max_push_vel_xy: float = 1.0  # base 수평 속도 킥 최대 [m/s]
+
+    # ── 관측 노이즈 (policy obs 에만 적용, AMP obs 불변) ──────────
+    obs_noise: bool = True
+    joint_pos_noise: float = 0.01  # [rad]
+    joint_vel_noise: float = 0.5  # [rad/s]
+    lin_vel_noise: float = 0.1  # [m/s]
+    ang_vel_noise: float = 0.2  # [rad/s]
+    gravity_noise: float = 0.05  # projected_gravity 단위벡터 노이즈
+    encoder_bias: bool = True  # per-env 고정 joint_pos 오프셋 (±PACE_ENCODER_BIAS_MAG)
+
 
 @configclass
 class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
@@ -136,3 +191,12 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
         update_period=0.005,
         track_air_time=True,
     )
+
+    # ── Sim2Real: PACE 식별 파라미터 반영 + Domain Randomization ──
+    # 둘 다 기본 on. 원래 baseline(nominal armature 0.01·마찰 0·DR 없음)을 재현하려면
+    # use_pace_params=False, domain_rand=False 로 실행.
+    # [A/B 진단] PACE viscous=2.4 과감쇠가 awkward gait root cause로 확정(팀 분석) → OFF로 5.1 품질 복원 확증.
+    # 확증 후 현실적 viscous(~0.2)/armature(~0.03)로 재도입 예정.
+    use_pace_params: bool = False  # 식별된 armature/viscous/Coulomb 를 로봇 플랜트에 반영
+    domain_rand: bool = False  # DR 활성화 (아래 dr 범위 사용)
+    dr: DomainRandCfg = DomainRandCfg()

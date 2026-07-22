@@ -19,7 +19,7 @@ from tensordict import TensorDict
 from rsl_rl.modules import ActorCritic, ActorCriticCNN, ActorCriticRecurrent
 from rsl_rl.modules.rnd import RandomNetworkDistillation
 from rsl_rl.storage.rollout_storage_legacy import RolloutStorage
-from rsl_rl.utils import string_to_callable
+from rsl_rl.utils import resolve_optimizer, string_to_callable
 
 
 class PPO:
@@ -41,6 +41,7 @@ class PPO:
         entropy_coef: float = 0.01,
         learning_rate: float = 0.001,
         max_grad_norm: float = 1.0,
+        optimizer: str = "adam",
         use_clipped_value_loss: bool = True,
         schedule: str = "adaptive",
         desired_kl: float = 0.01,
@@ -112,7 +113,7 @@ class PPO:
         self.policy.to(self.device)
 
         # Create the optimizer
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+        self.optimizer = resolve_optimizer(optimizer)(self.policy.parameters(), lr=learning_rate)
 
         # Add storage
         self.storage = storage

@@ -58,7 +58,7 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.007,
+        entropy_coef=0.005,  # std 발산 억제 (0.007→0.005): iter500 이후 reward 평탄한데 noise_std 0.25→4.25 단조발산 관측
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=2e-4,  # MimicKit actor_optimizer lr

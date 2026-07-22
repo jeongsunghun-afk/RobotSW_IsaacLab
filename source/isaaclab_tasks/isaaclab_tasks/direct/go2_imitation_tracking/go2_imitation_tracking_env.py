@@ -47,9 +47,15 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_mul
+from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_mul
 
-from .go2_imitation_tracking_env_cfg import Go2ImitationTrackingEnvCfg
+from .go2_imitation_tracking_env_cfg import (
+    PACE_ARMATURE,
+    PACE_COULOMB,
+    PACE_ENCODER_BIAS_MAG,
+    PACE_VISCOUS,
+    Go2ImitationTrackingEnvCfg,
+)
 from .motion_lib import Go2MotionLib
 
 
@@ -121,7 +127,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )
-        # [R4] per-step root_quat history buffer (wxyz, identity-initialized).
+        # [R4] per-step root_quat history buffer (xyzw, identity-initialized).
         # Kept separate from amp_observation_buffer so base 43-dim stays untouched.
         # The heading-relative tan_norm 6D is computed at consumption time.
         self._amp_quat_buf = torch.zeros(
@@ -129,7 +135,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )
-        self._amp_quat_buf[..., 0] = 1.0  # identity quat wxyz: w=1
+        self._amp_quat_buf[..., 3] = 1.0  # identity quat xyzw: w=1
 
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w = torch.zeros(
@@ -146,6 +152,9 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )
+
+        # ── PACE 식별 파라미터 + Domain Randomization 초기화 ─────
+        self._init_domain_rand()
 
     # ──────────────────────────────────────────────────────────
     # IsaacLab DirectRLEnv 필수 메서드
@@ -183,7 +192,14 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        target = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        # DR: action(토크 명령) 지연 — per-env 지연 스텝만큼 과거 target 을 적용
+        if self.cfg.domain_rand and self.cfg.dr.randomize_action_delay:
+            self._action_delay_buf = torch.cat([target.unsqueeze(1), self._action_delay_buf[:, :-1]], dim=1)
+            rows = torch.arange(self.num_envs, device=self.device)
+            self._processed_actions = self._action_delay_buf[rows, self._action_delay_steps]
+        else:
+            self._processed_actions = target
 
     def _post_physics_step(self):
         # 목표 속도 타이머 업데이트
@@ -193,16 +209,23 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             change_ids = change_mask.nonzero(as_tuple=False).flatten()
             self._resample_steering(change_ids)
 
+        # DR: 주기적 외란 push (base 수평 속도 킥)
+        if self.cfg.domain_rand and self.cfg.dr.push_robot:
+            self._push_timer -= self.step_dt
+            push_ids = (self._push_timer <= 0.0).nonzero(as_tuple=False).flatten()
+            if push_ids.numel() > 0:
+                self._push_robots(push_ids)
+                self._push_timer[push_ids] = self.cfg.dr.push_interval_s
+
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
         root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]  # [N,3]
-        # NOTE (IsaacLab 3.0 migration): body_quat_w is now (x,y,z,w). The internal AMP
-        # heading helpers (_calc_heading_quat*) and motion_lib still assume (w,x,y,z), so the
-        # AMP root-rotation features mix conventions — finite (no NaN) but semantically wrong.
-        # Correctness fix (motion_lib + heading helpers + _amp_quat_buf init) deferred; see report.
-        root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]  # [N,4] (x,y,z,w) in 3.0
+        # IsaacLab 3.0+: body_quat_w is (x,y,z,w). Heading helpers and _amp_quat_buf are
+        # now fully xyzw-aware; motion_lib quats (wxyz) are converted at the consumption
+        # boundary inside _compute_reference_buffers and _reset_strategy_rsi.
+        root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]  # [N,4] xyzw
         # IsaacLab 3.0: ArticulationData props return ProxyArray; .torch needed at
         # @torch.jit.script boundaries (_compute_amp_obs). Indexed accessors above
         # (body_pos_w[:, i], body_quat_w[:, i]) already unwrap to torch via __getitem__.
@@ -233,7 +256,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
                 self._hist_root_pos_w[:, i + 1] = self._hist_root_pos_w[:, i]
 
         self.amp_observation_buffer[:, 0] = amp_obs_step.clone()
-        self._amp_quat_buf[:, 0] = root_quat_w.clone()  # [R4] wxyz
+        self._amp_quat_buf[:, 0] = root_quat_w.clone()  # [R4] xyzw (from body_quat_w)
 
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w[:, 0] = root_pos_w.clone()
@@ -279,7 +302,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             dim=-1,
         )  # total = 48
 
-        return {"policy": policy_obs}
+        return {"policy": self._apply_obs_dr(policy_obs)}
 
     def _get_rewards(self) -> torch.Tensor:
         # ── (1) lin_vel tracking — body frame 직접 비교 ──────────
@@ -426,6 +449,167 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             self.extras["log"] = {}  # type: ignore[assignment]
         self.extras["log"].update(extras)  # type: ignore[union-attr]
 
+        # PACE 플랜트 반영 + per-env Domain Randomization 재샘플
+        self._apply_domain_rand(env_ids)  # type: ignore[arg-type]
+
+    # ──────────────────────────────────────────────────────────
+    # PACE 파라미터 + Domain Randomization
+    # ──────────────────────────────────────────────────────────
+
+    def _init_domain_rand(self):
+        """PACE nominal 플랜트 텐서 + DR per-env 상태 버퍼 초기화.
+
+        관절 타입(hip/thigh/calf)별 식별값을 robot joint order 로 펼쳐두고, per-env 스케일·
+        encoder bias·action delay·push 타이머 버퍼를 만든다. 실제 sim write 는 리셋마다
+        :meth:`_apply_domain_rand` 에서 수행한다 (각 env = 서로 다른 로봇).
+        """
+        device = self.device
+        names = list(self._robot.data.joint_names)
+        nj = self._robot.num_joints
+
+        # PACE nominal (robot joint order). 미식별 관절은 nominal(armature 0.01, 마찰 0) 유지.
+        self._pace_armature = torch.full((nj,), 0.01, device=device)
+        self._pace_viscous = torch.zeros(nj, device=device)
+        self._pace_coulomb = torch.zeros(nj, device=device)
+        for key in ("hip", "thigh", "calf"):
+            ids = [i for i, n in enumerate(names) if n.endswith(f"_{key}_joint")]
+            self._pace_armature[ids] = PACE_ARMATURE[key]
+            self._pace_viscous[ids] = PACE_VISCOUS[key]
+            self._pace_coulomb[ids] = PACE_COULOMB[key]
+        self._all_joint_ids = torch.arange(nj, dtype=torch.int32, device=device)
+
+        # 게인 원본 (DCMotor 는 actuator.stiffness/damping 텐서로 토크를 계산 → 이 텐서를 직접 스케일)
+        self._act = self._robot.actuators["base_legs"]
+        self._base_kp = self._act.stiffness.clone()
+        self._base_kd = self._act.damping.clone()
+
+        # per-env DR 상태
+        self._encoder_bias = torch.zeros(self.num_envs, 12, device=device)
+        self._action_delay_steps = torch.zeros(self.num_envs, dtype=torch.long, device=device)
+        d_cap = max(1, int(self.cfg.dr.max_action_delay_steps))
+        self._action_delay_buf = self._robot.data.default_joint_pos.unsqueeze(1).repeat(1, d_cap + 1, 1).clone()
+        self._push_timer = torch.full((self.num_envs,), self.cfg.dr.push_interval_s, device=device)
+
+        # mass DR 기준값 (base 링크 원본 질량)
+        self._base_body_id = self._robot.data.body_names.index("base")
+        _bid = self._base_body_id
+        self._default_base_mass = self._robot.data.body_mass.torch[:, _bid : _bid + 1].clone()
+
+        self._dr_ready = False  # 첫 전체 reset 에서 startup material DR 적용 후 True
+
+    def _sample(self, rng: tuple[float, float], n: int, d: int) -> torch.Tensor:
+        """[n, d] uniform 샘플 (rng=(lo, hi))."""
+        lo, hi = rng
+        return torch.rand(n, d, device=self.device) * (hi - lo) + lo
+
+    def _apply_domain_rand(self, env_ids: torch.Tensor):
+        """PACE 플랜트 반영 + per-env DR 재샘플 (리셋된 env_ids 대상)."""
+        env_ids_long = env_ids.to(torch.long)
+        env_ids_int = env_ids.to(torch.int32)
+        n = int(env_ids_long.numel())
+        dr = self.cfg.dr
+
+        # ── PACE armature / viscous / Coulomb (+ per-env 스케일) ──
+        if self.cfg.use_pace_params:
+            arm_s = (
+                self._sample(dr.armature_scale_range, n, 1)
+                if (self.cfg.domain_rand and dr.randomize_armature)
+                else 1.0
+            )
+            jf_s = (
+                self._sample(dr.joint_friction_scale_range, n, 1)
+                if (self.cfg.domain_rand and dr.randomize_joint_friction)
+                else 1.0
+            )
+            armature = self._pace_armature.unsqueeze(0).repeat(n, 1) * arm_s
+            viscous = self._pace_viscous.unsqueeze(0).repeat(n, 1) * jf_s
+            coulomb = self._pace_coulomb.unsqueeze(0).repeat(n, 1) * jf_s
+            self._robot.write_joint_armature_to_sim_index(
+                armature=armature, joint_ids=self._all_joint_ids, env_ids=env_ids_int
+            )
+            self._robot.write_joint_friction_coefficient_to_sim_index(
+                joint_friction_coeff=coulomb,
+                joint_dynamic_friction_coeff=coulomb,
+                joint_viscous_friction_coeff=viscous,
+                joint_ids=self._all_joint_ids,
+                env_ids=env_ids_int,
+            )
+
+        if not self.cfg.domain_rand:
+            return
+
+        # ── startup-only: 마찰(material) 랜덤화 (첫 전체 reset 에서 모든 env) ──
+        if not self._dr_ready:
+            self._randomize_material_startup()
+            self._dr_ready = True
+
+        # ── base payload 질량 ──
+        if dr.randomize_mass:
+            add = self._sample(dr.added_base_mass_range, n, 1)
+            new_mass = torch.clamp(self._default_base_mass[env_ids_long] + add, min=1e-6)
+            body_ids = torch.tensor([self._base_body_id], dtype=torch.int32, device=self.device)
+            self._robot.set_masses_index(masses=new_mass, body_ids=body_ids, env_ids=env_ids_int)
+
+        # ── PD 게인 스케일 (DCMotor actuator 텐서 직접 수정) ──
+        if dr.randomize_gains:
+            self._act.stiffness[env_ids_long] = self._base_kp[env_ids_long] * self._sample(dr.kp_scale_range, n, 1)
+            self._act.damping[env_ids_long] = self._base_kd[env_ids_long] * self._sample(dr.kd_scale_range, n, 1)
+
+        # ── encoder bias / action delay / push 타이머 ──
+        if dr.encoder_bias:
+            rand_bias = torch.rand(n, 12, device=self.device) * 2.0 - 1.0
+            self._encoder_bias[env_ids_long] = rand_bias * PACE_ENCODER_BIAS_MAG
+        if dr.randomize_action_delay:
+            self._action_delay_steps[env_ids_long] = torch.randint(
+                0, dr.max_action_delay_steps + 1, (n,), device=self.device
+            )
+            self._action_delay_buf[env_ids_long] = self._robot.data.default_joint_pos[env_ids_long].unsqueeze(1)
+        self._push_timer[env_ids_long] = dr.push_interval_s
+
+    def _randomize_material_startup(self):
+        """모든 env 의 강체 마찰(static·dynamic)을 per-env 값으로 랜덤화 (startup 1회).
+
+        코어 ``events.randomize_rigid_body_material`` 의 PhysX 경로와 동일한 API 사용
+        (root_view + warp). 전체 shape 에 동일 계수를 적용해 "로봇별 접지 마찰"을 근사한다.
+        """
+        dr = self.cfg.dr
+        materials = wp.to_torch(self._robot.root_view.get_material_properties())  # [num_envs, num_shapes, 3] CPU
+        lo, hi = dr.foot_friction_range
+        fr = torch.rand(materials.shape[0], 1, device="cpu") * (hi - lo) + lo  # per-env 마찰
+        materials[..., 0] = fr  # static friction
+        materials[..., 1] = fr  # dynamic friction
+        env_ids = torch.arange(materials.shape[0], device="cpu", dtype=torch.int32)
+        self._robot.root_view.set_material_properties(
+            wp.from_torch(materials.contiguous(), dtype=wp.float32), wp.from_torch(env_ids, dtype=wp.int32)
+        )
+
+    def _push_robots(self, env_ids: torch.Tensor):
+        """base 에 랜덤 수평 속도 킥을 주어 외란(impulse)을 흉내낸다."""
+        n = int(env_ids.numel())
+        lin = self._robot.data.root_lin_vel_w[env_ids].clone()  # [n,3] world
+        ang = self._robot.data.root_ang_vel_w[env_ids].clone()  # [n,3] world
+        kick = (torch.rand(n, 2, device=self.device) * 2.0 - 1.0) * self.cfg.dr.max_push_vel_xy
+        lin[:, 0:2] += kick
+        vel = torch.cat([lin, ang], dim=-1)  # [n,6]
+        self._robot.write_root_com_velocity_to_sim_index(root_velocity=vel, env_ids=env_ids.to(torch.int32))
+
+    def _apply_obs_dr(self, obs: torch.Tensor) -> torch.Tensor:
+        """policy obs(48-dim) 에만 관측 노이즈 + encoder bias 를 더한다. AMP obs 는 불변."""
+        if not self.cfg.domain_rand:
+            return obs
+        dr = self.cfg.dr
+        noise = torch.zeros_like(obs)
+        if dr.obs_noise:
+            n = self.num_envs
+            noise[:, 0:3] = torch.randn(n, 3, device=self.device) * dr.lin_vel_noise  # root_lin_vel_b
+            noise[:, 3:6] = torch.randn(n, 3, device=self.device) * dr.ang_vel_noise  # root_ang_vel_b
+            noise[:, 6:9] = torch.randn(n, 3, device=self.device) * dr.gravity_noise  # projected_gravity_b
+            noise[:, 12:24] = torch.randn(n, 12, device=self.device) * dr.joint_pos_noise  # joint_pos - default
+            noise[:, 24:36] = torch.randn(n, 12, device=self.device) * dr.joint_vel_noise  # joint_vel
+        if dr.encoder_bias:
+            noise[:, 12:24] += self._encoder_bias  # per-env 고정 엔코더 오프셋
+        return obs + noise
+
     # ──────────────────────────────────────────────────────────
     # 리셋 전략
     # ──────────────────────────────────────────────────────────
@@ -445,13 +629,15 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         )
 
         # root_state [N, 13]: pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
+        # motion_lib returns wxyz; IsaacLab 6.0 sim and quat_apply expect xyzw.
+        root_quat_xyzw = convert_quat(root_quat, to="xyzw")
         root_state = self._robot.data.default_root_state[env_ids].clone()
         root_state[:, 0:3] = root_pos + self.scene.env_origins[env_ids]
-        root_state[:, 3:7] = root_quat  # wxyz
+        root_state[:, 3:7] = root_quat_xyzw  # xyzw
 
         # motion_lib 속도는 body frame → world frame 변환 필요
-        root_state[:, 7:10] = quat_apply(root_quat, lin_vel_b)
-        root_state[:, 10:13] = quat_apply(root_quat, ang_vel_b)
+        root_state[:, 7:10] = quat_apply(root_quat_xyzw, lin_vel_b)
+        root_state[:, 10:13] = quat_apply(root_quat_xyzw, ang_vel_b)
 
         joint_pos_out = self._robot.data.default_joint_pos[env_ids].clone()
         joint_vel_out = self._robot.data.default_joint_vel[env_ids].clone()
@@ -553,9 +739,10 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
 
         amp_obs_buf = amp_obs.view(num_samples, n_hist, -1)  # [N, H, 43]
         root_pos_hist = root_pos.view(num_samples, n_hist, 3)
-        # [R4] return full quat history (N, H, 4) so callers can build tan_norm window
-        quat_hist = root_quat.view(num_samples, n_hist, 4)  # [N, H, 4]
-        curr_root_quat = quat_hist[:, 0, :]  # [N, 4] current frame
+        # [R4] return full quat history (N, H, 4) — convert wxyz (motion_lib) → xyzw (IsaacLab 6.0)
+        # so all consumers (_reset_strategy_rsi, collect_reference_motions) receive xyzw directly.
+        quat_hist_wxyz = root_quat.view(num_samples, n_hist, 4)
+        quat_hist = convert_quat(quat_hist_wxyz.reshape(-1, 4), to="xyzw").reshape(num_samples, n_hist, 4)
         return amp_obs_buf, root_pos_hist, quat_hist
 
     def collect_reference_motions(
@@ -660,7 +847,7 @@ def _apply_root_rot_tan_norm(
       - tan_norm: [quat_rotate(q, [1,0,0]), quat_rotate(q, [0,0,1])] (MimicKit torch_util.py:216-227)
 
     Args:
-        quat_buf: [N, H, 4] wxyz — per-step root_quat history (index 0 = newest)
+        quat_buf: [N, H, 4] xyzw — per-step root_quat history (index 0 = newest)
         num_envs: N
         n_hist:   H
 
@@ -693,25 +880,25 @@ def _apply_root_rot_tan_norm(
 
 @torch.jit.script
 def _calc_heading_quat(quat: torch.Tensor) -> torch.Tensor:
-    """Yaw-only quaternion (heading) 추출. quat: [N,4] wxyz."""
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    """Yaw-only quaternion (heading) 추출. quat: [N,4] xyzw."""
+    x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     half_yaw = yaw * 0.5
     heading = torch.stack(
-        [torch.cos(half_yaw), torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw)],
+        [torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw), torch.cos(half_yaw)],
         dim=-1,
     )
-    return heading  # [N,4] wxyz
+    return heading  # [N,4] xyzw
 
 
 @torch.jit.script
 def _calc_heading_quat_inv(quat: torch.Tensor) -> torch.Tensor:
-    """Heading quaternion 역원 (heading 기준 로컬 변환용). quat: [N,4] wxyz."""
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    """Heading quaternion 역원 (heading 기준 로컬 변환용). quat: [N,4] xyzw."""
+    x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     half_yaw = -yaw * 0.5  # inverse = negative yaw
     heading_inv = torch.stack(
-        [torch.cos(half_yaw), torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw)],
+        [torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw), torch.cos(half_yaw)],
         dim=-1,
     )
-    return heading_inv  # [N,4] wxyz
+    return heading_inv  # [N,4] xyzw
