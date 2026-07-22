@@ -40,10 +40,13 @@ source scripts/real2sim/r2s_hind_leg/r2s_commands.sh
 ## 3. 실행 순서
 
 ```bash
-# 터미널 1 — Isaac sim_runner
+# 터미널 1 — Isaac sim_runner (라이브스트림 ON)
 r2s_hl_sim
-#   또는 수동: conda activate isaac-6.0
-#             python scripts/real2sim/sim_runner_hindleg.py --num_envs 1 [--headless]
+#   또는 수동:
+#     LIVESTREAM=2 CUDA_VISIBLE_DEVICES=2 ./isaaclab.sh -p \
+#       scripts/real2sim/sim_runner_hindleg.py --num_envs 1 --viz kit
+#
+#   헤드리스로 돌리려면:  VIZ= r2s_hl_sim   (= --viz 미전달)
 
 # 터미널 2 — PyQt GUI (디스플레이 필요)
 r2s_hl_gui
@@ -85,7 +88,9 @@ ROS2 실로봇 연동 시 추가된다.
 
 | 변수 / 플래그 | 기본 | 의미 |
 |---|---|---|
-| `--headless` | off | 렌더 창 없이 실행 |
+| `--viz` | `kit` (런처 기본) | 비주얼라이저. **라이브스트림엔 `kit` 필수**, 생략하면 헤드리스 |
+| `VIZ` (env) | `kit` | 런처가 붙일 `--viz` 값. `VIZ=` 로 비우면 헤드리스 |
+| `LIVESTREAM` (env) | 2 | Isaac 라이브스트림 모드 |
 | `--num_envs` | 1 | 시뮬 환경 수(1만 지원) |
 | `GPU` | 2 | sim_runner CUDA 디바이스 |
 | `faithful_pd` (cfg) | True | GUI kp/kd를 실제 sim 게인에 반영 |
@@ -99,6 +104,9 @@ ROS2 실로봇 연동 시 추가된다.
 - **GUI에서 명령해도 sim이 안 움직임**: sim_runner가 떠 있는지, 포트 9873/9874가 열려 있는지 확인
   (`ss -uln | grep 987`). 다른 R2S(go2, 9871/9872)와는 포트가 다르므로 동시 실행 가능.
 - **Monitor 창이 비어있음**: GUI가 sim 상태를 받아야 sim 라인이 그려진다(sim_runner 먼저 기동).
+- **라이브스트림 화면이 안 뜸**: `--viz kit`이 빠졌는지 확인(`LIVESTREAM=2`만으로는 부족).
+  `r2s_hl_sim`은 이제 자동으로 붙인다. 흰 화면이면 학습이 점유한 GPU와 겹친 것 —
+  `GPU=<유휴 GPU> r2s_hl_sim`으로 분리한다.
 - **관절이 명령보다 덜 감**: soft limit(±81°/±162°) 클램프. GUI가 자동 클램프하므로 명령값 자체가 제한됨.
 
 ---

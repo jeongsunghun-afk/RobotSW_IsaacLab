@@ -3,18 +3,20 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""R2S-HindLeg Isaac Sim 런처 겸 UDP 통신 루프.
+"""R2S-BipedLeg Isaac Sim 런처 겸 UDP 통신 루프.
 
 gui_controller.py(시스템/conda Python 무관, 순수 UDP)와 UDP로 명령/상태를 주고받는
 Isaac Sim(conda Python 3.12) 쪽 프로세스. rclpy는 사용하지 않는다.
 
-계약: source/isaaclab_tasks/isaaclab_tasks/direct/r2s_hind_leg/CONTRACT.md §1, §4, §5
+계약: source/isaaclab_tasks/isaaclab_tasks/direct/r2s_biped_leg/CONTRACT.md §1, §4, §5
 
 실행 (라이브스트림):
-    LIVESTREAM=2 CUDA_VISIBLE_DEVICES=2 ./isaaclab.sh -p scripts/real2sim/sim_runner_hindleg.py \
-        --num_envs 1 --viz kit
+    LIVESTREAM=2 CUDA_VISIBLE_DEVICES=2 ./isaaclab.sh -p scripts/real2sim/sim_runner_bipedleg.py \
+        --num_envs 1 --fix_base --viz kit
 
-헤드리스로 돌리려면 ``--viz``를 생략한다.
+``--viz kit``은 6.0 라이브스트림에 필수다. ``--viz``를 생략하면 헤드리스로 돌아간다
+(``--headless``는 deprecated). 8-DOF 2족이라 ``--fix_base`` 없이는 GUI로 관절을 스텝하는
+순간 넘어지므로, 관절 추종 확인 용도로는 ``--fix_base``를 켠다.
 """
 
 """Launch Omniverse Toolkit first."""
@@ -26,11 +28,14 @@ import sys
 from isaaclab.app import AppLauncher
 
 # r2s_udp는 순수 stdlib이라 AppLauncher 기동 전에 임포트해도 안전하다.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "r2s_hind_leg"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "r2s_biped_leg"))
 from r2s_udp import CMD_PORT, STATE_PORT, pack_state, unpack_cmd  # isort: skip
 
-parser = argparse.ArgumentParser(description="R2S-HindLeg sim runner (UDP bridge to gui_controller.py).")
+parser = argparse.ArgumentParser(description="R2S-BipedLeg sim runner (UDP bridge to gui_controller.py).")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
+parser.add_argument(
+    "--fix_base", action="store_true", default=False, help="Fix the robot base in mid-air instead of free spawn."
+)
 parser.add_argument("--cmd_port", type=int, default=CMD_PORT, help="UDP port to receive motor commands on.")
 parser.add_argument("--state_port", type=int, default=STATE_PORT, help="UDP port to send sim state to.")
 AppLauncher.add_app_launcher_args(parser)
@@ -49,13 +54,15 @@ import torch
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
-TASK_NAME = "Isaac-R2S-HindLeg-v0"
+TASK_NAME = "Isaac-R2S-BipedLeg-v0"
 HOST = "127.0.0.1"
 
 
 def main() -> None:
-    """Run the UDP <-> Isaac Sim hind-leg bridge loop (latest-wins, non-blocking recv)."""
+    """Run the UDP <-> Isaac Sim biped-leg bridge loop (latest-wins, non-blocking recv)."""
+    # parse and override the environment configuration (CONTRACT §5: fix_base toggle)
     env_cfg = parse_env_cfg(TASK_NAME, device=args_cli.device, num_envs=args_cli.num_envs)
+    env_cfg.fix_base = args_cli.fix_base
 
     env = gym.make(TASK_NAME, cfg=env_cfg)
     env.reset()
@@ -68,7 +75,7 @@ def main() -> None:
     gui_addr: tuple[str, int] | None = None  # 마지막 cmd 발신자에게 state 회신
 
     print(
-        f"[sim_runner_hindleg] UDP listening on {HOST}:{args_cli.cmd_port}, "
+        f"[sim_runner_bipedleg] UDP listening on {HOST}:{args_cli.cmd_port}, "
         f"sending state to sender:{args_cli.state_port}",
         flush=True,
     )
