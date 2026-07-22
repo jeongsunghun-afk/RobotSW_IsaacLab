@@ -171,6 +171,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # set the log directory for the environment
         env_cfg.log_dir = log_dir
 
+        # enable height-scan ray visualization in play mode.
+        # Direct parkour env exposes cfg.height_scanner; manager-based envs use cfg.scene.height_scanner.
+        _scanner_owners = [env_cfg]
+        if hasattr(env_cfg, "scene"):
+            _scanner_owners.append(env_cfg.scene)
+        for _owner in _scanner_owners:
+            _height_scanner_cfg = getattr(_owner, "height_scanner", None)
+            if _height_scanner_cfg is not None and hasattr(_height_scanner_cfg, "debug_vis"):
+                _height_scanner_cfg.debug_vis = True
+
         # work around the Isaac Sim 6.0 instanceable-render issue for Go2 in the play path
         use_noninstanceable_go2_for_render(env_cfg)
 
