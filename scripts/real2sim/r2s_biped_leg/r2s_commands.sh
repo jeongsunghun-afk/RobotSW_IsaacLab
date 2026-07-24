@@ -8,12 +8,20 @@
 #
 #   source /home/lgb/IsaacLab-6.0/scripts/real2sim/r2s_biped_leg/r2s_commands.sh
 #
-#   r2s_bl_sim   # 터미널1: Isaac sim_runner (conda isaac-6.0)
-#   r2s_bl_gui   # 터미널2: PyQt GUI (순수 UDP, 시스템 python)
+#   position 모드 (수동 관절 제어):
+#     r2s_bl_sim   # 터미널1: Isaac sim_runner (conda isaac-6.0)
+#     r2s_bl_gui   # 터미널2: PyQt GUI (순수 UDP, 시스템 python)
 #
-# 각 명령은 추가 인자를 그대로 전달한다. 예: VIZ= r2s_bl_sim  (헤드리스)
+#   policy 모드 (학습 정책 구동, GUI에서 Mode=Policy):
+#     r2s_bl_psim  # 터미널1: sim_runner --policy_mode (conda) — 라이브스트림 VIZ=kit
+#     r2s_bl_prun  # 터미널2: policy_runner (conda torch)
+#     r2s_bl_gui   # 터미널3: PyQt GUI → Mode를 Policy로, Run 클릭
+#
+# 각 명령은 추가 인자를 그대로 전달한다. 예: VIZ= r2s_bl_psim  (헤드리스),  GPU=1 r2s_bl_prun
 
 _R2S_BL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-r2s_bl_sim() { bash "$_R2S_BL_DIR/run_sim_runner.sh" "$@"; }      # 터미널1: Isaac sim_runner
-r2s_bl_gui() { bash "$_R2S_BL_DIR/run_gui_controller.sh" "$@"; }  # 터미널2: PyQt GUI
+r2s_bl_sim() { bash "$_R2S_BL_DIR/run_sim_runner.sh" "$@"; }        # position: Isaac sim_runner
+r2s_bl_gui() { bash "$_R2S_BL_DIR/run_gui_controller.sh" "$@"; }    # PyQt GUI (position/policy 공용)
+r2s_bl_psim() { bash "$_R2S_BL_DIR/run_policy_sim.sh" "$@"; }       # policy: sim_runner --policy_mode
+r2s_bl_prun() { bash "$_R2S_BL_DIR/run_policy_runner.sh" "$@"; }    # policy: policy_runner (추론)

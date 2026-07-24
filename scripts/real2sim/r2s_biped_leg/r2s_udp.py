@@ -27,12 +27,27 @@ CMD_PORT: int = 9881  # gui -> sim_runner
 STATE_PORT: int = 9882  # sim_runner -> gui
 MONITOR_PORT: int = 9883  # gui(relay) -> monitor
 
+# --- policy mode 전용 포트 (position-control 대역과 겹치지 않음) ---
+#   gui ──POLICY_CMD(9884)──▶ policy_runner ──POLICY_ACT(9886)──▶ sim_runner
+#                                          ◀──POLICY_STATE(9885)──┘
+#   policy_runner ──REAL_ACT(9887)──▶ real ──REAL_STATE(9888)──▶ policy_runner (seam)
+POLICY_CMD_PORT: int = 9884  # gui -> policy_runner (mode/source/x_vel/yaw)
+POLICY_STATE_PORT: int = 9885  # sim_runner -> policy_runner (rich state: q,dq,gravity)
+POLICY_ACT_PORT: int = 9886  # policy_runner -> sim_runner (target q)
+REAL_ACT_PORT: int = 9887  # policy_runner -> real endpoint (seam)
+REAL_STATE_PORT: int = 9888  # real endpoint -> policy_runner (seam)
+
 # magic — r2s_hind_leg("R2HC"/"R2HS"/"R2MN")와 반드시 다른 값을 쓴다. 두 리그를 동시에 띄웠을 때
 # 다른 리그로 잘못 보낸 패킷이 (관절 수가 달라 크기로도 걸러지지만) magic 단계에서 확실히 거부되어
 # 절대 오파싱될 수 없게 하기 위함이다.
 CMD_MAGIC: int = 0x52324243  # "R2BC"
 STATE_MAGIC: int = 0x52324253  # "R2BS"
 MONITOR_MAGIC: int = 0x5232424D  # "R2BM"
+
+# policy mode magic — 위 3개와 반드시 다른 값.
+POLICY_CMD_MAGIC: int = 0x52325043  # "R2PC" gui -> policy_runner
+POLICY_STATE_MAGIC: int = 0x52325053  # "R2PS" sim_runner -> policy_runner
+POLICY_ACT_MAGIC: int = 0x52325041  # "R2PA" policy_runner -> sim_runner (and real)
 
 # 명령: magic(I) seq(I) + NUM_JOINTS x (q,dq,kp,kd,tau) f
 _CMD_FMT: str = "<II" + "5f" * NUM_JOINTS
@@ -193,6 +208,133 @@ def unpack_monitor(data: bytes) -> dict | None:
     return {"seq": seq, "action_q": action_q, "sim_q": sim_q, "sim_dq": sim_dq, "sim_tau": sim_tau}
 
 
+# ---------------------------------------------------------------------------
+# policy mode: command (gui -> policy_runner)
+# ---------------------------------------------------------------------------
+
+# magic(I) seq(I) mode(i) source(i) x_vel(f) yaw(f)
+#   mode:   0=idle(정책 정지), 1=run
+#   source: 0=sim(sim state로 폐루프), 1=real(real state로 폐루프)
+_POLICY_CMD_FMT: str = "<IIiiff"
+POLICY_CMD_SIZE: int = struct.calcsize(_POLICY_CMD_FMT)
+
+
+def pack_policy_cmd(seq: int, mode: int, source: int, x_vel: float, yaw: float) -> bytes:
+    """gui -> policy_runner 제어 명령 직렬화.
+
+    Args:
+        seq: 증가 시퀀스 번호.
+        mode: 0=idle(정책 정지·중립 유지), 1=run.
+        source: 폐루프 input source. 0=sim, 1=real.
+        x_vel: 전진 속도 명령 [m/s]. 학습 범위 [-0.5, 2.0].
+        yaw: 요 각속도 명령 [rad/s]. 학습 범위 [-0.5, 0.5].
+
+    Returns:
+        POLICY_CMD_SIZE 바이트 패킷.
+    """
+    return struct.pack(
+        _POLICY_CMD_FMT, POLICY_CMD_MAGIC, seq & 0xFFFFFFFF, int(mode), int(source), float(x_vel), float(yaw)
+    )
+
+
+def unpack_policy_cmd(data: bytes) -> dict | None:
+    """policy 명령 역직렬화. magic 불일치/크기 오류 시 None.
+
+    Returns:
+        키: ``seq``, ``mode``, ``source``, ``x_vel``, ``yaw``.
+    """
+    if len(data) != POLICY_CMD_SIZE:
+        return None
+    magic, seq, mode, source, x_vel, yaw = struct.unpack(_POLICY_CMD_FMT, data)
+    if magic != POLICY_CMD_MAGIC:
+        return None
+    return {"seq": seq, "mode": mode, "source": source, "x_vel": x_vel, "yaw": yaw}
+
+
+# ---------------------------------------------------------------------------
+# policy mode: rich state (sim_runner/real -> policy_runner)
+# ---------------------------------------------------------------------------
+
+# magic(I) seq(I) + q(8f) + dq(8f) + gravity(3f)  — **articulation 순서** (재매핑 없음)
+_POLICY_STATE_FMT: str = "<II" + "f" * NUM_JOINTS + "f" * NUM_JOINTS + "3f"
+POLICY_STATE_SIZE: int = struct.calcsize(_POLICY_STATE_FMT)
+
+
+def pack_policy_state(seq: int, q, dq, gravity) -> bytes:
+    """policy_runner용 rich state 직렬화 (articulation 순서).
+
+    Args:
+        seq: 증가 시퀀스 번호.
+        q: 관절각 [rad], 길이 8, articulation 순서.
+        dq: 관절각속도 [rad/s], 길이 8, articulation 순서.
+        gravity: projected_gravity_b (base frame 중력 단위벡터), 길이 3.
+
+    Returns:
+        POLICY_STATE_SIZE 바이트 패킷.
+    """
+    vals = [float(q[i]) for i in range(NUM_JOINTS)]
+    vals += [float(dq[i]) for i in range(NUM_JOINTS)]
+    vals += [float(gravity[i]) for i in range(3)]
+    return struct.pack(_POLICY_STATE_FMT, POLICY_STATE_MAGIC, seq & 0xFFFFFFFF, *vals)
+
+
+def unpack_policy_state(data: bytes) -> dict | None:
+    """policy rich state 역직렬화. magic 불일치/크기 오류 시 None.
+
+    Returns:
+        키: ``seq``, ``q`` (8), ``dq`` (8), ``gravity`` (3). 전부 articulation 순서.
+    """
+    if len(data) != POLICY_STATE_SIZE:
+        return None
+    fields = struct.unpack(_POLICY_STATE_FMT, data)
+    if fields[0] != POLICY_STATE_MAGIC:
+        return None
+    seq = fields[1]
+    body = fields[2:]
+    q = list(body[:NUM_JOINTS])
+    dq = list(body[NUM_JOINTS : 2 * NUM_JOINTS])
+    gravity = list(body[2 * NUM_JOINTS : 2 * NUM_JOINTS + 3])
+    return {"seq": seq, "q": q, "dq": dq, "gravity": gravity}
+
+
+# ---------------------------------------------------------------------------
+# policy mode: action (policy_runner -> sim_runner / real)
+# ---------------------------------------------------------------------------
+
+# magic(I) seq(I) + target_q(8f)  — **articulation 순서**
+_POLICY_ACT_FMT: str = "<II" + "f" * NUM_JOINTS
+POLICY_ACT_SIZE: int = struct.calcsize(_POLICY_ACT_FMT)
+
+
+def pack_policy_act(seq: int, target_q) -> bytes:
+    """policy_runner -> sim_runner/real 관절 목표각 직렬화 (articulation 순서).
+
+    Args:
+        seq: 증가 시퀀스 번호.
+        target_q: 관절 목표각 [rad], 길이 8, articulation 순서.
+            (= action_scale * raw_action + default_joint_pos)
+
+    Returns:
+        POLICY_ACT_SIZE 바이트 패킷.
+    """
+    vals = [float(target_q[i]) for i in range(NUM_JOINTS)]
+    return struct.pack(_POLICY_ACT_FMT, POLICY_ACT_MAGIC, seq & 0xFFFFFFFF, *vals)
+
+
+def unpack_policy_act(data: bytes) -> dict | None:
+    """policy action 역직렬화. magic 불일치/크기 오류 시 None.
+
+    Returns:
+        키: ``seq``, ``target_q`` (8, articulation 순서).
+    """
+    if len(data) != POLICY_ACT_SIZE:
+        return None
+    fields = struct.unpack(_POLICY_ACT_FMT, data)
+    if fields[0] != POLICY_ACT_MAGIC:
+        return None
+    return {"seq": fields[1], "target_q": list(fields[2:])}
+
+
 if __name__ == "__main__":
     z = [0.0] * NUM_JOINTS
     c = pack_cmd(1, z, z, [65.0] * NUM_JOINTS, [6.0] * NUM_JOINTS, z)
@@ -209,4 +351,25 @@ if __name__ == "__main__":
     assert len(unpack_monitor(m)["sim_q"]) == NUM_JOINTS
     # 다른 리그(hind_leg) magic이 섞여 들어와도 절대 파싱되지 않는지 확인.
     assert unpack_cmd(struct.pack(_CMD_FMT, 0x52324843, 0, *([0.0] * (5 * NUM_JOINTS)))) is None
-    print(f"r2s_udp(bipedleg) OK  CMD={CMD_SIZE} STATE={STATE_SIZE} MON={MON_SIZE}")
+
+    # policy mode 패킷 왕복.
+    pc = pack_policy_cmd(4, 1, 0, 1.5, -0.3)
+    assert len(pc) == POLICY_CMD_SIZE, (len(pc), POLICY_CMD_SIZE)
+    dpc = unpack_policy_cmd(pc)
+    assert dpc["mode"] == 1 and dpc["source"] == 0 and abs(dpc["x_vel"] - 1.5) < 1e-6 and abs(dpc["yaw"] + 0.3) < 1e-6
+    g = [0.0, 0.0, -1.0]
+    ps = pack_policy_state(5, z, z, g)
+    assert len(ps) == POLICY_STATE_SIZE, (len(ps), POLICY_STATE_SIZE)
+    dps = unpack_policy_state(ps)
+    assert len(dps["q"]) == NUM_JOINTS and len(dps["gravity"]) == 3 and abs(dps["gravity"][2] + 1.0) < 1e-6
+    pa = pack_policy_act(6, [0.2] * NUM_JOINTS)
+    assert len(pa) == POLICY_ACT_SIZE, (len(pa), POLICY_ACT_SIZE)
+    assert abs(unpack_policy_act(pa)["target_q"][0] - 0.2) < 1e-6
+    # policy 패킷에 position-control magic이 섞여도 거부.
+    assert unpack_policy_cmd(pack_cmd(1, z, z, z, z, z)) is None
+    assert unpack_cmd(pack_policy_act(1, z)) is None
+
+    print(
+        f"r2s_udp(bipedleg) OK  CMD={CMD_SIZE} STATE={STATE_SIZE} MON={MON_SIZE} "
+        f"POLICY_CMD={POLICY_CMD_SIZE} POLICY_STATE={POLICY_STATE_SIZE} POLICY_ACT={POLICY_ACT_SIZE}"
+    )

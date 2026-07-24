@@ -150,13 +150,61 @@ robot 시리즈는 ROS2 실로봇 연동 시 추가된다.
 
 ---
 
-## 9. 파일
+## 9. Policy 모드 — 학습된 hind_leg 정책 구동
+
+GUI의 **Mode: Policy**로 전환하면, 학습된 hind_leg history 정책(`model_23100.pt`)이 로봇을 자유베이스에서
+폐루프로 구동한다. GUI는 x_vel(앞뒤)·yaw(좌우) 속도 명령과 input source(Sim/Real)만 통제하고, 정책 추론은
+별도 `policy_runner_bipedleg.py`(conda torch, Isaac 앱 없음)가 수행하며 action을 **sim + real 양쪽에 전송**한다.
+
+```
+gui ──POLICY_CMD(9884)──▶ policy_runner ──POLICY_ACT(9886)──▶ sim_runner(--policy_mode)
+                                        ◀──POLICY_STATE(9885)──┘  (요청-응답 lockstep: 1 action = 1 sim step)
+policy_runner ──REAL_ACT(9887)──▶ real ──REAL_STATE(9888)──▶ policy_runner   (seam; --real_host 지정 시)
+```
+
+**3-터미널 실행 (별칭 — 가장 쉬움):**
+
+```bash
+# 한 번만 source (각 터미널에서). ~/.bashrc 에 넣어두면 매번 안 쳐도 된다.
+source /home/lgb/IsaacLab-6.0/scripts/real2sim/r2s_biped_leg/r2s_commands.sh
+
+r2s_bl_psim    # 터미널1: sim_runner --policy_mode (라이브스트림 kit). 헤드리스는 VIZ= r2s_bl_psim
+r2s_bl_prun    # 터미널2: policy_runner (학습 정책 로드·추론)
+r2s_bl_gui     # 터미널3: GUI → Mode를 Policy로, Run 클릭, x_vel/yaw 조절
+```
+
+환경변수로 조정: `GPU=1 r2s_bl_psim`, `CKPT=model_10000.pt r2s_bl_prun`, `REAL_HOST=192.168.x.y r2s_bl_prun`.
+
+<details><summary>별칭 없이 직접 실행</summary>
+
+```bash
+# 터미널 1: sim (라이브스트림으로 로봇을 보려면 --viz kit, 생략 시 headless)
+bash scripts/real2sim/r2s_biped_leg/run_policy_sim.sh
+# 터미널 2: 정책 추론 (Isaac 앱 없이 순수 torch)
+bash scripts/real2sim/r2s_biped_leg/run_policy_runner.sh
+# 터미널 3: GUI
+bash scripts/real2sim/r2s_biped_leg/run_gui_controller.sh
+```
+</details>
+
+**핵심 계약 (POLICY_MODE_SPEC.md):**
+- **lockstep 필수**: sim_runner는 POLICY_ACT 하나당 정확히 1 env.step만 진행(학습 `1 action = 1 step` 불변식).
+  free-running이면 부팅 중 로봇이 넘어지고 gait clock이 비동기가 된다.
+- obs(34) = gravity3 + cmd3 + (q−default)8 + dq8 + prev_action8 + clock4, **articulation 순서**(재매핑 없음).
+  priv_explicit(base vel)는 estimator로 추정하므로 state엔 gravity+관절만 필요.
+- action→target = `0.25·action + default`, **slew limiter 우회**(학습엔 없음), 게인은 cfg DCMotor 고정.
+- command 학습 범위: x_vel∈[-0.5, 2.0], yaw∈[-0.5, 0.5], y_vel≡0(미학습). **yaw 추종은 약함**(학습 track_ang_vel 0.145).
+- **real 주의**: real은 자기 IMU로 폐루프를 돌지 않으면(미러 target만 받으면) 자유베이스 2족이 넘어진다.
+
+## 10. 파일
 
 | 파일 | 역할 |
 |---|---|
-| `sim_runner_bipedleg.py` (상위 폴더) | Isaac 런처 + UDP 루프 |
-| `gui_controller.py` | PyQt5 GUI, UDP 발행 + monitor 중계 |
+| `sim_runner_bipedleg.py` (상위 폴더) | Isaac 런처 + UDP 루프 (position / `--policy_mode` lockstep) |
+| `policy_runner_bipedleg.py` (상위 폴더) | 학습 정책 추론 + UDP fan-out (conda torch, Isaac 앱 없음) |
+| `gui_controller.py` | PyQt5 GUI, position 발행 + policy 명령(Mode 토글) |
 | `monitor.py` | 실시간 plot(별도 프로세스) |
 | `motions.py` | 자세/게인/한계 상수 + 보간/스텝/사인/클램프 유틸(순수 함수) |
 | `r2s_udp.py` | UDP 패킷 스키마(공유, stdlib만) — 재구현 금지 |
+| `POLICY_MODE_SPEC.md` | policy 모드 아키텍처/계약/obs parity 명세 |
 | `run_*.sh` / `r2s_commands.sh` | 원커맨드 런처 + 별칭 |

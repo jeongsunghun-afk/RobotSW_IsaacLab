@@ -68,6 +68,9 @@ class R2SBipedLegEnv(DirectRLEnv):
         # faithful PD: kp/kd가 바뀔 때만 sim drive 게인을 다시 쓴다(매 step write 회피).
         self._applied_kp = torch.zeros(self.num_envs, NUM_JOINTS, device=self.device)
         self._applied_kd = torch.zeros(self.num_envs, NUM_JOINTS, device=self.device)
+        # policy 모드 target — **articulation 순서 전체 관절** (leg-major _joint_ids 재매핑 없음).
+        # 학습 정책은 articulation 순서로 obs/action을 봤으므로 그대로 apply해야 순서가 맞는다.
+        self._policy_target = torch.zeros(self.num_envs, self.robot.num_joints, device=self.device)
 
     # ------------------------------------------------------------------
     # 외부 인터페이스 (sim_runner_bipedleg.py에서 호출)
@@ -112,6 +115,36 @@ class R2SBipedLegEnv(DirectRLEnv):
             "tau_est": self.robot.data.applied_torque[0, self._joint_ids].cpu().numpy(),
         }
 
+    def set_policy_target(self, target_q: torch.Tensor | list[float]) -> None:
+        """policy_runner가 계산한 **articulation 순서** 목표각을 주입 (policy mode 전용).
+
+        slew limiter를 우회한다 — 학습 파이프라인엔 slew가 없으므로, 넣으면 정책 동역학이 왜곡된다.
+        target_q는 이미 ``action_scale * raw_action + default_joint_pos`` 로 계산된 절대 목표각이며
+        articulation 순서(재매핑 없음)다.
+
+        Args:
+            target_q: 관절 목표각 [rad], 길이 = articulation 관절 수, articulation 순서.
+        """
+        t = torch.as_tensor(target_q, device=self.device, dtype=torch.float32)
+        if t.dim() == 1:
+            t = t.unsqueeze(0).expand(self.num_envs, -1)
+        self._policy_target.copy_(t)
+
+    def get_policy_state(self) -> dict:
+        """policy_runner용 rich state (numpy, num_envs==1 가정).
+
+        학습 정책 obs와 같은 **articulation 순서** 전체 관절 q/dq + base frame projected gravity.
+        joint order 재매핑이 없도록 leg-major(_joint_ids)가 아니라 raw articulation 순서를 그대로 낸다.
+
+        Returns:
+            dict — ``q`` [rad], ``dq`` [rad/s] (각 길이 = articulation 관절 수), ``gravity`` (3, 단위벡터).
+        """
+        return {
+            "q": self.robot.data.joint_pos[0].cpu().numpy(),
+            "dq": self.robot.data.joint_vel[0].cpu().numpy(),
+            "gravity": self.robot.data.projected_gravity_b[0].cpu().numpy(),
+        }
+
     def _to_tensor(self, x: torch.Tensor | list[float]) -> torch.Tensor:
         t = torch.as_tensor(x, device=self.device, dtype=torch.float32)
         if t.dim() == 1:
@@ -147,6 +180,12 @@ class R2SBipedLegEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        if self.cfg.policy_mode:
+            # policy 모드: 외부(policy_runner)가 set_policy_target으로 넣은 articulation 순서 절대
+            # 목표각을 그대로 적용. slew/faithful PD 우회. joint_ids 생략 = 전체 관절 articulation 순서.
+            del actions
+            self.robot.set_joint_position_target(self._policy_target)
+            return
         if self.cfg.sysid:
             # sysid 모드: actions = 절대 관절 목표각 [rad], **articulation 관절 순서**.
             # PACE(fit_bipedleg.py / collect_chirp_sim_bipedleg.py)가 관절 인덱스로 직접 채워 넣는
@@ -229,3 +268,5 @@ class R2SBipedLegEnv(DirectRLEnv):
         self._kp[env_ids] = torch.tensor(DEFAULT_KP, device=self.device)
         self._kd[env_ids] = torch.tensor(DEFAULT_KD, device=self.device)
         self._tau_ff[env_ids] = 0.0
+        # policy target도 default(articulation 순서 전체 관절)로 초기화 — 스트림 점프 방지.
+        self._policy_target[env_ids] = self.robot.data.default_joint_pos[env_ids]

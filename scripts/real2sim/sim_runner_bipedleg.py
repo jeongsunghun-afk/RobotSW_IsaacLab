@@ -29,12 +29,28 @@ from isaaclab.app import AppLauncher
 
 # r2s_udp는 순수 stdlib이라 AppLauncher 기동 전에 임포트해도 안전하다.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "r2s_biped_leg"))
-from r2s_udp import CMD_PORT, STATE_PORT, pack_state, unpack_cmd  # isort: skip
+from r2s_udp import (  # isort: skip
+    CMD_PORT,
+    POLICY_ACT_PORT,
+    POLICY_STATE_PORT,
+    STATE_PORT,
+    pack_policy_state,
+    pack_state,
+    unpack_cmd,
+    unpack_policy_act,
+)
 
 parser = argparse.ArgumentParser(description="R2S-BipedLeg sim runner (UDP bridge to gui_controller.py).")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
 parser.add_argument(
     "--fix_base", action="store_true", default=False, help="Fix the robot base in mid-air instead of free spawn."
+)
+parser.add_argument(
+    "--policy_mode",
+    action="store_true",
+    default=False,
+    help="Policy mode: receive articulation-order target from policy_runner_bipedleg.py (POLICY_ACT_PORT) "
+    "and publish rich state (q,dq,gravity) on POLICY_STATE_PORT. Free base (fix_base forced False).",
 )
 parser.add_argument("--cmd_port", type=int, default=CMD_PORT, help="UDP port to receive motor commands on.")
 parser.add_argument("--state_port", type=int, default=STATE_PORT, help="UDP port to send sim state to.")
@@ -62,12 +78,24 @@ def main() -> None:
     """Run the UDP <-> Isaac Sim biped-leg bridge loop (latest-wins, non-blocking recv)."""
     # parse and override the environment configuration (CONTRACT §5: fix_base toggle)
     env_cfg = parse_env_cfg(TASK_NAME, device=args_cli.device, num_envs=args_cli.num_envs)
-    env_cfg.fix_base = args_cli.fix_base
+    if args_cli.policy_mode:
+        # policy 모드: 정책이 자유베이스에서 균형을 잡으므로 fix_base는 강제 False.
+        env_cfg.policy_mode = True
+        env_cfg.fix_base = False
+    else:
+        env_cfg.fix_base = args_cli.fix_base
 
     env = gym.make(TASK_NAME, cfg=env_cfg)
     env.reset()
 
-    # UDP sockets: recv is non-blocking so the sim loop never stalls (CONTRACT §4 latest-wins)
+    if args_cli.policy_mode:
+        _run_policy_loop(env)
+    else:
+        _run_position_loop(env)
+
+
+def _run_position_loop(env) -> None:
+    """Position-control 브릿지 (gui_controller.py <-> sim, CMD/STATE 포트)."""
     recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     recv_sock.bind((HOST, args_cli.cmd_port))
     recv_sock.setblocking(False)
@@ -75,7 +103,7 @@ def main() -> None:
     gui_addr: tuple[str, int] | None = None  # 마지막 cmd 발신자에게 state 회신
 
     print(
-        f"[sim_runner_bipedleg] UDP listening on {HOST}:{args_cli.cmd_port}, "
+        f"[sim_runner_bipedleg] position mode — UDP listening on {HOST}:{args_cli.cmd_port}, "
         f"sending state to sender:{args_cli.state_port}",
         flush=True,
     )
@@ -107,6 +135,63 @@ def main() -> None:
                 sim_time = float(env.unwrapped.episode_length_buf[0].item()) * env.unwrapped.step_dt
                 packet = pack_state(seq, sim_time, st["q"], st["dq"], st["ddq"], st["tau_est"])
                 send_sock.sendto(packet, gui_addr)
+            seq += 1
+    finally:
+        recv_sock.close()
+        send_sock.close()
+        env.close()
+
+
+def _run_policy_loop(env) -> None:
+    """Policy 브릿지 (policy_runner_bipedleg.py <-> sim).
+
+    POLICY_ACT_PORT 에서 articulation-순서 목표각을 받아 set_policy_target 으로 적용하고,
+    매 step 후 rich state(q,dq,gravity)를 POLICY_STATE_PORT 로 회신한다 (latest-wins).
+    """
+    recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    recv_sock.bind((HOST, POLICY_ACT_PORT))
+    recv_sock.settimeout(0.1)  # action 대기(blocking) — 없으면 step하지 않고 upright reset 유지
+    send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    print(
+        f"[sim_runner_bipedleg] policy mode (lockstep) — UDP listening on {HOST}:{POLICY_ACT_PORT}, "
+        f"sending rich state to sender:{POLICY_STATE_PORT}",
+        flush=True,
+    )
+
+    zero_action = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
+    seq = 0
+    try:
+        while simulation_app.is_running():
+            # Lockstep: POLICY_ACT 하나당 정확히 1 env.step (학습 1 action = 1 step 불변식 유지).
+            # action이 없으면 step하지 않는다 — 부팅 중/idle에 로봇이 default 자세로 넘어지는 것을 막는다.
+            try:
+                data, src = recv_sock.recvfrom(4096)
+            except (TimeoutError, OSError):
+                continue  # 타임아웃: step 없이 대기 (upright 유지)
+            act = unpack_policy_act(data)
+            # 큐에 쌓인 나머지는 버리고 최신만 사용 (latest-wins, 지연 누적 방지)
+            recv_sock.setblocking(False)
+            while True:
+                try:
+                    data2, src2 = recv_sock.recvfrom(4096)
+                except (BlockingIOError, OSError):
+                    break
+                a2 = unpack_policy_act(data2)
+                if a2 is not None:
+                    act, src = a2, src2
+            recv_sock.settimeout(0.1)
+            if act is None:
+                continue
+
+            env.unwrapped.set_policy_target(act["target_q"])
+            with torch.inference_mode():
+                env.step(zero_action)  # 정확히 1 step
+
+            # 이번 step 결과 rich state를 action 발신자(policy_runner)에게 회신
+            st = env.unwrapped.get_policy_state()
+            packet = pack_policy_state(seq, st["q"], st["dq"], st["gravity"])
+            send_sock.sendto(packet, (src[0], POLICY_STATE_PORT))
             seq += 1
     finally:
         recv_sock.close()

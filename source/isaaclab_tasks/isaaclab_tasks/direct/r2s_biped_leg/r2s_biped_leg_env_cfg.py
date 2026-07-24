@@ -114,6 +114,13 @@ class R2SBipedLegEnvCfg(DirectRLEnvCfg):
     # slew limiter/faithful PD를 우회한다 (chirp 고주파 왜곡 방지). R2SBipedLegSysidEnvCfg가 켠다.
     sysid: bool = False
 
+    # policy 모드 — True면 _pre_physics_step이 외부(policy_runner_bipedleg.py)가 set_policy_target()으로
+    # 주입한 **articulation 순서** 목표각을 set_joint_position_target()으로 직접 적용한다.
+    # slew limiter/faithful PD를 우회하고(학습 파이프라인엔 slew 없음), 게인은 cfg DCMotor 고정
+    # (write_joint_stiffness 경로는 explicit actuator에서 q≈target/2 버그를 유발하므로 절대 사용 안 함).
+    # 자유베이스로 정책이 균형을 잡으므로 fix_base=False 여야 한다.
+    policy_mode: bool = False
+
     # 로봇 — HIND_LEG_CFG는 자유베이스 8-DOF 2족, init z=0.6.
     robot: ArticulationCfg = HIND_LEG_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
