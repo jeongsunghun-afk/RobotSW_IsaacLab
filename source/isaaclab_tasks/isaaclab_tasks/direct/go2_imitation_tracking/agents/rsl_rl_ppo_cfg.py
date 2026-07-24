@@ -7,15 +7,28 @@
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Go2 Imitation Tracking 환경용 PPO + AMP 러너 설정 (Simple 버전).
+"""Go2 Imitation Tracking 환경용 PPO + AMP + RMA 러너 설정.
 
-PPOAMPBase + ActorCritic + OnPolicyRunnerAMPBase 조합.
-MimicKit amp_go2_task_agent.yaml 하이퍼파라미터 기반.
+Runner:    OnPolicyRunnerAMP
+Policy:    ActorCriticRMA  (history encoder + priv encoder, scan 없음)
+Algorithm: PPOAMP  (PPO + AMP discriminator)
+Estimator: priv_explicit(root_lin_vel_b) 예측 (실배포 시 실측 lin_vel 대체)
+
+MimicKit amp_go2_task_agent.yaml 하이퍼파라미터 기반 (AMP dict 값은 불변).
 
 AMP reward mixing:
   - Stage 1 (0~5000 iter):  task_reward_lerp=1.0 → 순수 task reward
   - Stage 2 (5000~ iter):   task_reward_lerp→0.5 → 50% task + 50% AMP
   - annealing 5000 iter (= 5000×24=120000 steps)
+
+obs_groups: env가 반환하는 dict obs {policy, priv_explicit, priv_latent, history} 라우팅.
+  policy:        proprio                [N, 45]
+  priv_explicit: root_lin_vel_b*scale   [N, 3]
+  priv_latent:   armature/friction/...  [N, 19]
+  history:       policy proprio history [N, 10, 45]
+  critic total:  45+3+19 = 67
+scan 그룹 없음 (이 env는 height_scan/clearance 미사용 — ActorCriticRMA는 scan이 obs_groups에
+없으면 scan encoder를 생략한다).
 """
 
 from isaaclab.utils.configclass import configclass
@@ -25,7 +38,7 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Go2 Imitation Tracking 환경용 PPO 러너 설정 (AMP Simple 버전)."""
+    """Go2 Imitation Tracking 환경용 PPO 러너 설정 (RMA + estimator + AMP)."""
 
     num_steps_per_env: int = 24
     max_iterations: int = 50000
@@ -33,17 +46,20 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name: str = "go2_imitation_tracking"
     clip_actions: float = 4.0
 
-    # OnPolicyRunnerAMPBase 사용
-    class_name: str = "OnPolicyRunnerAMPBase"
+    # OnPolicyRunnerAMP 사용 (RMA + estimator)
+    class_name: str = "OnPolicyRunnerAMP"
 
-    # policy obs만 사용 (history/priv 없음)
+    # dict obs: policy/priv_explicit/priv_latent/history (scan 없음)
     obs_groups: dict = {
         "policy": ["policy"],
-        "critic": ["policy"],
+        "critic": ["policy", "priv_explicit", "priv_latent"],
+        "priv_explicit": ["priv_explicit"],
+        "priv": ["priv_latent"],
+        "history": ["history"],
     }
 
     policy: RslRlPpoActorCriticCfg = RslRlPpoActorCriticCfg(
-        class_name="ActorCritic",
+        class_name="ActorCriticRMA",
         init_noise_std=0.25,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
@@ -52,13 +68,18 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         activation="elu",
     )
 
-    estimator = None
+    # priv_explicit(root_lin_vel_b) 예측 — 실배포 시 estimator가 실측 대체
+    estimator: dict = {
+        "hidden_dims": [128, 64],
+        "learning_rate": 1.0e-3,
+        "train_with_estimated_states": True,
+    }
 
     algorithm: RslRlPpoAlgorithmCfg = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,  # std 발산 억제 (0.007→0.005): iter500 이후 reward 평탄한데 noise_std 0.25→4.25 단조발산 관측
+        entropy_coef=0.005,  # std 발산 억제 (0.007→0.005)
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=2e-4,  # MimicKit actor_optimizer lr
@@ -67,7 +88,7 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        class_name="PPOAMPBase",
+        class_name="PPOAMP",
     )
 
     amp: dict = dict(
@@ -90,7 +111,7 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         # ── AMP obs 차원 (env와 일치해야 함) ──────────────────────
         # amp_observation_space = 49 (per-step) × num_amp_observations(=10) = 490
         # R4: per-step 43→49 (+6 root_rot_tan_norm), env_cfg.amp_observation_space=49
-        # NOTE: 이 값은 fallback default일 뿐. OnPolicyRunnerAMPBase가 런타임에
+        # NOTE: 이 값은 fallback default일 뿐. OnPolicyRunnerAMP가 런타임에
         #       env.amp_observation_space.shape[0] (=490)로 덮어쓰므로 disc input_dim은 자동 파생.
         amp_observation_space=490,
         # ── Loss / Reward / Normalizer 방식 선택 ─────────────────

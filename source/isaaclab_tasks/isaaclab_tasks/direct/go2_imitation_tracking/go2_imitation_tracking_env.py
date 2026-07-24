@@ -15,12 +15,18 @@ body-frame 선속도/각속도 추종(vx, vy=0, yaw_rate)으로 교체한 환경
   - AMP Discriminator: 49-dim obs × 10 history = 490-dim  (R4: root_rot_tan_norm 6D 추가)
   - Task reward: lin_vel_reward(0.7) + yaw_vel_reward(0.3)
   - Reset: 항상 RSI (Reference State Initialization)
-  - 알고리즘: PPOAMPBase + OnPolicyRunnerAMPBase (rsl_rl)
+  - 알고리즘: RMA(ActorCriticRMA) + estimator + PPOAMP + OnPolicyRunnerAMP (rsl_rl)
 
-Policy observation (48-dim):
-  root_lin_vel_b(3) + root_ang_vel_b(3) + projected_gravity_b(3) +
-  lin_vel_cmd(2) + yaw_vel_cmd(1) +
-  joint_pos - default(12) + joint_vel(12) + actions(12)
+Policy observation dict (실배포 가능 RMA 구조 — root_lin_vel_b는 실측 불가하므로
+estimator가 policy(45)로부터 추정하고, priv_explicit(3)는 학습 시 GT critic/estimator target 용):
+  policy(45)        = root_ang_vel_b(3) + projected_gravity_b(3) +
+                       lin_vel_cmd(2) + yaw_vel_cmd(1) +
+                       joint_pos - default(12) + joint_vel(12) + actions(12)
+  priv_explicit(3)  = root_lin_vel_b * priv_explicit_lin_vel_scale
+  priv_latent(19)   = armature_scale(1) + joint_friction_scale(1) + base_mass_offset(1) +
+                       foot_friction_offset(1) + kp_scale(1) + kd_scale(1) +
+                       action_delay_norm(1) + encoder_bias_norm(12)
+  history(10, 45)   = policy proprio ring buffer (noised)
 
 [R4 ablation] MimicKit compute_tar_obs 방식 이식:
   - 각 disc window frame의 root_quat을 window[-1](현재) frame의 heading-inv 기준 local로 변환
@@ -60,12 +66,22 @@ from .motion_lib import Go2MotionLib
 
 
 class Go2ImitationTrackingEnv(DirectRLEnv):
-    """Go2 AMP + body-frame 속도추종 Imitation 환경.
+    """Go2 AMP + body-frame 속도추종 Imitation 환경 (RMA + estimator 아키텍처).
 
-    Policy observation (48-dim):
-        root_lin_vel_b(3) + root_ang_vel_b(3) + projected_gravity_b(3) +
+    Policy proprio (45-dim, 실측 가능한 신호만):
+        root_ang_vel_b(3) + projected_gravity_b(3) +
         lin_vel_cmd(2) + yaw_vel_cmd(1) +
         joint_pos - default(12) + joint_vel(12) + actions(12)
+
+    priv_explicit(3-dim, 실측 불가 — 학습 시 critic/estimator target GT):
+        root_lin_vel_b * priv_explicit_lin_vel_scale
+
+    priv_latent(19-dim, quasi-static domain-rand 파라미터 — RMA priv encoder 입력):
+        armature_scale(1) + joint_friction_scale(1) + base_mass_offset(1) +
+        foot_friction_offset(1) + kp_scale(1) + kd_scale(1) +
+        action_delay_norm(1) + encoder_bias_norm(12)
+
+    history(10, 45): policy proprio ring buffer (노이즈 포함, 최신이 index 0).
 
     AMP disc observation (49-dim per step):
         dof_pos(12) + dof_vel(12) + root_height(1) +
@@ -156,6 +172,11 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # ── PACE 식별 파라미터 + Domain Randomization 초기화 ─────
         self._init_domain_rand()
 
+        # ── RMA proprio history 링버퍼 (policy obs 45-dim × history_len) ────
+        self._proprio_history = torch.zeros(
+            self.num_envs, self.cfg.history_len, self.cfg.observation_space, device=self.device
+        )
+
     # ──────────────────────────────────────────────────────────
     # IsaacLab DirectRLEnv 필수 메서드
     # ──────────────────────────────────────────────────────────
@@ -176,8 +197,11 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         )
 
         self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped when the scene cfg declares no
+        # entities (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs
+        # unfiltered — robots from different envs physically collide. Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=["/World/ground"])
 
         self.scene.articulations["robot"] = self._robot
         self.scene.sensors["contact_sensor"] = self.contact_sensor
@@ -287,10 +311,10 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             "terminal_amp_obs": self._terminal_amp_obs.clone(),
         }
 
-        # ── Policy 관측 (48-dim) — body-frame 속도 명령을 그대로 삽입 ──
-        policy_obs = torch.cat(
+        # ── Policy proprio (45-dim) — 실측 가능한 신호만. root_lin_vel_b는 실배포 시
+        # 직접 측정 불가하므로 policy obs에서 제외하고 priv_explicit로 분리(estimator가 추정) ──
+        proprio = torch.cat(
             [
-                root_lin_vel_b,  # 3
                 root_ang_vel_b,  # 3
                 self._robot.data.projected_gravity_b,  # 3
                 self._lin_vel_cmd,  # 2 (vx, vy)
@@ -300,9 +324,28 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
                 self.actions,  # 12
             ],
             dim=-1,
-        )  # total = 48
+        )  # total = 45
+        policy_obs = self._apply_obs_dr(proprio)
 
-        return {"policy": self._apply_obs_dr(policy_obs)}
+        # ── priv_explicit(3) — GT root_lin_vel_b (critic/estimator target, 노이즈 없음) ──
+        priv_explicit = root_lin_vel_b * self.cfg.priv_explicit_lin_vel_scale
+
+        # ── priv_latent(19) — quasi-static domain-rand 파라미터 ──
+        priv_latent = self._get_priv_latent()
+
+        # ── proprio history 링버퍼 갱신 (노이즈 포함된 policy_obs 저장) ──
+        self._proprio_history = torch.where(
+            (self.episode_length_buf <= 1)[:, None, None],
+            torch.stack([policy_obs] * self.cfg.history_len, dim=1),
+            torch.cat([self._proprio_history[:, 1:], policy_obs.unsqueeze(1)], dim=1),
+        )
+
+        return {
+            "policy": policy_obs,
+            "priv_explicit": priv_explicit,
+            "priv_latent": priv_latent,
+            "history": self._proprio_history,
+        }
 
     def _get_rewards(self) -> torch.Tensor:
         # ── (1) lin_vel tracking — body frame 직접 비교 ──────────
@@ -435,6 +478,10 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # 속도 명령 재샘플링 (버퍼 초기화 — 불변규칙 §3)
         self._resample_steering(env_ids)  # type: ignore[arg-type]
 
+        # RMA proprio history 리셋 (실질적인 재구성은 다음 _get_observations의
+        # episode_length_buf<=1 분기에서 현재 proprio로 복제되지만, 방어적으로 0 초기화)
+        self._proprio_history[env_ids] = 0.0
+
         # NOTE: amp_observation_buffer는 _reset_strategy_rsi 내부에서 RSI 데이터로 채워짐.
         # 여기서 0으로 덮어쓰지 않음 — 덮어쓰면 RSI 효과가 완전히 사라짐.
 
@@ -495,6 +542,17 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         _bid = self._base_body_id
         self._default_base_mass = self._robot.data.body_mass.torch[:, _bid : _bid + 1].clone()
 
+        # ── RMA priv_latent 버퍼 (per-env, quasi-static DR 파라미터) ────────────
+        # nominal 값(해당 DR 항목이 off 이거나 아직 샘플되지 않은 env)은 항상 이 초기값 유지:
+        # scale류 = 1.0(무작위화 없음), offset류 = 0.0(nominal 대비 편차 없음).
+        # ActorCriticRMA는 priv_latent 키를 무조건 요구하므로 DR off 여도 항상 내보내야 함.
+        self._priv_armature_scale = torch.ones(self.num_envs, 1, device=device)
+        self._priv_joint_friction_scale = torch.ones(self.num_envs, 1, device=device)
+        self._priv_base_mass_offset = torch.zeros(self.num_envs, 1, device=device)  # [kg]
+        self._priv_foot_friction_offset = torch.zeros(self.num_envs, 1, device=device)  # nominal(1.0) 대비 오프셋
+        self._priv_kp_scale = torch.ones(self.num_envs, 1, device=device)
+        self._priv_kd_scale = torch.ones(self.num_envs, 1, device=device)
+
         self._dr_ready = False  # 첫 전체 reset 에서 startup material DR 적용 후 True
 
     def _sample(self, rng: tuple[float, float], n: int, d: int) -> torch.Tensor:
@@ -512,9 +570,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # ── PACE armature / viscous / Coulomb (+ per-env 스케일) ──
         if self.cfg.use_pace_params:
             arm_s = (
-                self._sample(dr.armature_scale_range, n, 1)
-                if (self.cfg.domain_rand and dr.randomize_armature)
-                else 1.0
+                self._sample(dr.armature_scale_range, n, 1) if (self.cfg.domain_rand and dr.randomize_armature) else 1.0
             )
             jf_s = (
                 self._sample(dr.joint_friction_scale_range, n, 1)
@@ -534,6 +590,12 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
                 joint_ids=self._all_joint_ids,
                 env_ids=env_ids_int,
             )
+            # priv_latent 버퍼 갱신: 실제로 랜덤화된 env_ids만 (스칼라 nominal=1.0 인 경우는 미기록,
+            # 초기값이 이미 nominal 이므로 무의미한 write 생략)
+            if self.cfg.domain_rand and dr.randomize_armature:
+                self._priv_armature_scale[env_ids_long] = arm_s
+            if self.cfg.domain_rand and dr.randomize_joint_friction:
+                self._priv_joint_friction_scale[env_ids_long] = jf_s
 
         if not self.cfg.domain_rand:
             return
@@ -549,11 +611,17 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             new_mass = torch.clamp(self._default_base_mass[env_ids_long] + add, min=1e-6)
             body_ids = torch.tensor([self._base_body_id], dtype=torch.int32, device=self.device)
             self._robot.set_masses_index(masses=new_mass, body_ids=body_ids, env_ids=env_ids_int)
+            # priv_latent: 실제 적용된(clamp 반영) nominal 대비 오프셋 [kg]
+            self._priv_base_mass_offset[env_ids_long] = new_mass - self._default_base_mass[env_ids_long]
 
         # ── PD 게인 스케일 (DCMotor actuator 텐서 직접 수정) ──
         if dr.randomize_gains:
-            self._act.stiffness[env_ids_long] = self._base_kp[env_ids_long] * self._sample(dr.kp_scale_range, n, 1)
-            self._act.damping[env_ids_long] = self._base_kd[env_ids_long] * self._sample(dr.kd_scale_range, n, 1)
+            kp_scale = self._sample(dr.kp_scale_range, n, 1)
+            kd_scale = self._sample(dr.kd_scale_range, n, 1)
+            self._act.stiffness[env_ids_long] = self._base_kp[env_ids_long] * kp_scale
+            self._act.damping[env_ids_long] = self._base_kd[env_ids_long] * kd_scale
+            self._priv_kp_scale[env_ids_long] = kp_scale
+            self._priv_kd_scale[env_ids_long] = kd_scale
 
         # ── encoder bias / action delay / push 타이머 ──
         if dr.encoder_bias:
@@ -582,6 +650,8 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self._robot.root_view.set_material_properties(
             wp.from_torch(materials.contiguous(), dtype=wp.float32), wp.from_torch(env_ids, dtype=wp.int32)
         )
+        # priv_latent: nominal 마찰(env_cfg static_friction=1.0) 대비 오프셋으로 저장 (전 env, startup 1회뿐)
+        self._priv_foot_friction_offset[:, 0] = fr.to(self.device).squeeze(-1) - 1.0
 
     def _push_robots(self, env_ids: torch.Tensor):
         """base 에 랜덤 수평 속도 킥을 주어 외란(impulse)을 흉내낸다."""
@@ -594,21 +664,47 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self._robot.write_root_com_velocity_to_sim_index(root_velocity=vel, env_ids=env_ids.to(torch.int32))
 
     def _apply_obs_dr(self, obs: torch.Tensor) -> torch.Tensor:
-        """policy obs(48-dim) 에만 관측 노이즈 + encoder bias 를 더한다. AMP obs 는 불변."""
+        """policy proprio(45-dim) 에만 관측 노이즈 + encoder bias 를 더한다. AMP obs/priv_explicit 는 불변.
+
+        45-dim 레이아웃 (root_lin_vel_b 는 policy obs에서 분리되어 priv_explicit로 이동했으므로
+        여기엔 없음 — GT priv_explicit는 노이즈 없이 그대로 사용):
+            root_ang_vel_b[0:3] + projected_gravity_b[3:6] +
+            lin_vel_cmd[6:8] + yaw_vel_cmd[8:9] +
+            (joint_pos-default)[9:21] + joint_vel[21:33] + actions[33:45]
+        """
         if not self.cfg.domain_rand:
             return obs
         dr = self.cfg.dr
         noise = torch.zeros_like(obs)
         if dr.obs_noise:
             n = self.num_envs
-            noise[:, 0:3] = torch.randn(n, 3, device=self.device) * dr.lin_vel_noise  # root_lin_vel_b
-            noise[:, 3:6] = torch.randn(n, 3, device=self.device) * dr.ang_vel_noise  # root_ang_vel_b
-            noise[:, 6:9] = torch.randn(n, 3, device=self.device) * dr.gravity_noise  # projected_gravity_b
-            noise[:, 12:24] = torch.randn(n, 12, device=self.device) * dr.joint_pos_noise  # joint_pos - default
-            noise[:, 24:36] = torch.randn(n, 12, device=self.device) * dr.joint_vel_noise  # joint_vel
+            noise[:, 0:3] = torch.randn(n, 3, device=self.device) * dr.ang_vel_noise  # root_ang_vel_b
+            noise[:, 3:6] = torch.randn(n, 3, device=self.device) * dr.gravity_noise  # projected_gravity_b
+            noise[:, 9:21] = torch.randn(n, 12, device=self.device) * dr.joint_pos_noise  # joint_pos - default
+            noise[:, 21:33] = torch.randn(n, 12, device=self.device) * dr.joint_vel_noise  # joint_vel
         if dr.encoder_bias:
-            noise[:, 12:24] += self._encoder_bias  # per-env 고정 엔코더 오프셋
+            noise[:, 9:21] += self._encoder_bias  # per-env 고정 엔코더 오프셋
         return obs + noise
+
+    def _get_priv_latent(self) -> torch.Tensor:
+        """RMA priv_latent(19-dim) 조립 — quasi-static domain-rand 파라미터, 매 env 항상 반환.
+
+        DR 항목이 off 이거나 아직 샘플되지 않은 env는 버퍼 nominal 값(scale=1.0, offset=0.0)을
+        그대로 반환한다 (ActorCriticRMA가 priv_latent 키를 무조건 요구하므로).
+        """
+        return torch.cat(
+            [
+                self._priv_armature_scale,  # 1
+                self._priv_joint_friction_scale,  # 1
+                self._priv_base_mass_offset,  # 1  [kg]
+                self._priv_foot_friction_offset,  # 1
+                self._priv_kp_scale,  # 1
+                self._priv_kd_scale,  # 1
+                (self._action_delay_steps.float() / max(1, self.cfg.dr.max_action_delay_steps)).unsqueeze(-1),  # 1
+                self._encoder_bias / PACE_ENCODER_BIAS_MAG,  # 12
+            ],
+            dim=-1,
+        )  # (N, 19)
 
     # ──────────────────────────────────────────────────────────
     # 리셋 전략

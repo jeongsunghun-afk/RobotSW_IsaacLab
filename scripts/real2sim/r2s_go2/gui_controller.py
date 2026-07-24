@@ -18,6 +18,12 @@ Buttons:
     - Sine sweep: inject a sine wave on the selected joint around DEFAULT_POSE
       (continuous, stopped with the Stop button).
     - Sit: interpolate from the current pose to SIT_POSE.
+    - Policy: drive the exported go2_imitation_tracking deployable policy (RMA+estimator,
+      proprio(45)+history(10x45) -> action(12)). Start interpolates to DEFAULT_POSE first
+      (safety handover, real-hardware fall risk), then engages closed-loop control. Inference
+      runs inside the publisher process, not the Qt UI process — see ``policy_runtime.py`` and
+      ``_compute_target``'s ``_MODE_POLICY`` branch. Input source (Sim/Real ``/lowstate``) and
+      x_vel/yaw_vel command are live-adjustable without breaking the control loop.
 
 Every command is published with kp=25, kd=0.5 (all joints), mode=0x01, dq=0, tau=0 (CONTRACT.md §6).
 
@@ -52,6 +58,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 import lowcmd_crc  # noqa: E402
 import motions  # noqa: E402
+import policy_runtime  # noqa: E402
 import r2s_udp  # noqa: E402
 import rclpy  # noqa: E402
 from PyQt5.QtCore import Qt, QTimer  # noqa: E402
@@ -92,6 +99,23 @@ STARTUP_ACQUIRE_TIMEOUT_S: float = 2.0  # 첫 /lowstate 대기 상한 [s]. 넘�
 # 시작 자세 획득용 상태 토픽. shared(실기) 모드면 실로봇 /lowstate, sim 전용이면 sim_bridge /lowstate.
 STARTUP_STATE_TOPIC: str = os.environ.get("R2S_STARTUP_STATE_TOPIC", "/lowstate")
 CMD_TOPIC: str = os.environ.get("R2S_CMD_TOPIC", "/lowcmd")  # publisher 프로세스가 발행하는 명령 토픽
+
+# Policy 모드 상태 소스 — 실로봇은 항상 고정 "/lowstate"(remap 안 함, CONTRACT §3). sim은
+# monitor.py와 동일한 R2S_SIM_STATE_TOPIC 관례를 재사용(run_gui_controller.sh가 shared/sim-only
+# 모드에 맞춰 이미 export함 — sim-only일 땐 "/lowstate"로 겹쳐도 rclpy가 다중구독을 허용하므로
+# 무해하다). STARTUP_STATE_TOPIC(위)은 기동 시 자세 획득 전용이라 건드리지 않는다 — 두 목적을
+# 한 구독으로 겸용하면 STARTUP_STATE_TOPIC이 sim으로 오버라이드된 경우 policy의 "real" 소스
+# 의미가 깨지므로, 약간의 구독 중복을 감수하고 policy 전용 구독을 별도로 둔다.
+POLICY_REAL_STATE_TOPIC: str = "/lowstate"
+POLICY_SIM_STATE_TOPIC: str = os.environ.get("R2S_SIM_STATE_TOPIC", "/sim/lowstate")
+DEPLOYABLE_POLICY_PATH: str = os.environ.get(
+    "R2S_DEPLOYABLE_POLICY",
+    os.path.join(
+        # scripts/real2sim/r2s_go2/gui_controller.py -> repo root (4 levels up from this file)
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "logs/rsl_rl/go2_imitation_tracking/2026-07-24_13-03-00/exported/deployable_policy.pt",
+    ),
+)
 
 # Self-contained dark-theme QSS. Purely cosmetic (colors/spacing/typography) — applied once
 # in main() via app.setStyleSheet(); no widget behavior, signal wiring, or timer logic reads
@@ -262,6 +286,7 @@ _NUM = r2s_udp.NUM_MOTORS
 _MODE_HOLD = 0  # 고정 자세 유지 (BASE_Q)
 _MODE_SEQUENCE = 1  # 프레임 버퍼를 경과 시간으로 인덱싱 (보간/Stand/Sit/Step/StandUp)
 _MODE_SINE = 2  # BASE_Q + 선택 관절에 사인 주입 (경과 시간 기반)
+_MODE_POLICY = 3  # 실측 proprio + policy 추론으로 매 tick 목표 계산 (base/start_time 미사용)
 
 _SM_MODE = 0
 _SM_KP = 1
@@ -274,12 +299,31 @@ _SM_SINE_JOINT = 7
 _SM_SINE_AMP = 8
 _SM_SINE_FREQ = 9
 _SM_MEASURED_VALID = 10  # 0/1: publisher가 /lowstate를 받았는가
-_SM_BASE_Q = 11  # 11..22: hold 자세 / sine 기준 자세
+_SM_BASE_Q = 11  # 11..22: hold 자세 / sine 기준 자세 / policy 모드 fallback(default) 자세
 _SM_MEASURED_Q = 23  # 23..34: 로봇 실측 관절각 (publisher가 /lowstate에서 씀)
 _SM_CURRENT_Q = 35  # 35..46: publisher의 현재 출력 목표 (publisher가 매 cycle 씀, UI가 읽어 보간 시작점으로)
-_SM_FRAMES = 47  # 47..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 12)
+# Policy 모드 — cmd(UI 슬라이더가 씀) + 실측 proprio 소스(publisher가 dual subscription으로 씀,
+# real/sim 각각 별도 슬롯. 값은 전부 DDS 순서 그대로 저장, articulation 순서 변환은 추론 직전에
+# policy_runtime에서 함). history 링버퍼(10×45)는 여기 없음 — publisher 프로세스 로컬 상태(§3).
+_SM_POLICY_XVEL = 47  # lin_vel_cmd x [m/s]
+_SM_POLICY_YAWVEL = 48  # yaw_vel_cmd [rad/s]
+_SM_POLICY_INPUT_SOURCE = 49  # 0=sim, 1=real
+_SM_POLICY_Q_REAL = 50  # 50..61 (DDS 순서)
+_SM_POLICY_DQ_REAL = 62  # 62..73
+_SM_POLICY_GYRO_REAL = 74  # 74..76
+_SM_POLICY_QUAT_REAL = 77  # 77..80 (wxyz)
+_SM_POLICY_VALID_REAL = 81
+_SM_POLICY_Q_SIM = 82  # 82..93 (DDS 순서)
+_SM_POLICY_DQ_SIM = 94  # 94..105
+_SM_POLICY_GYRO_SIM = 106  # 106..108
+_SM_POLICY_QUAT_SIM = 109  # 109..112 (wxyz)
+_SM_POLICY_VALID_SIM = 113
+_SM_FRAMES = 114  # 114..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 12)
 MAX_FRAMES = 512  # 512/50 = 10.24s 최대 시퀀스
 _SM_LEN = _SM_FRAMES + MAX_FRAMES * _NUM
+
+_POLICY_SOURCE_SIM = 0
+_POLICY_SOURCE_REAL = 1
 
 
 def _build_lowcmd(pose: list[float], kp: float, kd: float) -> LowCmd:
@@ -305,12 +349,34 @@ def _build_lowcmd(pose: list[float], kp: float, kd: float) -> LowCmd:
     return msg
 
 
-def _compute_target(shared, now: float) -> tuple[list[float], float, float] | None:
+class _PolicyContext:
+    """publisher 프로세스 로컬 policy 상태(모델 + history). **공유메모리에 절대 안 올림**(§3
+    결정 — history/모델 객체는 publisher만 읽고 쓰므로 굳이 mp.Array로 왕복시킬 이유가 없음)."""
+
+    def __init__(self) -> None:
+        self.model: policy_runtime.PolicyModel | None = None
+        self.history = policy_runtime.ProprioHistory()
+        self._load_attempted = False
+
+    def ensure_loaded(self, node) -> None:
+        """모델을 1회만 로드 시도(실패해도 재시도 안 함 — policy 모드는 그냥 fallback-hold로 동작)."""
+        if self._load_attempted:
+            return
+        self._load_attempted = True
+        try:
+            self.model = policy_runtime.PolicyModel(DEPLOYABLE_POLICY_PATH)
+            node.get_logger().info(f"[policy] deployable 모델 로드 완료: {DEPLOYABLE_POLICY_PATH}")
+        except Exception as exc:  # noqa: BLE001 — 로드 실패는 fallback-hold로 안전하게 흡수
+            node.get_logger().warning(f"[policy] 모델 로드 실패({exc}) — Policy 모드는 fallback-hold로 동작")
+
+
+def _compute_target(shared, now: float, policy_ctx: _PolicyContext) -> tuple[list[float], float, float] | None:
     """공유 메모리의 모션 스펙 + 경과 시간으로 현재 목표 자세를 계산한다 (publisher 프로세스에서 호출).
 
     Returns:
         ``(pose, kp, kd)`` 또는 명령이 없으면(``CMD_VALID=0``) None.
     """
+    policy_inputs = None  # _MODE_POLICY일 때만 채움 — lock 밖에서 추론하기 위해 값만 빼온다
     with shared.get_lock():
         if shared[_SM_CMD_VALID] < 0.5:
             return None
@@ -333,8 +399,52 @@ def _compute_target(shared, now: float) -> tuple[list[float], float, float] | No
             freq = shared[_SM_SINE_FREQ]
             pose = list(base)
             pose[joint] = base[joint] + amp * math.sin(2.0 * math.pi * freq * (now - start))
+        elif mode == _MODE_POLICY:
+            pose = base  # 기본값(실측 미수신/모델 미로드 시 fallback) — 아래서 조건부로 덮어씀
+            source = int(shared[_SM_POLICY_INPUT_SOURCE])
+            if source == _POLICY_SOURCE_REAL:
+                valid = shared[_SM_POLICY_VALID_REAL] >= 0.5
+                q_off, dq_off, gyro_off, quat_off = (
+                    _SM_POLICY_Q_REAL,
+                    _SM_POLICY_DQ_REAL,
+                    _SM_POLICY_GYRO_REAL,
+                    _SM_POLICY_QUAT_REAL,
+                )
+            else:
+                valid = shared[_SM_POLICY_VALID_SIM] >= 0.5
+                q_off, dq_off, gyro_off, quat_off = (
+                    _SM_POLICY_Q_SIM,
+                    _SM_POLICY_DQ_SIM,
+                    _SM_POLICY_GYRO_SIM,
+                    _SM_POLICY_QUAT_SIM,
+                )
+            if valid and policy_ctx.model is not None:
+                policy_inputs = (
+                    [shared[q_off + i] for i in range(_NUM)],  # q_dds
+                    [shared[dq_off + i] for i in range(_NUM)],  # dq_dds
+                    tuple(shared[gyro_off + i] for i in range(3)),  # gyro_xyz
+                    tuple(shared[quat_off + i] for i in range(4)),  # quat_wxyz
+                    shared[_SM_POLICY_XVEL],
+                    shared[_SM_POLICY_YAWVEL],
+                )
         else:  # _MODE_HOLD
             pose = base
+
+    # lock 밖: policy 추론(torch forward, GPU일 수 있음)은 UI의 공유메모리 접근(슬라이더/버튼)을
+    # 블록하지 않도록 lock을 놓은 뒤 수행한다(§3 결정). policy_inputs가 없는 tick(다른 모드이거나,
+    # 실측/모델 미준비인 fallback)은 history를 무효화해 다음 policy 진입 때 새로 seed되게 한다.
+    if policy_inputs is None:
+        policy_ctx.history.clear()
+    else:
+        q_dds, dq_dds, gyro_xyz, quat_wxyz, xvel, yaw_vel = policy_inputs
+        q_art = policy_runtime.dds_to_art(q_dds)
+        dq_art = policy_runtime.dds_to_art(dq_dds)
+        proprio = policy_runtime.build_proprio(gyro_xyz, quat_wxyz, (xvel, 0.0), yaw_vel, q_art, dq_art)
+        history = policy_ctx.history.push(proprio)
+        action = policy_ctx.model.infer(proprio, history)
+        target_art = policy_runtime.action_to_target_art(action)
+        pose = policy_runtime.art_to_dds(target_art)
+
     return pose, kp, kd
 
 
@@ -363,13 +473,46 @@ def publisher_process_main(shared, stop_flag) -> None:
     qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
     node.create_subscription(LowState, STARTUP_STATE_TOPIC, on_lowstate, qos)
 
+    # Policy 모드 전용 구독 — STARTUP_STATE_TOPIC(기동 자세 획득용, 위)과 목적이 달라 별도로 둔다
+    # (STARTUP_STATE_TOPIC이 env로 sim에 오버라이드된 구성이면 "real"의 의미가 깨지므로). q/dq/IMU
+    # 전부 필요해 on_lowstate보다 더 많이 캡처한다. 둘 다 DDS 순서 그대로 저장.
+    def on_lowstate_policy_real(msg: LowState) -> None:
+        with shared.get_lock():
+            for i in range(_NUM):
+                shared[_SM_POLICY_Q_REAL + i] = float(msg.motor_state[i].q)
+                shared[_SM_POLICY_DQ_REAL + i] = float(msg.motor_state[i].dq)
+            for i in range(3):
+                shared[_SM_POLICY_GYRO_REAL + i] = float(msg.imu_state.gyroscope[i])
+            for i in range(4):
+                shared[_SM_POLICY_QUAT_REAL + i] = float(msg.imu_state.quaternion[i])
+            shared[_SM_POLICY_VALID_REAL] = 1.0
+
+    def on_lowstate_policy_sim(msg: LowState) -> None:
+        with shared.get_lock():
+            for i in range(_NUM):
+                shared[_SM_POLICY_Q_SIM + i] = float(msg.motor_state[i].q)
+                shared[_SM_POLICY_DQ_SIM + i] = float(msg.motor_state[i].dq)
+            for i in range(3):
+                shared[_SM_POLICY_GYRO_SIM + i] = float(msg.imu_state.gyroscope[i])
+            for i in range(4):
+                shared[_SM_POLICY_QUAT_SIM + i] = float(msg.imu_state.quaternion[i])
+            shared[_SM_POLICY_VALID_SIM] = 1.0
+
+    node.create_subscription(LowState, POLICY_REAL_STATE_TOPIC, on_lowstate_policy_real, qos)
+    node.create_subscription(LowState, POLICY_SIM_STATE_TOPIC, on_lowstate_policy_sim, qos)
+
+    # deployable 모델 로드 + 워밍업(§3) — 여기서 1회, 라이브 50Hz 루프 진입 전에 끝낸다. torch는
+    # PolicyModel 내부에서 fork 이후(=지금, 이 프로세스 안)에만 import 된다(CUDA-after-fork 회피).
+    policy_ctx = _PolicyContext()
+    policy_ctx.ensure_loaded(node)
+
     period = PUBLISH_PERIOD_S
     next_t = time.monotonic()
     try:
         while not stop_flag.value and rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.0)
             now = time.monotonic()
-            result = _compute_target(shared, now)
+            result = _compute_target(shared, now, policy_ctx)
             if result is not None:  # 시작 자세 획득 전(CMD_VALID=0)엔 발행 보류
                 pose, kp, kd = result
                 pub.publish(_build_lowcmd(pose, kp, kd))
@@ -410,6 +553,13 @@ class MainWindow(QMainWindow):
         self._sine_base_pose: list[float] = list(motions.DEFAULT_POSE)
         self._sine_start_time: float = 0.0
 
+        # Policy 모드 상태 — 추론은 publisher 프로세스가 하므로(§3) 여기선 UI 버튼 상태 + engage
+        # 대기 타이머만 추적한다. Start 클릭 시 안전 handover(DEFAULT_POSE로 보간 후 engage, 팀 결정)
+        # 를 위해 일회성 QTimer로 체이닝한다(50Hz 연속 발행과 무관한 1회성 이벤트라 UI 타이머로 충분
+        # — 이 파일 상단 docstring이 배제하는 건 "연속 목표 생성"이지 1회성 지연 실행이 아니다).
+        self._policy_active: bool = False
+        self._policy_engage_timer: QTimer | None = None
+
         # Monitor 는 **별도 프로세스**로 spawn 한다 (렌더를 gui heartbeat 에서 격리; CONTRACT §11).
         # None=미실행. subprocess.Popen 핸들.
         self._monitor_proc: subprocess.Popen | None = None
@@ -421,6 +571,11 @@ class MainWindow(QMainWindow):
         self._sine_joint_combo.currentIndexChanged.connect(self._on_sine_param_changed)
         self._sine_amp_spin.valueChanged.connect(self._on_sine_param_changed)
         self._sine_freq_spin.valueChanged.connect(self._on_sine_param_changed)
+
+        # policy 실행 중 슬라이더/소스를 바꾸면 publisher에 cmd만 갱신(engage는 안 끊김) — sine과 동일 패턴.
+        self._policy_xvel_spin.valueChanged.connect(self._on_policy_param_changed)
+        self._policy_yaw_spin.valueChanged.connect(self._on_policy_param_changed)
+        self._policy_source_combo.currentIndexChanged.connect(self._on_policy_param_changed)
 
         # /lowcmd 발행 + 목표 생성(보간/사인)은 별도 publisher 프로세스가 담당한다(이 UI 프로세스엔
         # 발행/모션 타이머·rclpy spin 없음) — UI 조작이 heartbeat·목표 갱신을 굶기지 못하게 하는 핵심.
@@ -530,6 +685,38 @@ class MainWindow(QMainWindow):
         sine_layout.addWidget(self._sine_stop_btn)
         layout.addWidget(sine_group)
 
+        # -- Policy (deployable RMA+estimator 정책, publisher 프로세스에서 50Hz 추론 — §3) --
+        policy_group = QGroupBox("Policy")
+        policy_layout = QHBoxLayout(policy_group)
+        policy_layout.setSpacing(10)
+        policy_layout.addWidget(QLabel("x_vel [m/s]:"))
+        self._policy_xvel_spin = QDoubleSpinBox()
+        self._policy_xvel_spin.setRange(*policy_runtime.LIN_VEL_X_RANGE)
+        self._policy_xvel_spin.setSingleStep(0.1)
+        self._policy_xvel_spin.setValue(0.0)
+        policy_layout.addWidget(self._policy_xvel_spin)
+        policy_layout.addWidget(QLabel("yaw_vel [rad/s]:"))
+        self._policy_yaw_spin = QDoubleSpinBox()
+        self._policy_yaw_spin.setRange(*policy_runtime.YAW_VEL_RANGE)
+        self._policy_yaw_spin.setSingleStep(0.1)
+        self._policy_yaw_spin.setValue(0.0)
+        policy_layout.addWidget(self._policy_yaw_spin)
+        policy_layout.addWidget(QLabel("Source:"))
+        self._policy_source_combo = QComboBox()
+        self._policy_source_combo.addItems(["Sim", "Real"])  # index 0=Sim, 1=Real (_POLICY_SOURCE_*)
+        policy_layout.addWidget(self._policy_source_combo)
+        self._policy_start_btn = QPushButton("Start")
+        self._policy_start_btn.setObjectName("primaryButton")
+        self._policy_start_btn.clicked.connect(self._on_policy_start_clicked)
+        policy_layout.addWidget(self._policy_start_btn)
+        self._policy_stop_btn = QPushButton("Stop")
+        self._policy_stop_btn.setObjectName("dangerButton")
+        self._policy_stop_btn.clicked.connect(self._on_policy_stop_clicked)
+        self._policy_stop_btn.setEnabled(False)
+        policy_layout.addWidget(self._policy_stop_btn)
+        policy_layout.addStretch(1)
+        layout.addWidget(policy_group)
+
         layout.addStretch(1)
 
         # -- Status bar --
@@ -560,6 +747,8 @@ class MainWindow(QMainWindow):
     def _write_hold(self, pose: list[float]) -> None:
         """고정 자세 유지 명령."""
         self._sine_active = False
+        self._policy_active = False
+        self._cancel_policy_engage()  # 대기 중인 engage 타이머가 나중에 엉뚱하게 발화하는 것 방지(안전)
         self._current_pose = list(pose)
         self._latest_pose = list(pose)
         with self._shared.get_lock():
@@ -571,8 +760,15 @@ class MainWindow(QMainWindow):
             self._shared[_SM_CMD_VALID] = 1.0
 
     def _write_sequence(self, seq: list[list[float]]) -> None:
-        """프레임 시퀀스를 publisher가 경과 시간으로 재생하도록 공유 메모리에 쓴다(sine 정지)."""
+        """프레임 시퀀스를 publisher가 경과 시간으로 재생하도록 공유 메모리에 쓴다(sine/policy 정지).
+
+        ⚠ Policy Start 버튼도 안전 handover(팀 결정, §5)로 이 경로(→ `_play_sequence_to`)를 거친다 —
+        그 시점엔 아직 engage 타이머가 없어(아래서 만들기 전) `_cancel_policy_engage()`가 no-op이라
+        문제없다(호출 순서: 보간 시작 → 여기 도달 → 리턴 후에야 engage 타이머 생성).
+        """
         self._sine_active = False
+        self._policy_active = False
+        self._cancel_policy_engage()
         if len(seq) > MAX_FRAMES:
             seq = seq[:MAX_FRAMES]  # 상한 초과분은 잘라낸다(10s 이상 시퀀스는 없음)
         self._current_pose = list(seq[-1])  # 시퀀스 종료 자세 (다음 버튼 보간 시작점 근사)
@@ -593,6 +789,8 @@ class MainWindow(QMainWindow):
     def _write_sine(self, base: list[float], joint: int, amp: float, freq: float) -> None:
         """선택 관절에 사인을 주입하는 모션을 publisher가 생성하도록 공유 메모리에 쓴다."""
         self._sine_active = True
+        self._policy_active = False
+        self._cancel_policy_engage()
         self._sine_base_pose = list(base)
         self._sine_start_time = time.monotonic()
         with self._shared.get_lock():
@@ -615,6 +813,51 @@ class MainWindow(QMainWindow):
             self._shared[_SM_SINE_JOINT] = float(joint)
             self._shared[_SM_SINE_AMP] = float(amp)
             self._shared[_SM_SINE_FREQ] = float(freq)
+
+    def _write_policy(self, xvel: float, yaw_vel: float, source: int) -> None:
+        """Policy 모드 진입 명령. sine/sequence와 달리 목표를 여기서 미리 굽지 않는다 — 매 tick
+        publisher가 실측 proprio + 정책 추론으로 새로 계산하므로(§3), 여기선 모드/cmd만 쓴다.
+        `_SM_BASE_Q`는 실측 미수신/모델 미로드 시 publisher의 fallback-hold 자세로 쓰인다 — 방금
+        보간해 도착한 DEFAULT_POSE와 같은 값을 넣어(팀 결정 §5 handover) fallback도 안전하게 만든다.
+        """
+        self._sine_active = False
+        self._policy_active = True
+        with self._shared.get_lock():
+            self._shared[_SM_MODE] = _MODE_POLICY
+            self._shared[_SM_KP] = motions.DEFAULT_KP
+            self._shared[_SM_KD] = motions.DEFAULT_KD
+            for i in range(_NUM):
+                self._shared[_SM_BASE_Q + i] = float(motions.DEFAULT_POSE[i])
+            self._shared[_SM_POLICY_XVEL] = float(xvel)
+            self._shared[_SM_POLICY_YAWVEL] = float(yaw_vel)
+            self._shared[_SM_POLICY_INPUT_SOURCE] = float(source)
+            self._shared[_SM_CMD_VALID] = 1.0
+        self._current_pose = list(motions.DEFAULT_POSE)
+        self._latest_pose = list(motions.DEFAULT_POSE)
+
+    def _update_policy_cmd(self, xvel: float, yaw_vel: float, source: int) -> None:
+        """policy 실행 중 cmd/입력소스만 갱신 — `_update_sine_params`와 동일 패턴."""
+        if not self._policy_active:
+            return
+        with self._shared.get_lock():
+            self._shared[_SM_POLICY_XVEL] = float(xvel)
+            self._shared[_SM_POLICY_YAWVEL] = float(yaw_vel)
+            self._shared[_SM_POLICY_INPUT_SOURCE] = float(source)
+
+    def _cancel_policy_engage(self) -> None:
+        """대기 중인 policy engage 타이머(있으면) 취소. 다른 모션 명령이 boarding 도중 끼어들었는데
+        타이머가 그대로 살아있으면 몇 초 뒤 엉뚱하게 policy로 전환돼버리므로 — sine의 저위험
+        파라미터 갱신과 달리 이건 안전 문제라 `_write_hold`/`_write_sequence`/`_write_sine`에서
+        항상 호출한다."""
+        if self._policy_engage_timer is not None:
+            self._policy_engage_timer.stop()
+            self._policy_engage_timer = None
+
+    def _stop_policy(self) -> None:
+        """policy 비활성화 + 버튼 상태 복원(Stop 클릭 시 호출) — `_stop_sine`과 동일 역할."""
+        self._policy_active = False
+        self._policy_start_btn.setEnabled(True)
+        self._policy_stop_btn.setEnabled(False)
 
     # -- Shared sequence playback --
 
@@ -698,6 +941,50 @@ class MainWindow(QMainWindow):
         self._sine_start_btn.setEnabled(True)
         self._sine_stop_btn.setEnabled(False)
 
+    # -- Policy (deployable RMA+estimator 정책) --
+
+    def _on_policy_start_clicked(self) -> None:
+        # 안전 handover(팀 결정, §5): 현재 자세 → DEFAULT_POSE로 먼저 보간한 뒤에만 engage한다.
+        # 정책이 default 근처 자세를 가정하고 학습됐고, 실하드웨어에서 첫 액션이 임의 자세 기준으로
+        # 튀는 것(낙상 위험)보다 안전이 우선이라 Sine/Step의 무보호 즉시-시작과는 다르게 간다.
+        self._status_label.setText("Policy: default 자세로 이동 중 (engage 대기)...")
+        self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)
+        # 위 호출(→ _write_sequence)이 정책 버튼 상태를 건드리지 않으므로 여기서 명시적으로 설정
+        # (sine과 동일 관례 — write_* 는 *_active 플래그만, 버튼 복원/설정은 핸들러가 담당).
+        self._policy_start_btn.setEnabled(False)
+        self._policy_stop_btn.setEnabled(True)
+
+        xvel = self._policy_xvel_spin.value()
+        yaw_vel = self._policy_yaw_spin.value()
+        source = self._policy_source_combo.currentIndex()  # 0=Sim, 1=Real (_POLICY_SOURCE_*)
+        self._policy_engage_timer = QTimer(self)
+        self._policy_engage_timer.setSingleShot(True)
+        self._policy_engage_timer.timeout.connect(lambda: self._engage_policy(xvel, yaw_vel, source))
+        self._policy_engage_timer.start(int(SEQUENCE_DURATION_S * 1000))
+
+    def _engage_policy(self, xvel: float, yaw_vel: float, source: int) -> None:
+        self._policy_engage_timer = None  # 이미 발화 — 더 취소할 대상 없음
+        self._write_policy(xvel, yaw_vel, source)
+        src_label = "Real" if source == _POLICY_SOURCE_REAL else "Sim"
+        self._status_label.setText(f"Policy: engaged (source={src_label}, x_vel={xvel:.2f}, yaw_vel={yaw_vel:.2f})")
+
+    def _on_policy_param_changed(self) -> None:
+        # policy 실행 중 슬라이더/소스 변경 → publisher에 cmd만 갱신(engage는 안 끊김).
+        self._update_policy_cmd(
+            self._policy_xvel_spin.value(),
+            self._policy_yaw_spin.value(),
+            self._policy_source_combo.currentIndex(),
+        )
+
+    def _on_policy_stop_clicked(self) -> None:
+        # engage 대기 중이었으면 그 타이머부터 취소(안 그러면 뒤늦게 engage 되어버림), 이후 현재
+        # 목표 자세로 홀드(정지 시 target이 튀지 않게) — sine stop과 동일 관례.
+        self._cancel_policy_engage()
+        pose = self._read_current_target()
+        self._stop_policy()
+        self._write_hold(pose)
+        self._status_label.setText("Policy stopped")
+
     # -- continuous publisher --
 
     def _on_startup_tick(self) -> None:
@@ -736,6 +1023,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override signature)
         self._startup_timer.stop()
+        self._cancel_policy_engage()
         # monitor 자식 프로세스가 살아있으면 정리 (orphan 방지). publisher 프로세스는 main()이 정리한다.
         if self._monitor_proc is not None and self._monitor_proc.poll() is None:
             self._monitor_proc.terminate()

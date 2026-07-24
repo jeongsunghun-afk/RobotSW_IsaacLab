@@ -85,12 +85,18 @@ class DomainRandCfg:
 
 @configclass
 class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
-    """Go2 Imitation Tracking 환경 설정 — body-frame 속도추종 버전.
+    """Go2 Imitation Tracking 환경 설정 — body-frame 속도추종 + RMA/estimator 아키텍처.
 
-    Policy 관측 (observation_space = 48):
-        root_lin_vel_b(3) + root_ang_vel_b(3) + projected_gravity_b(3) +
-        lin_vel_cmd(2) + yaw_vel_cmd(1) +
-        joint_pos_offset(12) + joint_vel(12) + actions(12)
+    Policy observation dict (실배포 가능 RMA 구조 — root_lin_vel_b는 실측 불가하므로
+    estimator가 policy(45)로부터 추정하고, priv_explicit(3)는 학습 시 GT critic/estimator target 용):
+        policy(45)        = root_ang_vel_b(3) + projected_gravity_b(3) +
+                             lin_vel_cmd(2) + yaw_vel_cmd(1) +
+                             joint_pos - default(12) + joint_vel(12) + actions(12)
+        priv_explicit(3)  = root_lin_vel_b * priv_explicit_lin_vel_scale
+        priv_latent(19)   = armature_scale(1) + joint_friction_scale(1) + base_mass_offset(1) +
+                             foot_friction_offset(1) + kp_scale(1) + kd_scale(1) +
+                             action_delay_norm(1) + encoder_bias_norm(12)
+        history(10, 45)   = policy proprio ring buffer (noised)
 
     AMP Discriminator 관측 (amp_observation_space = 49, per step):
         dof_pos(12) + dof_vel(12) + root_height(1) +
@@ -110,9 +116,17 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     decimation: int = sim_dt_hz // policy_dt_hz  # 4
 
     # ── 공간 ────────────────────────────────────────────────────
-    observation_space: int = 3 + 3 + 3 + 2 + 1 + 12 + 12 + 12  # = 48
+    # policy(45) = root_ang_vel_b(3) + projected_gravity_b(3) + lin_vel_cmd(2) + yaw_vel_cmd(1)
+    #            + joint_pos_offset(12) + joint_vel(12) + actions(12)
+    observation_space: int = 3 + 3 + 2 + 1 + 12 + 12 + 12  # = 45
     action_space: int = 12
     state_space: int = 0
+
+    # ── RMA (dict obs: policy/priv_explicit/priv_latent/history) ─
+    num_priv_explicit: int = 3  # root_lin_vel_b * priv_explicit_lin_vel_scale
+    num_priv_latent: int = 19  # armature/friction/mass/kp/kd/action_delay/encoder_bias(12)
+    history_len: int = 10  # policy proprio ring buffer depth
+    priv_explicit_lin_vel_scale: float = 2.0  # root_lin_vel_b 스케일 (parkour_imitation 관례)
 
     num_amp_observations: int = 10  # disc hist depth (ablation: 2→10, MimicKit 방향)
     amp_observation_space: int = 49  # per-step disc obs (R4: +6 root_rot_tan_norm)
@@ -195,8 +209,13 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     # ── Sim2Real: PACE 식별 파라미터 반영 + Domain Randomization ──
     # 둘 다 기본 on. 원래 baseline(nominal armature 0.01·마찰 0·DR 없음)을 재현하려면
     # use_pace_params=False, domain_rand=False 로 실행.
-    # [A/B 진단] PACE viscous=2.4 과감쇠가 awkward gait root cause로 확정(팀 분석) → OFF로 5.1 품질 복원 확증.
-    # 확증 후 현실적 viscous(~0.2)/armature(~0.03)로 재도입 예정.
-    use_pace_params: bool = False  # 식별된 armature/viscous/Coulomb 를 로봇 플랜트에 반영
-    domain_rand: bool = False  # DR 활성화 (아래 dr 범위 사용)
+    # [A/B 진단 이력] PACE viscous=2.4 과감쇠가 awkward gait root cause로 확정(팀 분석, 26_07_22) →
+    # 당시 OFF로 5.1 품질 복원 확증. 이후 viscous를 더 현실적인 ~0.2로 재보정하는 후속 작업은 별도.
+    # RMA(ActorCriticRMA)+estimator+DR 아키텍처로 전환하면서 PACE/DR을 다시 기본 ON으로 되돌린다 —
+    # priv_latent가 armature/friction/kp/kd/action_delay/encoder_bias 스케일을 명시적으로 인코딩하므로
+    # 정책이 PACE 플랜트 편차에 강건해지도록 학습시키는 것이 이번 아키텍처의 목적이다.
+    # gait 품질이 재차 저하되더라도 이는 이번 변경의 revert 신호가 아니라 별도 후속 진단 대상이다
+    # (예: viscous 재보정, priv_encoder 용량 조정 등).
+    use_pace_params: bool = True  # 식별된 armature/viscous/Coulomb 를 로봇 플랜트에 반영
+    domain_rand: bool = True  # DR 활성화 (아래 dr 범위 사용)
     dr: DomainRandCfg = DomainRandCfg()
