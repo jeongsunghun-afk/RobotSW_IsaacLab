@@ -559,7 +559,9 @@ LEG_CFG = ArticulationCfg(
             max_depenetration_velocity=1.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
+            # 다리 간 통과(교차·겹침)를 물리적으로 막는다. convex-hull collision 기준이라
+            # 실제 mesh 보다 다소 부풀 수 있어(false-positive 가능) 초기 학습을 관찰해야 한다.
+            enabled_self_collisions=True,
             solver_position_iteration_count=4,
             solver_velocity_iteration_count=0,
         ),
