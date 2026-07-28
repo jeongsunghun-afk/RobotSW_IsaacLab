@@ -44,8 +44,8 @@ parser.add_argument(
     "--mode",
     type=str,
     default="push",
-    choices=["push", "drift", "video"],
-    help="push=S1-G5, drift=S1-G7, video=육안 확인용 영상.",
+    choices=["push", "drift", "hold", "video"],
+    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, video=육안 확인용 영상.",
 )
 parser.add_argument("--video_folder", type=str, default=None, help="video 모드 출력 폴더.")
 parser.add_argument("--video_length", type=int, default=1000, help="video 모드 기록 길이 [step].")
@@ -110,6 +110,15 @@ CONDITIONS: tuple[str, ...] = ("stance4", "stance3")
 # 성공 판정
 SUCCESS_FOOT_ERR = 0.10  # [m] PLAN S1-G5: 발 오차 ≤ 0.1 m
 FINAL_WINDOW = 25  # 마지막 0.5 s 평균으로 발 오차를 낸다
+
+# ── hold 모드 (S1-G2 워크스페이스 커버리지 / S1-G3 hold drift) ────────────────
+HOLD_WINDOW_STEPS = 250  # 5.0 s — PLAN S1-G3 이 명시한 hold 길이
+HOLD_TRIAL_STEPS = SETTLE_STEPS + HOLD_WINDOW_STEPS  # 7.0 s (타임아웃 499 이내)
+GRID_CELL_M = 0.10  # [m] PLAN S1-G2 의 격자 크기
+G2_CELL_ERR = 0.08  # [m] 셀 평균 오차 기준
+G2_CELL_FRAC = 0.90  # 기준을 만족해야 하는 셀 비율
+G3_STD_M = 0.02  # [m] 5 s hold 오차 std 기준
+G3_RANGE_M = 0.05  # [m] 5 s hold 오차 max−min 기준
 
 
 def build_env(seed: int):
@@ -429,6 +438,114 @@ def run_drift_seed(env, policy, seed: int) -> dict:
     }
 
 
+def grid_shape(base_env) -> tuple[int, int, int]:
+    """명령 박스를 ``GRID_CELL_M`` 격자로 나눴을 때의 셀 개수 (x, y, z).
+
+    x·y 는 ±box, z 는 0~box 이므로 축마다 범위가 다르다. 마지막 셀은 잘릴 수 있다.
+    """
+    bx, by, bz = base_env.cfg.command.box_max
+    return (
+        max(1, math.ceil(2.0 * bx / GRID_CELL_M)),
+        max(1, math.ceil(2.0 * by / GRID_CELL_M)),
+        max(1, math.ceil(bz / GRID_CELL_M)),
+    )
+
+
+def build_stratified_targets(base_env, leg_idx, cell_idx, generator: torch.Generator):
+    """각 env 를 배정된 격자 셀 **안에서** 균등 샘플한 목표로 만든다.
+
+    커버리지 게이트는 셀마다 표본이 있어야 성립한다. 목표를 박스 전체에서 무작위로 뽑으면
+    모서리 셀(부피가 잘린 셀)의 표본이 체계적으로 적어져 셀 평균이 불안정해진다.
+    """
+    device = base_env.device
+    n = base_env.num_envs
+    bx, by, bz = base_env.cfg.command.box_max
+    nx, ny, nz = grid_shape(base_env)
+
+    xi = cell_idx // (ny * nz)
+    yi = (cell_idx // nz) % ny
+    zi = cell_idx % nz
+
+    def within(i, lo0, hi_all, count):
+        lo = lo0 + i.float() * GRID_CELL_M
+        hi = torch.minimum(lo + GRID_CELL_M, torch.full_like(lo, hi_all))
+        del count
+        return lo + torch.rand(n, generator=generator, device=device) * (hi - lo)
+
+    off = torch.stack(
+        [within(xi, -bx, bx, nx), within(yi, -by, by, ny), within(zi, 0.0, bz, nz)],
+        dim=-1,
+    )
+
+    nominal = base_env._nominal_foot_pos_b.expand(n, -1, -1).clone()
+    rows = torch.arange(n, device=device)
+    nominal[rows, leg_idx] = nominal[rows, leg_idx] + off
+    return nominal
+
+
+def run_hold_seed(env, policy, seed: int) -> dict:
+    """정적 목표를 5 s 유지하며 S1-G2(커버리지)와 S1-G3(hold drift)를 동시에 잰다.
+
+    두 게이트 모두 "목표를 잡고 유지" 조건에서 정의되므로 한 시행에서 함께 측정한다.
+    오차는 관측 노이즈가 실린 obs 가 아니라 **실제 발 위치**로 계산한다.
+    """
+    base_env = env.unwrapped
+    device = base_env.device
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    nx, ny, nz = grid_shape(base_env)
+    n_cell = nx * ny * nz
+    n_slot = 4 * n_cell
+    slot = torch.arange(n, device=device) % n_slot
+    slot = slot[torch.randperm(n, generator=gen, device=device)]
+    leg_idx = slot // n_cell
+    cell_idx = slot % n_cell
+
+    target_b = build_stratified_targets(base_env, leg_idx, cell_idx, gen)
+    patch_command(base_env, leg_idx, target_b)
+    obs, _ = env.reset()
+
+    alive = torch.ones(n, dtype=torch.bool, device=device)
+    err_sum = torch.zeros(n, device=device)
+    err_sq = torch.zeros(n, device=device)
+    err_min = torch.full((n,), float("inf"), device=device)
+    err_max = torch.zeros(n, device=device)
+    steps = torch.zeros(n, device=device)
+
+    for step in range(HOLD_TRIAL_STEPS):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+        alive = alive & (~base_env._died.clone())
+
+        if step >= SETTLE_STEPS:
+            e = foot_err_of_manip(base_env, leg_idx)
+            m = alive.float()
+            err_sum += e * m
+            err_sq += (e**2) * m
+            err_min = torch.where(alive, torch.minimum(err_min, e), err_min)
+            err_max = torch.where(alive, torch.maximum(err_max, e), err_max)
+            steps += m
+
+    k = steps.clamp(min=1.0)
+    mean_err = err_sum / k
+    var = (err_sq / k - mean_err**2).clamp(min=0.0)
+    return {
+        "leg": leg_idx.cpu(),
+        "cell": cell_idx.cpu(),
+        "alive": alive.cpu(),
+        "mean_err": mean_err.cpu(),
+        "std_err": torch.sqrt(var).cpu(),
+        "range_err": (err_max - torch.where(torch.isinf(err_min), err_max, err_min)).cpu(),
+        "grid": (nx, ny, nz),
+        "box": tuple(float(v) for v in base_env.cfg.command.box_max),
+    }
+
+
 def run_video(env, policy, seed: int) -> dict:
     """육안 확인용 — 3족 hold 를 3 s 마다 새 목표로 갱신하며 영상으로 남긴다.
 
@@ -589,6 +706,100 @@ def report_push(results: list[dict]) -> dict:
     return out
 
 
+def report_hold(results: list[dict]) -> dict:
+    leg = torch.cat([r["leg"] for r in results])
+    cell = torch.cat([r["cell"] for r in results])
+    alive = torch.cat([r["alive"] for r in results])
+    mean_err = torch.cat([r["mean_err"] for r in results])
+    std_err = torch.cat([r["std_err"] for r in results])
+    range_err = torch.cat([r["range_err"] for r in results])
+    nx, ny, nz = results[0]["grid"]
+    n_cell = nx * ny * nz
+    leg_names = ("FL", "FR", "RL", "RR")
+
+    out: dict = {"n_trials": int(alive.numel()), "alive_rate": float(alive.float().mean().item())}
+    a = alive  # 낙상한 시행은 hold 지표가 무의미하므로 제외 (제외 비율도 보고한다)
+
+    # ── S1-G2 워크스페이스 커버리지 ──────────────────────────────────────────
+    print("\n" + "=" * 78)
+    print(f"S1-G2  워크스페이스 커버리지 (격자 {GRID_CELL_M} m → {nx}×{ny}×{nz} = {n_cell} 셀 / 다리)")
+    print("=" * 78)
+    cell_rows = []
+    for li in range(4):
+        for ci in range(n_cell):
+            sel = a & (leg == li) & (cell == ci)
+            cnt = int(sel.sum().item())
+            if cnt == 0:
+                cell_rows.append({"leg": leg_names[li], "cell": ci, "n": 0, "mean_err": float("nan")})
+                continue
+            cell_rows.append(
+                {"leg": leg_names[li], "cell": ci, "n": cnt, "mean_err": float(mean_err[sel].mean().item())}
+            )
+    filled = [c for c in cell_rows if c["n"] > 0]
+    ok = [c for c in filled if c["mean_err"] <= G2_CELL_ERR]
+    frac = len(ok) / max(len(filled), 1)
+    out["g2"] = {
+        "n_cells": len(cell_rows),
+        "n_cells_with_samples": len(filled),
+        "min_samples_per_cell": min((c["n"] for c in filled), default=0),
+        "cell_pass_fraction": frac,
+        "threshold_m": G2_CELL_ERR,
+        "pass": frac >= G2_CELL_FRAC,
+        "worst_cells": sorted(filled, key=lambda c: -c["mean_err"])[:8],
+    }
+    print(f"표본이 있는 셀 {len(filled)}/{len(cell_rows)} (셀당 최소 {out['g2']['min_samples_per_cell']} 시행)")
+    print(
+        f"셀 평균 오차 ≤ {G2_CELL_ERR} m 인 셀: {len(ok)}/{len(filled)} = {frac * 100:.1f}%"
+        f"  (기준 ≥{G2_CELL_FRAC * 100:.0f}%)"
+    )
+    bx, by, _ = results[0]["box"]
+    print("\n오차가 큰 셀 상위 8개 (셀 중심 오프셋 [m]):")
+    for c in out["g2"]["worst_cells"]:
+        ci = c["cell"]
+        xi, yi, zi = ci // (ny * nz), (ci // nz) % ny, ci % nz
+        cx = -bx + (xi + 0.5) * GRID_CELL_M
+        cy = -by + (yi + 0.5) * GRID_CELL_M
+        cz = (zi + 0.5) * GRID_CELL_M
+        print(f"    {c['leg']} (x{cx:+.2f}, y{cy:+.2f}, z{cz:+.2f}) → {c['mean_err']:.4f} m  (n={c['n']})")
+
+    # ── S1-G3 hold drift ────────────────────────────────────────────────────
+    print("\n" + "=" * 78)
+    print(f"S1-G3  hold drift ({HOLD_WINDOW_STEPS / 50.0:.0f} s hold)")
+    print("=" * 78)
+    pass_std = std_err[a] <= G3_STD_M
+    pass_rng = range_err[a] <= G3_RANGE_M
+    both = pass_std & pass_rng
+    out["g3"] = {
+        "std_median_m": pct(std_err[a], 0.5),
+        "std_p95_m": pct(std_err[a], 0.95),
+        "range_median_m": pct(range_err[a], 0.5),
+        "range_p95_m": pct(range_err[a], 0.95),
+        "frac_std_ok": float(pass_std.float().mean().item()),
+        "frac_range_ok": float(pass_rng.float().mean().item()),
+        "frac_both_ok": float(both.float().mean().item()),
+        "mean_err_median_m": pct(mean_err[a], 0.5),
+    }
+    g3 = out["g3"]
+    print(f"오차 std   : 중앙 {g3['std_median_m']:.4f}  95p {g3['std_p95_m']:.4f}   (기준 ≤{G3_STD_M})")
+    print(f"오차 max−min: 중앙 {g3['range_median_m']:.4f}  95p {g3['range_p95_m']:.4f}   (기준 ≤{G3_RANGE_M})")
+    print(
+        f"기준 충족 시행 비율: std {g3['frac_std_ok'] * 100:.1f}%  range {g3['frac_range_ok'] * 100:.1f}%"
+        f"  둘 다 {g3['frac_both_ok'] * 100:.1f}%"
+    )
+    print(f"hold 중 평균 오차 중앙값: {g3['mean_err_median_m']:.4f} m")
+    print(f"낙상으로 제외된 시행: {(1.0 - out['alive_rate']) * 100:.2f}%")
+
+    # 다리별 — 앞/뒤 워크스페이스가 다르므로 분해해 본다.
+    print("\n다리별 (hold 평균 오차 중앙 / std 중앙):")
+    out["per_leg"] = {}
+    for li, name in enumerate(leg_names):
+        sel = a & (leg == li)
+        rec = {"mean_err_median": pct(mean_err[sel], 0.5), "std_median": pct(std_err[sel], 0.5)}
+        out["per_leg"][name] = rec
+        print(f"    {name}: {rec['mean_err_median']:.4f} / {rec['std_median']:.4f}")
+    return out
+
+
 def report_drift(results: list[dict]) -> dict:
     alive = torch.cat([r["alive"] for r in results])
     hold_err = torch.cat([r["hold_err"] for r in results])
@@ -681,12 +892,15 @@ def main():
         try:
             if args_cli.mode == "push":
                 results.append(run_push_seed(env, policy, seed))
+            elif args_cli.mode == "hold":
+                results.append(run_hold_seed(env, policy, seed))
             else:
                 results.append(run_drift_seed(env, policy, seed))
         finally:
             env.close()
 
-    summary = report_push(results) if args_cli.mode == "push" else report_drift(results)
+    reporters = {"push": report_push, "hold": report_hold, "drift": report_drift}
+    summary = reporters[args_cli.mode](results)
     summary["config"] = {
         "checkpoint": args_cli.checkpoint,
         "mode": args_cli.mode,
