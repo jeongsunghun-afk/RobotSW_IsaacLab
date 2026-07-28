@@ -40,7 +40,22 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Go2-Pedipulation-v0 S1 게이트(G5/G7) 평가.")
 parser.add_argument("--checkpoint", type=str, required=True, help="model_*.pt 경로.")
-parser.add_argument("--mode", type=str, default="push", choices=["push", "drift"], help="push=S1-G5, drift=S1-G7.")
+parser.add_argument(
+    "--mode",
+    type=str,
+    default="push",
+    choices=["push", "drift", "video"],
+    help="push=S1-G5, drift=S1-G7, video=육안 확인용 영상.",
+)
+parser.add_argument("--video_folder", type=str, default=None, help="video 모드 출력 폴더.")
+parser.add_argument("--video_length", type=int, default=1000, help="video 모드 기록 길이 [step].")
+parser.add_argument(
+    "--video_leg",
+    type=str,
+    default="cycle",
+    choices=["cycle", "FL", "FR", "RL", "RR"],
+    help="video 모드에서 조작할 다리. 특정 다리를 강제하면 leg 매핑을 육안으로 검증할 수 있다.",
+)
 parser.add_argument("--num_envs", type=int, default=1024, help="시드당 병렬 시행 수.")
 parser.add_argument("--seeds", type=int, default=3, help="시드 개수 (PLAN §5: 최소 3).")
 parser.add_argument("--seed0", type=int, default=1000, help="첫 시드 값. 시드는 seed0, seed0+1, ... 로 진행.")
@@ -57,8 +72,10 @@ parser.add_argument(
 parser.add_argument("--no_domain_rand", action="store_true", help="DR 을 끄고 평가 (기본은 학습과 동일하게 ON).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
-args_cli.enable_cameras = False
+args_cli.enable_cameras = args_cli.mode == "video"
 args_cli.headless = True
+if args_cli.mode == "video" and not args_cli.video_folder:
+    parser.error("--mode video 에는 --video_folder 가 필요합니다.")
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -100,10 +117,11 @@ def build_env(seed: int):
     env_cfg = parse_env_cfg(TASK, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed = seed
 
-    # 명령이 시행 도중 재샘플되면 안 된다.
+    # 명령이 시행 도중 재샘플되면 안 된다 (video 모드는 예외 — 여러 도달을 보여줘야 한다).
     # ⚠ min 만 키우면 (max-min) 이 음수가 되어 타이머가 즉시 만료된다. 반드시 둘 다 같은 값.
-    env_cfg.command.resample_time_min = 1.0e6
-    env_cfg.command.resample_time_max = 1.0e6
+    hold_s = 3.0 if args_cli.mode == "video" else 1.0e6
+    env_cfg.command.resample_time_min = hold_s
+    env_cfg.command.resample_time_max = hold_s
     # ⚠ 평가 중 커리큘럼이 승급하면 목표 분포가 런 도중 바뀐다. 승급 판정 자체를 봉쇄한다.
     env_cfg.command.curriculum_min_episodes = 10**9
     # 학습 커리큘럼이 도달한 최대 박스에서 평가한다.
@@ -117,7 +135,24 @@ def build_env(seed: int):
 
     agent_cfg: RslRlOnPolicyRunnerCfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
 
-    env = gym.make(TASK, cfg=env_cfg, render_mode=None)
+    if args_cli.mode == "video":
+        # 기본 뷰(7.5, 7.5, 7.5)는 로봇이 수십 픽셀로 찍혀 gait 판단이 불가능하다.
+        # env 0 을 근접 추종한다.
+        # 로봇은 제자리 task 라 env 원점 기준 고정 카메라로 충분하다 (표류 ~7 cm).
+        env_cfg.viewer.origin_type = "env"
+        env_cfg.viewer.env_index = 0
+        env_cfg.viewer.eye = (1.3, 1.1, 0.6)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.2)
+        env = gym.make(TASK, cfg=env_cfg, render_mode="rgb_array")
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_folder=args_cli.video_folder,
+            step_trigger=lambda step: step == 0,
+            video_length=args_cli.video_length,
+            disable_logger=True,
+        )
+    else:
+        env = gym.make(TASK, cfg=env_cfg, render_mode=None)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # ── 정책 로드 (play.py 의 OnPolicyRunner 경로와 동일) ────────────────────
@@ -394,6 +429,68 @@ def run_drift_seed(env, policy, seed: int) -> dict:
     }
 
 
+def run_video(env, policy, seed: int) -> dict:
+    """육안 확인용 — 3족 hold 를 3 s 마다 새 목표로 갱신하며 영상으로 남긴다.
+
+    수치 게이트가 통과해도 gait 가 비정상인 사례가 이 저장소에 여러 건 있으므로, S1 종결
+    판정에는 영상 확인이 필요하다.
+    """
+    base_env = env.unwrapped
+    device = base_env.device
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    leg_names = ("FL", "FR", "RL", "RR")
+    if args_cli.video_leg == "cycle":
+        leg_idx = torch.arange(n, device=device) % 4
+    else:
+        leg_idx = torch.full((n,), leg_names.index(args_cli.video_leg), dtype=torch.long, device=device)
+    cond_idx = torch.full((n,), CONDITIONS.index("stance3"), dtype=torch.long, device=device)
+    n_leg = base_env.cfg.num_legs
+
+    def fresh_resample(env_ids: torch.Tensor):
+        """호출 때마다 **새 목표**를 뽑는다 — 한 영상에서 여러 도달 동작을 보기 위함."""
+        if env_ids is None or int(env_ids.numel()) == 0:
+            return
+        ids = env_ids.to(torch.long)
+        target = build_targets(base_env, leg_idx, cond_idx, gen)
+        role = torch.ones(int(ids.numel()), n_leg, device=device)
+        role[torch.arange(int(ids.numel()), device=device), leg_idx[ids]] = 0.0
+        base_env._leg_role[ids] = role
+        base_env._foot_target_b[ids] = target[ids]
+        base_env._traj_center_b[ids] = target[ids]
+        base_env._hold_counter[ids] = 0.0
+        base_env._cmd_timer[ids] = base_env.cfg.command.resample_time_min
+
+    base_env._resample_command = fresh_resample
+    obs, _ = env.reset()
+
+    err_sum = torch.zeros(n, device=device)
+    steps = 0
+    for _ in range(args_cli.video_length):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+        err_sum += foot_err_of_manip(base_env, leg_idx)
+        steps += 1
+
+    mean_err = float((err_sum / max(steps, 1)).mean().item())
+    print(f"\n영상 저장: {args_cli.video_folder}   (평균 추종 오차 {mean_err:.4f} m, {steps} step)")
+    # 카메라는 env 0 만 비추므로 env 0 의 발 높이를 함께 찍어, 영상에서 어느 다리가 들렸는지와
+    # 인덱스 매핑이 일치하는지 대조할 수 있게 한다.
+    foot_z = base_env._compute_foot_pos_b()[0, :, 2]
+    nom_z = base_env._nominal_foot_pos_b[0, :, 2]
+    print(f"env 0 조작 다리: {leg_names[int(leg_idx[0].item())]}")
+    print(
+        "env 0 발 높이 (nominal 대비) [cm]: "
+        + ", ".join(f"{leg_names[i]} {(foot_z[i] - nom_z[i]) * 100:+.1f}" for i in range(4))
+    )
+    return {"mean_err": mean_err, "steps": steps, "manip_leg_env0": leg_names[int(leg_idx[0].item())]}
+
+
 def pct(x: torch.Tensor, q: float) -> float:
     if x.numel() == 0:
         return float("nan")
@@ -565,6 +662,17 @@ def report_drift(results: list[dict]) -> dict:
 
 
 def main():
+    if args_cli.mode == "video":
+        env, policy = build_env(args_cli.seed0)
+        try:
+            summary = run_video(env, policy, args_cli.seed0)
+        finally:
+            env.close()
+        if args_cli.out:
+            with open(args_cli.out, "w") as fh:
+                json.dump(summary, fh, indent=2, ensure_ascii=False)
+        return
+
     results = []
     for i in range(args_cli.seeds):
         seed = args_cli.seed0 + i
