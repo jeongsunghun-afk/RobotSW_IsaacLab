@@ -856,6 +856,7 @@ def run_circle_seed(env, policy, seed: int) -> dict:
     err_max = torch.zeros(n, device=device)
     cnt = torch.zeros(n, device=device)
     # 위상지연용 — 목표와 실제의 x 성분 시계열(중심 제거)을 모은다.
+    rad_hist: list[torch.Tensor] = []
     tx_hist: list[torch.Tensor] = []
     fx_hist: list[torch.Tensor] = []
     rows = torch.arange(n, device=device)
@@ -876,6 +877,11 @@ def run_circle_seed(env, policy, seed: int) -> dict:
         ctr = base_env._traj_center_b[rows, leg_idx]
         tx_hist.append((tgt - ctr)[:, 0].clone())
         fx_hist.append((cur - ctr)[:, 0].clone())
+        # 반경 방향 편향 — 중심에서의 거리. 진폭을 (max−min)/2 로 재면 **극값 통계**라
+        # 떨림에 부풀려진다(발 std 3.9 mm 면 진폭이 ~8 mm 커진다). 평균 반경거리는 그에 강건해서
+        # "원 바깥으로 도는가"를 판정할 수 있는 지표다.
+        rel = cur - ctr
+        rad_hist.append(torch.norm(rel[:, [0, 2]], dim=-1))
 
     rmse = torch.sqrt(err_sq / cnt.clamp(min=1.0))
     tx = torch.stack(tx_hist, dim=1)  # [n, T]
@@ -885,6 +891,7 @@ def run_circle_seed(env, policy, seed: int) -> dict:
     # 정지 목표 유지를 재고 있을 수 있다 (trajectory_mode 가 반영되지 않은 경우).
     tgt_amp = 0.5 * (tx.max(dim=1).values - tx.min(dim=1).values)
     foot_amp = 0.5 * (fx.max(dim=1).values - fx.min(dim=1).values)
+    radial_mean = torch.stack(rad_hist, dim=1).mean(dim=1)
 
     return {
         "leg": leg_idx.cpu(),
@@ -897,6 +904,7 @@ def run_circle_seed(env, policy, seed: int) -> dict:
         "rev_steps": rev_steps,
         "tgt_amp": tgt_amp.cpu(),
         "foot_amp": foot_amp.cpu(),
+        "radial_mean": radial_mean.cpu(),
     }
 
 
@@ -960,9 +968,15 @@ def report_circle(results: list[dict]) -> dict:
     famp = torch.cat([r["foot_amp"] for r in results])[a]
     out["target_amplitude_m"] = pct(tamp, 0.5)
     out["foot_amplitude_m"] = pct(famp, 0.5)
+    rmean = torch.cat([r["radial_mean"] for r in results])[a]
+    out["radial_mean_m"] = pct(rmean, 0.5)
     print(
         f"조건 검증: 목표 x 진폭 {out['target_amplitude_m']:.4f} m (반경 {rad:.3f} 이어야 함),"
         f" 실제 발 진폭 {out['foot_amplitude_m']:.4f} m"
+    )
+    print(
+        f"반경 편향: 평균 반경거리 {out['radial_mean_m']:.4f} m vs 지령 {rad:.3f} m"
+        f"  ({(out['radial_mean_m'] - rad) * 1000:+.1f} mm)   ← 진폭보다 떨림에 강건한 지표"
     )
     out["per_leg"] = {}
     print("\n다리별 RMSE 중앙값 [m]:")
