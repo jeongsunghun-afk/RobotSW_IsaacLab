@@ -44,8 +44,8 @@ parser.add_argument(
     "--mode",
     type=str,
     default="push",
-    choices=["push", "drift", "hold", "video"],
-    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, video=육안 확인용 영상.",
+    choices=["push", "drift", "hold", "video", "showcase"],
+    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, video=육안 확인, showcase=목적 시연 영상.",
 )
 parser.add_argument("--video_folder", type=str, default=None, help="video 모드 출력 폴더.")
 parser.add_argument("--video_length", type=int, default=1000, help="video 모드 기록 길이 [step].")
@@ -72,10 +72,11 @@ parser.add_argument(
 parser.add_argument("--no_domain_rand", action="store_true", help="DR 을 끄고 평가 (기본은 학습과 동일하게 ON).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
-args_cli.enable_cameras = args_cli.mode == "video"
+RENDER_MODES = ("video", "showcase")
+args_cli.enable_cameras = args_cli.mode in RENDER_MODES
 args_cli.headless = True
-if args_cli.mode == "video" and not args_cli.video_folder:
-    parser.error("--mode video 에는 --video_folder 가 필요합니다.")
+if args_cli.mode in RENDER_MODES and not args_cli.video_folder:
+    parser.error(f"--mode {args_cli.mode} 에는 --video_folder 가 필요합니다.")
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -83,9 +84,11 @@ simulation_app = app_launcher.app
 import inspect  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
+import os  # noqa: E402
 from importlib import metadata  # noqa: E402
 
 import gymnasium as gym  # noqa: E402
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
@@ -131,6 +134,9 @@ def build_env(seed: int):
     hold_s = 3.0 if args_cli.mode == "video" else 1.0e6
     env_cfg.command.resample_time_min = hold_s
     env_cfg.command.resample_time_max = hold_s
+    if args_cli.mode == "showcase":
+        # 대본이 30 s 가까이 이어지므로 10 s 기본 에피소드로는 중간에 리셋된다.
+        env_cfg.episode_length_s = 120.0
     # ⚠ 평가 중 커리큘럼이 승급하면 목표 분포가 런 도중 바뀐다. 승급 판정 자체를 봉쇄한다.
     env_cfg.command.curriculum_min_episodes = 10**9
     # 학습 커리큘럼이 도달한 최대 박스에서 평가한다.
@@ -144,20 +150,22 @@ def build_env(seed: int):
 
     agent_cfg: RslRlOnPolicyRunnerCfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
 
-    if args_cli.mode == "video":
-        # 기본 뷰(7.5, 7.5, 7.5)는 로봇이 수십 픽셀로 찍혀 gait 판단이 불가능하다.
-        # env 0 을 근접 추종한다.
+    if args_cli.mode in RENDER_MODES:
+        # 기본 뷰(7.5, 7.5, 7.5)는 로봇이 수십 픽셀로 찍혀 자세 판단이 불가능하다.
         # 로봇은 제자리 task 라 env 원점 기준 고정 카메라로 충분하다 (표류 ~7 cm).
         env_cfg.viewer.origin_type = "env"
         env_cfg.viewer.env_index = 0
-        env_cfg.viewer.eye = (1.3, 1.1, 0.6)
-        env_cfg.viewer.lookat = (0.0, 0.0, 0.2)
+        # 눈높이를 낮게 두면 반대쪽 뒷발의 목표 마커가 몸통에 가린다. 3/4 부감으로 올려
+        # 네 발이 모두 보이게 한다.
+        env_cfg.viewer.eye = (1.35, 1.0, 0.92)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.18)
+        length = sum(s["steps"] for s in SHOWCASE_SCRIPT) if args_cli.mode == "showcase" else args_cli.video_length
         env = gym.make(TASK, cfg=env_cfg, render_mode="rgb_array")
         env = gym.wrappers.RecordVideo(
             env,
             video_folder=args_cli.video_folder,
             step_trigger=lambda step: step == 0,
-            video_length=args_cli.video_length,
+            video_length=length,
             disable_logger=True,
         )
     else:
@@ -546,6 +554,234 @@ def run_hold_seed(env, policy, seed: int) -> dict:
     }
 
 
+# ── showcase 시나리오 ────────────────────────────────────────────────────────
+# 학습 목적을 그대로 보여주는 대본. (지속 step, 다리, nominal 대비 오프셋 [m], 자막, push)
+# 오프셋은 전부 학습 박스(±0.20, ±0.14, 0~0.26) 안이다 — 분포 밖 동작을 시연하지 않는다.
+# ⚠ 다리 교체 구간은 **네 다리에 같은 오프셋**을 준다. 다리마다 다른 목표를 주면 난이도가
+#   섞여 "어느 다리든 같은 정책이 수행한다"는 요점이 흐려진다 (실제로 RL 에만 극단적인 목표를
+#   줬다가 그 구간만 오차가 5 cm 로 나왔다 — 정책이 아니라 대본 탓이었다).
+SWITCH_OFF: tuple[float, float, float] = (0.08, 0.00, 0.18)
+SHOWCASE_SCRIPT: tuple[dict, ...] = (
+    {"steps": 100, "leg": "FL", "off": (0.0, 0.0, 0.0), "label": "Standing on four legs", "marker": False},
+    {"steps": 200, "leg": "FL", "off": SWITCH_OFF, "label": "COMMAND: front-left foot -> target"},
+    {"steps": 150, "leg": "FR", "off": SWITCH_OFF, "label": "SAME COMMAND, front-right foot"},
+    {"steps": 150, "leg": "RL", "off": SWITCH_OFF, "label": "SAME COMMAND, rear-left foot"},
+    {"steps": 150, "leg": "RR", "off": SWITCH_OFF, "label": "SAME COMMAND, rear-right foot"},
+    {"steps": 150, "leg": "FL", "off": (-0.12, 0.06, 0.22), "label": "Targets across the workspace"},
+    {"steps": 150, "leg": "FL", "off": (0.16, -0.08, 0.10), "label": "Targets across the workspace"},
+    {
+        # ⚠ 마지막 push 이후 회복까지 담아야 한다. base frame 기준 오차라 push 직후가 아니라
+        #   자세를 되잡는 ~1 s 뒤에 정점이 오고, 복귀에 다시 ~1 s 가 걸린다. 꼬리가 짧으면
+        #   영상이 회복 도중에 끊겨 실패처럼 보인다.
+        "steps": 440,
+        "leg": "FL",
+        "off": (0.08, 0.00, 0.20),
+        "label": "HOLDING under 100 / 150 / 200 N pushes",
+        "pushes": ((110, 100.0), (200, 150.0), (290, 200.0)),
+    },
+)
+SHOWCASE_TITLE = "Go2 Pedipulation - move a commanded foot to a commanded position and hold it"
+
+# 조작 다리별 카메라 위치 (env 원점 기준). 고정 카메라로는 반대쪽 뒷발의 목표 마커가 몸통에
+# 완전히 가려 "발이 목표에 갔다"를 볼 수 없다. 활성 다리 쪽으로 돌린다.
+SHOWCASE_CAM: dict[str, tuple[float, float, float]] = {
+    "FL": (1.35, 1.00, 0.92),
+    "FR": (1.35, -1.00, 0.92),
+    "RL": (-1.25, 1.10, 0.92),
+    "RR": (-1.25, -1.10, 0.92),
+}
+SHOWCASE_LOOKAT: tuple[float, float, float] = (0.0, 0.0, 0.18)
+
+
+def set_camera(base_env, eye, lookat) -> bool:
+    """env 0 원점 기준으로 뷰포트 카메라를 옮긴다. 성공 여부를 반환한다.
+
+    ``viewport_camera_controller`` 는 GUI/visualizer 가 없는 headless 에서 ``None`` 이므로
+    (``direct_rl_env.py:168-172``) 쓸 수 없다. 그 컨트롤러가 내부에서 호출하는 두 경로를
+    직접 부른다 — rgb_array 렌더는 Kit 렌더러 카메라를 쓰므로 두 번째 호출이 실제로 화면을
+    바꾼다.
+    """
+    origin = base_env.scene.env_origins[0].detach().cpu().numpy()
+    e = origin + np.asarray(eye, dtype=float)
+    t = origin + np.asarray(lookat, dtype=float)
+    base_env.sim.set_camera_view(eye=tuple(float(v) for v in e), target=tuple(float(v) for v in t))
+    try:
+        from isaaclab_physx.renderers.kit_viewport_utils import set_kit_renderer_camera_view
+
+        set_kit_renderer_camera_view(eye=e, target=t, camera_prim_path=base_env.cfg.viewer.cam_prim_path)
+        return True
+    except (ImportError, AttributeError):
+        return False
+
+
+def run_showcase(env, policy, seed: int) -> dict:
+    """학습 목적이 드러나는 시연 영상.
+
+    게이트 측정과 달리 통계가 아니라 **가독성**이 목적이다. 목표를 구 마커로 띄우고,
+    발이 그 안으로 들어가 머무는 것을 보인다. 다리를 바꿔 명령해도 같은 정책이 수행한다는
+    점(ALaM leg-role 설계)과 외란 중에도 유지된다는 점을 한 영상에 담는다.
+
+    ``seed`` 는 env 구성에만 쓰이고 여기서는 참조하지 않는다 — 시나리오가 전부 대본이라
+    무작위 추출이 없다.
+    """
+    del seed
+    import isaaclab.sim as sim_utils
+    from isaaclab.markers import VisualizationMarkers
+    from isaaclab.markers.config import SPHERE_MARKER_CFG
+    from isaaclab.utils.math import quat_apply
+
+    base_env = env.unwrapped
+    device = base_env.device
+    leg_names = ("FL", "FR", "RL", "RR")
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    n_leg = base_env.cfg.num_legs
+    state = {"leg": 0, "off": (0.0, 0.0, 0.0)}
+
+    def scripted_resample(env_ids: torch.Tensor):
+        """대본이 지정한 다리·목표를 그대로 쓴다 (무작위 재샘플 금지)."""
+        if env_ids is None or int(env_ids.numel()) == 0:
+            return
+        ids = env_ids.to(torch.long)
+        nominal = base_env._nominal_foot_pos_b.expand(n, -1, -1).clone()
+        off = torch.tensor(state["off"], device=device)
+        rows = torch.arange(n, device=device)
+        nominal[rows, state["leg"]] = nominal[rows, state["leg"]] + off
+        role = torch.ones(int(ids.numel()), n_leg, device=device)
+        role[:, state["leg"]] = 0.0
+        base_env._leg_role[ids] = role
+        base_env._foot_target_b[ids] = nominal[ids]
+        base_env._traj_center_b[ids] = nominal[ids]
+        base_env._hold_counter[ids] = 0.0
+        base_env._cmd_timer[ids] = 1.0e6
+
+    base_env._resample_command = scripted_resample
+
+    # 목표 마커 — 반지름은 hold 판정 임계(hold_delta_ee)의 대략 절반으로 두어, 발이 마커에
+    # 닿는 것이 곧 "임계 안"임을 눈으로 알 수 있게 한다.
+    marker_cfg = SPHERE_MARKER_CFG.copy()
+    marker_cfg.prim_path = "/Visuals/Pedipulation/target"
+    marker_cfg.markers["sphere"].radius = 0.035
+    marker_cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.85, 0.25))
+    target_marker = VisualizationMarkers(marker_cfg)
+    hidden = torch.tensor([[0.0, 0.0, -10.0]], device=device)
+
+    obs, _ = env.reset()
+
+    timeline: list[dict] = []
+    all_ids = torch.arange(n, device=device)
+    step_global = 0
+    cam = np.asarray(SHOWCASE_CAM[SHOWCASE_SCRIPT[0]["leg"]], dtype=float)
+    for seg in SHOWCASE_SCRIPT:
+        cam_to = np.asarray(SHOWCASE_CAM[seg["leg"]], dtype=float)
+        state["leg"] = leg_names.index(seg["leg"])
+        state["off"] = seg["off"]
+        # 새 목표를 즉시 적용 (에피소드 리셋 없이). ⚠ `_hold_counter` 는 `_get_rewards` 에서
+        # inference mode 안에서 재할당되므로 inference tensor 다 — 밖에서 쓰면 RuntimeError.
+        with torch.inference_mode():
+            scripted_resample(all_ids)
+        pushes = dict(seg.get("pushes", ()))
+        show_marker = seg.get("marker", True)
+
+        # ⚠ 카메라는 **구간 시작에 한 번만** 옮긴다. 매 step 옮기면 RTX 렌더러가 따라오지
+        #   못해 프레임이 백지로 나온다 (매 step 호출 시 1490 중 257 프레임이 날아갔고, 최장
+        #   165 프레임이 연속으로 비었다). 자막도 같은 시점에 바뀌므로 컷 전환으로 읽힌다.
+        cam = cam_to
+        if not set_camera(base_env, cam, SHOWCASE_LOOKAT) and step_global == 0:
+            print("[WARN] Kit 렌더러 카메라를 옮길 수 없다 — 고정 시점으로 촬영된다.")
+
+        for local in range(seg["steps"]):
+            if local in pushes:
+                mag = torch.full((n,), pushes[local], device=device)
+                ang = torch.full((n,), math.pi * 0.25, device=device)
+                apply_push(base_env, mag, ang)
+            elif (local - PUSH_STEPS) in pushes:
+                clear_push(base_env)
+
+            with torch.inference_mode():
+                obs, _, _, _ = env.step(policy(obs))
+
+            root_pos_w, root_quat_w = base_env._base_pose()
+            tgt_b = base_env._foot_target_b[all_ids, state["leg"]]
+            tgt_w = root_pos_w + quat_apply(root_quat_w, tgt_b)
+            target_marker.visualize(translations=tgt_w if show_marker else hidden.expand(n, -1))
+
+            err = float(foot_err_of_manip(base_env, torch.full((n,), state["leg"], device=device))[0].item())
+            active_push = 0.0
+            for s, m in pushes.items():
+                if s <= local < s + PUSH_STEPS:
+                    active_push = m
+            timeline.append(
+                {
+                    "step": step_global,
+                    "label": seg["label"],
+                    "leg": seg["leg"],
+                    "err_m": err,
+                    "push_N": active_push,
+                    "marker": show_marker,
+                }
+            )
+            step_global += 1
+
+    print(f"\n시연 {step_global} step ({step_global / 50.0:.1f} s) 기록 완료.")
+    return {"timeline": timeline, "total_steps": step_global, "title": SHOWCASE_TITLE}
+
+
+def annotate_video(src: str, dst: str, timeline: list[dict], title: str):
+    """렌더된 mp4 에 제목·현재 단계·추종 오차를 얹는다.
+
+    자막이 없으면 "개가 다리를 흔든다"와 "명령받은 점으로 발을 옮긴다"가 구분되지 않는다.
+    한글 폰트가 시스템에 없어 영문으로 쓴다.
+    """
+    # imageio v2 API 를 쓴다 — 이 환경에는 `pyav` 플러그인이 없고 imageio-ffmpeg 만 있다.
+    import imageio
+    from PIL import Image, ImageDraw, ImageFont
+
+    def load_font(size: int):
+        for path in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ):
+            if os.path.isfile(path):
+                return ImageFont.truetype(path, size)
+        return ImageFont.load_default()
+
+    f_title, f_label, f_num = load_font(22), load_font(30), load_font(26)
+    reader = imageio.get_reader(src)
+    fps = float(reader.get_meta_data().get("fps", 50.0))
+    writer = imageio.get_writer(dst, fps=fps, codec="libx264", quality=8, macro_block_size=1)
+
+    count = 0
+    for i, frame in enumerate(reader):
+        rec = timeline[min(i, len(timeline) - 1)]
+        img = Image.fromarray(frame)
+        d = ImageDraw.Draw(img, "RGBA")
+        w, h = img.size
+
+        d.rectangle([0, 0, w, 46], fill=(0, 0, 0, 165))
+        d.text((16, 12), title, font=f_title, fill=(255, 255, 255, 255))
+
+        d.rectangle([0, h - 78, w, h], fill=(0, 0, 0, 165))
+        d.text((16, h - 70), rec["label"], font=f_label, fill=(120, 235, 140, 255))
+
+        if rec["marker"]:
+            err_cm = rec["err_m"] * 100.0
+            col = (120, 235, 140, 255) if err_cm <= 5.0 else (245, 200, 90, 255)
+            d.text((16, h - 34), f"foot-to-target error: {err_cm:5.1f} cm", font=f_num, fill=col)
+        if rec["push_N"] > 0.0:
+            d.text((w - 250, h - 34), f"PUSH {rec['push_N']:.0f} N", font=f_num, fill=(255, 110, 110, 255))
+
+        writer.append_data(np.asarray(img))
+        count += 1
+
+    reader.close()
+    writer.close()
+    print(f"자막 입힌 영상: {dst}  ({count} frame @ {fps:.0f} fps)")
+
+
 def run_video(env, policy, seed: int) -> dict:
     """육안 확인용 — 3족 hold 를 3 s 마다 새 목표로 갱신하며 영상으로 남긴다.
 
@@ -873,12 +1109,18 @@ def report_drift(results: list[dict]) -> dict:
 
 
 def main():
-    if args_cli.mode == "video":
+    if args_cli.mode in RENDER_MODES:
         env, policy = build_env(args_cli.seed0)
         try:
-            summary = run_video(env, policy, args_cli.seed0)
+            runner = run_showcase if args_cli.mode == "showcase" else run_video
+            summary = runner(env, policy, args_cli.seed0)
         finally:
-            env.close()
+            env.close()  # RecordVideo 는 close 시점에 mp4 를 쓴다 — 자막은 그 뒤에 얹는다.
+        if args_cli.mode == "showcase":
+            src = os.path.join(args_cli.video_folder, "rl-video-step-0.mp4")
+            dst = os.path.join(args_cli.video_folder, "pedipulation_showcase.mp4")
+            annotate_video(src, dst, summary["timeline"], summary["title"])
+            summary["video"] = dst
         if args_cli.out:
             with open(args_cli.out, "w") as fh:
                 json.dump(summary, fh, indent=2, ensure_ascii=False)
