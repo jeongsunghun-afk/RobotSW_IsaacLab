@@ -188,13 +188,21 @@ class Go2PedipulationEnvCfg(DirectRLEnvCfg):
     w_feet_slip: float = -3.0  # 접지 발 미끄러짐
 
     # action 규제 (절대 크기가 아니라 변화율/가속도/토크 — PLAN §3.4)
+    #
     # ⚠ 스케일 주의: 28-dim 에 대한 제곱합이라 항당 기여가 쉽게 커진다. 초기 std=0.5 에서
-    #   E[Σ(Δa)²] ≈ 14, E[Σ(a-2a'+a'')²] ≈ 42 이므로, 추종 보상(최대 1.0/step)을 넘지 않도록
-    #   가중치를 이 수준으로 잡는다. 첫 스모크에서 -0.05/-0.02 는 task 를 완전히 압도했다.
-    w_action_rate: float = -0.005
-    w_action_smooth: float = -0.002
-    w_joint_acc: float = -2.5e-7
-    w_joint_vel: float = -1e-4
+    #   E[Σ(Δa)²] ≈ 14, E[Σ(a-2a'+a'')²] ≈ 42 이므로 **학습 초기에는** 추종 보상을 압도할 수
+    #   있다. 첫 스모크에서 -0.05/-0.02 가 실제로 task 를 완전히 눌렀다.
+    #
+    # 아래 값은 그보다 낮지만, 처음 수렴시킨 -0.005/-0.002 보다는 4배 높다. 그 값에서는 정책이
+    # 관측 노이즈를 액션으로 그대로 흘려보내 유지 중에도 관절 목표가 2.56°/step 흔들렸다.
+    # 4배(현재)와 10배를 fine-tune 으로 비교한 결과가 이 값의 근거다:
+    #   4배  — 떨림 2.56°→1.30°/step, hold 오차 12.4→10.2 mm, push 강건성 불변
+    #   10배 — 떨림 0.91°/step 로 더 낮지만 **150 N push 성공률이 52%→31% 로 붕괴**
+    # 즉 규제를 더 올리면 외란 회복 반응이 느려진다. 측정 근거는 IMPL_LOG §4g.
+    w_action_rate: float = -0.02
+    w_action_smooth: float = -0.008
+    w_joint_acc: float = -1e-6
+    w_joint_vel: float = -5e-4
     w_torque: float = -2e-5
 
     # 접촉 / 안전
