@@ -70,6 +70,11 @@ parser.add_argument(
     "--stance4_z_bias", type=float, default=0.0, help="4족 조건 목표 z 의 nominal 대비 평균 오프셋 [m] (음수=지면 쪽)."
 )
 parser.add_argument("--no_domain_rand", action="store_true", help="DR 을 끄고 평가 (기본은 학습과 동일하게 ON).")
+parser.add_argument(
+    "--no_obs_noise",
+    action="store_true",
+    help="물리 DR 은 두고 **관측 노이즈만** 끈다. 떨림의 원인이 obs 노이즈인지 분리할 때 쓴다.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 RENDER_MODES = ("video", "showcase")
@@ -144,6 +149,10 @@ def build_env(seed: int):
 
     if args_cli.no_domain_rand:
         env_cfg.domain_rand = False
+    if args_cli.no_obs_noise:
+        # 물리 DR(질량·마찰·게인·지연)은 그대로 두고 관측 노이즈만 끈다.
+        env_cfg.dr.obs_noise = False
+        env_cfg.dr.encoder_bias = False
     # 외란은 이 스크립트가 통제한다 — env 내장 랜덤 push/발 외력은 항상 끈다.
     env_cfg.dr.push_robot = False
     env_cfg.dr.push_foot_force = False
@@ -524,11 +533,21 @@ def run_hold_seed(env, policy, seed: int) -> dict:
     err_min = torch.full((n,), float("inf"), device=device)
     err_max = torch.zeros(n, device=device)
     steps = torch.zeros(n, device=device)
+    # 떨림(tremor) 지표 — 유지 중인데도 관절 목표가 매 step 얼마나 흔들리는지.
+    jitter = torch.zeros(n, device=device)  # mean_j |Δ joint target| [rad/step]
+    jvel_sq = torch.zeros(n, device=device)  # mean_j joint_vel² [(rad/s)²]
+    prev_target = base_env._processed_actions.clone()
 
     for step in range(HOLD_TRIAL_STEPS):
         with torch.inference_mode():
             obs, _, _, _ = env.step(policy(obs))
         alive = alive & (~base_env._died.clone())
+
+        if step >= SETTLE_STEPS:
+            m = alive.float()
+            jitter += (base_env._processed_actions - prev_target).abs().mean(dim=-1) * m
+            jvel_sq += (base_env._robot.data.joint_vel.torch**2).mean(dim=-1) * m
+        prev_target = base_env._processed_actions.clone()
 
         if step >= SETTLE_STEPS:
             e = foot_err_of_manip(base_env, leg_idx)
@@ -551,6 +570,8 @@ def run_hold_seed(env, policy, seed: int) -> dict:
         "range_err": (err_max - torch.where(torch.isinf(err_min), err_max, err_min)).cpu(),
         "grid": (nx, ny, nz),
         "box": tuple(float(v) for v in base_env.cfg.command.box_max),
+        "jitter": (jitter / k).cpu(),
+        "jvel_rms": torch.sqrt(jvel_sq / k).cpu(),
     }
 
 
@@ -1024,6 +1045,24 @@ def report_hold(results: list[dict]) -> dict:
     )
     print(f"hold 중 평균 오차 중앙값: {g3['mean_err_median_m']:.4f} m")
     print(f"낙상으로 제외된 시행: {(1.0 - out['alive_rate']) * 100:.2f}%")
+
+    # ── 떨림(tremor) ────────────────────────────────────────────────────────
+    jit = torch.cat([r["jitter"] for r in results])[a]
+    jv = torch.cat([r["jvel_rms"] for r in results])[a]
+    out["tremor"] = {
+        "joint_target_jitter_rad_per_step": pct(jit, 0.5),
+        "joint_target_jitter_deg_per_step": pct(jit, 0.5) * 180.0 / math.pi,
+        "joint_vel_rms_rad_s": pct(jv, 0.5),
+        "foot_pos_std_m": g3["std_median_m"],
+    }
+    tr = out["tremor"]
+    print("\n떨림 지표 (hold 중, 중앙값):")
+    print(
+        f"    관절 목표 흔들림 {tr['joint_target_jitter_rad_per_step']:.5f} rad/step"
+        f" ({tr['joint_target_jitter_deg_per_step']:.3f}°/step)"
+    )
+    print(f"    관절 속도 RMS   {tr['joint_vel_rms_rad_s']:.4f} rad/s")
+    print(f"    발 위치 std     {tr['foot_pos_std_m'] * 1000:.2f} mm")
 
     # 다리별 — 앞/뒤 워크스페이스가 다르므로 분해해 본다.
     print("\n다리별 (hold 평균 오차 중앙 / std 중앙):")
