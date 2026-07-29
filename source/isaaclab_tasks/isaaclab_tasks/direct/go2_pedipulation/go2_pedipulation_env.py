@@ -93,6 +93,11 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._cmd_timer = torch.zeros(n_env, device=device)
         self._traj_phase = torch.zeros(n_env, device=device)  # 궤적 모드 위상 [rad]
         self._traj_center_b = torch.zeros(n_env, n_leg, 3, device=device)
+        # 궤적 파라미터는 env 별로 다르다 — 속도 sweep 평가를 하려면 정책이 여러 각속도를
+        # 겪어야 하므로 cfg 스칼라를 그대로 쓸 수 없다.
+        self._traj_radius = torch.full((n_env,), self.cfg.command.circle_radius, device=device)
+        self._traj_omega = torch.full((n_env,), self.cfg.command.circle_omega, device=device)
+        self._traj_dir = torch.ones(n_env, device=device)  # +1 반시계 / −1 시계
         self._hold_counter = torch.zeros(n_env, n_leg, device=device)
 
         # 조작 다리 목표 관절각 (증분형 action 의 적분 상태)
@@ -282,17 +287,54 @@ class Go2PedipulationEnv(DirectRLEnv):
         # ── 목표 위치: nominal 발 위치 + 커리큘럼 박스 오프셋 ──
         nominal = self._nominal_foot_pos_b.expand(n, -1, -1)  # [n,4,3]
         box = self._cmd_box  # [3]
-        off = torch.empty(n, self.cfg.num_legs, 3, device=device)
-        off[..., 0] = (torch.rand(n, self.cfg.num_legs, device=device) * 2.0 - 1.0) * box[0]
-        off[..., 1] = (torch.rand(n, self.cfg.num_legs, device=device) * 2.0 - 1.0) * box[1]
-        # z 는 위로만 — 발이 바닥에서 시작하므로 들어올리는 방향
-        off[..., 2] = torch.rand(n, self.cfg.num_legs, device=device) * box[2]
+        n_leg = self.cfg.num_legs
+
+        # 궤적 모드에서는 **원 전체가 박스 안에 들어가야** 하므로 중심 샘플링 범위를 반경만큼
+        # 좁힌다. 이걸 안 하면 목표가 학습된 워크스페이스 밖으로 나가 도달 자체가 불가능해진다.
+        if cmd.trajectory_mode == "circle":
+            if cmd.circle_randomize:
+                r = self._sample(cmd.circle_radius_range, n, 1).squeeze(-1)
+                om = self._sample(cmd.circle_omega_range, n, 1).squeeze(-1)
+                sign = torch.where(torch.rand(n, device=device) < 0.5, -1.0, 1.0)
+            else:
+                r = torch.full((n,), cmd.circle_radius, device=device)
+                om = torch.full((n,), cmd.circle_omega, device=device)
+                sign = torch.ones(n, device=device)
+            m = cmd.circle_center_margin
+            # 반경이 박스에 안 들어가면 반경을 줄인다 (박스를 넓히지 않는다).
+            r = torch.minimum(r, torch.clamp((box[2] - 2.0 * m) * 0.5, min=1e-3))
+            r = torch.minimum(r, torch.clamp(box[0] - m, min=1e-3))
+            self._traj_radius[env_ids] = r
+            self._traj_omega[env_ids] = om
+            self._traj_dir[env_ids] = sign
+            x_half = torch.clamp(box[0] - r - m, min=0.0)
+            z_lo, z_hi = r + m, torch.clamp(box[2] - r - m, min=r + m)
+            cx = (torch.rand(n, device=device) * 2.0 - 1.0) * x_half
+            cz = torch.rand(n, device=device) * (z_hi - z_lo) + z_lo
+            off = torch.empty(n, n_leg, 3, device=device)
+            off[..., 0] = cx.unsqueeze(-1)
+            off[..., 1] = (torch.rand(n, n_leg, device=device) * 2.0 - 1.0) * box[1]
+            off[..., 2] = cz.unsqueeze(-1)
+        else:
+            off = torch.empty(n, n_leg, 3, device=device)
+            off[..., 0] = (torch.rand(n, n_leg, device=device) * 2.0 - 1.0) * box[0]
+            off[..., 1] = (torch.rand(n, n_leg, device=device) * 2.0 - 1.0) * box[1]
+            # z 는 위로만 — 발이 바닥에서 시작하므로 들어올리는 방향
+            off[..., 2] = torch.rand(n, n_leg, device=device) * box[2]
         target = nominal + off
 
-        self._foot_target_b[env_ids] = target
         self._traj_center_b[env_ids] = target
         self._traj_phase[env_ids] = torch.rand(n, device=device) * 2.0 * math.pi
         self._hold_counter[env_ids] = 0.0
+        if cmd.trajectory_mode == "circle":
+            # 첫 step 부터 위상에 맞는 점을 가리키게 한다 — 중심을 목표로 두면 리셋 직후
+            # 한 step 동안만 반경만큼 어긋난 목표가 관측된다.
+            ph = self._traj_phase[env_ids]
+            rr = self._traj_radius[env_ids]
+            target = target.clone()
+            target[..., 0] += (rr * torch.cos(ph)).unsqueeze(-1)
+            target[..., 2] += (rr * torch.sin(ph)).unsqueeze(-1)
+        self._foot_target_b[env_ids] = target
 
         self._cmd_timer[env_ids] = (
             torch.rand(n, device=device) * (cmd.resample_time_max - cmd.resample_time_min) + cmd.resample_time_min
@@ -304,12 +346,14 @@ class Go2PedipulationEnv(DirectRLEnv):
         if cmd.trajectory_mode == "static":
             return
         if cmd.trajectory_mode == "circle":
-            omega = cmd.circle_speed / max(cmd.circle_radius, 1e-6)  # [rad/s]
-            self._traj_phase = self._traj_phase + omega * self.step_dt
+            # 각속도·반경·회전방향은 env 별로 다르다 (cfg 스칼라가 아니라 버퍼).
+            self._traj_phase += self._traj_dir * self._traj_omega * self.step_dt
             # base frame x-z 평면 원 (발을 앞뒤/위아래로 돌린다)
-            dx = cmd.circle_radius * torch.cos(self._traj_phase)
-            dz = cmd.circle_radius * torch.sin(self._traj_phase)
-            self._foot_target_b = self._traj_center_b.clone()
+            dx = self._traj_radius * torch.cos(self._traj_phase)
+            dz = self._traj_radius * torch.sin(self._traj_phase)
+            # ⚠ 재할당하면 텐서 객체가 바뀐다. 평가 스크립트가 이 버퍼에 밖에서 쓰기 때문에
+            #   (inference tensor 문제) 반드시 in-place 로 갱신한다.
+            self._foot_target_b.copy_(self._traj_center_b)
             self._foot_target_b[..., 0] += dx.unsqueeze(-1)
             self._foot_target_b[..., 2] += dz.unsqueeze(-1)
         else:
@@ -358,6 +402,15 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _post_physics_step(self):
+        """물리 step 이후 명령·외란을 갱신한다.
+
+        ⚠ ``_post_physics_step`` 은 ``DirectRLEnv`` 의 훅이 **아니다.** 이 저장소의 여러 env 가
+        같은 이름의 메서드를 정의해 두었지만 프레임워크는 호출하지 않으며, 실제로 부르는 것은
+        ``skeleton_wtw_env.py`` 하나뿐이다. 그래서 이 메서드는 오랫동안 **죽어 있었고**
+        궤적 진행·에피소드 중 명령 재샘플·DR base push 가 전부 실행되지 않았다.
+        ``_get_dones`` 첫머리에서 명시적으로 호출한다 — 물리가 t+1 로 간 뒤, 보상과 관측이
+        계산되기 전이 목표를 t+1 로 옮길 자리다.
+        """
         self._advance_trajectory()
 
         self._cmd_timer -= self.step_dt
@@ -580,6 +633,10 @@ class Go2PedipulationEnv(DirectRLEnv):
     # ──────────────────────────────────────────────────────────
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        # DirectRLEnv 가 물리 step 직후 처음 부르는 훅이다. 명령·외란 갱신을 여기에 건다
+        # (이유는 _post_physics_step 의 docstring 참조).
+        self._post_physics_step()
+
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         if self.cfg.early_termination:

@@ -44,9 +44,11 @@ parser.add_argument(
     "--mode",
     type=str,
     default="push",
-    choices=["push", "drift", "hold", "video", "showcase"],
-    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, video=육안 확인, showcase=목적 시연 영상.",
+    choices=["push", "drift", "hold", "circle", "video", "showcase"],
+    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, circle=S2-G1/G2/G4/G5, video/showcase=영상.",
 )
+parser.add_argument("--circle_omega", type=float, default=0.5, help="circle 모드 각속도 [rad/s].")
+parser.add_argument("--circle_radius", type=float, default=0.10, help="circle 모드 반경 [m].")
 parser.add_argument("--video_folder", type=str, default=None, help="video 모드 출력 폴더.")
 parser.add_argument("--video_length", type=int, default=1000, help="video 모드 기록 길이 [step].")
 parser.add_argument(
@@ -142,6 +144,13 @@ def build_env(seed: int):
     if args_cli.mode == "showcase":
         # 대본이 30 s 가까이 이어지므로 10 s 기본 에피소드로는 중간에 리셋된다.
         env_cfg.episode_length_s = 120.0
+    if args_cli.mode == "circle":
+        # 1회전 = 2π/ω. ω=0.25 rad/s 면 25 s 라 10 s 에피소드로는 한 바퀴도 못 돈다.
+        env_cfg.episode_length_s = 120.0
+        env_cfg.command.trajectory_mode = "circle"
+        env_cfg.command.circle_randomize = False  # 평가는 고정 반경·각속도
+        env_cfg.command.circle_radius = args_cli.circle_radius
+        env_cfg.command.circle_omega = args_cli.circle_omega
     # ⚠ 평가 중 커리큘럼이 승급하면 목표 분포가 런 도중 바뀐다. 승급 판정 자체를 봉쇄한다.
     env_cfg.command.curriculum_min_episodes = 10**9
     # 학습 커리큘럼이 도달한 최대 박스에서 평가한다.
@@ -803,6 +812,168 @@ def annotate_video(src: str, dst: str, timeline: list[dict], title: str):
     print(f"자막 입힌 영상: {dst}  ({count} frame @ {fps:.0f} fps)")
 
 
+def run_circle_seed(env, policy, seed: int) -> dict:
+    """원 궤적 추종 — S2-G1(RMSE) / G2(최대편차) / G4(위상지연) / G5(완주율).
+
+    한 바퀴를 온전히 도는 구간에서 잰다. 명령은 env 가 생성하되(``trajectory_mode="circle"``),
+    조작 다리만 고정 배정해 다리별 분해가 가능하게 한다.
+    """
+    base_env = env.unwrapped
+    device = base_env.device
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    n_leg = base_env.cfg.num_legs
+    leg_idx = (torch.arange(n, device=device) % 4)[torch.randperm(n, generator=gen, device=device)]
+
+    # 명령 생성은 env 의 circle 경로를 그대로 쓰고, **조작 다리만** 고정한다.
+    orig_resample = base_env._resample_command
+
+    def leg_fixed_resample(env_ids: torch.Tensor):
+        orig_resample(env_ids)
+        if env_ids is None or int(env_ids.numel()) == 0:
+            return
+        ids = env_ids.to(torch.long)
+        role = torch.ones(int(ids.numel()), n_leg, device=device)
+        role[torch.arange(int(ids.numel()), device=device), leg_idx[ids]] = 0.0
+        base_env._leg_role[ids] = role
+        base_env._cmd_timer[ids] = 1.0e6
+
+    base_env._resample_command = leg_fixed_resample
+    obs, _ = env.reset()
+
+    omega = float(args_cli.circle_omega)
+    rev_steps = int(math.ceil(2.0 * math.pi / omega / base_env.step_dt))
+    total = SETTLE_STEPS + rev_steps
+    assert total < base_env.max_episode_length - 1, f"에피소드가 짧다: {total} vs {base_env.max_episode_length}"
+
+    alive = torch.ones(n, dtype=torch.bool, device=device)
+    err_sq = torch.zeros(n, device=device)
+    err_max = torch.zeros(n, device=device)
+    cnt = torch.zeros(n, device=device)
+    # 위상지연용 — 목표와 실제의 x 성분 시계열(중심 제거)을 모은다.
+    tx_hist: list[torch.Tensor] = []
+    fx_hist: list[torch.Tensor] = []
+    rows = torch.arange(n, device=device)
+
+    for step in range(total):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+        alive = alive & (~base_env._died.clone())
+        if step < SETTLE_STEPS:
+            continue
+        m = alive.float()
+        e = foot_err_of_manip(base_env, leg_idx)
+        err_sq += (e**2) * m
+        err_max = torch.where(alive, torch.maximum(err_max, e), err_max)
+        cnt += m
+        tgt = base_env._foot_target_b[rows, leg_idx]
+        cur = base_env._compute_foot_pos_b()[rows, leg_idx]
+        ctr = base_env._traj_center_b[rows, leg_idx]
+        tx_hist.append((tgt - ctr)[:, 0].clone())
+        fx_hist.append((cur - ctr)[:, 0].clone())
+
+    rmse = torch.sqrt(err_sq / cnt.clamp(min=1.0))
+    tx = torch.stack(tx_hist, dim=1)  # [n, T]
+    fx = torch.stack(fx_hist, dim=1)
+    lag = _phase_lag_steps(tx, fx, max_lag=int(0.4 / base_env.step_dt))
+    # 조건 검증: 목표가 실제로 반경만큼 돌았는가. 이게 없으면 "궤적 추종"이 아니라
+    # 정지 목표 유지를 재고 있을 수 있다 (trajectory_mode 가 반영되지 않은 경우).
+    tgt_amp = 0.5 * (tx.max(dim=1).values - tx.min(dim=1).values)
+    foot_amp = 0.5 * (fx.max(dim=1).values - fx.min(dim=1).values)
+
+    return {
+        "leg": leg_idx.cpu(),
+        "alive": alive.cpu(),
+        "rmse": rmse.cpu(),
+        "max_dev": err_max.cpu(),
+        "lag_s": (lag.float() * base_env.step_dt).cpu(),
+        "omega": omega,
+        "radius": float(args_cli.circle_radius),
+        "rev_steps": rev_steps,
+        "tgt_amp": tgt_amp.cpu(),
+        "foot_amp": foot_amp.cpu(),
+    }
+
+
+def _phase_lag_steps(target: torch.Tensor, actual: torch.Tensor, max_lag: int) -> torch.Tensor:
+    """실제가 목표보다 몇 step 뒤처지는지 — 상호상관 최대점. shape [n].
+
+    위치 오차만 보면 지연이 숨는다(원 위를 일정하게 뒤따라가면 오차는 작게 유지된다).
+    그래서 PLAN §5 가 S2-G4 를 따로 둔다.
+    """
+    t = target - target.mean(dim=1, keepdim=True)
+    a = actual - actual.mean(dim=1, keepdim=True)
+    t = t / t.norm(dim=1, keepdim=True).clamp(min=1e-8)
+    a = a / a.norm(dim=1, keepdim=True).clamp(min=1e-8)
+    best = torch.zeros(t.shape[0], device=t.device)
+    best_lag = torch.zeros(t.shape[0], dtype=torch.long, device=t.device)
+    T = t.shape[1]
+    for k in range(0, max_lag + 1):
+        # actual(t) 를 k 만큼 앞당겨 target 과 겹친다 → k 가 지연량
+        c = (t[:, : T - k] * a[:, k:]).sum(dim=1)
+        upd = c > best
+        best = torch.where(upd, c, best)
+        best_lag = torch.where(upd, torch.full_like(best_lag, k), best_lag)
+    return best_lag
+
+
+def report_circle(results: list[dict]) -> dict:
+    alive = torch.cat([r["alive"] for r in results])
+    rmse = torch.cat([r["rmse"] for r in results])
+    mx = torch.cat([r["max_dev"] for r in results])
+    lag = torch.cat([r["lag_s"] for r in results])
+    leg = torch.cat([r["leg"] for r in results])
+    om, rad = results[0]["omega"], results[0]["radius"]
+    v_tan = om * rad
+
+    a = alive
+    out = {
+        "omega_rad_s": om,
+        "radius_m": rad,
+        "tangential_speed_m_s": v_tan,
+        "n_trials": int(alive.numel()),
+        "completion_rate": float(alive.float().mean().item()),
+        "rmse_median_m": pct(rmse[a], 0.5),
+        "rmse_p95_m": pct(rmse[a], 0.95),
+        "max_dev_median_m": pct(mx[a], 0.5),
+        "max_dev_p95_m": pct(mx[a], 0.95),
+        "lag_median_s": pct(lag[a], 0.5),
+        "lag_p95_s": pct(lag[a], 0.95),
+    }
+    print("\n" + "=" * 78)
+    print(f"S2 원 궤적  (반경 {rad:.3f} m, ω {om:.2f} rad/s, 접선속도 {v_tan:.3f} m/s, 1회전)")
+    print("=" * 78)
+    print(f"완주율(낙상 없음): {out['completion_rate'] * 100:.1f}%   (S2-G5 기준 ≥90%)")
+    print(f"RMSE      중앙 {out['rmse_median_m']:.4f} m   95p {out['rmse_p95_m']:.4f} m")
+    print(f"최대 편차  중앙 {out['max_dev_median_m']:.4f} m   95p {out['max_dev_p95_m']:.4f} m   (S2-G2 절대 ≤0.12)")
+    print(f"위상 지연  중앙 {out['lag_median_s']:.3f} s   95p {out['lag_p95_s']:.3f} s   (S2-G4 기준 ≤0.10 s)")
+    ratio = out["max_dev_median_m"] / max(out["rmse_median_m"], 1e-9)
+    out["max_dev_over_rmse"] = ratio
+    print(f"최대편차/RMSE = {ratio:.2f}   (S2-G2 기준 ≤2.5)")
+
+    tamp = torch.cat([r["tgt_amp"] for r in results])[a]
+    famp = torch.cat([r["foot_amp"] for r in results])[a]
+    out["target_amplitude_m"] = pct(tamp, 0.5)
+    out["foot_amplitude_m"] = pct(famp, 0.5)
+    print(
+        f"조건 검증: 목표 x 진폭 {out['target_amplitude_m']:.4f} m (반경 {rad:.3f} 이어야 함),"
+        f" 실제 발 진폭 {out['foot_amplitude_m']:.4f} m"
+    )
+    out["per_leg"] = {}
+    print("\n다리별 RMSE 중앙값 [m]:")
+    for li, name in enumerate(("FL", "FR", "RL", "RR")):
+        sel = a & (leg == li)
+        v = pct(rmse[sel], 0.5)
+        out["per_leg"][name] = v
+        print(f"    {name}: {v:.4f}")
+    return out
+
+
 def run_video(env, policy, seed: int) -> dict:
     """육안 확인용 — 3족 hold 를 3 s 마다 새 목표로 갱신하며 영상으로 남긴다.
 
@@ -1175,12 +1346,14 @@ def main():
                 results.append(run_push_seed(env, policy, seed))
             elif args_cli.mode == "hold":
                 results.append(run_hold_seed(env, policy, seed))
+            elif args_cli.mode == "circle":
+                results.append(run_circle_seed(env, policy, seed))
             else:
                 results.append(run_drift_seed(env, policy, seed))
         finally:
             env.close()
 
-    reporters = {"push": report_push, "hold": report_hold, "drift": report_drift}
+    reporters = {"push": report_push, "hold": report_hold, "drift": report_drift, "circle": report_circle}
     summary = reporters[args_cli.mode](results)
     summary["config"] = {
         "checkpoint": args_cli.checkpoint,

@@ -97,10 +97,29 @@ class CommandCfg:
     curriculum_min_episodes: int = 200  # 승급 판정에 필요한 최소 종료 에피소드 수
 
     # ── 궤적 모드 (S2) ────────────────────────────────────────
-    # "static": 목표 고정 (S1) · "circle": 원 궤적 (S2)
+    # "static": 목표 고정 (S1) · "circle": base frame x-z 평면 원 궤적 (S2)
+    #
+    # ⚠ PLAN §5 의 S2-G1 은 반경 0.20 m 를 요구하지만 **Go2 다리로는 기구학적으로 불가능**하다.
+    #   FL 발의 도달 영역을 관절 한계로 실측한 결과(IMPL_LOG §4h), 오프셋 범위는 x [-0.373,
+    #   +0.405] / z [-0.090, +0.687] m 로 넓지만 그 영역 **안에 들어가는 최대 원은 반경
+    #   0.140 m** 다 (관절 한계가 만드는 영역 형태 때문이며 z 범위 부족이 아니다).
+    #   S1 이 검증한 명령 박스 안에서는 0.110 m 다. 0.20 m 는 팔 매니퓰레이터 벤치마크에서 온
+    #   값으로, 사족 다리에 전이되지 않는다.
     trajectory_mode: str = "static"
+    # 평가용 고정값 (randomize=False 일 때 사용)
     circle_radius: float = 0.10  # [m]
-    circle_speed: float = 0.05  # [m/s] 발 끝 접선 속도
+    circle_omega: float = 0.5  # [rad/s] 각속도. 접선속도 = omega * radius
+    # 학습용 랜덤화 — 속도 sweep 평가를 하려면 정책이 여러 속도를 겪어야 한다.
+    circle_randomize: bool = True
+    circle_radius_range: tuple[float, float] = (0.05, 0.10)  # [m]
+    # ⚠ sweep 축은 접선속도가 아니라 **각속도**다. 같은 접선속도라도 반경이 작으면 곡률이
+    #   커져 더 어렵다. PLAN 의 임계값(0.035/0.045/0.06 m)은 반경 0.20 m 기준이므로,
+    #   omega 를 맞춰야 그 숫자를 인용할 근거가 생긴다:
+    #     PLAN  r=0.20, v=0.05/0.10/0.20 m/s  →  omega = 0.25 / 0.50 / 1.00 rad/s
+    #     여기  r=0.10, v=0.025/0.05/0.10 m/s →  omega = 0.25 / 0.50 / 1.00 rad/s (동일)
+    circle_omega_range: tuple[float, float] = (0.15, 1.2)  # [rad/s]
+    # 원이 명령 박스를 벗어나지 않도록 중심 샘플링에 남길 여유
+    circle_center_margin: float = 0.01  # [m]
 
     # ── 재샘플 주기 ───────────────────────────────────────────
     resample_time_min: float = 3.0  # [s]
