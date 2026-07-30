@@ -171,6 +171,22 @@ class Go2PedipulationEnvCfg(DirectRLEnvCfg):
     # 조작 다리 증분 목표의 스텝당 상한 — 적분형 action 의 windup 방지
     manip_delta_clip: float = 0.15  # [rad/step]
 
+    # ── 관절 속도 관측 필터 ─────────────────────────────────────
+    # 1.0 = 필터 없음(원시값). EMA: v_filt ← (1-α)·v_filt + α·v_obs
+    #
+    # 유지 중 실제 관절 속도는 RMS 0.013 rad/s 인데 주입 노이즈는 σ=0.5 rad/s 다 — SNR 이 2.6%
+    # 로, 이 채널은 사실상 순수 노이즈다. 그런데도 정책이 여기에 0 이 아닌 이득을 학습해
+    # **떨림 분산의 78%** 를 이 채널이 만든다(측정: IMPL_LOG §4j).
+    #
+    # ⚠ 노이즈 크기(0.5)를 낮추는 것이 아니라 **필터를 넣는다.** 0.5 σ 는 IsaacLab 표준 velocity
+    #   env(±1.5 균등, σ≈0.87)보다 이미 작아서, 줄이면 벤치마크를 쉽게 만드는 것이 된다. 반면
+    #   실기의 관절 속도는 엔코더 차분값이라 어차피 필터를 거쳐 쓴다.
+    # ⚠ **실기 배포 시 같은 필터를 반드시 같은 α 로 적용해야 한다.** 여기만 켜면 sim2real gap 이다.
+    # ⚠ 기본값은 1.0(끔)이다. 이 값을 바꾸면 관측 의미가 바뀌므로 **학습과 평가가 같은 α 여야
+    #   한다** — 기존 체크포인트를 필터 켠 채로 평가하면 분포 밖이다. 켜고 학습한 정책은
+    #   평가 시에도 `env.jvel_filter_alpha` 를 같은 값으로 넘길 것.
+    jvel_filter_alpha: float = 1.0
+
     # 안전: 발 끝 속도. ISO/TS 15066 과도 접촉 한계 역산에서 유도한 값
     # (원위 다리 기준 1.76 m/s, 전체 로봇 기준 1.33 m/s, 통증 회피 권장 0.5 m/s).
     # ⚠ 현재는 **페널티만** 건다. action 이 관절 위치 목표라 발 끝 속도를 직접 clip 하려면
@@ -220,6 +236,13 @@ class Go2PedipulationEnvCfg(DirectRLEnvCfg):
     # 즉 규제를 더 올리면 외란 회복 반응이 느려진다. 측정 근거는 IMPL_LOG §4g.
     w_action_rate: float = -0.02
     w_action_smooth: float = -0.008
+    # 실제로 액추에이터에 보내는 관절 목표의 스텝당 변화량. **떠는 양 자체**를 벌하는 항이다.
+    #
+    # ⚠ w_action_rate 만으로는 조작 다리에 1차 페널티가 걸리지 않는다. a_man 이 이미 증분이라
+    #   Δa_man 은 가속도이고, 목표가 일정한 속도로 표류하는 것에는 비용이 0 이다. 그래서 떨림이
+    #   조작 다리 4.83°/step 대 지지 다리 2.16°/step 으로 갈렸다(측정: IMPL_LOG §4j).
+    #   이 항은 두 경로에 동일하게 걸린다.
+    w_joint_target_rate: float = -0.4
     w_joint_acc: float = -1e-6
     w_joint_vel: float = -5e-4
     w_torque: float = -2e-5

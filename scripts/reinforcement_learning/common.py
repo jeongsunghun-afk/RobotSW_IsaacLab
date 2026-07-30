@@ -25,6 +25,9 @@ from isaaclab.utils.io import dump_yaml
 
 from isaaclab_tasks.utils import add_launcher_args
 
+RECOMMENDED_MAX_VIDEO_LENGTH = 500
+"""Longest ``--video_length`` that does not noticeably stall the training loop [steps]."""
+
 
 def dispatch_library_entrypoint(
     argv: list[str] | None,
@@ -247,6 +250,17 @@ def create_isaaclab_env(
 def wrap_record_video(env, log_dir: str, args_cli: argparse.Namespace):
     """Wrap an environment with video recording when requested.
 
+    Recording is phase-shifted by half of :paramref:`args_cli.video_interval` so that the
+    capture-and-encode burst does not land on step ``0`` or on step multiples of the interval.
+    Those are the steps most likely to coincide with checkpoint writes, which would pile the
+    encoder's disk and GPU load on top of the checkpoint's. The trigger therefore fires at
+    ``interval // 2``, ``interval + interval // 2``, and so on. This keeps the same number of
+    recordings and the same duty cycle as an unshifted trigger; the only behavioral change is
+    that the first video is captured at ``interval // 2`` instead of at step ``0``.
+
+    The offset is a heuristic: it reduces collisions but cannot eliminate them, because the
+    trigger counts environment steps while checkpoints are written on iteration boundaries.
+
     Args:
         env: Gymnasium environment to wrap.
         log_dir: Training log directory.
@@ -258,14 +272,36 @@ def wrap_record_video(env, log_dir: str, args_cli: argparse.Namespace):
     if not args_cli.video:
         return env
 
+    if args_cli.video_length > RECOMMENDED_MAX_VIDEO_LENGTH:
+        print(
+            f"[WARNING] --video_length {args_cli.video_length} exceeds the recommended maximum of"
+            f" {RECOMMENDED_MAX_VIDEO_LENGTH} steps. Frames are buffered in memory and encoded"
+            " synchronously inside the training loop, so long recordings stall training and inflate"
+            " host memory. Consider a shorter --video_length and rendering full-length videos from a"
+            " saved checkpoint afterwards with scripts/tools/report_video.py."
+        )
+
+    # Phase-shift the trigger away from step 0 and from interval multiples. See the docstring.
+    video_offset = args_cli.video_interval // 2
+
+    # A named function, not a lambda: ``print_dict`` below routes callables through
+    # ``callable_to_string``, which for a lambda reads ``inspect.getsourcelines(...)[0][0]``.
+    # For a lambda nested in a multi-line dict literal that first line is ``video_kwargs = {``,
+    # which contains no ``lambda`` — so the split raises ``IndexError`` and kills the run at
+    # startup whenever ``--video`` is passed.
+    def step_trigger(step: int) -> bool:
+        return step % args_cli.video_interval == video_offset
+
     video_kwargs = {
         "video_folder": os.path.join(log_dir, "videos", "train"),
-        "step_trigger": lambda step: step % args_cli.video_interval == 0,
+        "step_trigger": step_trigger,
         "video_length": args_cli.video_length,
         "disable_logger": True,
     }
     print("[INFO] Recording videos during training.")
     print_dict(video_kwargs, nesting=4)
+    # print_dict shows only the trigger's name, which hides the resolved offset. Spell it out.
+    print(f"[INFO] First video at step {video_offset}, then every {args_cli.video_interval} steps.")
     return gym.wrappers.RecordVideo(env, **video_kwargs)
 
 

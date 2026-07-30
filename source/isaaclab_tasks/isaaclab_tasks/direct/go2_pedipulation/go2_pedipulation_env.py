@@ -109,6 +109,8 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._proprio_history = torch.zeros(n_env, self.cfg.history_len, self.cfg.observation_space, device=device)
         self._processed_actions = self._robot.data.default_joint_pos.clone()
         self._prev_joint_target = self._robot.data.default_joint_pos.clone()
+        # 관절 속도 관측 EMA 상태 (cfg.jvel_filter_alpha < 1 일 때만 쓴다)
+        self._jvel_filt = torch.zeros(n_env, 12, device=device)
 
         # ── 물리 상수 ─────────────────────────────────────────────
         self._total_mass = float(self._robot.data.body_mass.torch[0].sum().item())
@@ -147,6 +149,7 @@ class Go2PedipulationEnv(DirectRLEnv):
                 "stance_default",
                 "feet_slip",
                 "action_rate",
+                "joint_target_rate",
                 "action_smooth",
                 "joint_acc",
                 "joint_vel",
@@ -450,6 +453,13 @@ class Go2PedipulationEnv(DirectRLEnv):
         )
         policy_obs = self._apply_obs_dr(proprio)
 
+        # 관절 속도 관측 EMA — 노이즈를 **주입한 뒤** 거른다. 실기의 필터가 보는 것도
+        # (참값 + 센서 노이즈) 이므로 순서가 이래야 실기와 같은 양이 된다.
+        if self.cfg.jvel_filter_alpha < 1.0:
+            a = self.cfg.jvel_filter_alpha
+            self._jvel_filt.mul_(1.0 - a).add_(policy_obs[:, 15:27], alpha=a)
+            policy_obs = torch.cat([policy_obs[:, :15], self._jvel_filt, policy_obs[:, 27:]], dim=-1)
+
         # history 링버퍼 (노이즈 포함 policy obs 저장)
         self._proprio_history = torch.where(
             (self.episode_length_buf <= 1)[:, None, None],
@@ -533,7 +543,15 @@ class Go2PedipulationEnv(DirectRLEnv):
         p_slip = (torch.norm(foot_vel_b[..., :2], dim=-1) ** 2 * in_contact * stance).sum(dim=-1)
 
         # ── (7) action 규제 — 절대 크기가 아니라 변화율/가속/토크 ──
+        # ⚠ p_action_rate 는 **경로에 따라 물리적 의미가 다르다.** 지지 다리의 a_loc 는 위치이므로
+        #   Δa 는 속도지만, 조작 다리의 a_man 은 이미 증분(=속도)이라 Δa_man 은 **가속도**다.
+        #   그래서 이 항만으로는 조작 다리에 1차(속도) 페널티가 전혀 걸리지 않고, a_man 이 0 이
+        #   아닌 상수로 유지되는 목표 표류에는 비용이 0 이다. 실측 떨림이 조작 다리 4.83°/step
+        #   대 지지 다리 2.16°/step 로 갈린 것이 이 비대칭이다.
+        #   아래 p_joint_target_rate 가 두 경로에 동일하게 걸리는 1차 항이다.
         p_action_rate = torch.sum((self._actions - self._prev_actions) ** 2, dim=-1)
+        # 실제로 액추에이터에 보내는 관절 목표의 스텝당 변화량. 모터가 떠는 양이 바로 이것이다.
+        p_joint_target_rate = torch.sum((self._processed_actions - self._prev_joint_target) ** 2, dim=-1)
         p_action_smooth = torch.sum((self._actions - 2.0 * self._prev_actions + self._prev_prev_actions) ** 2, dim=-1)
         joint_acc = (self._robot.data.joint_vel - self._prev_joint_vel) / self.step_dt
         p_joint_acc = torch.sum(joint_acc**2, dim=-1)
@@ -566,6 +584,7 @@ class Go2PedipulationEnv(DirectRLEnv):
             "stance_default": cfg.w_stance_default * p_stance_default,
             "feet_slip": cfg.w_feet_slip * p_slip,
             "action_rate": cfg.w_action_rate * p_action_rate,
+            "joint_target_rate": cfg.w_joint_target_rate * p_joint_target_rate,
             "action_smooth": cfg.w_action_smooth * p_action_smooth,
             "joint_acc": cfg.w_joint_acc * p_joint_acc,
             "joint_vel": cfg.w_joint_vel * p_joint_vel,
@@ -700,6 +719,7 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._manip_joint_target[env_ids_long] = self._robot.data.default_joint_pos[env_ids_long].clone()
         self._prev_joint_target[env_ids_long] = self._robot.data.default_joint_pos[env_ids_long].clone()
         self._prev_joint_vel[env_ids_long] = 0.0
+        self._jvel_filt[env_ids_long] = 0.0
         self._hold_counter[env_ids_long] = 0.0
         self._episode_base_xy0[env_ids_long] = root_state[:, 0:2]
 

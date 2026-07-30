@@ -84,6 +84,24 @@ parser.add_argument(
     action="store_true",
     help="물리 DR 은 두고 **관측 노이즈만** 끈다. 떨림의 원인이 obs 노이즈인지 분리할 때 쓴다.",
 )
+parser.add_argument(
+    "--jvel_filter_alpha",
+    type=float,
+    default=None,
+    help=(
+        "관절 속도 관측 EMA 계수. **학습 때 쓴 값과 같아야 한다** — 다르면 분포 밖 평가다."
+        " 미지정이면 env cfg 기본값(1.0=끔)을 쓴다."
+    ),
+)
+parser.add_argument(
+    "--zero_noise",
+    type=str,
+    default="",
+    help=(
+        "관측 노이즈를 채널별로 0 으로 만든다 (쉼표 구분: joint_pos, joint_vel, gravity, foot_pos, bias)."
+        " 집계 3-way ablation 은 어느 채널이 떨림을 만드는지 못 가른다."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 RENDER_MODES = ("video", "showcase")
@@ -167,12 +185,31 @@ def build_env(seed: int):
     # 학습 커리큘럼이 도달한 최대 박스에서 평가한다.
     env_cfg.command.box_init = env_cfg.command.box_max
 
+    if args_cli.jvel_filter_alpha is not None:
+        env_cfg.jvel_filter_alpha = args_cli.jvel_filter_alpha
     if args_cli.no_domain_rand:
         env_cfg.domain_rand = False
     if args_cli.no_obs_noise:
         # 물리 DR(질량·마찰·게인·지연)은 그대로 두고 관측 노이즈만 끈다.
         env_cfg.dr.obs_noise = False
         env_cfg.dr.encoder_bias = False
+    if args_cli.zero_noise:
+        # 채널별 ablation. env 코드를 건드리지 않고 노이즈 크기만 0 으로 만든다.
+        _ZERO = {
+            "joint_pos": "joint_pos_noise",
+            "joint_vel": "joint_vel_noise",
+            "gravity": "gravity_noise",
+            "foot_pos": "foot_pos_noise",
+        }
+        for name in (s.strip() for s in args_cli.zero_noise.split(",")):
+            if not name:
+                continue
+            if name == "bias":
+                env_cfg.dr.encoder_bias = False
+            elif name in _ZERO:
+                setattr(env_cfg.dr, _ZERO[name], 0.0)
+            else:
+                raise ValueError(f"--zero_noise 에 알 수 없는 채널: {name} (가능: {', '.join(_ZERO)}, bias)")
     # 외란은 이 스크립트가 통제한다 — env 내장 랜덤 push/발 외력은 항상 끈다.
     env_cfg.dr.push_robot = False
     env_cfg.dr.push_foot_force = False
@@ -562,17 +599,45 @@ def run_hold_seed(env, policy, seed: int) -> dict:
     # 떨림(tremor) 지표 — 유지 중인데도 관절 목표가 매 step 얼마나 흔들리는지.
     jitter = torch.zeros(n, device=device)  # mean_j |Δ joint target| [rad/step]
     jvel_sq = torch.zeros(n, device=device)  # mean_j joint_vel² [(rad/s)²]
+    # ⚠ 위 jitter 는 12 관절 평균이라 **구조가 다른 두 경로를 섞는다.** 조작 다리는 적분형
+    #   (man_target += clamp(a·scale)) 이고 지지 다리는 절대 맵이다. 두 경로의 주파수 응답이
+    #   달라(적분기는 고주파를 1/f 로 감쇠) 어느 쪽이 떨리는지가 곧 어디를 고쳐야 하는지다.
+    jit_manip = torch.zeros(n, device=device)
+    jit_supp = torch.zeros(n, device=device)
+    # 고주파 chatter 와 저주파 표류 판별: Δtarget 의 부호 반전율.
+    #   ~1.0 = 매 step 방향 반전(Nyquist chatter) · ~0.5 = 백색 · ~0.0 = 단조 표류
+    flip = torch.zeros(n, device=device)
+    flip_steps = torch.zeros(n, device=device)
+    # 조작 다리의 3 관절 마스크 [N,12] — leg_idx 는 이 시행에서 조작하는 다리다.
+    manip_j = (base_env._leg_of_joint.unsqueeze(0) == leg_idx.unsqueeze(-1)).float()
+    supp_j = 1.0 - manip_j
     prev_target = base_env._processed_actions.clone()
+    prev_delta: torch.Tensor | None = None
+    # 원시 action 궤적 — 랜덤워크 판별용. obs 에 prev_actions(28) 가 들어 있어
+    # a_t = π(…, a_{t-1}, …) 의 되먹임 이득이 1 에 가까우면 백색 노이즈가 적분된다.
+    act_hist: list[torch.Tensor] = []
 
     for step in range(HOLD_TRIAL_STEPS):
         with torch.inference_mode():
             obs, _, _, _ = env.step(policy(obs))
         alive = alive & (~base_env._died.clone())
 
+        d = base_env._processed_actions - prev_target
         if step >= SETTLE_STEPS:
             m = alive.float()
-            jitter += (base_env._processed_actions - prev_target).abs().mean(dim=-1) * m
+            jitter += d.abs().mean(dim=-1) * m
+            jit_manip += (d.abs() * manip_j).sum(dim=-1) / 3.0 * m
+            jit_supp += (d.abs() * supp_j).sum(dim=-1) / 9.0 * m
             jvel_sq += (base_env._robot.data.joint_vel.torch**2).mean(dim=-1) * m
+            if prev_delta is not None:
+                # 부호가 뒤집힌 관절 비율. 진폭이 아주 작은 관절은 부호가 의미 없으므로 제외.
+                live = (d.abs() > 1e-6) & (prev_delta.abs() > 1e-6)
+                flipped = ((d * prev_delta) < 0.0) & live
+                cnt = live.sum(dim=-1).clamp(min=1)
+                flip += flipped.sum(dim=-1).float() / cnt.float() * m
+                flip_steps += m
+            act_hist.append(base_env._actions[:, :24].clone())
+        prev_delta = d
         prev_target = base_env._processed_actions.clone()
 
         if step >= SETTLE_STEPS:
@@ -583,6 +648,17 @@ def run_hold_seed(env, policy, seed: int) -> dict:
             err_min = torch.where(alive, torch.minimum(err_min, e), err_min)
             err_max = torch.where(alive, torch.maximum(err_max, e), err_max)
             steps += m
+
+    # ── 랜덤워크 판별 ────────────────────────────────────────────
+    # MSD(k) = E[(a_{t+k} − a_t)²] 를 lag 로 나눈 값. 랜덤워크면 lag 에 무관하게 일정(선형 증가),
+    # 평균회귀(OU)면 lag 가 커질수록 감소해 포화한다.
+    a_seq = torch.stack(act_hist, dim=1)  # [N,T,24]
+    a_c = a_seq - a_seq.mean(dim=1, keepdim=True)
+    lag1 = (a_c[:, 1:] * a_c[:, :-1]).mean(dim=(1, 2)) / a_c.pow(2).mean(dim=(1, 2)).clamp(min=1e-12)
+    msd = {}
+    for lag in (1, 2, 4, 8, 16, 32, 64):
+        if lag < a_seq.shape[1]:
+            msd[lag] = ((a_seq[:, lag:] - a_seq[:, :-lag]).pow(2).mean(dim=(1, 2)) / lag).cpu()
 
     k = steps.clamp(min=1.0)
     mean_err = err_sum / k
@@ -597,7 +673,12 @@ def run_hold_seed(env, policy, seed: int) -> dict:
         "grid": (nx, ny, nz),
         "box": tuple(float(v) for v in base_env.cfg.command.box_max),
         "jitter": (jitter / k).cpu(),
+        "jitter_manip": (jit_manip / k).cpu(),
+        "jitter_supp": (jit_supp / k).cpu(),
+        "flip_rate": (flip / flip_steps.clamp(min=1.0)).cpu(),
         "jvel_rms": torch.sqrt(jvel_sq / k).cpu(),
+        "act_lag1": lag1.cpu(),
+        "act_msd": msd,
     }
 
 
@@ -1343,11 +1424,22 @@ def report_hold(results: list[dict]) -> dict:
     # ── 떨림(tremor) ────────────────────────────────────────────────────────
     jit = torch.cat([r["jitter"] for r in results])[a]
     jv = torch.cat([r["jvel_rms"] for r in results])[a]
+    jit_m = torch.cat([r["jitter_manip"] for r in results])[a]
+    jit_s = torch.cat([r["jitter_supp"] for r in results])[a]
+    flip = torch.cat([r["flip_rate"] for r in results])[a]
+    _deg = 180.0 / math.pi
     out["tremor"] = {
         "joint_target_jitter_rad_per_step": pct(jit, 0.5),
-        "joint_target_jitter_deg_per_step": pct(jit, 0.5) * 180.0 / math.pi,
+        "joint_target_jitter_deg_per_step": pct(jit, 0.5) * _deg,
+        "jitter_manip_deg_per_step": pct(jit_m, 0.5) * _deg,
+        "jitter_supp_deg_per_step": pct(jit_s, 0.5) * _deg,
+        "delta_sign_flip_rate": pct(flip, 0.5),
         "joint_vel_rms_rad_s": pct(jv, 0.5),
         "foot_pos_std_m": g3["std_median_m"],
+        "act_lag1_autocorr": pct(torch.cat([r["act_lag1"] for r in results])[a], 0.5),
+        "act_msd_per_lag": {
+            str(lag): pct(torch.cat([r["act_msd"][lag] for r in results])[a], 0.5) for lag in results[0]["act_msd"]
+        },
     }
     tr = out["tremor"]
     print("\n떨림 지표 (hold 중, 중앙값):")
@@ -1355,8 +1447,21 @@ def report_hold(results: list[dict]) -> dict:
         f"    관절 목표 흔들림 {tr['joint_target_jitter_rad_per_step']:.5f} rad/step"
         f" ({tr['joint_target_jitter_deg_per_step']:.3f}°/step)"
     )
+    print(
+        f"      └ 조작 다리(적분 경로) {tr['jitter_manip_deg_per_step']:.3f}°/step"
+        f"  ·  지지 다리(절대 경로) {tr['jitter_supp_deg_per_step']:.3f}°/step"
+    )
+    print(
+        f"    Δtarget 부호 반전율 {tr['delta_sign_flip_rate']:.3f}"
+        "   (~1.0 = 매 step 반전(고주파 chatter) · ~0.5 = 백색 · ~0.0 = 단조 표류)"
+    )
     print(f"    관절 속도 RMS   {tr['joint_vel_rms_rad_s']:.4f} rad/s")
     print(f"    발 위치 std     {tr['foot_pos_std_m'] * 1000:.2f} mm")
+    print(f"    action lag-1 자기상관 {tr['act_lag1_autocorr']:.3f}")
+    msd = tr["act_msd_per_lag"]
+    print(
+        "    MSD/lag: " + "  ".join(f"k={lag}:{v:.4f}" for lag, v in msd.items()) + "   (일정=랜덤워크 · 감소=평균회귀)"
+    )
 
     # 다리별 — 앞/뒤 워크스페이스가 다르므로 분해해 본다.
     print("\n다리별 (hold 평균 오차 중앙 / std 중앙):")
