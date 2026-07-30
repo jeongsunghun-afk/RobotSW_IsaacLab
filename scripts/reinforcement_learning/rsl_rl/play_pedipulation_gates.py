@@ -47,6 +47,13 @@ parser.add_argument(
     choices=["push", "drift", "hold", "circle", "video", "showcase"],
     help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, circle=S2-G1/G2/G4/G5, video/showcase=영상.",
 )
+parser.add_argument(
+    "--showcase_stage",
+    type=str,
+    default="s1",
+    choices=["s1", "s2"],
+    help="showcase 대본. s1=정지 목표 도달·유지, s2=연속 원 궤적 추종.",
+)
 parser.add_argument("--circle_omega", type=float, default=0.5, help="circle 모드 각속도 [rad/s].")
 parser.add_argument("--circle_radius", type=float, default=0.10, help="circle 모드 반경 [m].")
 parser.add_argument("--video_folder", type=str, default=None, help="video 모드 출력 폴더.")
@@ -144,6 +151,10 @@ def build_env(seed: int):
     if args_cli.mode == "showcase":
         # 대본이 30 s 가까이 이어지므로 10 s 기본 에피소드로는 중간에 리셋된다.
         env_cfg.episode_length_s = 120.0
+        # 궤적 모드를 켜 두고 정지 구간은 **반경 0** 으로 표현한다. 그러면 한 런에서 정지·원을
+        # 함께 다룰 수 있다 (모드 전환에 env 재생성이 필요 없다).
+        env_cfg.command.trajectory_mode = "circle"
+        env_cfg.command.circle_randomize = False
     if args_cli.mode == "circle":
         # 1회전 = 2π/ω. ω=0.25 rad/s 면 25 s 라 10 s 에피소드로는 한 바퀴도 못 돈다.
         env_cfg.episode_length_s = 120.0
@@ -177,7 +188,13 @@ def build_env(seed: int):
         # 네 발이 모두 보이게 한다.
         env_cfg.viewer.eye = (1.35, 1.0, 0.92)
         env_cfg.viewer.lookat = (0.0, 0.0, 0.18)
-        length = sum(s["steps"] for s in SHOWCASE_SCRIPT) if args_cli.mode == "showcase" else args_cli.video_length
+        if args_cli.mode == "showcase":
+            # ⚠ 대본 길이로 잡아야 한다. 다른 대본의 길이를 쓰면 영상이 중간에 잘린다
+            # (s2 대본 2020 step 을 s1 길이 1490 으로 녹화해 뒷부분이 통째로 날아갔다).
+            _script = SHOWCASE_SCRIPT_S2 if args_cli.showcase_stage == "s2" else SHOWCASE_SCRIPT
+            length = sum(s["steps"] for s in _script)
+        else:
+            length = args_cli.video_length
         env = gym.make(TASK, cfg=env_cfg, render_mode="rgb_array")
         env = gym.wrappers.RecordVideo(
             env,
@@ -612,6 +629,64 @@ SHOWCASE_SCRIPT: tuple[dict, ...] = (
 )
 SHOWCASE_TITLE = "Go2 Pedipulation - move a commanded foot to a commanded position and hold it"
 
+# ── S2 대본: 연속 궤적 추종 ──────────────────────────────────────────────────
+# 반경 0 은 정지 목표와 같다(원이 점으로 축퇴). 그래서 정지 구간과 원 구간을 한 런에서
+# `trajectory_mode="circle"` 하나로 다룰 수 있다.
+# 원은 base frame x-z 평면에 있으므로 **측면(y 축 방향) 시점**이 아니면 원으로 안 보인다.
+_S2_FL_CENTER = (0.08, 0.00, 0.18)
+_S2_RR_CENTER = (0.08, 0.00, 0.18)
+_CAM_FL_SIDE = (0.26, 1.35, 0.34)
+_LOOK_FL_SIDE = (0.26, 0.17, 0.20)
+_CAM_RR_SIDE = (-0.19, -1.35, 0.34)
+_LOOK_RR_SIDE = (-0.19, -0.17, 0.21)
+SHOWCASE_SCRIPT_S2: tuple[dict, ...] = (
+    {"steps": 100, "leg": "FL", "off": (0.0, 0.0, 0.0), "label": "Standing on four legs", "marker": False},
+    {"steps": 160, "leg": "FL", "off": _S2_FL_CENTER, "label": "S1: reach a fixed target and hold"},
+    {
+        "steps": 660,
+        "leg": "FL",
+        "off": _S2_FL_CENTER,
+        "radius": 0.10,
+        "omega": 0.5,
+        "label": "S2: trace a circle  (r 0.10 m, 0.5 rad/s)",
+        "eye": _CAM_FL_SIDE,
+        "lookat": _LOOK_FL_SIDE,
+    },
+    {
+        "steps": 340,
+        "leg": "FL",
+        "off": _S2_FL_CENTER,
+        "radius": 0.10,
+        "omega": 1.0,
+        "label": "Same circle at twice the rate  (1.0 rad/s)",
+        "eye": _CAM_FL_SIDE,
+        "lookat": _LOOK_FL_SIDE,
+    },
+    {
+        "steps": 340,
+        "leg": "RR",
+        "off": _S2_RR_CENTER,
+        "radius": 0.10,
+        "omega": 1.0,
+        "label": "Same command on the rear-right foot",
+        "eye": _CAM_RR_SIDE,
+        "lookat": _LOOK_RR_SIDE,
+    },
+    {
+        "steps": 420,
+        "leg": "FL",
+        "off": _S2_FL_CENTER,
+        "radius": 0.10,
+        "omega": 0.5,
+        "label": "Tracking under 100 / 150 N pushes",
+        "pushes": ((120, 100.0), (260, 150.0)),
+        "eye": _CAM_FL_SIDE,
+        "lookat": _LOOK_FL_SIDE,
+    },
+)
+SHOWCASE_TITLE_S2 = "Go2 Pedipulation - follow a continuous foot trajectory on a commanded leg"
+PATH_MARKER_N = 48  # 명령된 원 경로를 표시할 정적 마커 개수
+
 # 조작 다리별 카메라 위치 (env 원점 기준). 고정 카메라로는 반대쪽 뒷발의 목표 마커가 몸통에
 # 완전히 가려 "발이 목표에 갔다"를 볼 수 없다. 활성 다리 쪽으로 돌린다.
 SHOWCASE_CAM: dict[str, tuple[float, float, float]] = {
@@ -669,10 +744,10 @@ def run_showcase(env, policy, seed: int) -> dict:
 
     n = base_env.num_envs
     n_leg = base_env.cfg.num_legs
-    state = {"leg": 0, "off": (0.0, 0.0, 0.0)}
+    state = {"leg": 0, "off": (0.0, 0.0, 0.0), "radius": 0.0, "omega": 0.0}
 
     def scripted_resample(env_ids: torch.Tensor):
-        """대본이 지정한 다리·목표를 그대로 쓴다 (무작위 재샘플 금지)."""
+        """대본이 지정한 다리·목표·궤적 파라미터를 그대로 쓴다 (무작위 재샘플 금지)."""
         if env_ids is None or int(env_ids.numel()) == 0:
             return
         ids = env_ids.to(torch.long)
@@ -683,8 +758,15 @@ def run_showcase(env, policy, seed: int) -> dict:
         role = torch.ones(int(ids.numel()), n_leg, device=device)
         role[:, state["leg"]] = 0.0
         base_env._leg_role[ids] = role
-        base_env._foot_target_b[ids] = nominal[ids]
         base_env._traj_center_b[ids] = nominal[ids]
+        # 반경 0 이면 목표 = 중심 (정지 목표와 동일).
+        base_env._traj_radius[ids] = state["radius"]
+        base_env._traj_omega[ids] = state["omega"]
+        base_env._traj_dir[ids] = 1.0
+        base_env._traj_phase[ids] = 0.0
+        tgt = nominal[ids].clone()
+        tgt[..., 0] += state["radius"]  # phase 0 → +x 방향
+        base_env._foot_target_b[ids] = tgt
         base_env._hold_counter[ids] = 0.0
         base_env._cmd_timer[ids] = 1.0e6
 
@@ -699,14 +781,30 @@ def run_showcase(env, policy, seed: int) -> dict:
     target_marker = VisualizationMarkers(marker_cfg)
     hidden = torch.tensor([[0.0, 0.0, -10.0]], device=device)
 
+    # 명령된 원 **경로**를 작은 점으로 깔아 둔다. 이게 없으면 발이 원을 그리는지, 그냥 아무렇게
+    # 움직이는지 영상만으로는 구분되지 않는다.
+    path_cfg = SPHERE_MARKER_CFG.copy()
+    path_cfg.prim_path = "/Visuals/Pedipulation/path"
+    path_cfg.markers["sphere"].radius = 0.008
+    path_cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.95, 0.75, 0.15))
+    path_marker = VisualizationMarkers(path_cfg)
+    path_hidden = torch.tensor([[0.0, 0.0, -10.0]], device=device).expand(PATH_MARKER_N, -1)
+    path_ang = torch.linspace(0.0, 2.0 * math.pi, PATH_MARKER_N + 1, device=device)[:-1]
+
     obs, _ = env.reset()
+
+    script = SHOWCASE_SCRIPT_S2 if args_cli.showcase_stage == "s2" else SHOWCASE_SCRIPT
+    title = SHOWCASE_TITLE_S2 if args_cli.showcase_stage == "s2" else SHOWCASE_TITLE
 
     timeline: list[dict] = []
     all_ids = torch.arange(n, device=device)
     step_global = 0
-    cam = np.asarray(SHOWCASE_CAM[SHOWCASE_SCRIPT[0]["leg"]], dtype=float)
-    for seg in SHOWCASE_SCRIPT:
-        cam_to = np.asarray(SHOWCASE_CAM[seg["leg"]], dtype=float)
+    cam = np.asarray(script[0].get("eye", SHOWCASE_CAM[script[0]["leg"]]), dtype=float)
+    for seg in script:
+        cam_to = np.asarray(seg.get("eye", SHOWCASE_CAM[seg["leg"]]), dtype=float)
+        look_to = seg.get("lookat", SHOWCASE_LOOKAT)
+        state["radius"] = float(seg.get("radius", 0.0))
+        state["omega"] = float(seg.get("omega", 0.0))
         state["leg"] = leg_names.index(seg["leg"])
         state["off"] = seg["off"]
         # 새 목표를 즉시 적용 (에피소드 리셋 없이). ⚠ `_hold_counter` 는 `_get_rewards` 에서
@@ -720,7 +818,7 @@ def run_showcase(env, policy, seed: int) -> dict:
         #   못해 프레임이 백지로 나온다 (매 step 호출 시 1490 중 257 프레임이 날아갔고, 최장
         #   165 프레임이 연속으로 비었다). 자막도 같은 시점에 바뀌므로 컷 전환으로 읽힌다.
         cam = cam_to
-        if not set_camera(base_env, cam, SHOWCASE_LOOKAT) and step_global == 0:
+        if not set_camera(base_env, cam, look_to) and step_global == 0:
             print("[WARN] Kit 렌더러 카메라를 옮길 수 없다 — 고정 시점으로 촬영된다.")
 
         for local in range(seg["steps"]):
@@ -739,6 +837,17 @@ def run_showcase(env, policy, seed: int) -> dict:
             tgt_w = root_pos_w + quat_apply(root_quat_w, tgt_b)
             target_marker.visualize(translations=tgt_w if show_marker else hidden.expand(n, -1))
 
+            # 원 경로 마커 — 반경 0(정지 구간)이면 숨긴다.
+            if show_marker and state["radius"] > 1e-6:
+                ctr_b = base_env._traj_center_b[0, state["leg"]]
+                ring_b = ctr_b.unsqueeze(0).repeat(PATH_MARKER_N, 1)
+                ring_b[:, 0] += state["radius"] * torch.cos(path_ang)
+                ring_b[:, 2] += state["radius"] * torch.sin(path_ang)
+                ring_w = root_pos_w[0] + quat_apply(root_quat_w[0].expand(PATH_MARKER_N, -1), ring_b)
+                path_marker.visualize(translations=ring_w)
+            else:
+                path_marker.visualize(translations=path_hidden)
+
             err = float(foot_err_of_manip(base_env, torch.full((n,), state["leg"], device=device))[0].item())
             active_push = 0.0
             for s, m in pushes.items():
@@ -756,8 +865,8 @@ def run_showcase(env, policy, seed: int) -> dict:
             )
             step_global += 1
 
-    print(f"\n시연 {step_global} step ({step_global / 50.0:.1f} s) 기록 완료.")
-    return {"timeline": timeline, "total_steps": step_global, "title": SHOWCASE_TITLE}
+    print(f"\n시연 {step_global} step ({step_global / 50.0:.1f} s) 기록 완료. (대본 {args_cli.showcase_stage})")
+    return {"timeline": timeline, "total_steps": step_global, "title": title}
 
 
 def annotate_video(src: str, dst: str, timeline: list[dict], title: str):
