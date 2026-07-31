@@ -21,3 +21,7 @@ Added
 * Added ``CommandCfg.static_fraction`` to ``Go2-Pedipulation-v0``, the share of environments whose
   circle command degenerates to a stationary target. Training only on moving targets makes holding
   a stationary one out of distribution.
+* Added ``w_base_drift`` and ``base_drift_free`` to ``Go2-Pedipulation-v0``, a dead-banded penalty
+  on how far the base translates from where the episode started. Foot targets are expressed in the
+  base frame, so a base that shifts carries the target with it. The dead band leaves the
+  counterbalance a front-leg reach actually needs unpenalized.

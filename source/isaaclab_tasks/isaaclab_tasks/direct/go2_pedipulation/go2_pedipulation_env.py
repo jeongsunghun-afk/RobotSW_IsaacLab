@@ -149,6 +149,7 @@ class Go2PedipulationEnv(DirectRLEnv):
                 "flat_orientation",
                 "base_height",
                 "stance_default",
+                "base_drift",
                 "feet_slip",
                 "action_rate",
                 "joint_target_rate",
@@ -557,6 +558,12 @@ class Go2PedipulationEnv(DirectRLEnv):
         q_dev = torch.abs(self._robot.data.joint_pos - self._robot.data.default_joint_pos)
         p_stance_default = (q_dev * role_j).sum(dim=-1)
 
+        # base 병진 — 에피소드 시작 위치 기준. 데드존(필수 counterbalance) 밖만 2차로 벌한다.
+        # ⚠ `_episode_base_xy0` 는 리셋에서 갱신되고 있었지만 어떤 보상 항에도 쓰이지 않았다.
+        base_xy = self._robot.data.body_pos_w[:, self._base_body_id, :2]
+        base_drift = torch.norm(base_xy - self._episode_base_xy0, dim=-1)
+        p_base_drift = torch.clamp(base_drift - cfg.base_drift_free, min=0.0) ** 2
+
         contact_force = torch.norm(self.contact_sensor.data.net_forces_w[:, self._foot_sensor_ids], dim=-1)  # [N,4]
         in_contact = (contact_force > 1.0).float()
         p_slip = (torch.norm(foot_vel_b[..., :2], dim=-1) ** 2 * in_contact * stance).sum(dim=-1)
@@ -601,6 +608,7 @@ class Go2PedipulationEnv(DirectRLEnv):
             "flat_orientation": cfg.w_flat_orientation * p_flat,
             "base_height": cfg.w_base_height * p_height,
             "stance_default": cfg.w_stance_default * p_stance_default,
+            "base_drift": cfg.w_base_drift * p_base_drift,
             "feet_slip": cfg.w_feet_slip * p_slip,
             "action_rate": cfg.w_action_rate * p_action_rate,
             "joint_target_rate": cfg.w_joint_target_rate * p_joint_target_rate,
