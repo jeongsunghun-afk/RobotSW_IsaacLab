@@ -162,6 +162,20 @@ class Quad17Env(DirectRLEnv):
         # Accurate base-frame foot offset (4, 2), captured lazily in _get_rewards (needs body_pos_w).
         self._foot_offset_b: torch.Tensor | None = None
 
+        # -------- DTC offline / APT-RL: offline TAMOLS foothold cache --------
+        # Load the precomputed TAMOLS foothold plan (offline trajectory-optimized footholds) once and
+        # build the cache-leg -> sole-slot permutation. When cfg.use_tamols_cache is on, _regen_footholds
+        # looks these up (indexed by the commanded vx + the distance to the next gap) and re-anchors them
+        # to the robot's live base pose, giving the policy terrain-derived (gap-straddling) footholds
+        # instead of the redundant base-relative Raibert ones. All lookup tensors are STATIC (not
+        # per-episode), so none need re-initializing in _reset_idx. Falls back to Raibert if the dir is
+        # missing. _cache2sole needs _nominal_foot_offset (built above), so this must run after it.
+        self._tamols_loaded = False
+        self._gap_near_edges_x: torch.Tensor | None = None  # populated after gap wiring below (needs _gap)
+        self._gap_widths: torch.Tensor | None = None  # per-gap width, index-aligned with _gap_near_edges_x
+        if bool(self.cfg.use_tamols_cache):
+            self._load_tamols_cache()
+
         # Eval-only foothold diagnostics (NOT zeroed on episode reset) for the ablation gate (Step 8).
         # Purely diagnostic — never added to the reward, never in obs — so they do not affect training
         # or checkpoint compatibility. The ablation eval script zeroes these after a settle window.
@@ -217,6 +231,45 @@ class Quad17Env(DirectRLEnv):
                 f"corridor={self._gap_corridor_len:.2f}m x{self._gap_n_corridors}) depth={self.cfg.gap_depth} "
                 f"surface_z={self._gap_surface_z:.3f} n_strips={self._strip_centers_x.numel()} "
                 f"base_h_target={self.cfg.base_height_target:.3f} cmd_vx={self.cfg.gap_lin_vel_x_range}"
+            )
+
+        # -------- DTC offline / APT-RL: forward-vx-only command + gap near-edge table (cache path) --------
+        # The offline TAMOLS cache is a FORWARD-vx-only plan (no lateral / yaw footholds), so restrict the
+        # command distribution to forward motion whenever the cache path is active, and clamp vx into the
+        # cached grid so every command maps to an in-distribution plan slice. Gap mode already zeroes vy/yaw
+        # (above); this also covers the flat-ground A/B case (gap off, cache on) and, in gap mode, narrows
+        # the top speed from the gap range's 0.8 down to the cache's 0.6 (the cache does not cover vx>0.6).
+        # Also build the sorted gap near-edge x-table (strip center + strip_w/2) used by _next_gap_dist;
+        # this runs AFTER the gap wiring so self._gap and _strip_centers_x are available.
+        if self._tamols_loaded and bool(self.cfg.use_tamols_cache):
+            lo, hi = self.cfg.command_cfg["lin_vel_x_range"]
+            vx_lo, vx_hi = float(self._tamols_vx[0]), float(self._tamols_vx[-1])
+            new_lo, new_hi = max(lo, vx_lo), min(hi, vx_hi)
+            if new_lo > new_hi:  # command range does not overlap the cache grid -> pin to the grid
+                new_lo, new_hi = vx_lo, vx_hi
+            self.cfg.command_cfg = {
+                "lin_vel_x_range": [new_lo, new_hi],
+                "lin_vel_y_range": [0.0, 0.0],
+                "ang_vel_range": [0.0, 0.0],
+            }
+            if self._gap and hasattr(self, "_strip_centers_x") and self._strip_centers_x.numel() >= 2:
+                # gap near-edge (world x) = solid-strip center + half strip width; sorted for searchsorted.
+                # The gap AFTER strip k spans [center[k]+strip_w/2, center[k+1]-strip_w/2], so its width is
+                # center[k+1] - center[k] - strip_w. The last strip has no gap after it, so DROP it from BOTH
+                # arrays -> _gap_near_edges_x and _gap_widths stay length (n_strips-1) and index-aligned (the
+                # searchsorted idx into edges indexes the matching width). Derived purely from the stored
+                # strip centers (no _build_gap_terrain change), so it tracks whatever width curriculum was built.
+                strip_w = float(self.cfg.gap_strip_width)
+                centers = self._strip_centers_x  # (n_strips,) sorted
+                self._gap_near_edges_x = (centers[:-1] + 0.5 * strip_w).contiguous()  # (n_strips-1,)
+                self._gap_widths = (centers[1:] - centers[:-1] - strip_w).clamp_min(0.0).contiguous()  # (n_strips-1,)
+            print(
+                f"[quad17][tamols] forward-vx-only command for cache path: "
+                f"vx={self.cfg.command_cfg['lin_vel_x_range']} vy=0 yaw=0 (cache grid vx=[{vx_lo},{vx_hi}]); "
+                f"gap_near_edges={0 if self._gap_near_edges_x is None else self._gap_near_edges_x.numel()} "
+                f"gap_w[{'-' if self._gap_widths is None else f'{float(self._gap_widths.min()):.3f}'}.."
+                f"{'-' if self._gap_widths is None else f'{float(self._gap_widths.max()):.3f}'}] "
+                f"cache_width_grid=[{float(self._tamols_width[0]):.2f},{float(self._tamols_width[-1]):.2f}]"
             )
 
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalzied_body_names)
@@ -567,6 +620,143 @@ class Quad17Env(DirectRLEnv):
 
         return observations
 
+    def _load_tamols_cache(self):
+        """Load the offline TAMOLS foothold cache and build the cache-leg -> sole-slot permutation.
+
+        Reads ``tamols_cache/{meta.json,footholds.bin}`` next to this file. ``footholds.bin`` is
+        float32 [n_vx, n_width, n_gapd, 4, 3] row-major, foot order FL,FR,RL,RR, LOCAL frame (base start
+        at origin, +x forward; world = base_pos + Rz(yaw) * local). Sets ``_tamols_fh`` (torch on device),
+        the axis grids ``_tamols_vx`` / ``_tamols_width`` / ``_tamols_gapd``, and ``_cache2sole``
+        (long [4], env sole slot -> cache leg). Missing dir -> stay in the Raibert fallback (loaded=False).
+        """
+        import json
+        import os as _os
+
+        cache_dir = _os.path.join(_os.path.dirname(__file__), "tamols_cache")
+        meta_path = _os.path.join(cache_dir, "meta.json")
+        fh_path = _os.path.join(cache_dir, "footholds.bin")
+        if not (_os.path.isfile(meta_path) and _os.path.isfile(fh_path)):
+            print(f"[quad17][tamols] cache not found under {cache_dir}; falling back to Raibert footholds")
+            return
+        with open(meta_path) as f:
+            meta = json.load(f)
+        n_vx, n_width, n_gapd = int(meta["n_vx"]), int(meta["n_width"]), int(meta["n_gapd"])
+        shape = tuple(meta["footholds_shape"])  # [n_vx, n_width, n_gapd, 4, 3]
+        assert shape == (n_vx, n_width, n_gapd, 4, 3), f"[quad17][tamols] unexpected footholds_shape {shape}"
+        fh = np.fromfile(fh_path, dtype=np.float32).reshape(shape)
+        self._tamols_fh = torch.tensor(fh, device=self.device, dtype=torch.float)  # (n_vx,n_width,n_gapd,4,3)
+        self._tamols_vx = torch.tensor(meta["vx_vals"], device=self.device, dtype=torch.float)  # (n_vx,)
+        self._tamols_width = torch.tensor(meta["width_vals"], device=self.device, dtype=torch.float)  # (n_width,)
+        self._tamols_gapd = torch.tensor(meta["gapd_vals"], device=self.device, dtype=torch.float)  # (n_gapd,)
+        assert (
+            self._tamols_vx.numel() == n_vx
+            and self._tamols_width.numel() == n_width
+            and self._tamols_gapd.numel() == n_gapd
+        )
+
+        # Cache-leg (FL,FR,RL,RR) -> env sole-slot permutation. Cache leg signs (base frame, +x fwd/+y
+        # left): FL=(+,+) FR=(+,-) RL=(-,+) RR=(-,-). For each env sole slot read the sign of its nominal
+        # base-frame offset and map to the matching cache index; _cache2sole[i] = cache leg feeding env
+        # sole slot i, so ``local_fh[:, _cache2sole]`` reorders a cache-order plan into sole order.
+        sign2cache = {(1, 1): 0, (1, -1): 1, (-1, 1): 2, (-1, -1): 3}  # (sgn x, sgn y) -> FL,FR,RL,RR
+        c2s = []
+        for i in range(4):
+            sx = 1 if float(self._nominal_foot_offset[i, 0]) >= 0.0 else -1
+            sy = 1 if float(self._nominal_foot_offset[i, 1]) >= 0.0 else -1
+            c2s.append(sign2cache[(sx, sy)])
+        assert sorted(c2s) == [0, 1, 2, 3], f"[quad17][tamols] _cache2sole {c2s} is not a valid permutation"
+        self._cache2sole = torch.tensor(c2s, device=self.device, dtype=torch.long)  # (4,)
+        self._tamols_loaded = True
+        print(
+            f"[quad17][tamols] loaded offline foothold cache: fh{tuple(self._tamols_fh.shape)} "
+            f"vx={meta['vx_vals']} width={meta['width_vals']} "
+            f"gapd[{float(self._tamols_gapd[0]):.3f}..{float(self._tamols_gapd[-1]):.3f}] "
+            f"cache2sole(sole->cache)={c2s}"
+        )
+
+    def _next_gap_dist(self, base_x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Distance to the next gap near-edge ahead (clamped) AND the width of that chosen gap.
+
+        Gap near-edges (world x) = solid-strip centers + strip_w/2 (``_gap_near_edges_x``); ``_gap_widths``
+        is index-aligned (the gap AFTER each near-edge). For each env take the nearest near-edge whose
+        distance d = edge - base_x is >= the cache's min gapd (so a gap the base has just started to
+        straddle, up to |gapd_min| behind, still counts), then clamp d into the cached [gapd_min, gapd_max]
+        range and read that gap's width from the SAME searchsorted index. When no gap is within reach ahead
+        (or the terrain is flat / no cache strips) return (gapd_max, default_width) => the "nominal stance"
+        cache slice (no straddle); default width = cache median (0.18) but the gapd_max slice is nominal
+        anyway. yaw≈0 forward regime, so the world-x difference equals the base-frame x-distance.
+        """
+        gapd_min, gapd_max = float(self._tamols_gapd[0]), float(self._tamols_gapd[-1])
+        default_w = float(self._tamols_width[self._tamols_width.numel() // 2])  # cache median width (~0.18)
+        edges = self._gap_near_edges_x
+        if edges is None or edges.numel() == 0 or self._gap_widths is None:
+            return torch.full_like(base_x, gapd_max), torch.full_like(base_x, default_w)
+        k = edges.numel()
+        thr = base_x + gapd_min  # first edge >= this minimizes d subject to d >= gapd_min
+        idx = torch.searchsorted(edges, thr)  # (N,); == k if base is past every near-edge
+        overflow = idx >= k
+        idx = idx.clamp(max=k - 1)
+        d = torch.clamp(edges[idx] - base_x, min=gapd_min, max=gapd_max)
+        w = self._gap_widths[idx]  # width of the chosen gap (same index)
+        d = torch.where(overflow, torch.full_like(d, gapd_max), d)
+        w = torch.where(overflow, torch.full_like(w, default_w), w)
+        return d, w
+
+    def _lookup_tamols_footholds(self, mask: torch.Tensor):
+        """Re-anchor foothold targets for the masked feet from the offline TAMOLS cache (DTC offline).
+
+        ``mask``: (N, 4) bool. Index the cache by the nearest cached forward-vx (to the command), the
+        next gap's width, and the local x-distance to that gap's near-edge ahead, gather the 4-foot LOCAL
+        plan, reorder it to sole order, and re-anchor to the CURRENT base pose (world_xy = base_xy + Rz(yaw)
+        * local_xy). Writes
+        the same _foothold_target / _foothold_target2 / _stance_pos / _target_age buffers the Raibert path
+        uses, under the identical per-foot where-mask, so only feet that just touched down (or aged out)
+        advance. The look-ahead target2 mirrors the Raibert lookahead: one placement offset forward.
+        """
+        if not bool(torch.any(mask)):
+            return
+        n = self.num_envs
+        sole_pos_w = self._robot.data.body_pos_w[:, self._sole_body_ids, :]  # (N,4,3)
+        base_pos = self._robot.data.root_link_pos_w  # (N,3)
+        yaw_q = math_utils.yaw_quat(self._robot.data.root_quat_w)  # (N,4)
+
+        # 3-axis lookup: nearest cached forward-vx, next gap's width, and distance to that gap ahead.
+        vx = self._commands[:, 0]
+        vx_idx = torch.argmin(torch.abs(vx[:, None] - self._tamols_vx[None, :]), dim=1)  # (N,)
+        gapd, gap_w = self._next_gap_dist(base_pos[:, 0])  # (N,), gapd clamped to [gapd_min, gapd_max]
+        width_idx = torch.argmin(torch.abs(gap_w[:, None] - self._tamols_width[None, :]), dim=1)  # (N,)
+        gapd_idx = torch.argmin(torch.abs(gapd[:, None] - self._tamols_gapd[None, :]), dim=1)  # (N,)
+
+        # gather the 4-foot LOCAL plan (vx, width, gapd axes) and reorder cache(FL,FR,RL,RR) -> sole order.
+        local_fh = self._tamols_fh[vx_idx, width_idx, gapd_idx]  # (N,4,3) cache order
+        local_fh = local_fh[:, self._cache2sole, :].contiguous()  # (N,4,3) sole order
+
+        # re-anchor xy to world: base_xy + Rz(yaw) @ local_xy (rotate a z=0 copy, add base pos).
+        fh_xy0 = local_fh.clone()
+        fh_xy0[..., 2] = 0.0
+        yaw_q_e = yaw_q[:, None, :].expand(-1, 4, -1).reshape(-1, 4)
+        off_w = math_utils.quat_apply(yaw_q_e, fh_xy0.reshape(-1, 3)).reshape(n, 4, 3)  # (N,4,3), z~0
+        tgt1 = base_pos[:, None, :] + off_w
+        # one-stride look-ahead: mirror the Raibert lookahead (0.5 * T_stance * vx forward, base frame).
+        stride_b = torch.zeros(n, 3, device=self.device)
+        stride_b[:, 0] = 0.5 * self.cfg.foothold_T_stance * vx
+        stride_w = math_utils.quat_apply(yaw_q, stride_b)  # (N,3)
+        tgt2 = tgt1 + stride_w[:, None, :]
+
+        # foot target z = the walking surface, set the SAME way the Raibert path does (strip top / sole z).
+        if self._gap:
+            tgt1[..., 2] = self._gap_surface_z
+            tgt2[..., 2] = self._gap_surface_z
+        else:
+            tgt1[..., 2] = sole_pos_w[..., 2]
+            tgt2[..., 2] = sole_pos_w[..., 2]
+
+        m3 = mask.unsqueeze(-1)
+        self._stance_pos = torch.where(m3, sole_pos_w, self._stance_pos)
+        self._foothold_target = torch.where(m3, tgt1, self._foothold_target)
+        self._foothold_target2 = torch.where(m3, tgt2, self._foothold_target2)
+        self._target_age = torch.where(mask, torch.zeros_like(self._target_age), self._target_age)
+
     def _regen_footholds(self, mask: torch.Tensor):
         """Re-anchor foothold targets for the masked (env, foot) entries from the CURRENT base pose.
 
@@ -578,7 +768,14 @@ class Quad17Env(DirectRLEnv):
         vectorized where-update (avoids the intra-call ordering hazard). The jitter — decorrelated
         from the command — is MANDATORY: without it target == f(cmd, clock, pose), which the policy
         already observes, so the reward becomes a shortcut the foothold obs is free to ignore.
+
+        DTC offline / APT-RL: when ``cfg.use_tamols_cache`` is on and the cache loaded, delegate to the
+        offline TAMOLS lookup instead (terrain-derived gap-straddling footholds); the Raibert body below
+        is kept intact for an A/B comparison (toggle off / cache missing => this path).
         """
+        if self.cfg.use_tamols_cache and self._tamols_loaded:
+            self._lookup_tamols_footholds(mask)
+            return
         if not bool(torch.any(mask)):
             return
         n = self.num_envs

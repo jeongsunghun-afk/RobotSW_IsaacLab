@@ -161,6 +161,16 @@ class Quad17VelocityEnvCfg(DirectRLEnvCfg):
     foothold_jitter_xy = 0.05  # m; decorrelated horizontal jitter (MANDATORY, breaks redundancy)
     foothold_jitter_z = 0.02  # m; vertical jitter
 
+    # -- DTC offline / APT-RL: offline TAMOLS foothold cache (A/B against the Raibert path above) --
+    # When True, ``_regen_footholds`` looks up precomputed TAMOLS-planned footholds from ``./tamols_cache``
+    # (indexed by the commanded forward vx + the local x-distance to the next gap near-edge) and re-anchors
+    # them to the robot's live base pose, giving terrain-derived gap-straddling targets instead of the
+    # redundant base-relative Raibert ones. The cache is a FORWARD-vx-only plan, so the command
+    # distribution is restricted to forward motion (vy=yaw=0, vx clamped to the cached grid) while it is
+    # active (see Quad17Env.__init__). Set False to fall back to the intact Raibert path for an A/B run.
+    # If the cache dir is missing at runtime it silently falls back to Raibert (see _load_tamols_cache).
+    use_tamols_cache: bool = True
+
     # -- DTC Phase-2 gap-test terrain (physical "must read obs" pressure) --
     # On FLAT ground the touchdown reward has no physical consequence for missing a foothold, so the
     # policy ignores the foothold obs (proven by the ablation gate: none≈scramble). This toggle adds
