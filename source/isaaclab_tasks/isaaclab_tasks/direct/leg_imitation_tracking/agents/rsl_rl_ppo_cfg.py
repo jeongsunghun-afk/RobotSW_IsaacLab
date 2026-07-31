@@ -20,7 +20,12 @@ AMP reward mixing:
 
 from isaaclab.utils.configclass import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+    RslRlSymmetryCfg,
+)
 
 
 @configclass
@@ -108,3 +113,141 @@ class LegImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         disc_logit_reg_type="weight",  # "logit" | "weight" (MimicKit 방식) — ablation: logit→weight
         disc_norm_clip=10.0,  # None | 10.0 (MimicKit 방식) — ablation: None→10.0
     )
+
+
+@configclass
+class LegImitationTrackingRMAPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Leg Imitation Tracking + RMA Estimator 러너 설정.
+
+    학습 스택은 ``parkour_imitation``의 RMA 계열을 참고:
+        Runner:    OnPolicyRunnerParkourAMP  (estimator 자동 구성 + AMP reward fusion)
+        Policy:    ActorCriticRMA            (history encoder + priv encoder + estimator)
+        Algorithm: PPOAMP                    (PPOParkour + AMP discriminator)
+
+    핵심:
+      - Estimator 는 러너가 obs 로부터 자동 구성한다
+        (input = obs["policy"](57), output = priv_explicit(6)).
+        ``train_with_estimated_states=True`` 이므로 actor 는 추정 속도를 소비하고
+        critic 은 ground-truth 속도를 본다.
+      - AMP fusion: ``total = task_reward + amp_weight * flat_mask * disc_reward``.
+        env 가 전부 평지라 ``_flat_env_mask`` 는 전부 True → AMP 전 env 적용.
+        (부모 leg 러너의 ``task_reward_lerp`` 스케줄은 이 러너에서 **무시**된다.)
+      - symmetry data-aug **적용**(``__post_init__``): 17-DOF leg L/R mirror 함수
+        (``mdp.symmetry:compute_leg_symmetric_states``)로 좌우 대칭을 소프트하게 강제한다.
+        num_aug=2 로 미니배치가 2배가 되며 KL adaptive 스케줄이 흡수한다. mirror 부호는
+        SMR reference(대략 좌우대칭)로 실측 검증: hip·뒷발·waist=FLIP, thigh·calf·앞발=NO-FLIP.
+
+    priv_latent 은 상수 placeholder(zeros)다 — DR 미적용이라 adaptation module 은 no-op.
+    Estimator(속도 추정)는 이와 무관하게 학습된다.
+    """
+
+    # ── Runner ────────────────────────────────────────────────────────────────
+    class_name: str = "OnPolicyRunnerParkourAMP"
+    num_steps_per_env: int = 24
+    max_iterations: int = 50000
+    save_interval: int = 100
+    experiment_name: str = "leg_imitation_tracking_rma"
+    empirical_normalization: bool = True
+    seed: int = 1
+
+    # leg action scale(0.25) 기준 clip. 부모 leg 러너와 동일하게 4.0 유지(torque85 와 정합).
+    clip_actions: float = 4.0
+
+    # ── obs_groups: env dict obs → actor/critic/encoder 라우팅 ────────────────
+    # env returns: {policy(57), priv_explicit(6), priv(placeholder), history(10×57)}
+    #   scan 그룹 없음 → ActorCriticRMA 는 scandot_encoder 를 만들지 않는다(num_scan_obs=0).
+    #   critic = policy + priv_explicit + priv (concat)
+    obs_groups: dict = {
+        "policy": ["policy"],
+        "critic": ["policy", "priv_explicit", "priv"],
+        "history": ["history"],
+        "priv": ["priv"],
+        "priv_explicit": ["priv_explicit"],
+    }
+
+    # ── Estimator: priv_explicit(base 선/각속도) 예측 ─────────────────────────
+    estimator: dict = {
+        "hidden_dims": [128, 64],
+        "learning_rate": 1.0e-3,
+        "train_with_estimated_states": True,
+    }
+
+    # ── Policy: ActorCriticRMA ────────────────────────────────────────────────
+    # actor/critic_obs_normalization=True — baseline(비-RMA)과 동일하게 empirical normalization 사용.
+    # 이유: 이 env 는 obs 에 큰 raw 값이 섞여 있다(base_mass ~40kg in priv_latent, joint_vel ~30rad/s,
+    #   base 속도 in priv_explicit). parkour 는 이를 legged_gym 수동 스케일로 O(1) 화하지만 우리는 그 스케일을
+    #   두지 않았다. EmpiricalNormalization 은 (x-mean)/std 로 **센터링+스케일**을 데이터에서 학습하므로
+    #   수동 스케일보다 완전하고(예: base_mass 40 offset 을 평균으로 제거), baseline 과 전처리가 일치해
+    #   RMA+DR 만 순수 변수로 격리된다. DR 런은 priv_latent 이 상수가 아니라 variance-0 문제도 없다.
+    #   (estimator MLP 자체는 raw proprio→raw priv_explicit 회귀로 별개; 이미 raw 에서 수렴 확인됨.)
+    # init_noise_std=0.25: leg 는 1.0 에서 std 가 단조 발산(→9.98)해 mean 정책이 거칠어진다.
+    # baseline(비-RMA) 도 0.25 사용. (첫 RMA 런은 parkour 기본 1.0 을 써서 발산했다.)
+    policy: RslRlPpoActorCriticCfg = RslRlPpoActorCriticCfg(
+        class_name="ActorCriticRMA",
+        init_noise_std=0.25,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+    )
+
+    # ── Algorithm: PPOAMP ────────────────────────────────────────────────────
+    # entropy_coef 는 leg 의 std 발산 억제값(0.005)을 유지 (parkour 기본 0.01 대비 보수적).
+    algorithm: RslRlPpoAlgorithmCfg = RslRlPpoAlgorithmCfg(
+        class_name="PPOAMP",
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=2.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+    # ── AMP ──────────────────────────────────────────────────────────────────
+    # amp_weight: additive fusion 가중치 (total = task + amp_weight * flat_mask * disc_reward).
+    # amp_observation_space: 런너 초기화 시 env.amp_observation_space.shape[0](=590)로 덮어씀.
+    # AMP 계수/fusion 을 baseline(LegImitationTrackingPPORunnerCfg)과 완전히 동일하게 맞춘다 — RMA+DR 효과만 격리.
+    # fusion="lerp" + task_reward_lerp=0.5: baseline(OnPolicyRunnerAMPBase)의 fusion 과 동일한
+    #   total = 0.5*task + 0.5*amp. (parkour 러너 기본 additive 를 lerp 모드로 전환 — on_policy_runner_parkour_amp
+    #   에 추가한 플래그. amp_weight 는 lerp 모드에서 미사용.)
+    # reward_coef=2.0 (baseline과 동일; parkour 기본 0.08 은 25배 약해 첫 런에서 모방이 붕괴했다).
+    # 나머지 disc 하이퍼파라미터(lr/gp/hidden/epochs/logit_reg/loss/reward/norm_clip/replay)는 baseline 과 동일.
+    amp: dict = dict(
+        fusion="lerp",
+        task_reward_lerp=0.5,
+        amp_weight=1.0,
+        discriminator_learning_rate=2.5e-4,
+        gradient_penalty_coef=5.0,
+        reward_coef=2.0,
+        discriminator_hidden_dims=[1024, 512],
+        disc_num_epochs=2,
+        disc_mini_batch_size=4096,
+        disc_logit_reg=0.01,
+        disc_loss_type="bce",
+        disc_reward_type="bce",
+        disc_logit_reg_type="weight",
+        disc_norm_clip=10.0,
+        enable_replay_buffer=True,
+        replay_buffer_size=200000,
+        amp_observation_space=590,
+        motion_files=None,
+    )
+
+    def __post_init__(self):
+        # L/R mirror data-augmentation (num_aug=2). AMP obs travel via extras["amp_obs"] (separate
+        # discriminator path), so they are NOT mirrored here. use_mirror_loss=False → pure data-aug.
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            use_mirror_loss=False,
+            mirror_loss_coeff=0.0,
+            data_augmentation_func=(
+                "isaaclab_tasks.direct.leg_imitation_tracking.mdp.symmetry:compute_leg_symmetric_states"
+            ),
+        )
