@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
@@ -435,7 +437,7 @@ R_SKELETON_HIND_LEG_CFG = ArticulationCfg(
 
 HIND_LEG_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/lgb/IsaacLab/source/isaaclab_assets/data/Robots/Hind_Leg/hind_leg.usd",
+        usd_path=os.path.join(os.path.dirname(__file__), "../../../../JSH/Hind_Leg/hind_leg.usd"),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -491,6 +493,124 @@ HIND_LEG_CFG = ArticulationCfg(
                 ".*_calf_joint": 1.1,
                 ".*_foot_joint": 1.0,
             },
+        ),
+    },
+)
+
+
+# 평발(2점 접촉) 변형 — hind_leg와 동일 로봇, 발끝 링크에 heel 접촉구 추가(밑창). 모델기반이 실패한 2점 보행을 RL로 검증용.
+FLAT_HIND_LEG_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=os.path.join(os.path.dirname(__file__), "../../../../JSH/Hind_Leg_Flat/hind_leg_flat.usd"),
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=5.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True, solver_position_iteration_count=8, solver_velocity_iteration_count=4
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.42),
+        joint_pos={
+            # Flat 2-point standing pose (heel+toe spheres coplanar on floor; verified in Isaac).
+            # HR = HL with thigh/foot sign flipped (mirrored-URDF joint frames); calf same sign.
+            "HL_hip_joint": 0.0,
+            "HL_thigh_joint": 0.25,
+            "HL_calf_joint": -0.40,
+            "HL_foot_joint": 1.4386,
+            "HR_hip_joint": 0.0,
+            "HR_thigh_joint": -0.25,
+            "HR_calf_joint": -0.40,
+            "HR_foot_joint": -1.4387,
+        },
+    ),
+    actuator_value_resolution_debug_print=True,  # type: ignore
+    # 0.9 -> 0.95: reclaim dorsiflexion room up to the physical hard stop (foot_joint hard
+    # limit -30..+90 deg == MuJoCo -1.396..0.698 rad == 120 deg travel; flat pose 1.4386=82.4 deg).
+    soft_joint_pos_limit_factor=0.95,
+    actuators={
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint", ".*_foot_joint"],
+            velocity_limit_sim={
+                ".*_hip_joint": 29.6,
+                ".*_thigh_joint": 29.6,
+                ".*_calf_joint": 19.7,
+                ".*_foot_joint": 14.8,
+            },
+            effort_limit_sim={".*_hip_joint": 28, ".*_thigh_joint": 28, ".*_calf_joint": 42, ".*_foot_joint": 56},
+            # PD gains: inertia-scaled (ω_n=20 rad/s, ζ=0.9) from measured per-joint
+            # effective inertia I_eff (hip 0.163 / thigh 0.133 / calf 0.030 / foot 0.0019 kg·m²).
+            # Previous uniform Kp=25/Kd=0.5 (= Go2 quadruped default) left hip/thigh at ζ≈0.12
+            # (under-damped) and foot at ω_n≈113 (over-stiff). foot=20 sized for contact authority
+            # (env=HindLegHistoryEnvCfg, 200Hz physics). See _workspace/hind_leg_kp_kd_tuning_guide.md
+            stiffness={
+                ".*_hip_joint": 65.0,
+                ".*_thigh_joint": 53.0,
+                ".*_calf_joint": 12.0,
+                ".*_foot_joint": 20.0,
+            },
+            damping={
+                ".*_hip_joint": 6.0,
+                ".*_thigh_joint": 4.8,
+                ".*_calf_joint": 1.1,
+                ".*_foot_joint": 1.0,
+            },
+        ),
+    },
+)
+
+
+# ============================================================
+# QUAD_17DOF_CFG — 17-DOF full quadruped (4 legs × hip/thigh/calf/foot + waist)
+# DTC(Deep Tracking Control) 개발용. USD = quad_real_17dof_waist_sphere.mjcf 변환.
+# 관절순서(17): HL/HR(hip,thigh,calf,foot) · FB_waist · FL/FR(hip,thigh,calf,foot).
+# 기립 = 전관절 0 @ base z=0.5235 (MuJoCo 검증: 발접촉 z~0.02 접지).
+# 액추에이터 = A 제어기(MuJoCo 배포)/MJCF 실값 참조: Peak 토크(hip/thigh84·calf126·foot100.8·waist84),
+# 속도한계=A no-load ω(hip/thigh29.6·calf19.7·foot14.8). PD게인=hind_leg 튜닝(P1서 quad용 재튜닝 가능).
+# ============================================================
+QUAD_17DOF_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=os.path.join(os.path.dirname(__file__), "../../../../JSH/quad_17dof/quad_17dof.usd"),
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=5.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True, solver_position_iteration_count=8, solver_velocity_iteration_count=4
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.0),  # USD Base에 0.5235 baked → init z=0 (총 0.5235)
+        joint_pos={".*": 0.0},
+        joint_vel={".*": 0.0},
+    ),
+    soft_joint_pos_limit_factor=0.9,
+    actuators={
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint", ".*_foot_joint"],
+            velocity_limit_sim={
+                ".*_hip_joint": 29.6,
+                ".*_thigh_joint": 29.6,
+                ".*_calf_joint": 19.7,
+                ".*_foot_joint": 14.8,
+            },
+            effort_limit_sim={".*_hip_joint": 84.0, ".*_thigh_joint": 84.0, ".*_calf_joint": 126.0, ".*_foot_joint": 100.8},
+            stiffness={".*_hip_joint": 65.0, ".*_thigh_joint": 53.0, ".*_calf_joint": 12.0, ".*_foot_joint": 20.0},
+            damping={".*_hip_joint": 6.0, ".*_thigh_joint": 4.8, ".*_calf_joint": 1.1, ".*_foot_joint": 1.0},
+        ),
+        "waist": ImplicitActuatorCfg(
+            joint_names_expr=["FB_waist_joint"],
+            velocity_limit_sim=29.6,
+            effort_limit_sim=84.0,
+            stiffness=40.0,
+            damping=4.0,
         ),
     },
 )
