@@ -111,6 +111,8 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._prev_joint_target = self._robot.data.default_joint_pos.clone()
         # 관절 속도 관측 EMA 상태 (cfg.jvel_filter_alpha < 1 일 때만 쓴다)
         self._jvel_filt = torch.zeros(n_env, 12, device=device)
+        # 관절 목표 출력 EMA 상태 (cfg.action_filter_alpha < 1 일 때만 쓴다)
+        self._target_filt = self._robot.data.default_joint_pos.clone()
 
         # ── 물리 상수 ─────────────────────────────────────────────
         self._total_mass = float(self._robot.data.body_mass.torch[0].sum().item())
@@ -303,6 +305,13 @@ class Go2PedipulationEnv(DirectRLEnv):
                 r = torch.full((n,), cmd.circle_radius, device=device)
                 om = torch.full((n,), cmd.circle_omega, device=device)
                 sign = torch.ones(n, device=device)
+            # 일부 env 는 반경·각속도를 0 으로 눌러 **정지 목표**로 만든다. circle 만으로
+            # 학습하면 정책이 "목표는 늘 움직인다"를 전제로 삼아, 정지 목표를 유지할 때
+            # 오히려 더 떤다 (측정: circle 학습 후 유지 중 떨림이 1.29→2.83°/step).
+            if cmd.static_fraction > 0.0:
+                is_static = torch.rand(n, device=device) < cmd.static_fraction
+                r = torch.where(is_static, torch.zeros_like(r), r)
+                om = torch.where(is_static, torch.zeros_like(om), om)
             m = cmd.circle_center_margin
             # 반경이 박스에 안 들어가면 반경을 줄인다 (박스를 넓히지 않는다).
             r = torch.minimum(r, torch.clamp((box[2] - 2.0 * m) * 0.5, min=1e-3))
@@ -392,7 +401,17 @@ class Go2PedipulationEnv(DirectRLEnv):
 
         # 다음 스텝의 적분 기준. 지지 다리 슬롯은 현재 목표를 그대로 이어받아,
         # stance→manipulation 전환 시 목표가 튀지 않게 한다.
+        #
+        # ⚠ 아래 출력 필터를 **거치기 전** 값을 적분 기준으로 남긴다. 필터 출력을 되먹이면
+        #   적분기가 leaky 해져 plant 자체가 달라진다 — 여기서 원하는 것은 "적분기 + 출력
+        #   필터"이지 "누설 적분기"가 아니다.
         self._manip_joint_target = target.clone()
+
+        # 관절 목표 출력 EMA — 정책의 이득은 두고 고주파 성분만 깎는다.
+        if self.cfg.action_filter_alpha < 1.0:
+            af = self.cfg.action_filter_alpha
+            self._target_filt.mul_(1.0 - af).add_(target, alpha=af)
+            target = self._target_filt.clone()
 
         if self.cfg.domain_rand and self.cfg.dr.randomize_action_delay:
             self._action_delay_buf = torch.cat([target.unsqueeze(1), self._action_delay_buf[:, :-1]], dim=1)
@@ -720,6 +739,7 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._prev_joint_target[env_ids_long] = self._robot.data.default_joint_pos[env_ids_long].clone()
         self._prev_joint_vel[env_ids_long] = 0.0
         self._jvel_filt[env_ids_long] = 0.0
+        self._target_filt[env_ids_long] = self._robot.data.default_joint_pos[env_ids_long].clone()
         self._hold_counter[env_ids_long] = 0.0
         self._episode_base_xy0[env_ids_long] = root_state[:, 0:2]
 

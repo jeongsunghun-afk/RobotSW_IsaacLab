@@ -118,6 +118,10 @@ class CommandCfg:
     #     PLAN  r=0.20, v=0.05/0.10/0.20 m/s  →  omega = 0.25 / 0.50 / 1.00 rad/s
     #     여기  r=0.10, v=0.025/0.05/0.10 m/s →  omega = 0.25 / 0.50 / 1.00 rad/s (동일)
     circle_omega_range: tuple[float, float] = (0.15, 1.2)  # [rad/s]
+    # circle 모드에서 반경·각속도를 0 으로 눌러 정지 목표로 만들 env 비율.
+    # S2 의 실제 요구는 "궤적 추종"만이 아니라 "정지 목표 도달·유지"(S1)를 **포함**한다.
+    # 100% circle 로 학습하면 정지 목표가 분포 밖이 되어 유지 중 떨림이 오히려 커진다.
+    static_fraction: float = 0.0
     # 원이 명령 박스를 벗어나지 않도록 중심 샘플링에 남길 여유
     circle_center_margin: float = 0.01  # [m]
 
@@ -170,6 +174,20 @@ class Go2PedipulationEnvCfg(DirectRLEnvCfg):
     stiffness_range: tuple[float, float] = (20.0, 60.0)  # [N·m/rad] 활성화 시
     # 조작 다리 증분 목표의 스텝당 상한 — 적분형 action 의 windup 방지
     manip_delta_clip: float = 0.15  # [rad/step]
+
+    # ── 관절 목표 출력 필터 ─────────────────────────────────────
+    # 1.0 = 필터 없음. EMA: q_cmd ← (1-α)·q_cmd + α·q_target
+    #
+    # 유지 중 action 의 lag-1 자기상관이 0.60~0.89 이고 MSD/lag 가 큰 lag 에서 감소한다
+    # (측정: IMPL_LOG §4k). 즉 떨림은 발산하는 랜덤워크가 아니라 **상관시간 2~9 step
+    # (2.5~12 Hz) 의 평균회귀 성분**이다 — EMA 가 실제로 깎을 수 있는 대역이다.
+    # ⚠ 초기에 "랜덤워크라 EMA 는 답이 아니다"라고 판단했는데 그건 Δtarget 의 부호 반전율만
+    #   본 결론이었다. MSD 를 보면 유계이며, 그 판단은 틀렸다.
+    #
+    # 평평한 페널티는 정책의 **이득 자체**를 깎아 외란 회복까지 느리게 만든다(150 N 52%→31%
+    # 전례). 필터는 이득을 두고 대역만 깎는다.
+    # ⚠ 실기 배포 시 같은 α 로 같은 필터를 적용해야 한다.
+    action_filter_alpha: float = 1.0
 
     # ── 관절 속도 관측 필터 ─────────────────────────────────────
     # 1.0 = 필터 없음(원시값). EMA: v_filt ← (1-α)·v_filt + α·v_obs

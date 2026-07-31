@@ -65,6 +65,12 @@ parser.add_argument(
     choices=["cycle", "FL", "FR", "RL", "RR"],
     help="video 모드에서 조작할 다리. 특정 다리를 강제하면 leg 매핑을 육안으로 검증할 수 있다.",
 )
+parser.add_argument(
+    "--video_zoom",
+    type=float,
+    default=1.0,
+    help="video/showcase 카메라 당김 배율. 1.0=전신, 2.0=거리 절반. 떨림 육안 확인에 쓴다.",
+)
 parser.add_argument("--num_envs", type=int, default=1024, help="시드당 병렬 시행 수.")
 parser.add_argument("--seeds", type=int, default=3, help="시드 개수 (PLAN §5: 최소 3).")
 parser.add_argument("--seed0", type=int, default=1000, help="첫 시드 값. 시드는 seed0, seed0+1, ... 로 진행.")
@@ -92,6 +98,12 @@ parser.add_argument(
         "관절 속도 관측 EMA 계수. **학습 때 쓴 값과 같아야 한다** — 다르면 분포 밖 평가다."
         " 미지정이면 env cfg 기본값(1.0=끔)을 쓴다."
     ),
+)
+parser.add_argument(
+    "--action_filter_alpha",
+    type=float,
+    default=None,
+    help="관절 목표 출력 EMA 계수. **학습 때 쓴 값과 같아야 한다.** 미지정이면 cfg 기본값(1.0=끔).",
 )
 parser.add_argument(
     "--zero_noise",
@@ -187,6 +199,8 @@ def build_env(seed: int):
 
     if args_cli.jvel_filter_alpha is not None:
         env_cfg.jvel_filter_alpha = args_cli.jvel_filter_alpha
+    if args_cli.action_filter_alpha is not None:
+        env_cfg.action_filter_alpha = args_cli.action_filter_alpha
     if args_cli.no_domain_rand:
         env_cfg.domain_rand = False
     if args_cli.no_obs_noise:
@@ -223,8 +237,13 @@ def build_env(seed: int):
         env_cfg.viewer.env_index = 0
         # 눈높이를 낮게 두면 반대쪽 뒷발의 목표 마커가 몸통에 가린다. 3/4 부감으로 올려
         # 네 발이 모두 보이게 한다.
-        env_cfg.viewer.eye = (1.35, 1.0, 0.92)
-        env_cfg.viewer.lookat = (0.0, 0.0, 0.18)
+        # 떨림은 발 끝에서 수 mm 라, 전신 뷰로는 육안 판별이 안 된다. --video_zoom 으로
+        # lookat 을 향해 카메라를 당겨 조작 다리를 크게 잡는다 (1.0 = 기존 전신 뷰).
+        _eye = (1.35, 1.0, 0.92)
+        _look = (0.0, 0.0, 0.18)
+        _z = max(args_cli.video_zoom, 1e-3)
+        env_cfg.viewer.eye = tuple(lk + (e - lk) / _z for e, lk in zip(_eye, _look))
+        env_cfg.viewer.lookat = _look
         if args_cli.mode == "showcase":
             # ⚠ 대본 길이로 잡아야 한다. 다른 대본의 길이를 쓰면 영상이 중간에 잘린다
             # (s2 대본 2020 step 을 s1 길이 1490 으로 녹화해 뒷부분이 통째로 날아갔다).
