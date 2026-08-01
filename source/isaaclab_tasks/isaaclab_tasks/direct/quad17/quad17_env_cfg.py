@@ -197,6 +197,23 @@ class Quad17VelocityEnvCfg(DirectRLEnvCfg):
     gap_width_max = 0.20  # m; target gap toward the corridor far end (~the pre-curriculum uniform 0.18 m)
     curric_x_start = 0.3  # m; first ~0.3 m past each platform stays easy before that corridor's ramp begins
     curric_x_ramp = 0.0  # m; 0 = auto per-corridor = max(2.0, 0.7*corridor_len); >0 pins a fixed ramp span
+    # -- DTC adaptive terrain-LEVEL curriculum (IsaacLab game-inspired; OFF => the spatial ramp above) --
+    # When True, _build_gap_terrain lays out ``num_terrain_levels`` corridors as spatial ROWS stacked along
+    # +y (each a lane running along +x). Level 0 = FLAT (fully paved, no gaps); level L carves gaps whose
+    # width scales L/(num_terrain_levels-1) from ~0 up to ``gap_width_max``. Each env carries a persistent
+    # ``_terrain_level`` (init 0 => everyone starts flat) and spawns in its level's lane; at episode end it
+    # is PROMOTED a level if its forward progress this episode exceeded ``promote_frac`` of the corridor
+    # length, DEMOTED if below ``demote_frac`` (clamped [0, num_terrain_levels-1]). The offline TAMOLS cache
+    # lookup (_next_gap_dist) is made PER-ENV by its level's gap edges/widths so the foothold plan matches
+    # the lane the robot is actually on. Default OFF => byte-for-byte the per-band spatial-ramp behaviour
+    # above (the currently-running training is unaffected). Only takes effect together with gap_terrain=True
+    # (it extends the gap builder). Build-time knobs are cfg-only (no env-var overrides).
+    terrain_curriculum: bool = False
+    num_terrain_levels: int = 10  # difficulty rows; level 0 = flat, level (n-1) = gap_width_max
+    terrain_curriculum_corridor_len = 8.0  # m; forward length of each level's gap corridor (past the platform)
+    terrain_curriculum_lane_pitch = 4.0  # m; +y spacing between difficulty lanes (keeps a robot inside its lane)
+    promote_frac = 0.8  # advance a level if forward progress this episode > promote_frac * corridor_len
+    demote_frac = 0.4  # regress a level if forward progress this episode < demote_frac * corridor_len
     foot_in_gap_reward_scale = -1.0  # mild penalty: a stance foot dropped below the strip surface
     # forward-only command for the gap test (must cross trenches); applied in Quad17Env.__init__.
     gap_lin_vel_x_range = [0.4, 0.8]
@@ -351,3 +368,16 @@ class Quad17VelocityEnvCfg(DirectRLEnvCfg):
     lin_vel_x_range = [-0.5, 1.0]
     lin_vel_y_range = [-0.5, 0.5]
     ang_vel_range = [-0.5, 0.5]
+
+    # -- Always-on numerical robustness (pure safety; NO behaviour change on finite, in-range data) --
+    # A physics blow-up on one env (e.g. a wide gap at a high terrain level) can emit NaN/Inf/huge values
+    # that propagate obs -> reward -> gradient -> NaN policy std (crash: "normal expects all elements of
+    # std >= 0.0"). These guards sanitize obs (_get_observations) and reward (_get_rewards) and terminate a
+    # detonated robot early (_get_dones). They do NOT change obs/action dims, so checkpoints stay loadable.
+    obs_clip = 100.0  # obs sanitized to nan_to_num then clamped to +/-obs_clip (generous; real obs << 100)
+    reward_clip = 50.0  # per-step summed reward clamped to +/-reward_clip after nan_to_num
+    # blow-up termination thresholds (well above real locomotion so gap-level fast motion is NOT killed):
+    blowup_lin_vel = 25.0  # m/s; base speed above this = explosion (real top speed ~2 m/s)
+    blowup_ang_vel = 50.0  # rad/s; base angular speed above this = explosion
+    blowup_height_max = 5.0  # m; base world-z above this = launched (normal ~0.82 m on the strip surface)
+    blowup_height_min = -5.0  # m; base world-z below this = fell through the world / exploded downward

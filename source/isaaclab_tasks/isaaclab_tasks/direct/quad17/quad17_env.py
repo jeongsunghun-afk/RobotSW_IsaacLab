@@ -48,6 +48,24 @@ class Quad17Env(DirectRLEnv):
     cfg: Quad17VelocityEnvCfg
 
     def __init__(self, cfg: Quad17VelocityEnvCfg, render_mode: str | None = None, **kwargs):
+        # -- EARLY env-var override: QUAD17_TERRAIN_CURRICULUM (adaptive terrain-LEVEL curriculum) --
+        # Processed BEFORE super().__init__() (which runs _setup_scene/_build_gap_terrain) so it actually
+        # switches the terrain BUILDER — unlike QUAD17_GAP_TERRAIN, which is read after _setup_scene and so
+        # only toggles the post-build wiring. Mutating the passed cfg here propagates because DirectRLEnv
+        # stores it as self.cfg during super().__init__(). Same string parsing as QUAD17_GAP_TERRAIN:
+        #   "1"/"true" => force cfg.terrain_curriculum on; "0"/"false" => force off; unset => cfg default.
+        # Forcing it on ALSO forces cfg.gap_terrain on (the curriculum builds on the gap terrain), so this
+        # SINGLE env-var enables the full curriculum path; the self._terrain_curriculum guard below still
+        # requires gap terrain. (Do not combine QUAD17_TERRAIN_CURRICULUM=1 with QUAD17_GAP_TERRAIN=0 —
+        # that contradictory pair would build curriculum lanes but then disable the gap path.)
+        import os as _os
+
+        _tc_env = _os.environ.get("QUAD17_TERRAIN_CURRICULUM", "").strip()
+        if _tc_env != "":
+            cfg.terrain_curriculum = _tc_env not in ("0", "false", "False", "no")
+            if cfg.terrain_curriculum:
+                cfg.gap_terrain = True  # curriculum extends the gap builder; enable it so one var suffices
+
         super().__init__(cfg, render_mode, **kwargs)
 
         # Joint position command (deviation from default joint positions)
@@ -208,6 +226,16 @@ class Quad17Env(DirectRLEnv):
         if _gap_env != "":
             self.cfg.gap_terrain = _gap_env not in ("0", "false", "False", "no")
         self._gap = bool(self.cfg.gap_terrain)
+        # -- DTC adaptive terrain-LEVEL curriculum (see cfg.terrain_curriculum) --
+        # Only active together with the gap builder; _build_gap_terrain (run in _setup_scene above) has
+        # already laid out the per-level lanes and per-level gap tables (_level_*) when the toggle is on.
+        # ``_terrain_level`` is PERSISTENT curriculum state (NOT zeroed each episode) — allocated here,
+        # updated at episode end by _update_terrain_levels in _reset_idx. ``_terrain_curric_started`` gates
+        # the first (full) reset out of the promote/demote logic (no valid prior spawn anchor yet). Default
+        # OFF => every curriculum branch below is skipped and the env behaves byte-for-byte as before.
+        self._terrain_curriculum = self._gap and bool(self.cfg.terrain_curriculum)
+        self._terrain_level = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._terrain_curric_started = False
         # Per-episode forward spawn offset (m): shifts the robot's phase relative to the static trench
         # pattern each reset so it cannot memorize a fixed body-relative gap schedule. Re-randomized in
         # _reset_idx; bounded to one nominal period so the feet stay on the spawn platform.
@@ -252,7 +280,12 @@ class Quad17Env(DirectRLEnv):
                 "lin_vel_y_range": [0.0, 0.0],
                 "ang_vel_range": [0.0, 0.0],
             }
-            if self._gap and hasattr(self, "_strip_centers_x") and self._strip_centers_x.numel() >= 2:
+            if (
+                self._gap
+                and not self._terrain_curriculum
+                and hasattr(self, "_strip_centers_x")
+                and self._strip_centers_x.numel() >= 2
+            ):
                 # gap near-edge (world x) = solid-strip center + half strip width; sorted for searchsorted.
                 # The gap AFTER strip k spans [center[k]+strip_w/2, center[k+1]-strip_w/2], so its width is
                 # center[k+1] - center[k] - strip_w. The last strip has no gap after it, so DROP it from BOTH
@@ -376,6 +409,11 @@ class Quad17Env(DirectRLEnv):
         trenches begin forward of it. ``_strip_centers_x`` (sorted world-x of every strip center) is
         stored for the foothold snap so the reference targets EXACTLY match the physical strips.
         """
+        # Adaptive terrain-LEVEL curriculum: hand off to the per-level lane builder (kept as a separate
+        # method so THIS spatial-ramp body stays byte-for-byte identical when the toggle is off).
+        if bool(self.cfg.terrain_curriculum):
+            self._build_gap_terrain_curriculum()
+            return
         import os as _os
 
         import trimesh
@@ -469,6 +507,120 @@ class Quad17Env(DirectRLEnv):
             f"gap_w ramp {gap_min:.2f}->{gap_max:.2f} m (actual min={gaps_np.min():.3f} max={gaps_np.max():.3f})"
         )
 
+    def _build_gap_terrain_curriculum(self):
+        """Build the adaptive terrain-LEVEL trench field: ``num_terrain_levels`` corridors as +y ROWS.
+
+        Difficulty is SPATIAL-by-row (unlike the sibling per-band ramp): each level L occupies its own
+        y-lane (``y = L * lane_pitch``) running along +x, and a robot is teleported to its level's lane at
+        every reset (see _reset_idx). Level 0 is FLAT (the corridor is one solid paved box, no gaps); level
+        L>0 lays solid strips (width ``gap_strip_width``, tops at ``z = gap_depth``) separated by gaps whose
+        width scales ``L/(num_terrain_levels-1) * gap_width_max`` (+ level-scaled jitter). A wide solid
+        spawn platform heads every lane so all four feet start on solid ground. Because different-env robot
+        collisions are filtered (GPU replication), all envs currently at level L may share lane L without
+        colliding — only the shared terrain matters, so the lane y-position selects which gap pattern (which
+        difficulty) the robot physically experiences.
+
+        Stores PER-LEVEL gap tables so the offline TAMOLS cache lookup can be indexed by each env's level:
+          * ``_level_strip_centers`` (num_levels, max_strips)  sorted strip-center world-x, sentinel-padded
+          * ``_level_strip_count``   (num_levels,)             real strip count per level (0 for flat lvl 0)
+          * ``_level_gap_edges``     (num_levels, max_edges)   gap near-edges (center + strip_w/2), padded
+          * ``_level_gap_widths``    (num_levels, max_edges)   width of the gap AFTER each near-edge, padded
+          * ``_level_origin_xy``     (num_levels, 2)           lane spawn origin (spawn_x, lane_y)
+        Padding uses a large finite sentinel so batched ``searchsorted`` stays sorted and 'past every real
+        edge' is detected as overflow (=> nominal-stance cache slice), matching the flat _next_gap_dist path.
+        """
+        import trimesh
+
+        strip_w = float(self.cfg.gap_strip_width)
+        jitter = float(self.cfg.gap_spacing_jitter)
+        depth = float(self.cfg.gap_depth)
+        gap_max = float(self.cfg.gap_width_max)
+        num_levels = max(1, int(self.cfg.num_terrain_levels))
+        corridor_len = float(self.cfg.terrain_curriculum_corridor_len)
+        lane_pitch = float(self.cfg.terrain_curriculum_lane_pitch)
+        lane_width = max(1.5, lane_pitch - 1.0)  # y-band each lane occupies (leave a trench gutter between lanes)
+        plat_len = 2.0  # wide spawn platform so all 4 feet (~0.6 m wheelbase) start on solid ground
+        x_plat0 = -1.0  # platform spans [x_plat0, x_plat0 + plat_len]; spawn at its center (x=0)
+        spawn_x = x_plat0 + 0.5 * plat_len  # 0.0 (on the platform)
+        x_strip0 = x_plat0 + plat_len  # strips/gaps begin just past the platform leading edge
+        x_strip_end = x_strip0 + corridor_len
+
+        rng = np.random.RandomState(0)  # deterministic -> stored centers match the built mesh exactly
+        boxes: list = []
+        level_centers: list = []  # per-level np array of solid-strip center x
+        for lvl in range(num_levels):
+            y_lane = float(lvl * lane_pitch)
+            b = trimesh.creation.box(extents=(plat_len, lane_width, depth))  # spawn platform (solid)
+            b.apply_translation((x_plat0 + 0.5 * plat_len, y_lane, 0.5 * depth))
+            boxes.append(b)
+            frac = 0.0 if num_levels <= 1 else lvl / (num_levels - 1)
+            gap_w = frac * gap_max
+            centers: list = []
+            if gap_w < 1e-3:  # FLAT level: pave the whole corridor solid (no gaps)
+                b = trimesh.creation.box(extents=(corridor_len, lane_width, depth))
+                b.apply_translation((0.5 * (x_strip0 + x_strip_end), y_lane, 0.5 * depth))
+                boxes.append(b)
+            else:
+                x = x_strip0
+                while x + strip_w <= x_strip_end:
+                    c = x + 0.5 * strip_w
+                    centers.append(c)
+                    b = trimesh.creation.box(extents=(strip_w, lane_width, depth))
+                    b.apply_translation((c, y_lane, 0.5 * depth))
+                    boxes.append(b)
+                    gap = max(0.02, gap_w + float(rng.uniform(-jitter, jitter)) * frac)  # jitter shrinks with level
+                    x += strip_w + gap
+            level_centers.append(np.asarray(centers, dtype=np.float64))
+        mesh = trimesh.util.concatenate(boxes)
+        self._terrain.import_mesh("gap_strips", mesh)
+        self._gap_surface_z = depth  # world z of the strip/platform tops = walking surface (same as flat path)
+
+        # -------- pack the per-level gap tables (padded to a common width) --------
+        sentinel = 1.0e9
+        max_strips = max(1, max(len(c) for c in level_centers))
+        max_edges = max(1, max_strips - 1)
+        lc = np.full((num_levels, max_strips), sentinel, dtype=np.float64)
+        lcount = np.zeros((num_levels,), dtype=np.int64)
+        le = np.full((num_levels, max_edges), sentinel, dtype=np.float64)
+        lw = np.zeros((num_levels, max_edges), dtype=np.float64)
+        for lvl, c in enumerate(level_centers):
+            cs = np.sort(c)
+            lcount[lvl] = cs.size
+            if cs.size >= 1:
+                lc[lvl, : cs.size] = cs
+            if cs.size >= 2:
+                edges = cs[:-1] + 0.5 * strip_w  # gap near-edge = strip center + half strip width
+                widths = np.clip(cs[1:] - cs[:-1] - strip_w, 0.0, None)  # width of the gap after each near-edge
+                le[lvl, : edges.size] = edges
+                lw[lvl, : widths.size] = widths
+        self._level_strip_centers = torch.tensor(lc, dtype=torch.float, device=self.device)  # (L, max_strips)
+        self._level_strip_count = torch.tensor(lcount, dtype=torch.long, device=self.device)  # (L,)
+        self._level_gap_edges = torch.tensor(le, dtype=torch.float, device=self.device)  # (L, max_edges)
+        self._level_gap_widths = torch.tensor(lw, dtype=torch.float, device=self.device)  # (L, max_edges)
+        self._gap_curric_sentinel = float(sentinel)
+        self._corridor_len = corridor_len
+        origins = np.stack(
+            [np.full(num_levels, spawn_x, dtype=np.float64), np.arange(num_levels, dtype=np.float64) * lane_pitch],
+            axis=1,
+        )  # (L, 2) lane spawn origin (spawn_x, lane_y)
+        self._level_origin_xy = torch.tensor(origins, dtype=torch.float, device=self.device)
+
+        # Banner-compat + Raibert-fallback aliases: _strip_centers_x must be non-empty for the __init__ gap
+        # banner and any non-cache snap; use the hardest lane's centers (or a 2-strip stub if it is flat).
+        hardest = np.sort(level_centers[-1]) if level_centers[-1].size >= 2 else np.array([spawn_x, spawn_x + strip_w])
+        self._strip_centers_x = torch.tensor(hardest, dtype=torch.float, device=self.device)
+        self._gap_corridor_len = corridor_len
+        self._gap_curric_ramp = 0.0
+        self._gap_n_corridors = num_levels
+        print(
+            f"[quad17][gap][curriculum] built {num_levels} difficulty lanes (rows along +y, pitch "
+            f"{lane_pitch:.2f}m, lane_w {lane_width:.2f}m): level 0 FLAT -> level {num_levels - 1} "
+            f"gap_w {gap_max:.2f}m | corridor_len={corridor_len:.2f}m plat_len={plat_len:.2f}m spawn_x={spawn_x:.2f} "
+            f"strips_x[{x_strip0:.2f},{x_strip_end:.2f}] depth={depth:.2f} surface_z={depth:.3f} "
+            f"strips/level(min..max)={int(lcount.min())}..{int(lcount.max())} "
+            f"promote>{self.cfg.promote_frac:.2f}*len demote<{self.cfg.demote_frac:.2f}*len"
+        )
+
     def _snap_x_to_strip(self, x: torch.Tensor) -> torch.Tensor:
         """Snap x (any shape) to the nearest solid-strip center (from ``_strip_centers_x``).
 
@@ -477,6 +629,18 @@ class Quad17Env(DirectRLEnv):
         ``searchsorted`` on the sorted centers tensor — guarantees the reference foothold lands on a
         physically solid strip, so a foot tracking it will not drop into a trench.
         """
+        if self._terrain_curriculum:
+            # PER-ENV snap: use each env's level's strip centers (Raibert-fallback path only; the primary
+            # cache path re-anchors without snapping). x is (N, M) with N=num_envs; rows with 0 strips
+            # (flat level 0) are left unsnapped (all-solid, any x is valid ground).
+            centers = self._level_strip_centers[self._terrain_level]  # (N, K) sorted asc, sentinel-padded
+            count = self._level_strip_count[self._terrain_level]  # (N,)
+            k = centers.shape[1]
+            idx = torch.searchsorted(centers, x).clamp(1, k - 1)  # (N, M)
+            left = torch.gather(centers, 1, idx - 1)
+            right = torch.gather(centers, 1, idx)  # may be the sentinel past the last real strip
+            nearest = torch.where((x - left) <= (right - x), left, right)  # sentinel right -> keeps left
+            return torch.where((count == 0).unsqueeze(1), x, nearest)
         c = self._strip_centers_x
         flat = x.reshape(-1)
         idx = torch.searchsorted(c, flat).clamp(1, c.numel() - 1)
@@ -586,6 +750,13 @@ class Quad17Env(DirectRLEnv):
             ],
             dim=-1,
         )
+        # -------- always-on numerical safety: sanitize the policy obs (critical NaN-std fix) --------
+        # A physics blow-up on one env can inject NaN/Inf/huge values here; left unchecked they reach the
+        # policy and drive the action std to NaN (training crash). nan_to_num + clamp guarantees a finite,
+        # bounded obs. Done BEFORE the history stack below so the history buffer never accumulates NaN.
+        # Pure safety: a no-op on already-finite, in-range obs, and it does NOT change the obs dimension.
+        _oc = float(self.cfg.obs_clip)
+        obs = torch.nan_to_num(obs, nan=0.0, posinf=_oc, neginf=-_oc).clamp(-_oc, _oc)
         observations = {"policy": obs}
 
         if self.cfg.history_observation:
@@ -617,6 +788,12 @@ class Quad17Env(DirectRLEnv):
                 dim=-1,
             )
             observations["priv_latent"] = priv_obs
+
+        # Final safety sweep: sanitize EVERY obs group handed to the policy/critic (the priv groups are
+        # built from raw physics state / view tensors, not from the already-sanitized `obs`, so they can
+        # independently carry NaN/Inf on a blow-up). Same generous clamp; no dim change on any group.
+        for _k, _v in observations.items():
+            observations[_k] = torch.nan_to_num(_v, nan=0.0, posinf=_oc, neginf=-_oc).clamp(-_oc, _oc)
 
         return observations
 
@@ -688,6 +865,25 @@ class Quad17Env(DirectRLEnv):
         """
         gapd_min, gapd_max = float(self._tamols_gapd[0]), float(self._tamols_gapd[-1])
         default_w = float(self._tamols_width[self._tamols_width.numel() // 2])  # cache median width (~0.18)
+        if self._terrain_curriculum:
+            # PER-ENV gap table: gather each env's level's near-edges/widths, then run the SAME nearest-
+            # edge-ahead logic BATCHED (searchsorted per row). Sentinel-padding is > any real edge, so a
+            # base past every real gap searches into the padding -> detected as overflow -> nominal slice.
+            lvl = self._terrain_level  # (N,)
+            edges = self._level_gap_edges[lvl]  # (N, E) sorted asc, sentinel-padded
+            widths = self._level_gap_widths[lvl]  # (N, E)
+            sent = self._gap_curric_sentinel
+            e = edges.shape[1]
+            thr = (base_x + gapd_min).unsqueeze(1)  # (N,1); first edge >= thr minimizes d s.t. d >= gapd_min
+            idx = torch.searchsorted(edges, thr).squeeze(1)  # (N,); == e if base is past every real edge
+            idx_c = idx.clamp(max=e - 1)
+            chosen_e = torch.gather(edges, 1, idx_c.unsqueeze(1)).squeeze(1)  # (N,)
+            chosen_w = torch.gather(widths, 1, idx_c.unsqueeze(1)).squeeze(1)  # (N,)
+            overflow = (idx >= e) | (chosen_e >= 0.5 * sent)  # no real gap ahead (past all / hit padding)
+            d = torch.clamp(chosen_e - base_x, min=gapd_min, max=gapd_max)
+            d = torch.where(overflow, torch.full_like(d, gapd_max), d)
+            w = torch.where(overflow, torch.full_like(chosen_w, default_w), chosen_w)
+            return d, w
         edges = self._gap_near_edges_x
         if edges is None or edges.numel() == 0 or self._gap_widths is None:
             return torch.full_like(base_x, gapd_max), torch.full_like(base_x, default_w)
@@ -989,6 +1185,13 @@ class Quad17Env(DirectRLEnv):
             "progress": progress * self.cfg.progress_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+        # always-on numerical safety: a blown-up env can make a reward term NaN/Inf or huge (the crash run
+        # logged a Mean-reward spike to -1473 from one corrupted env). nan_to_num + clamp to a per-step bound
+        # keeps the training signal finite and bounded. No-op on normal finite rewards; the clamped value is
+        # what feeds curriculum_rew_buf and is returned to the runner (per-term _episode_sums stay raw for
+        # diagnostics). The blow-up termination in _get_dones then resets the offending env.
+        _rc = float(self.cfg.reward_clip)
+        reward = torch.nan_to_num(reward, nan=0.0, posinf=_rc, neginf=-_rc).clamp(-_rc, _rc)
         self.curriculum_rew_buf += reward
         for key, value in rewards.items():
             self._episode_sums[key] += value
@@ -1018,6 +1221,24 @@ class Quad17Env(DirectRLEnv):
         # t_ref=0 at reset (see _base_ref_xy), a fresh robot has err≈0 and this does NOT fire at step 0.
         ref_x, _ = self._base_ref_xy()
         died = died | ((ref_x - self._robot.data.root_link_pos_w[:, 0]) > self.cfg.progress_fail_dist)
+        # -------- always-on blow-up termination: catch an exploded robot BEFORE it corrupts training --------
+        # A physics detonation (e.g. a wide gap at a high terrain level) yields non-finite state or absurd
+        # speeds/heights that would poison obs/reward (and, pre-guard, the policy std). Terminate so the
+        # source env is reset. Thresholds sit FAR above real locomotion (top speed ~2 m/s, base ~0.82 m), so
+        # normal fast gap-crossing motion is never falsely killed. Additive (OR) to the conditions above.
+        root_pos = self._robot.data.root_link_pos_w  # (N,3) world
+        root_lin = self._robot.data.root_lin_vel_b  # (N,3) speed magnitude is frame-invariant
+        root_ang = self._robot.data.root_ang_vel_b  # (N,3)
+        nonfinite = (
+            ~torch.isfinite(root_pos).all(dim=-1)
+            | ~torch.isfinite(root_lin).all(dim=-1)
+            | ~torch.isfinite(root_ang).all(dim=-1)
+        )
+        exploded = (torch.norm(root_lin, dim=-1) > self.cfg.blowup_lin_vel) | (
+            torch.norm(root_ang, dim=-1) > self.cfg.blowup_ang_vel
+        )
+        height_bad = (root_pos[:, 2] > self.cfg.blowup_height_max) | (root_pos[:, 2] < self.cfg.blowup_height_min)
+        died = died | nonfinite | exploded | height_bad
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -1032,11 +1253,25 @@ class Quad17Env(DirectRLEnv):
         self._gait_phase[env_ids] = torch.rand(len(env_ids), device=self.device)
         if self.cfg.history_observation:
             self.obs_history_buf[env_ids, :, :] = 0.0
+        # -------- adaptive terrain-LEVEL curriculum: promote/demote BEFORE respawning --------
+        # Uses this episode's forward progress (current base_x minus the OLD spawn anchor _base_ref_x0,
+        # which still holds the previous episode's spawn x at this point) to move each env up/down a level,
+        # then the spawn below places it in the (possibly new) level's lane. No-op when the toggle is off.
+        if self._terrain_curriculum:
+            self._update_terrain_levels(env_ids)
         # reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        if self._terrain_curriculum:
+            # Spawn in THIS env's level lane (origin xy = lane spawn_x, lane_y); do NOT add the grid
+            # env_origins (default root xy is 0, so this places the robot at the lane origin). Cross-env
+            # collision filtering means many envs sharing a lane do not physically collide.
+            lvl = self._terrain_level[env_ids]
+            default_root_state[:, 0] += self._level_origin_xy[lvl, 0]
+            default_root_state[:, 1] += self._level_origin_xy[lvl, 1]
+        else:
+            default_root_state[:, :3] += self._terrain.env_origins[env_ids]
         if self._gap:
             # Gap test: spawn on the solid strip surface (raise by strip height) and add a per-episode
             # forward offset (re-randomized here -> different phase vs. the static trench pattern each
@@ -1091,8 +1326,33 @@ class Quad17Env(DirectRLEnv):
         extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
+        # adaptive terrain-level curriculum progression metric (mean level of the just-reset envs).
+        if self._terrain_curriculum:
+            self.extras["log"]["Metrics/terrain_level"] = torch.mean(self._terrain_level[env_ids].float()).item()
+            self._terrain_curric_started = True  # arm promote/demote for all subsequent resets
 
         self._resample_commands(env_ids)
+
+    def _update_terrain_levels(self, env_ids: torch.Tensor):
+        """Game-inspired terrain-level curriculum: promote on forward progress, demote on hesitation.
+
+        Progress this episode = current base_x - the OLD spawn anchor ``_base_ref_x0`` (still the previous
+        episode's spawn x, which INCLUDES the per-episode spawn_dx jitter, at the point this runs). Advance a
+        level when progress exceeds ``promote_frac`` of the corridor length, regress below ``demote_frac``,
+        clamped to ``[0, num_terrain_levels-1]``. Skipped on the first (full) reset — there is no valid prior
+        spawn anchor yet (``_base_ref_x0`` is still the __init__ zero), so ``_terrain_curric_started`` gates
+        it; the level 0 floor makes it a no-op regardless. Mirrors the sibling parkour curriculum, but keyed
+        on forward x-advance (forward-only gap test) instead of radial distance from the origin.
+        """
+        if not self._terrain_curric_started:
+            return
+        base_x = self._robot.data.root_link_pos_w[env_ids, 0]  # terminal base x (pre-respawn)
+        progress = base_x - self._base_ref_x0[env_ids]  # forward advance from this episode's spawn
+        corridor = self._corridor_len
+        move_up = progress > self.cfg.promote_frac * corridor
+        move_down = progress < self.cfg.demote_frac * corridor
+        new_level = self._terrain_level[env_ids] + move_up.long() - move_down.long()
+        self._terrain_level[env_ids] = torch.clamp(new_level, 0, int(self.cfg.num_terrain_levels) - 1)
 
     def _resample_commands(self, env_ids: torch.Tensor):
         self._commands[env_ids, 0] = torch_rand_float(
