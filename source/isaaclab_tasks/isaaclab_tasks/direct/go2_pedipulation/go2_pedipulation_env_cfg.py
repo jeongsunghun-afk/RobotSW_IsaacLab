@@ -170,6 +170,9 @@ class Go2PedipulationEnvCfg(DirectRLEnvCfg):
 
     # ── 액션 ────────────────────────────────────────────────────
     action_scale: float = 0.25
+    # hip(abduction) 액션을 0.5배로 축소. 지지 다리 슬롯(a_loc)에만 적용되며,
+    # 적분형인 조작 다리 슬롯(a_man)은 영향을 받지 않는다.
+    hip_scale_reduction: bool = True
     use_stiffness_action: bool = False  # a_stiffness(4) 활성화 여부. 자리는 항상 유지
     stiffness_range: tuple[float, float] = (20.0, 60.0)  # [N·m/rad] 활성화 시
     # 조작 다리 증분 목표의 스텝당 상한 — 적분형 action 의 windup 방지

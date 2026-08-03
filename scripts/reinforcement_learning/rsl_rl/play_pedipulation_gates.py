@@ -86,6 +86,16 @@ parser.add_argument(
     default=-0.03,
     help="contact 모드에서 지시할 z 오프셋 [m]. 음수면 지면 아래를 지시해 눌러 닿게 한다.",
 )
+parser.add_argument(
+    "--hip_scale_reduction",
+    type=str,
+    default="auto",
+    choices=["auto", "on", "off"],
+    help=(
+        "hip 액션 축소. **학습 때와 같아야 한다** — 액션의 의미가 바뀌므로 다르면 분포 밖 평가다."
+        " auto(기본) = 체크포인트 옆 params/env.yaml 에서 자동 판별, 키가 없으면 off."
+    ),
+)
 parser.add_argument("--num_envs", type=int, default=1024, help="시드당 병렬 시행 수.")
 parser.add_argument("--seeds", type=int, default=3, help="시드 개수 (PLAN §5: 최소 3).")
 parser.add_argument("--seed0", type=int, default=1000, help="첫 시드 값. 시드는 seed0, seed0+1, ... 로 진행.")
@@ -183,10 +193,43 @@ G3_STD_M = 0.02  # [m] 5 s hold 오차 std 기준
 G3_RANGE_M = 0.05  # [m] 5 s hold 오차 max−min 기준
 
 
+def resolve_hip_scale_reduction(cfg_default: bool) -> bool:
+    """``hip_scale_reduction`` 을 **체크포인트가 학습된 값**으로 되돌린다.
+
+    이 플래그는 액션의 의미를 바꾸므로, 학습 때와 다르면 분포 밖 평가다. cfg 기본값을 그대로
+    쓰면 이 기능이 생기기 **전에** 학습된 정책에도 축소가 걸려 조용히 틀린 수치가 나온다.
+    그래서 기본 동작은 체크포인트 옆 ``params/env.yaml`` 에서 읽는 것이다 — 키가 없으면
+    그 run 은 기능 도입 이전이므로 ``False``.
+    """
+    if args_cli.hip_scale_reduction != "auto":
+        return args_cli.hip_scale_reduction == "on"
+    run_dir = os.path.dirname(os.path.abspath(args_cli.checkpoint))
+    yaml_path = os.path.join(run_dir, "params", "env.yaml")
+    if not os.path.isfile(yaml_path):
+        print(f"[gates] ⚠ {yaml_path} 없음 — cfg 기본값 {cfg_default} 사용. --hip_scale_reduction 로 명시할 것.")
+        return cfg_default
+    import yaml as _yaml
+
+    # IsaacLab 이 덤프한 env.yaml 은 python/tuple 태그를 쓰므로 SafeLoader 로는 그냥 못 읽는다.
+    class _TupleLoader(_yaml.SafeLoader):
+        pass
+
+    _TupleLoader.add_constructor(
+        "tag:yaml.org,2002:python/tuple",
+        lambda ldr, node: tuple(ldr.construct_sequence(node)),
+    )
+    with open(yaml_path) as fh:
+        trained = _yaml.load(fh, Loader=_TupleLoader)
+    val = bool(trained.get("hip_scale_reduction", False))
+    print(f"[gates] hip_scale_reduction={val} (학습 cfg 에서 자동 판별: {yaml_path})")
+    return val
+
+
 def build_env(seed: int):
     """평가용 env 를 만든다. 학습 cfg 에서 **평가에 해로운 동역학만** 끈다."""
     env_cfg = parse_env_cfg(TASK, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed = seed
+    env_cfg.hip_scale_reduction = resolve_hip_scale_reduction(env_cfg.hip_scale_reduction)
 
     # 명령이 시행 도중 재샘플되면 안 된다 (video 모드는 예외 — 여러 도달을 보여줘야 한다).
     # ⚠ min 만 키우면 (max-min) 이 음수가 되어 타이머가 즉시 만료된다. 반드시 둘 다 같은 값.
@@ -2260,6 +2303,7 @@ def main():
         #   None = CLI 미지정 → env cfg 기본값을 쓴 것.
         "jvel_filter_alpha": args_cli.jvel_filter_alpha,
         "action_filter_alpha": args_cli.action_filter_alpha,
+        "hip_scale_reduction": args_cli.hip_scale_reduction,
         "no_obs_noise": args_cli.no_obs_noise,
         "zero_noise": args_cli.zero_noise,
     }

@@ -394,6 +394,12 @@ class Go2PedipulationEnv(DirectRLEnv):
         role_j = self._leg_role[:, self._leg_of_joint]  # [N,12]
 
         # 지지 다리: 기본 자세 대비 절대 offset
+        # hip(abduction) 액션 축소는 지지 다리 슬롯에만 적용한다. a_man 은 적분형이라
+        # 같은 계수를 곱하면 "범위 축소"가 아니라 "hip 이동 속도 감쇠"가 되고, 조작 다리의
+        # abduction 권한은 이 태스크의 목적 자체다.
+        if self.cfg.hip_scale_reduction:
+            a_loc = a_loc.clone()
+            a_loc[:, self._hip_joint_ids] *= 0.5
         loc_target = a_loc * scale + default_q
         # 조작 다리: 직전 목표 대비 증분 (적분형) — 스텝당 변화량을 제한해 windup 방지
         delta = torch.clamp(a_man * scale, -self.cfg.manip_delta_clip, self.cfg.manip_delta_clip)
