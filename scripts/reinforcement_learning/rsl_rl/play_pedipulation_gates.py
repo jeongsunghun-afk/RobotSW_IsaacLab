@@ -44,8 +44,11 @@ parser.add_argument(
     "--mode",
     type=str,
     default="push",
-    choices=["push", "drift", "hold", "circle", "contact", "contactvid", "video", "showcase"],
-    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, circle=S2-G1/G2/G4/G5, contact=S4-G4/G1'/G2', video/showcase=영상.",
+    choices=["push", "drift", "hold", "step", "circle", "contact", "contactvid", "video", "showcase"],
+    help=(
+        "push=S1-G5, drift=S1-G7, hold=S1-G2/G3, step=명령 불연속 변화 응답,"
+        " circle=S2-G1/G2/G4/G5, contact=S4-G4/G1'/G2', video/showcase=영상."
+    ),
 )
 parser.add_argument(
     "--showcase_stage",
@@ -717,6 +720,140 @@ def run_hold_seed(env, policy, seed: int) -> dict:
     }
 
 
+# ── 명령 step 변화 응답 ──────────────────────────────────────────────────────
+# PLAN 의 S2 는 **연속적으로** 움직이는 목표(원)만 다룬다. 그러나 "명령이 계속 다르게 주어져도
+# 매끄럽게 성공"의 어려운 쪽은 목표가 **갑자기 튀는** step 변화다. 원은 미분이 연속이라
+# 원 추종 성적이 좋아도 step 응답이 나쁠 수 있으므로 따로 잰다.
+#
+# ⚠ 이 축은 정책마다 학습 노출이 다르다. ``_post_physics_step`` 이 죽어 있던 시절에 학습한
+#   정책(`smooth4x`, `smooth10x`, S1 첫 산출)은 에피소드 중 명령 재샘플을 **한 번도 겪지
+#   않았다**. 그 정책들에게 이 모드는 분포 밖이고, 그 사실 자체가 측정 대상이다.
+STEP_SETTLE_STEPS = 100  # 2.0 s — 첫 목표 A 에 자리잡는 구간 (측정 제외)
+STEP_WINDOW_STEPS = 250  # 5.0 s — 목표가 B 로 튄 뒤 측정 구간
+STEP_TRANSIENT_STEPS = 50  # 1.0 s — 점프 직후 과도구간 떨림
+STEP_TAIL_STEPS = 50  # 1.0 s — 정착 오차·정착 후 떨림
+STEP_CONVERGE_M = 0.05  # [m] S1-G1 과 같은 임계. 이 아래로 들어와 **유지**되면 재수렴
+
+
+def run_step_seed(env, policy, seed: int) -> dict:
+    """목표를 A 에서 B 로 불연속 점프시키고 재수렴 응답을 잰다.
+
+    측정 항목:
+      재수렴 시간   오차가 ``STEP_CONVERGE_M`` 아래로 들어와 **끝까지 유지**되는 첫 시점
+      overshoot     A→B 방향으로 B 를 지나쳐 간 최대 거리 / 점프 거리
+      과도 떨림     점프 직후 1 s 의 관절 목표 흔들림
+      정착 떨림     마지막 1 s 의 흔들림
+      정착 오차     마지막 1 s 평균 오차
+
+    ⚠ 떨림은 **12 관절 평균**과 **조작 다리만**을 둘 다 낸다. hold 모드의 헤드라인
+    (`joint_target_jitter_deg_per_step`)은 12 관절 평균이고 `jitter_manip_deg_per_step`
+    이 조작 다리만이다. 둘을 섞어 비교하면 조작 다리 쪽이 항상 커 보인다.
+    """
+    base_env = env.unwrapped
+    device = base_env.device
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    nx, ny, nz = grid_shape(base_env)
+    n_cell = nx * ny * nz
+    n_slot = 4 * n_cell
+    slot = torch.arange(n, device=device) % n_slot
+    slot = slot[torch.randperm(n, generator=gen, device=device)]
+    leg_idx = slot // n_cell
+    cell_a = slot % n_cell
+    # B 는 같은 다리의 **다른 셀**. 같은 셀을 허용하면 점프 거리가 0 에 가까운 시행이 섞여
+    # 재수렴 시간 중앙값이 "안 움직여도 통과"로 낙관 편향된다.
+    off = torch.randint(1, n_cell, (n,), generator=gen, device=device)
+    cell_b = (cell_a + off) % n_cell
+
+    target_a = build_stratified_targets(base_env, leg_idx, cell_a, gen)
+    target_b = build_stratified_targets(base_env, leg_idx, cell_b, gen)
+
+    rows = torch.arange(n, device=device)
+    pa = target_a[rows, leg_idx]
+    pb = target_b[rows, leg_idx]
+    jump = pb - pa
+    d_jump = torch.norm(jump, dim=-1)
+    # 점프 방향 단위벡터. overshoot 은 이 축으로만 재야 의미가 있다 (옆으로 벗어난 것은
+    # 경로 오차이지 overshoot 이 아니다).
+    unit = jump / d_jump.clamp(min=1e-6).unsqueeze(-1)
+
+    manip_j = (base_env._leg_of_joint.unsqueeze(0) == leg_idx.unsqueeze(-1)).float()
+
+    patch_command(base_env, leg_idx, target_a)
+    obs, _ = env.reset()
+    alive = torch.ones(n, dtype=torch.bool, device=device)
+
+    for _ in range(STEP_SETTLE_STEPS):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+        alive = alive & (~base_env._died.clone())
+
+    # ── 목표 점프 ────────────────────────────────────────────────────────────
+    # ⚠ patch_command 는 resample **함수만 설치**한다. `_cmd_timer` 가 1e6 으로 고정돼 있어
+    #   에피소드 중에 그 함수가 다시 불리지 않으므로, 목표를 바꾸려면 **직접 호출해야** 한다.
+    resample = patch_command(base_env, leg_idx, target_b)
+    with torch.inference_mode():
+        resample(rows)
+
+    err_hist: list[torch.Tensor] = []
+    over_max = torch.full((n,), -1e9, device=device)
+    jit_trans = torch.zeros(n, device=device)  # 12 관절 평균
+    jit_tail = torch.zeros(n, device=device)
+    jitm_trans = torch.zeros(n, device=device)  # 조작 다리 3 관절만
+    jitm_tail = torch.zeros(n, device=device)
+    prev_target = base_env._processed_actions.clone()
+
+    for step in range(STEP_WINDOW_STEPS):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+        alive = alive & (~base_env._died.clone())
+        m = alive.float()
+
+        err_hist.append(foot_err_of_manip(base_env, leg_idx))
+        pos = base_env._compute_foot_pos_b()[rows, leg_idx]
+        # B 를 지나친 정도. 음수면 아직 B 에 못 미친 것이다.
+        over_max = torch.maximum(over_max, ((pos - pb) * unit).sum(dim=-1))
+
+        d = (base_env._processed_actions - prev_target).abs()
+        jall = d.mean(dim=-1) * m
+        jm = (d * manip_j).sum(dim=-1) / 3.0 * m
+        if step < STEP_TRANSIENT_STEPS:
+            jit_trans += jall
+            jitm_trans += jm
+        if step >= STEP_WINDOW_STEPS - STEP_TAIL_STEPS:
+            jit_tail += jall
+            jitm_tail += jm
+        prev_target = base_env._processed_actions.clone()
+
+    e = torch.stack(err_hist, dim=1)  # [n, T]
+    # 재수렴 = "이 시점 이후로 계속" 임계 아래. 순간적으로 스쳐 지나가는 것은 재수렴이 아니므로
+    # 뒤에서부터 누적 min 을 취해 suffix 전체가 통과인 첫 시점을 찾는다.
+    ok = (e <= STEP_CONVERGE_M).int()
+    suffix_ok = torch.flip(torch.cummin(torch.flip(ok, [1]), dim=1).values, [1]).bool()
+    converged = suffix_ok.any(dim=1)
+    first = torch.argmax(suffix_ok.int(), dim=1)
+
+    return {
+        "alive": alive.cpu(),
+        "converged": (converged & alive).cpu(),
+        "reconv_s": (first.float() * base_env.step_dt).cpu(),
+        "d_jump": d_jump.cpu(),
+        "overshoot": (over_max.clamp(min=0.0) / d_jump.clamp(min=1e-6)).cpu(),
+        "final_err": e[:, -STEP_TAIL_STEPS:].mean(dim=1).cpu(),
+        "peak_err": e.amax(dim=1).cpu(),
+        "jit_trans": (jit_trans / STEP_TRANSIENT_STEPS).cpu(),
+        "jit_tail": (jit_tail / STEP_TAIL_STEPS).cpu(),
+        "jitm_trans": (jitm_trans / STEP_TRANSIENT_STEPS).cpu(),
+        "jitm_tail": (jitm_tail / STEP_TAIL_STEPS).cpu(),
+        "leg": leg_idx.cpu(),
+    }
+
+
 # ── S4 접촉 안전 (PLAN §5 S4-G4 / S4-G1' / S4-G2') ───────────────────────────
 # 접촉면은 **지면**을 쓴다. 명령 박스 하단(z≈nominal)이면 조작 발이 실제로 지면에 닿는다는
 # 것을 이미 4족 조건에서 측정했다(접촉력 25.7 N). 별도 정적 물체를 씬에 넣지 않아도 되고,
@@ -844,6 +981,110 @@ def run_contact_seed(env, policy, seed: int) -> dict:
         "has_steady": (steady_cnt > 0).cpu(),
         "body_weight_N": float(base_env._total_mass * base_env._gravity_mag),
     }
+
+
+def report_step(results: list[dict]) -> dict:
+    """명령 step 변화 응답 집계.
+
+    ⚠ 재수렴 시간은 **점프 거리에 강하게 의존**한다. 정책 간 비교는 같은 seed 로 같은 A·B 를
+    뽑으므로 전체 중앙값끼리 비교해도 되지만, 거리 3분위별로도 함께 낸다 — 먼 목표에서만
+    무너지는 정책과 전 구간에서 느린 정책은 다른 문제다.
+    """
+    cat = lambda k: torch.cat([r[k] for r in results])  # noqa: E731
+    alive, conv = cat("alive"), cat("converged")
+    reconv, dj, ov = cat("reconv_s"), cat("d_jump"), cat("overshoot")
+    fe, pe, jt, jl, leg = cat("final_err"), cat("peak_err"), cat("jit_trans"), cat("jit_tail"), cat("leg")
+    jmt, jml = cat("jitm_trans"), cat("jitm_tail")
+    _deg = 180.0 / math.pi
+    a = alive
+
+    out: dict = {
+        "n_trials": int(alive.numel()),
+        "alive_rate": float(alive.float().mean().item()),
+        "jump_dist_median_m": pct(dj[a], 0.5),
+        "reconverge_rate": float(conv[a].float().mean().item()),
+        "reconverge_s_median": pct(reconv[conv], 0.5),
+        "reconverge_s_p95": pct(reconv[conv], 0.95),
+        "overshoot_ratio_median": pct(ov[a], 0.5),
+        "overshoot_ratio_p95": pct(ov[a], 0.95),
+        "overshoot_gt10pct_rate": float((ov[a] > 0.10).float().mean().item()),
+        "final_err_median_m": pct(fe[a], 0.5),
+        "peak_err_median_m": pct(pe[a], 0.5),
+        # 12 관절 평균 — hold 모드 헤드라인과 같은 정의라 직접 비교된다.
+        "jitter_transient_deg_per_step": pct(jt[a], 0.5) * _deg,
+        "jitter_settled_deg_per_step": pct(jl[a], 0.5) * _deg,
+        # 조작 다리 3 관절만 — hold 의 jitter_manip_deg_per_step 과 같은 정의.
+        "jitter_manip_transient_deg_per_step": pct(jmt[a], 0.5) * _deg,
+        "jitter_manip_settled_deg_per_step": pct(jml[a], 0.5) * _deg,
+    }
+
+    print("\n" + "=" * 78)
+    print(f"명령 step 변화 응답  (시행 {out['n_trials']}, 생존 {out['alive_rate'] * 100:.1f}%)")
+    print(f"점프 거리 중앙 {out['jump_dist_median_m'] * 1000:.1f} mm · 재수렴 임계 {STEP_CONVERGE_M * 1000:.0f} mm")
+    print("=" * 78)
+    print(f"  재수렴률            : {out['reconverge_rate'] * 100:6.2f}%")
+    print(f"  재수렴 시간         : 중앙 {out['reconverge_s_median']:.2f} s   95p {out['reconverge_s_p95']:.2f} s")
+    print(
+        f"  overshoot 비율      : 중앙 {out['overshoot_ratio_median'] * 100:5.1f}%"
+        f"  95p {out['overshoot_ratio_p95'] * 100:5.1f}%"
+        f"  (>10% 인 시행 {out['overshoot_gt10pct_rate'] * 100:.1f}%)"
+    )
+    print(
+        f"  정착 오차           : {out['final_err_median_m'] * 1000:6.2f} mm"
+        f"   (경로 최대 {out['peak_err_median_m'] * 1000:.1f} mm)"
+    )
+    print(
+        f"  떨림 과도/정착 (12관절): {out['jitter_transient_deg_per_step']:.3f} / "
+        f"{out['jitter_settled_deg_per_step']:.3f} °/step"
+    )
+    print(
+        f"  떨림 과도/정착 (조작만): {out['jitter_manip_transient_deg_per_step']:.3f} / "
+        f"{out['jitter_manip_settled_deg_per_step']:.3f} °/step"
+    )
+
+    # ── 점프 거리 3분위 ──────────────────────────────────────────────────────
+    q1, q2 = pct(dj[a], 1 / 3), pct(dj[a], 2 / 3)
+    out["by_jump_dist"] = {}
+    print(f"\n점프 거리 3분위 (경계 {q1 * 1000:.0f} / {q2 * 1000:.0f} mm):")
+    for name, sel in (
+        ("near", a & (dj <= q1)),
+        ("mid", a & (dj > q1) & (dj <= q2)),
+        ("far", a & (dj > q2)),
+    ):
+        if not bool(sel.any().item()):
+            continue
+        rec = {
+            "n": int(sel.sum().item()),
+            "reconverge_rate": float(conv[sel].float().mean().item()),
+            "reconverge_s_median": pct(reconv[sel & conv], 0.5),
+            "overshoot_ratio_median": pct(ov[sel], 0.5),
+            "final_err_median_m": pct(fe[sel], 0.5),
+        }
+        out["by_jump_dist"][name] = rec
+        print(
+            f"    {name:5s} n={rec['n']:5d}  재수렴 {rec['reconverge_rate'] * 100:5.1f}%"
+            f"  {rec['reconverge_s_median']:.2f} s"
+            f"  overshoot {rec['overshoot_ratio_median'] * 100:5.1f}%"
+            f"  정착 {rec['final_err_median_m'] * 1000:5.2f} mm"
+        )
+
+    out["per_leg"] = {}
+    print("\n다리별 (재수렴률 / 재수렴 s / 정착 mm):")
+    for li, name in enumerate(("FL", "FR", "RL", "RR")):
+        sel = a & (leg == li)
+        if not bool(sel.any().item()):
+            continue
+        rec = {
+            "reconverge_rate": float(conv[sel].float().mean().item()),
+            "reconverge_s_median": pct(reconv[sel & conv], 0.5),
+            "final_err_median_m": pct(fe[sel], 0.5),
+        }
+        out["per_leg"][name] = rec
+        print(
+            f"    {name}: {rec['reconverge_rate'] * 100:5.1f}% / "
+            f"{rec['reconverge_s_median']:.2f} / {rec['final_err_median_m'] * 1000:5.2f}"
+        )
+    return out
 
 
 def report_contact(results: list[dict]) -> dict:
@@ -1986,6 +2227,8 @@ def main():
                 results.append(run_push_seed(env, policy, seed))
             elif args_cli.mode == "hold":
                 results.append(run_hold_seed(env, policy, seed))
+            elif args_cli.mode == "step":
+                results.append(run_step_seed(env, policy, seed))
             elif args_cli.mode == "circle":
                 results.append(run_circle_seed(env, policy, seed))
             elif args_cli.mode == "contact":
@@ -1998,6 +2241,7 @@ def main():
     reporters = {
         "push": report_push,
         "hold": report_hold,
+        "step": report_step,
         "drift": report_drift,
         "circle": report_circle,
         "contact": report_contact,
@@ -2011,6 +2255,13 @@ def main():
         "seed0": args_cli.seed0,
         "domain_rand": not args_cli.no_domain_rand,
         "contact_press_z": args_cli.contact_press_z,
+        # ⚠ 필터 계수는 **관측·출력의 의미 자체**다. 학습 때와 다르면 분포 밖 평가이므로,
+        #   기록해 두지 않으면 저장된 수치가 유효한지 사후에 판별할 방법이 없다.
+        #   None = CLI 미지정 → env cfg 기본값을 쓴 것.
+        "jvel_filter_alpha": args_cli.jvel_filter_alpha,
+        "action_filter_alpha": args_cli.action_filter_alpha,
+        "no_obs_noise": args_cli.no_obs_noise,
+        "zero_noise": args_cli.zero_noise,
     }
     if args_cli.out:
         with open(args_cli.out, "w") as fh:
