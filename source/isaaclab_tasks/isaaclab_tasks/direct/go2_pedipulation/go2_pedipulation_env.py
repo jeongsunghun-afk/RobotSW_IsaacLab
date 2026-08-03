@@ -168,6 +168,11 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._metric_track_err = torch.zeros(n_env, device=device)
         self._metric_steps = torch.zeros(n_env, device=device)
         self._metric_within = torch.zeros(n_env, device=device)
+        # S4-G4 ① — 조작 발이 접촉 중인데 CoM 이 지지 다각형 밖에 있는 step 수(하중 전이).
+        # PLAN §0b 는 이 카운터를 S1 에 미리 넣으라고 했다. 학습 내내 켜두면 게이트 판정이 공짜다.
+        self._metric_contact_steps = torch.zeros(n_env, device=device)
+        self._metric_unsafe_steps = torch.zeros(n_env, device=device)
+        self._metric_manip_load_peak = torch.zeros(n_env, device=device)
         self._metric_hold = torch.zeros(n_env, device=device)
         self._episode_base_xy0 = torch.zeros(n_env, 2, device=device)
         # 커리큘럼 진단 — 승급 판정이 실제로 몇 번 돌았고 몇 번 올라갔는지
@@ -630,6 +635,14 @@ class Go2PedipulationEnv(DirectRLEnv):
             self._episode_sums[key] += value
 
         # ── 커리큘럼용 지표 (조작 다리 추종 오차) ────────────────
+        # ── S4-G4 ① 안전 계측 (보상에는 안 들어간다. 판정용 누적만) ──
+        manip_cf = self._manip_contact_force()
+        in_contact_manip = manip_cf > cfg.contact_detect_force
+        margin = self._stance_support_margin()
+        self._metric_contact_steps += in_contact_manip.float()
+        self._metric_unsafe_steps += (in_contact_manip & (margin < cfg.support_margin_min)).float()
+        self._metric_manip_load_peak = torch.maximum(self._metric_manip_load_peak, manip_cf)
+
         manip_err = (err * manip_mask).sum(dim=-1) / n_manip
         self._metric_track_err += manip_err
         self._metric_steps += 1.0
@@ -666,6 +679,64 @@ class Go2PedipulationEnv(DirectRLEnv):
         nxt = torch.roll(filled, shifts=-1, dims=1)
         cross = filled[..., 0] * nxt[..., 1] - nxt[..., 0] * filled[..., 1]
         return 0.5 * torch.abs(cross.sum(dim=-1))
+
+    def _stance_support_margin(self) -> torch.Tensor:
+        """CoM 수평투영에서 **지지 발만으로 이루어진** 다각형 경계까지의 부호 있는 여유 [m].
+
+        양수 = 안쪽(조작 발 없이도 균형이 성립) · 음수 = 바깥(조작 발에 의존).
+
+        이것이 PLAN S4-G4 ①("접촉 시 조작 발이 지지 다각형에서 제외됨")의 판정량이다.
+        힘 게이트(peak ≤40 N)만으로는 부족하다 — **자중 147.3 N > ISO 손 한계 140 N** 이라
+        하중 전이가 일어나면 접촉력이 작아도 위험하기 때문이다.
+
+        ⚠ world 수평면에서 잰다. base frame xy 는 몸통이 기울면 수평이 아니다.
+        """
+        foot_w = self._robot.data.body_pos_w[:, self._foot_body_ids, :2]  # [N,4,2]
+        mass = self._robot.data.body_mass.torch
+        com_w = self._robot.data.body_com_pos_w.torch
+        com_xy = (com_w * mass.unsqueeze(-1)).sum(dim=1)[:, :2] / mass.sum(dim=1, keepdim=True)
+
+        stance = self._leg_role  # 1 = 지지
+        cyclic = torch.tensor([0, 1, 3, 2], dtype=torch.long, device=foot_w.device)  # FL, FR, RR, RL
+        pts = foot_w[:, cyclic, :]
+        valid = stance[:, cyclic].clone()
+
+        # 비지지 정점을 직전 지지 정점으로 순환 forward-fill (면적 계산과 같은 처리).
+        filled = pts.clone()
+        for _ in range(4):
+            prev_filled = torch.roll(filled, shifts=1, dims=1)
+            prev_valid = torch.roll(valid, shifts=1, dims=1)
+            take = ((valid < 0.5) & (prev_valid > 0.5)).unsqueeze(-1)
+            filled = torch.where(take, prev_filled, filled)
+            valid = torch.where(take.squeeze(-1), torch.ones_like(valid), valid)
+
+        nxt = torch.roll(filled, shifts=-1, dims=1)
+        edge = nxt - filled  # [N,4,2]
+        rel = com_xy.unsqueeze(1) - filled
+        cross = edge[..., 0] * rel[..., 1] - edge[..., 1] * rel[..., 0]
+        edge_len = torch.norm(edge, dim=-1)
+
+        # 중복 정점이 만든 길이 0 변은 판정에서 제외한다 (거리가 정의되지 않는다).
+        real = edge_len > 1e-6
+        dist = torch.where(real, cross / edge_len.clamp(min=1e-6), torch.full_like(cross, 1e3))
+
+        # 다각형 정점 순서(시계/반시계)는 자세에 따라 뒤집힐 수 있으므로 부호를 고정하지 않고,
+        # 모든 변에 대해 같은 쪽이면 안쪽으로 본다. 여유는 가장 가까운 변까지의 거리.
+        pos_margin = torch.amin(torch.where(real, dist, torch.full_like(dist, 1e3)), dim=-1)
+        neg_margin = torch.amin(torch.where(real, -dist, torch.full_like(dist, 1e3)), dim=-1)
+        return torch.maximum(pos_margin, neg_margin)
+
+    def _manip_contact_force(self) -> torch.Tensor:
+        """조작 다리 발의 접촉력 크기 [N]. shape [N]. 조작 다리가 없으면 0."""
+        cf = torch.norm(self.contact_sensor.data.net_forces_w[:, self._foot_sensor_ids], dim=-1)  # [N,4]
+        manip = 1.0 - self._leg_role
+        return (cf * manip).sum(dim=-1)
+
+    def _manip_foot_speed(self) -> torch.Tensor:
+        """조작 다리 발 끝 속도 크기 [m/s] (world). shape [N]."""
+        v = self._robot.data.body_lin_vel_w[:, self._foot_body_ids, :]  # [N,4,3]
+        manip = (1.0 - self._leg_role).unsqueeze(-1)
+        return torch.norm((v * manip).sum(dim=1), dim=-1)
 
     def _undesired_contacts(self) -> torch.Tensor:
         """발 이외 부위의 접촉 개수."""
@@ -770,6 +841,9 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._metric_track_err[env_ids_long] = 0.0
         self._metric_steps[env_ids_long] = 0.0
         self._metric_within[env_ids_long] = 0.0
+        self._metric_contact_steps[env_ids_long] = 0.0
+        self._metric_unsafe_steps[env_ids_long] = 0.0
+        self._metric_manip_load_peak[env_ids_long] = 0.0
         self._metric_hold[env_ids_long] = 0.0
 
         # ── 로깅 ─────────────────────────────────────────────────
@@ -792,6 +866,12 @@ class Go2PedipulationEnv(DirectRLEnv):
         extras["Metric/cmd_box_y"] = self._cmd_box[1].clone()
         extras["Metric/cmd_box_z"] = self._cmd_box[2].clone()
         extras["Metric/base_drift_m"] = torch.mean(base_drift)
+        _cs = self._metric_contact_steps[env_ids_long]
+        extras["Metric/manip_contact_rate"] = torch.mean(_cs / steps_safe)
+        extras["Metric/support_violation_rate"] = torch.mean(
+            self._metric_unsafe_steps[env_ids_long] / _cs.clamp(min=1.0)
+        )
+        extras["Metric/manip_load_peak_N"] = torch.mean(self._metric_manip_load_peak[env_ids_long])
 
         if not isinstance(self.extras, dict):
             self.extras = {}

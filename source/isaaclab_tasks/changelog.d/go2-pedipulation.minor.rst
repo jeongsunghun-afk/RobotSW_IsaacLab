@@ -25,3 +25,7 @@ Added
   on how far the base translates from where the episode started. Foot targets are expressed in the
   base frame, so a base that shifts carries the target with it. The dead band leaves the
   counterbalance a front-leg reach actually needs unpenalized.
+* Added contact-safety instrumentation to ``Go2-Pedipulation-v0``. The environment now logs how
+  often the manipulating foot bears load while touching, measured as the signed margin from the
+  centre of mass to the polygon formed by the stance feet alone. Go2 weighs more than the ISO/TS
+  15066 hand-contact limit, so load transfer is unsafe even when the contact force is small.

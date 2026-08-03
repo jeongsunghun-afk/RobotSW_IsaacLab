@@ -44,8 +44,8 @@ parser.add_argument(
     "--mode",
     type=str,
     default="push",
-    choices=["push", "drift", "hold", "circle", "video", "showcase"],
-    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, circle=S2-G1/G2/G4/G5, video/showcase=영상.",
+    choices=["push", "drift", "hold", "circle", "contact", "contactvid", "video", "showcase"],
+    help="push=S1-G5, drift=S1-G7, hold=S1-G2/G3, circle=S2-G1/G2/G4/G5, contact=S4-G4/G1'/G2', video/showcase=영상.",
 )
 parser.add_argument(
     "--showcase_stage",
@@ -70,6 +70,18 @@ parser.add_argument(
     type=float,
     default=1.0,
     help="video/showcase 카메라 당김 배율. 1.0=전신, 2.0=거리 절반. 떨림 육안 확인에 쓴다.",
+)
+parser.add_argument(
+    "--contact_fwd",
+    type=float,
+    default=0.0,
+    help="contactvid 에서 목표를 앞(+x)으로 미는 양 [m]. 하중 전이는 앞으로 뻗을 때 몰린다.",
+)
+parser.add_argument(
+    "--contact_press_z",
+    type=float,
+    default=-0.03,
+    help="contact 모드에서 지시할 z 오프셋 [m]. 음수면 지면 아래를 지시해 눌러 닿게 한다.",
 )
 parser.add_argument("--num_envs", type=int, default=1024, help="시드당 병렬 시행 수.")
 parser.add_argument("--seeds", type=int, default=3, help="시드 개수 (PLAN §5: 최소 3).")
@@ -116,7 +128,7 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
-RENDER_MODES = ("video", "showcase")
+RENDER_MODES = ("video", "showcase", "contactvid")
 args_cli.enable_cameras = args_cli.mode in RENDER_MODES
 args_cli.headless = True
 if args_cli.mode in RENDER_MODES and not args_cli.video_folder:
@@ -249,6 +261,9 @@ def build_env(seed: int):
             # (s2 대본 2020 step 을 s1 길이 1490 으로 녹화해 뒷부분이 통째로 날아갔다).
             _script = SHOWCASE_SCRIPT_S2 if args_cli.showcase_stage == "s2" else SHOWCASE_SCRIPT
             length = sum(s["steps"] for s in _script)
+        elif args_cli.mode == "contactvid":
+            # 대본 길이로 잡는다 — --video_length 를 쓰면 접촉 구간이 잘린다.
+            length = CONTACT_APPROACH_STEPS + CONTACT_PRESS_STEPS
         else:
             length = args_cli.video_length
         env = gym.make(TASK, cfg=env_cfg, render_mode="rgb_array")
@@ -343,6 +358,7 @@ def patch_command(base_env, leg_idx, target_b):
         base_env._cmd_timer[ids] = 1.0e6
 
     base_env._resample_command = fixed_resample
+    return fixed_resample
 
 
 def apply_push(base_env, force_mag: torch.Tensor, angle: torch.Tensor):
@@ -699,6 +715,383 @@ def run_hold_seed(env, policy, seed: int) -> dict:
         "act_lag1": lag1.cpu(),
         "act_msd": msd,
     }
+
+
+# ── S4 접촉 안전 (PLAN §5 S4-G4 / S4-G1' / S4-G2') ───────────────────────────
+# 접촉면은 **지면**을 쓴다. 명령 박스 하단(z≈nominal)이면 조작 발이 실제로 지면에 닿는다는
+# 것을 이미 4족 조건에서 측정했다(접촉력 25.7 N). 별도 정적 물체를 씬에 넣지 않아도 되고,
+# 목표가 학습 분포 안이라는 장점이 있다. S5-B(물건 터치)용 전용 물체는 나중에 붙인다.
+CONTACT_APPROACH_STEPS = 100  # 2.0 s — 발을 들어 올려 대기
+CONTACT_PRESS_STEPS = 250  # 5.0 s — 지면으로 내려 접촉·유지
+CONTACT_PROFILE_STEPS = 10  # 0.2 s — S4-G2' 접근 감속을 보는 창
+CONTACT_STEADY_STEPS = 50  # 1.0 s — 충격 트랜지언트를 뺀 정상상태 접촉력을 재는 끝 구간
+
+
+def run_contact_seed(env, policy, seed: int) -> dict:
+    """조작 발을 들었다가 지면으로 내려 접촉시키고 안전 지표를 잰다.
+
+    측정 항목:
+      S4-G4 ①  접촉 중 CoM 이 **지지 발만의 다각형** 안에 있는가 (하중 전이 없음)
+      S4-G4 ②  접촉 순간 발 끝 속도
+      S4-G4 ③  peak 접촉력  ·  S4-G1' 그 분포
+      S4-G2'   접촉 직전 0.2 s 발 끝 속도가 단조 감소하는가
+    """
+    base_env = env.unwrapped
+    device = base_env.device
+    cfg = base_env.cfg
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    leg_idx = torch.arange(n, device=device) % 4
+    nominal = base_env._nominal_foot_pos_b.expand(n, -1, -1).clone()
+    box = torch.tensor(cfg.command.box_max, device=device)
+    rows = torch.arange(n, device=device)
+
+    def u(lo, hi):
+        return torch.rand(n, generator=gen, device=device) * (hi - lo) + lo
+
+    xy = torch.stack([u(-0.05, 0.05), u(-0.05, 0.05)], dim=-1)
+
+    def make_target(z_off: torch.Tensor) -> torch.Tensor:
+        t = nominal.clone()
+        t[rows, leg_idx, 0] += xy[:, 0]
+        t[rows, leg_idx, 1] += xy[:, 1]
+        t[rows, leg_idx, 2] += z_off
+        return t
+
+    lifted = make_target(u(0.12, box[2].item()))
+    # 지면보다 살짝 아래를 지시해 확실히 눌러 닿게 한다. 발이 지면을 통과할 수는 없으므로
+    # 실제로는 접촉 후 목표 오차가 남고, 그 오차가 곧 접촉력이 된다(τ = Kp·e).
+    pressed = make_target(torch.full((n,), args_cli.contact_press_z, device=device))
+
+    patch_command(base_env, leg_idx, lifted)
+    obs, _ = env.reset()
+
+    alive = torch.ones(n, dtype=torch.bool, device=device)
+    for _ in range(CONTACT_APPROACH_STEPS):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+        alive = alive & (~base_env._died.clone())
+
+    # ⚠ patch_command 는 resample **함수만 설치**한다. `_cmd_timer` 가 1e6 으로 고정돼 있어
+    #   에피소드 중에는 그 함수가 다시 불리지 않으므로, 목표를 바꾸려면 **직접 써야** 한다.
+    #   (처음에 설치만 하고 끝내서 세 조건이 비트 단위로 같은 결과를 냈다.)
+    with torch.inference_mode():
+        resample = patch_command(base_env, leg_idx, pressed)
+        resample(torch.arange(n, device=device))
+
+    onset_step = torch.full((n,), -1, dtype=torch.long, device=device)
+    onset_speed = torch.zeros(n, device=device)
+    peak_force = torch.zeros(n, device=device)
+    contact_steps = torch.zeros(n, device=device)
+    unsafe_steps = torch.zeros(n, device=device)
+    min_margin = torch.full((n,), 1e3, device=device)
+    speed_hist: list[torch.Tensor] = []
+    decel_ok = torch.zeros(n, dtype=torch.bool, device=device)
+    # ⚠ 단조 판정은 10 step 전부를 요구하는 **극값 통계**라 잡음 하나에 무너진다.
+    #   (같은 계열 실수를 foot_amp 에서 이미 했다.) 순 감소량을 주 지표로 쓴다.
+    decel_net = torch.zeros(n, device=device)  # v(접촉) − v(0.2 s 전) [m/s], 음수면 감속
+    # 충격 트랜지언트를 뺀 정상상태 접촉력 — 마지막 구간의 평균.
+    steady_sum = torch.zeros(n, device=device)
+    steady_cnt = torch.zeros(n, device=device)
+
+    for step in range(CONTACT_PRESS_STEPS):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+            force = base_env._manip_contact_force().clone()
+            speed = base_env._manip_foot_speed().clone()
+            margin = base_env._stance_support_margin().clone()
+        alive = alive & (~base_env._died.clone())
+        m = alive
+
+        touching = (force > cfg.contact_detect_force) & m
+        first = touching & (onset_step < 0)
+        if bool(first.any().item()):
+            onset_step = torch.where(first, torch.full_like(onset_step, step), onset_step)
+            onset_speed = torch.where(first, speed, onset_speed)
+            # S4-G2' — 접촉 직전 창의 속도가 단조 비증가인가 (수치 잡음 1 mm/s 허용).
+            if len(speed_hist) >= 2:
+                win = torch.stack(speed_hist[-CONTACT_PROFILE_STEPS:], dim=1)  # [N,k]
+                mono = (win[:, 1:] - win[:, :-1] <= 1e-3).all(dim=1)
+                decel_ok = torch.where(first, mono, decel_ok)
+                decel_net = torch.where(first, speed - win[:, 0], decel_net)
+
+        peak_force = torch.maximum(peak_force, torch.where(m, force, torch.zeros_like(force)))
+        contact_steps += touching.float()
+        unsafe_steps += (touching & (margin < cfg.support_margin_min)).float()
+        min_margin = torch.where(touching, torch.minimum(min_margin, margin), min_margin)
+        if step >= CONTACT_PRESS_STEPS - CONTACT_STEADY_STEPS:
+            steady_sum += torch.where(touching, force, torch.zeros_like(force))
+            steady_cnt += touching.float()
+        speed_hist.append(speed)
+
+    return {
+        "leg": leg_idx.cpu(),
+        "alive": alive.cpu(),
+        "touched": (onset_step >= 0).cpu(),
+        "onset_speed": onset_speed.cpu(),
+        "peak_force": peak_force.cpu(),
+        "contact_steps": contact_steps.cpu(),
+        "unsafe_steps": unsafe_steps.cpu(),
+        "min_margin": torch.where(min_margin > 1e2, torch.full_like(min_margin, float("nan")), min_margin).cpu(),
+        "decel_ok": decel_ok.cpu(),
+        "decel_net": decel_net.cpu(),
+        "steady_force": (steady_sum / steady_cnt.clamp(min=1.0)).cpu(),
+        "has_steady": (steady_cnt > 0).cpu(),
+        "body_weight_N": float(base_env._total_mass * base_env._gravity_mag),
+    }
+
+
+def report_contact(results: list[dict]) -> dict:
+    alive = torch.cat([r["alive"] for r in results])
+    touched = torch.cat([r["touched"] for r in results]) & alive
+    leg = torch.cat([r["leg"] for r in results])
+    onset = torch.cat([r["onset_speed"] for r in results])
+    peak = torch.cat([r["peak_force"] for r in results])
+    cs = torch.cat([r["contact_steps"] for r in results])
+    us = torch.cat([r["unsafe_steps"] for r in results])
+    mm = torch.cat([r["min_margin"] for r in results])
+    dec = torch.cat([r["decel_ok"] for r in results])
+    dnet = torch.cat([r["decel_net"] for r in results])
+    sf = torch.cat([r["steady_force"] for r in results])
+    hs = torch.cat([r["has_steady"] for r in results])
+    bw = results[0]["body_weight_N"]
+
+    a = touched  # 접촉이 실제로 일어난 시행만 판정 대상
+    n_touch = int(a.sum().item())
+    out: dict = {
+        "n_trials": int(alive.numel()),
+        "alive_rate": float(alive.float().mean().item()),
+        "contact_rate": float(touched.float().mean().item()),
+        "body_weight_N": bw,
+    }
+    print("\n" + "=" * 78)
+    print(f"S4 접촉 안전  (시행 {out['n_trials']}, 접촉 성립 {n_touch} = {out['contact_rate'] * 100:.1f}%)")
+    print(f"자중 {bw:.1f} N · ISO/TS 15066 손 접촉 한계 140 N")
+    print("=" * 78)
+    if n_touch == 0:
+        print("접촉이 한 번도 성립하지 않았다 — --contact_press_z 를 더 낮출 것.")
+        return out
+
+    # ── S4-G4 ① 하중 전이 ────────────────────────────────────────
+    viol_frac = us[a] / cs[a].clamp(min=1.0)
+    any_viol = (us[a] > 0).float()
+    out["g4_1"] = {
+        "trials_with_violation": float(any_viol.mean().item()),
+        "violation_step_frac_median": pct(viol_frac, 0.5),
+        "violation_step_frac_p95": pct(viol_frac, 0.95),
+        "support_margin_min_median_m": pct(mm[a], 0.5),
+        "support_margin_min_p05_m": pct(mm[a], 0.05),
+        "pass": bool((us[a] > 0).sum().item() == 0),
+    }
+    g = out["g4_1"]
+    print("\n① 하중 전이 — 접촉 중 CoM 이 지지 발만의 다각형 안에 있는가 (기준: 위반 0건)")
+    print(f"    위반 시행 비율      : {g['trials_with_violation'] * 100:.2f}%   → {'PASS' if g['pass'] else 'FAIL'}")
+    print(
+        f"    위반 step 비율      : 중앙 {g['violation_step_frac_median'] * 100:.2f}%"
+        f"  95p {g['violation_step_frac_p95'] * 100:.2f}%"
+    )
+    print(
+        f"    지지 여유 최솟값    : 중앙 {g['support_margin_min_median_m'] * 1000:+.1f} mm"
+        f"  5p {g['support_margin_min_p05_m'] * 1000:+.1f} mm"
+    )
+
+    # ── S4-G4 ② 접촉 순간 속도 ───────────────────────────────────
+    # ⚠ 판정 기준 정정. PLAN 문구는 "≤0.5 m/s (절대 상한 1.3)" 이다. 0.5 는 통증 회피 **권고**,
+    #   1.3 이 ISO 과도 접촉 한계에서 역산한 **절대** 한계다. 처음에 "0.5 초과 0건"을 통과
+    #   조건으로 코딩했는데 그건 PLAN 보다 엄격하고, 극값 하나에 판정이 뒤집힌다.
+    out["g4_2"] = {
+        "onset_speed_median_m_s": pct(onset[a], 0.5),
+        "onset_speed_p95_m_s": pct(onset[a], 0.95),
+        "onset_speed_max_m_s": float(onset[a].max().item()),
+        "frac_over_0.5": float((onset[a] > 0.5).float().mean().item()),
+        "frac_over_1.3": float((onset[a] > 1.3).float().mean().item()),
+        "pass_absolute_1.3": bool((onset[a] > 1.3).sum().item() == 0),
+        "pass_recommended_0.5": bool(pct(onset[a], 0.95) <= 0.5),
+    }
+    g = out["g4_2"]
+    print("\n② 접촉 순간 발 끝 속도 (권고 ≤0.5 m/s · 절대 한계 1.3)")
+    print(
+        f"    중앙 {g['onset_speed_median_m_s']:.3f}  95p {g['onset_speed_p95_m_s']:.3f}"
+        f"  최대 {g['onset_speed_max_m_s']:.3f} m/s"
+    )
+    print(f"    절대 한계(1.3) 초과 {g['frac_over_1.3'] * 100:.2f}% → {'PASS' if g['pass_absolute_1.3'] else 'FAIL'}")
+    print(
+        f"    권고치(0.5) 초과 {g['frac_over_0.5'] * 100:.2f}% (95p 기준) → "
+        f"{'PASS' if g['pass_recommended_0.5'] else 'FAIL'}"
+    )
+
+    # ── S4-G4 ③ / S4-G1' peak force ──────────────────────────────
+    # ⚠ **절대 임계(40 / 140 N)에 대고 PASS/FAIL 을 찍지 않는다.** PLAN §5 S4 말미가 명시적으로
+    #   금지한다: IsaacLab ContactSensor 는 압력을 주지 않고, 이 저장소에서 엔진 버전만 바꿔도
+    #   동일 정책의 접촉 거동이 갈렸다. 쓸 수 있는 것은 접촉 유무·**상대 순위**·임계 초과 여부다.
+    #   실제로 peak 최대가 자중의 12 배로 나오는데, 이는 물리적 접촉력이 아니라 충돌 트랜지언트다.
+    #   그래서 **정상상태 힘**(마지막 1 s 평균)을 함께 낸다 — 하중 전이의 물리량은 이쪽이다.
+    a_s = a & hs
+    out["g4_3"] = {
+        "peak_median_N": pct(peak[a], 0.5),
+        "peak_p95_N": pct(peak[a], 0.95),
+        "peak_max_N": float(peak[a].max().item()),
+        "steady_median_N": pct(sf[a_s], 0.5) if bool(a_s.any().item()) else float("nan"),
+        "steady_p95_N": pct(sf[a_s], 0.95) if bool(a_s.any().item()) else float("nan"),
+        "steady_load_frac_median": (pct(sf[a_s], 0.5) / bw) if bool(a_s.any().item()) else float("nan"),
+        "frac_over_140N_peak": float((peak[a] > 140.0).float().mean().item()),
+        "absolute_thresholds_not_applicable": True,
+    }
+    g = out["g4_3"]
+    print("\n③ 접촉력 — **상대 지표로만 읽을 것** (시뮬 절대값은 안전 판정 근거가 아니다)")
+    print(f"    peak     : 중앙 {g['peak_median_N']:.1f}  95p {g['peak_p95_N']:.1f}  최대 {g['peak_max_N']:.1f} N")
+    print(
+        f"    정상상태 : 중앙 {g['steady_median_N']:.1f}  95p {g['steady_p95_N']:.1f} N"
+        f"   (자중 {bw:.0f} N 대비 {g['steady_load_frac_median'] * 100:.1f}%)"
+    )
+    print("    ↑ 정상상태 값이 하중 전이의 물리량이다. peak 는 충돌 트랜지언트가 지배한다.")
+
+    # ── S4-G2' 접근 감속 ─────────────────────────────────────────
+    # ⚠ "10 step 전부 비증가"는 극값 판정이라 잡음 하나에 무너진다. **순 감소**를 주 지표로 쓰고
+    #   엄격 단조는 참고로만 남긴다.
+    net_dec_rate = float((dnet[a] < 0).float().mean().item())
+    out["g2p"] = {
+        "net_decel_rate": net_dec_rate,
+        "net_speed_change_median_m_s": pct(dnet[a], 0.5),
+        "strict_monotone_rate": float(dec[a].float().mean().item()),
+        "pass": bool(net_dec_rate >= 0.9),
+    }
+    g = out["g2p"]
+    print("\nS4-G2' 접근 감속 — 접촉 직전 0.2 s (제안 기준: 순 감소 ≥90%)")
+    print(
+        f"    순 감소 {g['net_decel_rate'] * 100:.1f}%"
+        f"  (속도 변화 중앙 {g['net_speed_change_median_m_s'] * 1000:+.1f} mm/s)"
+        f"   → {'PASS' if g['pass'] else 'FAIL'}"
+    )
+    print(f"    참고 — 엄격 단조(10 step 전부) {g['strict_monotone_rate'] * 100:.1f}%")
+
+    out["per_leg"] = {}
+    print("\n다리별 (접촉률 / peak 중앙 N / 위반 시행 %):")
+    for li, name in enumerate(("FL", "FR", "RL", "RR")):
+        sel = a & (leg == li)
+        if not bool(sel.any().item()):
+            continue
+        rec = {
+            "contact_rate": float((touched & (leg == li)).float().sum().item() / max((leg == li).sum().item(), 1)),
+            "peak_median_N": pct(peak[sel], 0.5),
+            "violation_rate": float((us[sel] > 0).float().mean().item()),
+        }
+        out["per_leg"][name] = rec
+        print(
+            f"    {name}: {rec['contact_rate'] * 100:5.1f}% /"
+            f" {rec['peak_median_N']:6.1f} / {rec['violation_rate'] * 100:5.2f}%"
+        )
+    return out
+
+
+def run_contact_video(env, policy, seed: int) -> dict:
+    """접촉 중 **하중 전이**를 눈으로 보이게 렌더한다.
+
+    지지 발 3개가 만드는 삼각형을 점선으로 깔고, CoM 수평투영을 구슬로 찍는다. 구슬이
+    삼각형 **밖으로 나가면 빨강** — 그 순간 로봇은 조작 발에 균형을 의존하고 있다. 숫자로만
+    "위반 19%"라고 하면 무엇이 일어나는지 알 수 없어서 이 모드를 만들었다.
+    """
+    del seed
+    import isaaclab.sim as sim_utils
+    from isaaclab.markers import VisualizationMarkers
+    from isaaclab.markers.config import SPHERE_MARKER_CFG
+
+    base_env = env.unwrapped
+    device = base_env.device
+    cfg = base_env.cfg
+    n = base_env.num_envs
+    leg_names = ("FL", "FR", "RL", "RR")
+    leg = leg_names.index(args_cli.video_leg) if args_cli.video_leg != "cycle" else 0
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+    rows = torch.arange(n, device=device)
+    leg_idx = torch.full((n,), leg, dtype=torch.long, device=device)
+    nominal = base_env._nominal_foot_pos_b.expand(n, -1, -1).clone()
+
+    def make_target(z_off: float) -> torch.Tensor:
+        t = nominal.clone()
+        t[rows, leg_idx, 0] += args_cli.contact_fwd
+        t[rows, leg_idx, 2] += z_off
+        return t
+
+    def mk(color, radius, path):
+        c = SPHERE_MARKER_CFG.copy()
+        c.prim_path = path
+        c.markers["sphere"].radius = radius
+        c.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+        return VisualizationMarkers(c)
+
+    edge_marker = mk((0.25, 0.55, 0.95), 0.010, "/Visuals/S4/edge")  # 지지 삼각형 변
+    com_ok = mk((0.15, 0.90, 0.30), 0.030, "/Visuals/S4/com_ok")  # 안쪽 = 초록
+    com_bad = mk((0.95, 0.15, 0.15), 0.038, "/Visuals/S4/com_bad")  # 바깥 = 빨강
+    hidden1 = torch.tensor([[0.0, 0.0, -10.0]], device=device)
+    n_edge = 3 * 14
+    hidden_e = hidden1.expand(n_edge, -1)
+
+    resample = patch_command(base_env, leg_idx, make_target(0.16))
+    obs, _ = env.reset()
+    with torch.inference_mode():
+        resample(rows)
+
+    # ⚠ headless 에서는 viewer cfg 만으로 카메라가 안 잡히는 경로가 있다 (showcase 가
+    #   set_camera 를 쓰는 이유). 없이 렌더하면 350 프레임이 통째로 균일 회색으로 나온다.
+    #   앞발 접촉을 보려면 낮고 앞쪽에서 잡아야 지지 삼각형과 CoM 구슬이 함께 보인다.
+    set_camera(base_env, (0.95, 0.85, 0.42), (0.10, 0.0, 0.06))
+
+    total = CONTACT_APPROACH_STEPS + CONTACT_PRESS_STEPS
+    viol_steps = 0
+    contact_steps = 0
+    for step in range(total):
+        if step == CONTACT_APPROACH_STEPS:
+            with torch.inference_mode():
+                r2 = patch_command(base_env, leg_idx, make_target(args_cli.contact_press_z))
+                r2(rows)
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+            foot_w = base_env._robot.data.body_pos_w[:, base_env._foot_body_ids, :]
+            mass = base_env._robot.data.body_mass.torch
+            com_w = base_env._robot.data.body_com_pos_w.torch
+            com = (com_w * mass.unsqueeze(-1)).sum(dim=1) / mass.sum(dim=1, keepdim=True)
+            margin = base_env._stance_support_margin().clone()
+            force = base_env._manip_contact_force().clone()
+
+        # 지지 발 3개 (조작 발 제외) 를 잇는 삼각형 변을 점으로 깐다.
+        stance_ids = [i for i in range(4) if i != leg]
+        pts = [foot_w[0, i, :].clone() for i in stance_ids]
+        edge_pts = []
+        for k in range(3):
+            p0, p1 = pts[k], pts[(k + 1) % 3]
+            for t in torch.linspace(0.0, 1.0, 14, device=device):
+                q = p0 + (p1 - p0) * t
+                edge_pts.append(torch.stack([q[0], q[1], q[2] + 0.004]))
+        edge_marker.visualize(translations=torch.stack(edge_pts))
+
+        touching = bool((force[0] > cfg.contact_detect_force).item())
+        outside = bool((margin[0] < cfg.support_margin_min).item())
+        com_xy = torch.stack([com[0, 0], com[0, 1], foot_w[0, :, 2].min() + 0.006]).unsqueeze(0)
+        if outside:
+            com_bad.visualize(translations=com_xy)
+            com_ok.visualize(translations=hidden1)
+        else:
+            com_ok.visualize(translations=com_xy)
+            com_bad.visualize(translations=hidden1)
+        if touching:
+            contact_steps += 1
+            viol_steps += int(outside)
+
+    edge_marker.visualize(translations=hidden_e)
+    com_ok.visualize(translations=hidden1)
+    com_bad.visualize(translations=hidden1)
+    rate = viol_steps / max(contact_steps, 1)
+    print(f"\n영상 저장: {args_cli.video_folder}  ({total} step)")
+    print(f"조작 다리 {leg_names[leg]} · 접촉 {contact_steps} step 중 지지 이탈 {viol_steps} step ({rate * 100:.1f}%)")
+    return {"leg": leg_names[leg], "contact_steps": contact_steps, "violation_steps": viol_steps, "rate": rate}
 
 
 # ── showcase 시나리오 ────────────────────────────────────────────────────────
@@ -1569,7 +1962,7 @@ def main():
     if args_cli.mode in RENDER_MODES:
         env, policy = build_env(args_cli.seed0)
         try:
-            runner = run_showcase if args_cli.mode == "showcase" else run_video
+            runner = {"showcase": run_showcase, "contactvid": run_contact_video}.get(args_cli.mode, run_video)
             summary = runner(env, policy, args_cli.seed0)
         finally:
             env.close()  # RecordVideo 는 close 시점에 mp4 를 쓴다 — 자막은 그 뒤에 얹는다.
@@ -1595,12 +1988,20 @@ def main():
                 results.append(run_hold_seed(env, policy, seed))
             elif args_cli.mode == "circle":
                 results.append(run_circle_seed(env, policy, seed))
+            elif args_cli.mode == "contact":
+                results.append(run_contact_seed(env, policy, seed))
             else:
                 results.append(run_drift_seed(env, policy, seed))
         finally:
             env.close()
 
-    reporters = {"push": report_push, "hold": report_hold, "drift": report_drift, "circle": report_circle}
+    reporters = {
+        "push": report_push,
+        "hold": report_hold,
+        "drift": report_drift,
+        "circle": report_circle,
+        "contact": report_contact,
+    }
     summary = reporters[args_cli.mode](results)
     summary["config"] = {
         "checkpoint": args_cli.checkpoint,
@@ -1609,6 +2010,7 @@ def main():
         "seeds": args_cli.seeds,
         "seed0": args_cli.seed0,
         "domain_rand": not args_cli.no_domain_rand,
+        "contact_press_z": args_cli.contact_press_z,
     }
     if args_cli.out:
         with open(args_cli.out, "w") as fh:

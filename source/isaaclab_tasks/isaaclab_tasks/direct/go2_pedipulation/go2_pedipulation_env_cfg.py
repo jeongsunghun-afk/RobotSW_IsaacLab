@@ -297,6 +297,23 @@ class Go2PedipulationEnvCfg(DirectRLEnvCfg):
     w_termination: float = -20.0
     w_joint_limit: float = -1.0
 
+    # ── S4 접촉 안전 계측 (PLAN §5 S4-G4 / S4-G1' / S4-G2') ─────
+    #
+    # ⚠ 이 블록은 **보상에 들어가지 않는다.** 판정용 계측 임계값이다. 안전을 reward 로 다루면
+    #   "대체로 안전"이 되는데, 여기서 필요한 것은 hard constraint 다.
+    #
+    # 진짜 게이트는 힘 크기가 아니라 **하중 전이**다: Go2 자중 147.3 N > ISO/TS 15066 손 접촉
+    # 한계 140 N 이므로, 조작 발로 체중이 넘어가면 peak force 게이트를 통과해도 위험하다.
+    contact_detect_force: float = 3.0  # [N] 이 위면 접촉으로 본다
+    # CoM 수평투영이 **지지 발만의 다각형** 안쪽으로 최소 이만큼 들어와 있어야 안전.
+    # 음수면 조작 발에 균형을 의존하고 있다는 뜻이다.
+    support_margin_min: float = 0.0  # [m]
+    # S4-G4 ② 접촉 순간 발 끝 속도. 통증 회피 권장 0.5, 절대 상한은 max_foot_speed(1.3).
+    contact_speed_limit: float = 0.5  # [m/s]
+    # S4-G4 ③ / S4-G1' peak force. 40 N 권고, 140 N 은 ISO 절대 한계.
+    contact_peak_warn_N: float = 40.0
+    contact_peak_abs_N: float = 140.0
+
     # ── 조기 종료 ───────────────────────────────────────────────
     early_termination: bool = True
     termination_height: float = 0.15  # [m]
