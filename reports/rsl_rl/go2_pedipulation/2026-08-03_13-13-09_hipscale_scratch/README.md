@@ -70,7 +70,17 @@ hip 은 좌우 균형의 주 액추에이터이므로 push 강건성이 떨어�
 `params/env.yaml` 에서 학습 값을 읽어 맞춘다. 키가 없는 구 run 은 `False` 로 처리된다.
 **이 자동 판별이 없으면 cfg 기본값 `True` 가 구 정책에도 걸려 조용히 분포 밖 평가가 된다.**
 
+## 대조군
+
+[`../2026-08-03_15-53-29_hipscale_scratch_s10x/`](../2026-08-03_15-53-29_hipscale_scratch_s10x/)
+— 이 run 과 **action 규제 배율만** 다르다 (4배 → 10배). 나머지 9개 항목은 `params/env.yaml`
+대조로 동일함을 확인했으므로 단일 변수 A/B 다.
+
+구 계보에서 10배는 떨림을 계보 최저(0.91 °/step)로 낮췄지만 push 를 53.0 → 30.6% 로 절반
+팔았다. `hip_scale_reduction` 도 액션 권한을 줄이는 조치라, 둘이 겹쳤을 때의 push 가 관측
+대상이다.
+
 ## 상태
 
-**진행 중** (시작 2026-08-03 13:13, ETA ~9 h 20 m). 완료 후 hold / push / circle / step /
-contact / drift 6종 평가 예정.
+**진행 중** (시작 2026-08-03 13:13, GPU 1, ETA ~9 h 20 m). 완료 후 hold / push / circle /
+step / contact / drift 6종 평가 예정.
