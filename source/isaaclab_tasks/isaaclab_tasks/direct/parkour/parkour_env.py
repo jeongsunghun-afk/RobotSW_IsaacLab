@@ -24,11 +24,11 @@ from isaaclab.sensors import ContactSensor, RayCaster, RayCasterCfg
 from isaaclab.terrains import TerrainImporter
 from isaaclab.terrains.trimesh import mesh_terrains as _parkour_mesh_terrains
 from isaaclab.utils import math as math_utils
+from isaaclab.utils.warp import raycast_mesh
 
 from isaaclab_tasks.direct._common import DebugKeyBindingCfg, DebugViewer, DebugViewerCfg
 
 from .clearance_3d_pattern import Clearance3DPatternCfg, clearance_3d_pattern  # noqa: F401
-from .voxel_occupancy import VoxelOccupancyCfg, build_ray_dirs, fill_voxel_grid, voxel_grid_shape
 from .parkour_env_cfg import (
     TERRAIN_CLASS_BALANCE_BEAM,
     TERRAIN_CLASS_CRAWL,
@@ -42,6 +42,14 @@ from .parkour_env_cfg import (
     TERRAIN_CLASS_STEPPING_STONES,
     TERRAIN_CLASS_ZIGZAG_HURDLES,
     ParkourEnvCfg,
+)
+from .voxel_column_pattern import VoxelColumnPatternCfg, voxel_column_pattern  # noqa: F401
+from .voxel_occupancy import (
+    VoxelOccupancyCfg,
+    build_ray_dirs,
+    fill_voxel_grid,
+    fill_voxel_grid_gt,
+    voxel_grid_shape,
 )
 
 # Mapping from terrain class ID → short name used as WandB metric suffix.
@@ -148,8 +156,10 @@ class Go2ParkourEnv(DirectRLEnv):
             )
             # Cache ray directions once (same pattern as _c3d_up_mask in clearance debug block).
             _c3d_cfg_v = Clearance3DPatternCfg(
-                num_azimuth=21, num_elevation=14,
-                azimuth_range=(-100.0, 100.0), elevation_range=(-75.0, 60.0),
+                num_azimuth=21,
+                num_elevation=14,
+                azimuth_range=(-100.0, 100.0),
+                elevation_range=(-75.0, 60.0),
             )
             self._voxel_ray_dirs = build_ray_dirs(_c3d_cfg_v, self.device)  # (294, 3)
 
@@ -245,6 +255,23 @@ class Go2ParkourEnv(DirectRLEnv):
         # Distinct from _base_id which comes from the contact sensor (same numeric value on Go2,
         # but semantically different source).
         self._robot_base_id, _ = self._robot.find_bodies("base")
+
+        # Articulation body indices for the feet — for reading _robot.data.* (positions, velocities).
+        # The contact sensor and the articulation do NOT order their bodies the same way: the sensor
+        # groups per leg (base, FL_hip, FL_thigh, FL_calf, FL_foot, FR_hip, ...) while the
+        # articulation groups per joint level (base, FL_hip, FR_hip, Head_upper, RL_hip, RR_hip,
+        # FL_thigh, ...).  On Go2 that makes _feet_ids = [4, 8, 14, 18] resolve to
+        # RL_hip / Head_lower / RR_calf / RR_foot when used against the articulation — three of four
+        # wrong.  Resolve separately and align BY NAME so index i means the same physical foot in
+        # both lists.
+        _robot_feet_ids, _robot_feet_names = self._robot.find_bodies(".*foot")
+        _sensor_feet_names = [self._contact_sensor.body_names[i] for i in self._feet_ids]
+        self._robot_feet_ids = [_robot_feet_ids[_robot_feet_names.index(n)] for n in _sensor_feet_names]
+        assert [self._robot.body_names[i] for i in self._robot_feet_ids] == _sensor_feet_names, (
+            "foot index alignment failed: "
+            f"articulation={[self._robot.body_names[i] for i in self._robot_feet_ids]} "
+            f"contact_sensor={_sensor_feet_names}"
+        )
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(
             # ["base", ".*thigh", ".*hip", "Head_upper", "Head_lower"]
             ["base", ".*thigh", ".*calf", ".*hip", "Head_upper", "Head_lower"]
@@ -472,6 +499,36 @@ class Go2ParkourEnv(DirectRLEnv):
             )
             self._clearance_scanner = RayCaster(_clearance_cfg)
             self.scene.sensors["clearance_scanner"] = self._clearance_scanner
+
+            if self.cfg.enable_voxel_scanner and self.cfg.voxel_gt_columns:
+                # ---- Ground-truth voxel column scanner ----
+                # One downward and one upward ray per grid column (2 x 27 x 21 = 1134), sharing the
+                # clearance scanner's mount and yaw alignment so the columns land exactly on grid
+                # cells.  Both start at the origin because the robot's base is the one point in the
+                # column known to be free; casting down from above the volume would report a crawl
+                # tunnel's ceiling as ground.
+                _col_pattern = VoxelColumnPatternCfg()
+                # Cached for the normal-carrying raycast in _fill_voxel_gt: the sensor computes
+                # world-frame rays internally but never exposes surface normals, and normals are
+                # the only thing that separates "entered the ground from above" from "exited a
+                # solid the ray started inside".
+                _cs, _cd = voxel_column_pattern(_col_pattern, self.device)
+                self._voxel_col_local_starts = _cs
+                self._voxel_col_dirs_w = _cd
+                self._voxel_col_scanner = RayCaster(
+                    RayCasterCfg(
+                        prim_path="/World/envs/env_.*/Robot/base",
+                        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.05)),
+                        ray_alignment="yaw",
+                        pattern_cfg=_col_pattern,
+                        debug_vis=False,
+                        mesh_prim_paths=["/World/ground"],
+                        # Must cover the top-down ray: it starts ``top_start_z`` above the origin
+                        # and still has to reach ground that may sit metres below on gap or stair.
+                        max_distance=8.0,
+                    )
+                )
+                self.scene.sensors["voxel_col_scanner"] = self._voxel_col_scanner
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         # Clear goals registry before terrain generation so we get a clean set for this env
@@ -778,7 +835,9 @@ class Go2ParkourEnv(DirectRLEnv):
             # Compute fresh values for ALL envs in one pass (sensor data is fresh post sim-step).
             scan_new = torch.nan_to_num(
                 self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.3,
-                nan=0.0, posinf=1.0, neginf=-1.0,
+                nan=0.0,
+                posinf=1.0,
+                neginf=-1.0,
             ).clip(-1.0, 1.0)
             # Change E: compute relative yaw error (target_yaw - robot_heading), wrapped to [-π, π].
             # Genesis uses delta_yaw = target_yaw - self.yaw (robot heading), giving the policy direct
@@ -839,9 +898,12 @@ class Go2ParkourEnv(DirectRLEnv):
                     _is_hit = _dist < self._voxel_cfg.max_distance  # (N, 294) bool
 
                     _t0 = time.perf_counter()
-                    voxel_new = fill_voxel_grid(
-                        self._voxel_ray_dirs, _dist, _is_hit, self._voxel_cfg, self.num_envs, self.device
-                    )
+                    if self.cfg.voxel_gt_columns:
+                        voxel_new = self._fill_voxel_gt()
+                    else:
+                        voxel_new = fill_voxel_grid(
+                            self._voxel_ray_dirs, _dist, _is_hit, self._voxel_cfg, self.num_envs, self.device
+                        )
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
                     _voxel_fill_ms = (time.perf_counter() - _t0) * 1000.0
@@ -866,8 +928,10 @@ class Go2ParkourEnv(DirectRLEnv):
 
                 if not hasattr(self, "_c3d_up_mask"):
                     _cfg_tmp = _C3DCfg(
-                        num_azimuth=21, num_elevation=14,
-                        azimuth_range=(-100.0, 100.0), elevation_range=(-75.0, 60.0),
+                        num_azimuth=21,
+                        num_elevation=14,
+                        azimuth_range=(-100.0, 100.0),
+                        elevation_range=(-75.0, 60.0),
                     )
                     _, _dirs = _c3d_fn(_cfg_tmp, self.device)  # (294, 3)
                     self._c3d_el = torch.rad2deg(torch.asin(_dirs[:, 2].clamp(-1.0, 1.0)))
@@ -959,7 +1023,7 @@ class Go2ParkourEnv(DirectRLEnv):
                     # A non-zero count means rays are marking through-surface voxels free → god's-eye.
                     # Only applies to hit rays (is_hit=True for env 0).
                     _bad_ray_count = 0
-                    _is_hit_e0 = _is_hit[0]   # (R,) bool — hit rays for env 0
+                    _is_hit_e0 = _is_hit[0]  # (R,) bool — hit rays for env 0
                     _dist_e0 = _dist[0].clamp(max=self._voxel_cfg.max_distance)  # (R,)
                     if _is_hit_e0.any():
                         _res_v = self._voxel_cfg.resolution
@@ -983,9 +1047,7 @@ class Go2ParkourEnv(DirectRLEnv):
                             _aiy = ((_pts_after[:, 1] - _y_min_v) / _res_v).round().long()
                             _aiz = ((_pts_after[:, 2] - _z_min_v) / _res_v).round().long()
                             _aib = (
-                                (_aix >= 0) & (_aix < _vnx)
-                                & (_aiy >= 0) & (_aiy < _vny)
-                                & (_aiz >= 0) & (_aiz < _vnz)
+                                (_aix >= 0) & (_aix < _vnx) & (_aiy >= 0) & (_aiy < _vny) & (_aiz >= 0) & (_aiz < _vnz)
                             )
                             if not _aib.any():
                                 continue
@@ -1245,7 +1307,9 @@ class Go2ParkourEnv(DirectRLEnv):
         # Restitution (dim 2) excluded — EventCfg randomize range is 0 → constant, zero info.
         # TODO(6.0): root_physx_view is deprecated in IsaacLab 3.0-beta → prefer root_view.
         # Functional for now (smoke passing); migrate to self._robot.root_view when stable API is confirmed.
-        _mat_all = torch.tensor(self._robot.root_physx_view.get_material_properties(), device=self.device)  # (N, num_shapes, 3)
+        _mat_all = torch.tensor(
+            self._robot.root_physx_view.get_material_properties(), device=self.device
+        )  # (N, num_shapes, 3)
         foot_friction = _mat_all[:, self._foot_shape_indices, 0].reshape(self.num_envs, -1)  # (N, 4)
 
         # priv_explicit: privileged state directly observable from a real sensor (linear + angular vel).
@@ -1527,7 +1591,9 @@ class Go2ParkourEnv(DirectRLEnv):
 
         self._last_contacts = contact
         # feet world XY positions: (N, 4, 2)
-        feet_pos_w = self._robot.data.body_pos_w[:, self._feet_ids, :]  # (N, 4, 3)
+        # _robot_feet_ids (articulation-indexed), NOT _feet_ids (contact-sensor-indexed) — the two
+        # body orderings differ; see the alignment block in __init__.
+        feet_pos_w = self._robot.data.body_pos_w[:, self._robot_feet_ids, :]  # (N, 4, 3)
         feet_xy = feet_pos_w[..., :2]  # (N, 4, 2)
         # World XY → grid index.
         # Grid cell (i, j) covers [origin + i*scale, origin + (i+1)*scale).
@@ -1732,6 +1798,25 @@ class Go2ParkourEnv(DirectRLEnv):
             _mask: torch.Tensor = _class_reset == _class_id
             if _mask.any():
                 self.extras["log"][f"curriculum/mean_terrain_level_{_class_name}"] = _levels_reset[_mask].mean().item()
+        # --- DIAG (temporary): merge gap curriculum decision breakdown ---
+        self.extras["log"].update(getattr(self, "_gap_diag", {}))
+        # --- DIAG (temporary): print gap-crossing stats during play/eval ---
+        import os as _os
+
+        if _os.environ.get("GAP_EVAL_PRINT") and getattr(self, "_gap_diag", None):
+            _gd = self._gap_diag
+            print(
+                f"[GAP_EVAL] lvl={_gd.get('curriculum_diag/gap_level_eval', -1):.2f} "
+                f"n={_gd.get('curriculum_diag/gap_n', 0):.0f} "
+                f"dis={_gd.get('curriculum_diag/gap_dis', -1):.2f} "
+                f"exp={_gd.get('curriculum_diag/gap_expected', -1):.2f} "
+                f"up={_gd.get('curriculum_diag/gap_frac_up', -1):.2f} "
+                f"down={_gd.get('curriculum_diag/gap_frac_down', -1):.2f} "
+                f"| hi_n={_gd.get('curriculum_diag/gaphi_n', 0):.0f} "
+                f"hi_dis={_gd.get('curriculum_diag/gaphi_dis', -1):.2f} "
+                f"hi_up={_gd.get('curriculum_diag/gaphi_frac_up', -1):.2f}",
+                flush=True,
+            )
 
     def _update_terrain_curriculum(self, env_ids: torch.Tensor):
         """Game-inspired terrain curriculum: advance on success, regress on failure."""
@@ -1768,6 +1853,31 @@ class Go2ParkourEnv(DirectRLEnv):
         expected_dist = self._commands[env_ids, 0].abs() * self.max_episode_length_s
         move_up = dis_to_origin > 0.8 * expected_dist
         move_down = dis_to_origin < 0.4 * expected_dist
+
+        # --- DIAG (temporary): gap-class curriculum decision breakdown ---
+        # Answers: at high gap levels, do envs PROMOTE (actually cross) or PARK in the
+        # [0.4,0.8]*expected dead-zone? Level evaluated = pre-update level.
+        # Stored on self and merged into extras["log"] in _reset_idx (extras["log"]
+        # is created AFTER this method runs).
+        self._gap_diag = {}
+        _gap = self._env_class[env_ids] == 3  # TERRAIN_CLASS_GAP
+        if bool(_gap.any()):
+            _lvl_pre = self._terrain_levels[env_ids].float()
+            _stay = (~move_up) & (~move_down)
+            self._gap_diag["curriculum_diag/gap_n"] = float(_gap.sum().item())
+            self._gap_diag["curriculum_diag/gap_level_eval"] = _lvl_pre[_gap].mean().item()
+            self._gap_diag["curriculum_diag/gap_frac_up"] = move_up[_gap].float().mean().item()
+            self._gap_diag["curriculum_diag/gap_frac_down"] = move_down[_gap].float().mean().item()
+            self._gap_diag["curriculum_diag/gap_frac_stay"] = _stay[_gap].float().mean().item()
+            self._gap_diag["curriculum_diag/gap_dis"] = dis_to_origin[_gap].mean().item()
+            self._gap_diag["curriculum_diag/gap_expected"] = expected_dist[_gap].mean().item()
+            _hi = _gap & (self._terrain_levels[env_ids] >= 6)
+            if bool(_hi.any()):
+                self._gap_diag["curriculum_diag/gaphi_n"] = float(_hi.sum().item())
+                self._gap_diag["curriculum_diag/gaphi_frac_up"] = move_up[_hi].float().mean().item()
+                self._gap_diag["curriculum_diag/gaphi_frac_stay"] = _stay[_hi].float().mean().item()
+                self._gap_diag["curriculum_diag/gaphi_dis"] = dis_to_origin[_hi].mean().item()
+                self._gap_diag["curriculum_diag/gaphi_expected"] = expected_dist[_hi].mean().item()
 
         max_level = self.cfg.terrain.terrain_generator.num_rows - 1
         self._terrain_levels[env_ids] += move_up.long() - move_down.long()
@@ -2142,6 +2252,105 @@ class Go2ParkourEnv(DirectRLEnv):
             self._voxel_occupied_visualizer.set_visibility(False)
         print(f"[parkour] Voxel occupancy vis: {'ON' if new_state else 'OFF'}")
 
+    def _cast_voxel_columns(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Cast the per-column vertical rays and return their hit heights **and surface normals**.
+
+        :class:`~isaaclab.sensors.RayCaster` hard-codes ``return_normal=0``
+        (``base_ray_caster.py``), so the sensor alone cannot say whether a ray *entered* a surface
+        from outside or *exited* a solid it started inside. Those two produce identical hit
+        positions, and telling them apart is the whole basis of :func:`fill_voxel_grid_gt`'s
+        classification, so the rays are re-cast here through
+        :func:`~isaaclab.utils.warp.raycast_mesh` with normals enabled.
+
+        Only public sensor data is used. ``ray_alignment="yaw"`` means the world-frame start of a
+        column is ``quat_apply_yaw(root_quat, local) + sensor_pos_w``, and the directions are pure
+        ±z, which yaw rotation leaves unchanged.
+
+        Returns:
+            ``(hits_z, normal_z)``, both ``(N, 3 * n_col)``; entries are non-finite where the ray
+            missed.
+        """
+        sc = self._voxel_col_scanner
+        origin = sc.data.pos_w  # (N, 3); touching .data refreshes the sensor's pose buffers
+        n_env = origin.shape[0]
+        n_ray = self._voxel_col_local_starts.shape[0]
+
+        quat = self._robot.data.root_quat_w.repeat_interleave(n_ray, dim=0)  # (N * R, 4)
+        local = self._voxel_col_local_starts.repeat(n_env, 1)  # (N * R, 3)
+        starts = math_utils.quat_apply_yaw(quat, local) + origin.repeat_interleave(n_ray, dim=0)
+        dirs = self._voxel_col_dirs_w.repeat(n_env, 1)
+
+        mesh = RayCaster.meshes[(sc.cfg.mesh_prim_paths[0], str(self.device))]
+        hits, _, normals, _ = raycast_mesh(starts, dirs, mesh, max_dist=float(sc.cfg.max_distance), return_normal=True)
+        return hits[:, 2].view(n_env, n_ray), normals[:, 2].view(n_env, n_ray)
+
+    def _fill_voxel_gt(self) -> torch.Tensor:
+        """Build the ground-truth occupancy grid from the per-column vertical rays.
+
+        ``ray_alignment="yaw"`` keeps the column scanner's z axis aligned with world z, so a ray's
+        travelled distance is purely its z offset from the start height (the sensor origin).
+
+        Returns:
+            ``(N, nx, ny, nz)`` int8 grid with values in ``{0, 1}``.
+        """
+        hits_z, normal_z = self._cast_voxel_columns()
+        org_z = self._voxel_col_scanner.data.pos_w[:, 2].unsqueeze(1)  # (N, 1)
+        # The pattern owns the column count; deriving it by division would silently mis-slice if
+        # the number of ray sets ever changes again.
+        pat = self._voxel_col_scanner.cfg.pattern_cfg
+        n_col = pat.nx * pat.ny
+        # Misses arrive as inf or NaN and both must read as "no surface"; clamp does not fix NaN.
+        # For the two distances that means +inf (nothing within range). For the signed top height
+        # it means -inf, which pushes the topmost surface below the volume so it marks nothing —
+        # mapping a top-ray miss to +inf instead would roof the column.
+        inf = float("inf")
+        down = torch.nan_to_num(org_z - hits_z[:, :n_col], nan=inf, posinf=inf, neginf=inf)
+        up = torch.nan_to_num(hits_z[:, n_col : 2 * n_col] - org_z, nan=inf, posinf=inf, neginf=inf)
+        top_z = torch.nan_to_num(hits_z[:, 2 * n_col : 3 * n_col] - org_z, nan=-inf, posinf=-inf, neginf=-inf)
+        # A miss carries no surface, so its normal must not classify anything: 0.0 fails both the
+        # "> 0" and "< 0" tests in the fill.
+        down_nz = torch.nan_to_num(normal_z[:, :n_col], nan=0.0, posinf=0.0, neginf=0.0)
+        up_nz = torch.nan_to_num(normal_z[:, n_col : 2 * n_col], nan=0.0, posinf=0.0, neginf=0.0)
+
+        grid, diag = fill_voxel_grid_gt(
+            down, up, self._voxel_cfg, top_z=top_z, down_normal_z=down_nz, up_normal_z=up_nz
+        )
+        # Published so auditing reads the classification that was actually applied. Deriving it
+        # again from raw ray hits grades a different geometry than the env ships — that mismatch
+        # is how the phantom-ground bug survived a passing audit.
+        self._voxel_gt_diag = diag
+
+        # Positive check at a few fixed steps: a silent no-op would look exactly like the
+        # ray-sampled fill in every other log line.  On flat ground the count must be
+        # ~nx*ny*(layers below the surface) — thousands of cells, not the ~70-80 the hit-point
+        # scatter yields.
+        step = int(self.common_step_counter)
+        if step in (5, 50, 300, 2000):
+            # env 0 is the reserved flat column in this env family, where a uniform grid is the
+            # correct answer — reporting it alone makes a working fill look broken.
+            # Aggregate over ALL envs, never a sample. Reading the first few envs made a working
+            # fill look broken twice: env 0 is the reserved flat column, low-index envs cluster on
+            # flat terrain, and every env sits on a flat spawn pad for the first few hundred steps,
+            # so a uniform grid is the *correct* answer there and says nothing about the fill.
+            fin_all = torch.where(torch.isfinite(down), down, torch.zeros_like(down))
+            spread = fin_all.amax(dim=1) - fin_all.amin(dim=1)  # (N,) per-env ground relief
+            occ_all = (grid == 1).flatten(1).sum(1).float()
+            # Report the ceiling count *after* the pillar test, not the raw upward-hit count: the
+            # raw count is exactly the quantity the phantom-ceiling bug inflates, so logging it
+            # would read the same whether the classification works or not.
+            up_hit = torch.isfinite(up)
+            pillar = up_hit & torch.isfinite(top_z) & ((top_z - up).abs() <= 0.05)
+            ceil_cols = (up_hit & ~pillar).sum(dim=1)
+            print(
+                f"[VoxelGT all-envs] envs_with_relief={int((spread > 0.02).sum().item())}/{down.shape[0]} "
+                f"relief max={spread.max().item():.3f} mean={spread.mean().item():.4f} | "
+                f"occ min={int(occ_all.min().item())} max={int(occ_all.max().item())} "
+                f"mean={occ_all.mean().item():.0f} | "
+                f"ceiling_cols_max={int(ceil_cols.max().item())} "
+                f"pillar_cols_max={int(pillar.sum(dim=1).max().item())}"
+            )
+        return grid
+
     def _draw_voxel_occupied(self) -> None:
         """Draw occupied voxels for the active viewer env as orange cuboid markers.
 
@@ -2227,6 +2436,89 @@ class Go2ParkourEnv(DirectRLEnv):
 
         self._voxel_occupied_visualizer.set_visibility(True)
         self._voxel_occupied_visualizer.visualize(translations=occ_world)
+
+    _VOXEL_CMP_Z_OFFSET: float = 1.0
+    """Height [m] the comparison overlay is lifted by so the terrain does not occlude it."""
+
+    def _draw_voxel_compare(self) -> None:
+        """Draw the ground-truth voxel volume and the ray-sampled cells it replaces, together.
+
+        Cyan dots are the grid the policy currently reads; magenta cubes are what the 294-ray
+        hit-point scatter would have marked from the *same* scanner data this step, recomputed
+        here for the overlay only. Both sit in the same frame, so the sampling gap shows up
+        directly rather than only as a cell count (~2,270 against ~70-80).
+
+        Both grids are lifted by :attr:`_VOXEL_CMP_Z_OFFSET` and drawn as a hologram above the
+        robot rather than in place. Drawn in place the ground-truth volume is mostly *inside* the
+        terrain mesh — filling the cells below the surface is the whole point — so the terrain
+        occludes all but its top layer, while the ray-sampled cells sit exactly on the surface and
+        stay fully visible. The in-place view therefore reads as the opposite of the truth
+        (measured: 134 cyan pixels against 41,862 magenta, for 1,275 cells against 79). Lifted into
+        free air both are unoccluded and directly comparable.
+
+        Cell cubes are drawn under voxel size so the volume reads as a lattice; at full size they
+        tile into an opaque slab that hides its own structure.
+
+        Requires ``voxel_gt_columns``; without it the two grids would be identical.
+        """
+        import isaaclab.sim as sim_utils
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+
+        res = self._voxel_cfg.resolution
+        if not hasattr(self, "_voxel_cmp_visualizers"):
+
+            def _mk(name: str, scale: float, color: tuple[float, float, float]) -> VisualizationMarkers:
+                return VisualizationMarkers(
+                    VisualizationMarkersCfg(
+                        prim_path=f"/Visuals/Parkour/{name}",
+                        markers={
+                            "cell": sim_utils.CuboidCfg(
+                                size=(res * scale,) * 3,
+                                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                            )
+                        },
+                    )
+                )
+
+            self._voxel_cmp_visualizers = (
+                _mk("voxel_gt_cmp", 0.55, (0.0, 0.8, 1.0)),  # cyan lattice — what the policy reads
+                _mk("voxel_sparse_cmp", 1.10, (1.0, 0.0, 0.8)),  # magenta — the 294-ray scatter
+            )
+        gt_vis, sparse_vis = self._voxel_cmp_visualizers
+
+        # Recompute the hit-point scatter from this step's clearance data, overlay only.
+        pos = self._clearance_scanner.data.pos_w
+        dist = torch.norm(self._clearance_scanner.data.ray_hits_w - pos.unsqueeze(1), dim=-1)
+        inf = float("inf")
+        dist = torch.nan_to_num(dist, nan=inf, posinf=inf, neginf=inf)
+        sparse = fill_voxel_grid(
+            self._voxel_ray_dirs,
+            dist,
+            dist < self._voxel_cfg.max_distance,
+            self._voxel_cfg,
+            self.num_envs,
+            self.device,
+        )
+
+        e = self._get_active_viewer_env_id()
+        lo = torch.tensor(
+            [self._voxel_cfg.x_range[0], self._voxel_cfg.y_range[0], self._voxel_cfg.z_range[0]],
+            device=self.device,
+        )
+        origin = self._clearance_scanner.data.pos_w[e].clone()
+        origin[2] += self._VOXEL_CMP_Z_OFFSET
+        for _tag, grid, vis in (("gt", self._voxel_grid[e], gt_vis), ("sparse", sparse[e], sparse_vis)):
+            idx = (grid == 1).nonzero(as_tuple=False)
+            self._voxel_cmp_calls = getattr(self, "_voxel_cmp_calls", 0) + 1
+            if self._voxel_cmp_calls <= 4:
+                print(f"[VoxelCmp e={e} call={self._voxel_cmp_calls}] {_tag}: {idx.shape[0]} cells")
+            if idx.shape[0] == 0:
+                vis.set_visibility(False)
+                continue
+            local = lo.unsqueeze(0) + idx.float() * res
+            quat = self._robot.data.root_quat_w[e].unsqueeze(0).expand(local.shape[0], -1)
+            vis.set_visibility(True)
+            vis.visualize(translations=math_utils.quat_apply_yaw(quat, local) + origin)
 
     def _toggle_clearance_rays(self) -> None:
         """Toggle the clearance-ray debug visualisation (C key).
@@ -2363,13 +2655,13 @@ class Go2ParkourEnv(DirectRLEnv):
         miss_mask = ~finite_mask
 
         # Hit points: raw world coords from scanner (no transform needed)
-        hit_up_pts = hits_w[hit_mask & up_mask]      # (K, 3)
-        hit_down_pts = hits_w[hit_mask & ~up_mask]    # (M, 3)
+        hit_up_pts = hits_w[hit_mask & up_mask]  # (K, 3)
+        hit_down_pts = hits_w[hit_mask & ~up_mask]  # (M, 3)
 
         # Miss endpoints: sensor_origin + world_dir * max_distance
         _max_dist = 4.0
         miss_endpoints = sensor_origin.unsqueeze(0) + world_dirs * _max_dist  # (294, 3)
-        miss_up_pts = miss_endpoints[miss_mask & up_mask]    # (P, 3)
+        miss_up_pts = miss_endpoints[miss_mask & up_mask]  # (P, 3)
         miss_down_pts = miss_endpoints[miss_mask & ~up_mask]  # (Q, 3)
 
         # ------------------------------------------------------------------
