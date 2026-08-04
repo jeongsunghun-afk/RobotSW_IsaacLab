@@ -1475,6 +1475,21 @@ SHOWCASE_CAM: dict[str, tuple[float, float, float]] = {
 SHOWCASE_LOOKAT: tuple[float, float, float] = (0.0, 0.0, 0.18)
 
 
+def _showcase_eye(seg: dict) -> np.ndarray:
+    """대본 구간의 카메라 위치에 ``--video_zoom`` 을 반영한다.
+
+    showcase 는 구간마다 카메라를 다시 잡으므로, 기동 시 ``env_cfg.viewer.eye`` 에 걸어 둔
+    배율이 덮어써져 **조용히 무시된다.** 옵션 설명은 video/showcase 둘 다 적용된다고
+    말하므로, 여기서도 같은 규칙(lookat 을 향해 1/zoom 만큼 당김)으로 적용한다.
+    """
+    eye = np.asarray(seg.get("eye", SHOWCASE_CAM[seg["leg"]]), dtype=float)
+    zoom = max(args_cli.video_zoom, 1e-3)
+    if zoom == 1.0:
+        return eye
+    look = np.asarray(seg.get("lookat", SHOWCASE_LOOKAT), dtype=float)
+    return look + (eye - look) / zoom
+
+
 def set_camera(base_env, eye, lookat) -> bool:
     """env 0 원점 기준으로 뷰포트 카메라를 옮긴다. 성공 여부를 반환한다.
 
@@ -1576,9 +1591,9 @@ def run_showcase(env, policy, seed: int) -> dict:
     timeline: list[dict] = []
     all_ids = torch.arange(n, device=device)
     step_global = 0
-    cam = np.asarray(script[0].get("eye", SHOWCASE_CAM[script[0]["leg"]]), dtype=float)
+    cam = _showcase_eye(script[0])
     for seg in script:
-        cam_to = np.asarray(seg.get("eye", SHOWCASE_CAM[seg["leg"]]), dtype=float)
+        cam_to = _showcase_eye(seg)
         look_to = seg.get("lookat", SHOWCASE_LOOKAT)
         state["radius"] = float(seg.get("radius", 0.0))
         state["omega"] = float(seg.get("omega", 0.0))

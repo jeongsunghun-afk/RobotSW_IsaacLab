@@ -155,7 +155,33 @@ Episode_Reward/joint_target_rate: 0.0000
 초기 재배치 성격이다. 표류를 직접 줄이는 `w_base_drift` 는 S4 위반을 0.05% → 19.19% 로
 만든 항이라 되살리지 않는다.
 
+## 영상 (`videos/`)
+
+체크포인트에서 사후 렌더했다 — 학습은 `--video` 없이 돌린다(이 저장소에서 hang 2회).
+
+| 파일 | 내용 | 길이 |
+|---|---|---|
+| `model_19999__showcase_s1__20260804-110852.mp4` | 네 다리 각각에 같은 목표를 주고 도달·유지. 자막에 실시간 오차 표시 | 1490 f / 29.8 s |
+| `model_19999__showcase_s1_zoom2__20260804-111503.mp4` | 위와 같은 대본을 **2배 확대**. 떨림 0.823 °/step 육안 확인용 | 1490 f / 29.8 s |
+| `model_19999__showcase_s2__20260804-110502.mp4` | 연속 원 궤적 추종, ω 0.5 → 1.0 rad/s | 2020 f / 40.4 s |
+| `model_19999__video_cycle_zoom2__20260804-110625.mp4` | 네 다리 순회, 2배 확대. **목표 마커·자막 없음**(순수 `--mode video` 는 오버레이를 그리지 않는다) | 1200 f / 24.0 s |
+
+렌더 인자에서 주의한 것:
+
+- **`--jvel_filter_alpha` 를 주지 않았다.** 이 정책은 필터를 끈 채(1.0) 학습됐다.
+  `jtr40_jvf` 렌더 때 쓰던 `0.25` 를 복사했으면 분포 밖 평가가 된다.
+- `--hip_scale_reduction` 은 기본 `auto` 로, `params/env.yaml` 에서 `True` 를 읽는다.
+
+⚠ **`--video_zoom` 이 showcase 에서 무시되고 있었다.** showcase 는 대본 구간마다 카메라를
+다시 잡으므로 기동 시 `env_cfg.viewer.eye` 에 걸어 둔 배율이 덮어써졌다. 옵션 설명은
+video/showcase 둘 다 적용된다고 하므로 `_showcase_eye()` 를 추가해 고쳤다. 고치기 전 확대본은
+비확대본과 프레임 평균 차이가 1.1(물리 난수 수준)이었고, 고친 뒤 39.1 이다.
+
+⚠ **showcase 는 stage 와 무관하게 항상 `pedipulation_showcase.mp4` 로 쓴다.** s1 을 찍고
+이어서 s2 를 찍으면 **덮어쓴다.** 렌더 직후 이름을 바꿀 것.
+
 ## 상태
 
 **완료** (2026-08-03 15:53 ~ 2026-08-04, GPU 3, 20000 iteration, `model_19999.pt`).
-6종 평가 완료. 대조군은 [`_comparisons/hipscale_2x2/`](../_comparisons/hipscale_2x2/).
+6종 평가 완료, 영상 4종 렌더 완료. 대조군은
+[`_comparisons/hipscale_2x2/`](../_comparisons/hipscale_2x2/).
