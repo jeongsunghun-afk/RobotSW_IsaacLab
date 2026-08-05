@@ -17,16 +17,21 @@ body-frame 선속도/각속도 추종(vx, vy=0, yaw_rate)으로 교체한 환경
   - Reset: 항상 RSI (Reference State Initialization)
   - 알고리즘: RMA(ActorCriticRMA) + estimator + PPOAMP + OnPolicyRunnerAMP (rsl_rl)
 
-Policy observation dict (실배포 가능 RMA 구조 — root_lin_vel_b는 실측 불가하므로
-estimator가 policy(45)로부터 추정하고, priv_explicit(3)는 학습 시 GT critic/estimator target 용):
-  policy(45)        = root_ang_vel_b(3) + projected_gravity_b(3) +
+Policy observation dict (실배포 가능 RMA 구조 — estimator가 policy(42)로부터 root 선속도·각속도를
+추정하고, priv_explicit(6)는 학습 시 GT critic/estimator target 용):
+  policy(42)        = projected_gravity_b(3) +
                        lin_vel_cmd(2) + yaw_vel_cmd(1) +
                        joint_pos - default(12) + joint_vel(12) + actions(12)
-  priv_explicit(3)  = root_lin_vel_b * priv_explicit_lin_vel_scale
+  priv_explicit(6)  = root_lin_vel_b * priv_explicit_lin_vel_scale +
+                       root_ang_vel_b * priv_explicit_ang_vel_scale
+
+  priv_explicit로 분리한 신호는 policy obs에서 제외한다 — estimator의 추정 대상을 actor에게
+  직접 보여주면 추정 구조가 무의미해진다. root_ang_vel_b는 실기 IMU로 측정 가능하지만
+  이 설계 일관성을 위해 obs에서 뺐다(2026-07-30 변경).
   priv_latent(19)   = armature_scale(1) + joint_friction_scale(1) + base_mass_offset(1) +
                        foot_friction_offset(1) + kp_scale(1) + kd_scale(1) +
                        action_delay_norm(1) + encoder_bias_norm(12)
-  history(10, 45)   = policy proprio ring buffer (noised)
+  history(10, 42)   = policy proprio ring buffer (noised)
 
 [R4 ablation] MimicKit compute_tar_obs 방식 이식:
   - 각 disc window frame의 root_quat을 window[-1](현재) frame의 heading-inv 기준 local로 변환
@@ -68,20 +73,23 @@ from .motion_lib import Go2MotionLib
 class Go2ImitationTrackingEnv(DirectRLEnv):
     """Go2 AMP + body-frame 속도추종 Imitation 환경 (RMA + estimator 아키텍처).
 
-    Policy proprio (45-dim, 실측 가능한 신호만):
-        root_ang_vel_b(3) + projected_gravity_b(3) +
+    Policy proprio (42-dim — priv_explicit로 분리한 root 속도 항은 제외):
+        projected_gravity_b(3) +
         lin_vel_cmd(2) + yaw_vel_cmd(1) +
         joint_pos - default(12) + joint_vel(12) + actions(12)
 
-    priv_explicit(3-dim, 실측 불가 — 학습 시 critic/estimator target GT):
+    priv_explicit(6-dim, 노이즈 없는 GT — 학습 시 critic 입력 / estimator target):
         root_lin_vel_b * priv_explicit_lin_vel_scale
+        root_ang_vel_b * priv_explicit_ang_vel_scale
+        둘 다 policy obs에 없으므로 estimator는 **미관측 상태 추정**을 학습한다
+        (각속도가 obs에 있던 이전 버전의 denoising 과제가 아니다).
 
     priv_latent(19-dim, quasi-static domain-rand 파라미터 — RMA priv encoder 입력):
         armature_scale(1) + joint_friction_scale(1) + base_mass_offset(1) +
         foot_friction_offset(1) + kp_scale(1) + kd_scale(1) +
         action_delay_norm(1) + encoder_bias_norm(12)
 
-    history(10, 45): policy proprio ring buffer (노이즈 포함, 최신이 index 0).
+    history(10, 42): policy proprio ring buffer (노이즈 포함, 최신이 index 0).
 
     AMP disc observation (49-dim per step):
         dof_pos(12) + dof_vel(12) + root_height(1) +
@@ -113,6 +121,11 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self.ref_body_index = self._robot.data.body_names.index(self.cfg.reference_body)
         self.key_body_indexes = [self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES]
 
+        # hip(abduction) 관절 인덱스 — 액션 범위 축소용
+        self._hip_joint_ids = torch.tensor(
+            [i for i, n in enumerate(self._robot.data.joint_names) if "hip" in n], dtype=torch.long, device=self.device
+        )
+
         # ── motion_lib ↔ IsaacLab joint 순서 매핑 ────────────────
         # IsaacLab joint 순서(알파벳 등)와 PKL DOF_NAMES 순서가 다를 수 있음.
         # go2_amp_env.py의 motion_dof_indexes 패턴과 동일.
@@ -127,6 +140,8 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
 
         # ── Velocity tracking command state ─────────────────────
         self._lin_vel_cmd = torch.zeros(self.num_envs, 2, device=self.device)  # (vx, vy) — vy 항상 0
+        # ④ 정지 명령으로 강제된 env (`rel_standing_envs`). `_resample_steering` 이 갱신한다.
+        self._standing_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._yaw_vel_cmd = torch.zeros(self.num_envs, device=self.device)  # yaw rate [rad/s]
         self._tar_timer = torch.zeros(self.num_envs, device=self.device)  # [N] seconds to change
 
@@ -172,7 +187,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # ── PACE 식별 파라미터 + Domain Randomization 초기화 ─────
         self._init_domain_rand()
 
-        # ── RMA proprio history 링버퍼 (policy obs 45-dim × history_len) ────
+        # ── RMA proprio history 링버퍼 (policy obs 42-dim × history_len) ────
         self._proprio_history = torch.zeros(
             self.num_envs, self.cfg.history_len, self.cfg.observation_space, device=self.device
         )
@@ -210,13 +225,23 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             "lin_vel_reward": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "yaw_vel_reward": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
         }
+        if self.cfg.standing_style_substitute:
+            # ④ 진단용 — **보상이 아니다.** style 대체가 실제로 물리는지 학습 중에 보려면 필요하다
+            # (pose 보상은 extras 경로라 `Episode_Reward/*` 에 안 잡힌다). 판정은
+            #   standing_base_h / standing_frac = 정지 중 평균 base 높이
+            # 로 하며, 0.22(웅크림) → 0.32(default 기립) 로 올라가야 기전이 작동한 것이다.
+            for _k in ("standing_pose_reward", "standing_frac", "standing_base_h"):
+                self._episode_sums[_k] = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone()
-        target = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        actions = self._actions.clone()
+        if self.cfg.hip_scale_reduction:
+            actions[:, self._hip_joint_ids] *= 0.5
+        target = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
         # DR: action(토크 명령) 지연 — per-env 지연 스텝만큼 과거 target 을 적용
         if self.cfg.domain_rand and self.cfg.dr.randomize_action_delay:
             self._action_delay_buf = torch.cat([target.unsqueeze(1), self._action_delay_buf[:, :-1]], dim=1)
@@ -311,11 +336,27 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             "terminal_amp_obs": self._terminal_amp_obs.clone(),
         }
 
-        # ── Policy proprio (45-dim) — 실측 가능한 신호만. root_lin_vel_b는 실배포 시
-        # 직접 측정 불가하므로 policy obs에서 제외하고 priv_explicit로 분리(estimator가 추정) ──
+        # ④ 정지 구간 style 대체 — 러너의 보상 융합에 쓰인다:
+        #     total = lerp·task + (1−lerp)·(style_weight·amp + (1−style_weight)·style_substitute)
+        # 두 키가 없으면 러너는 style_weight=1 / substitute=0 으로 보므로 다른 AMP task 는 불변.
+        if self.cfg.standing_style_substitute:
+            _pose_r = self._compute_standing_pose_reward()
+            self.extras["style_weight"] = (~self._standing_mask).float()
+            self.extras["style_substitute"] = _pose_r
+            # 진단 누적. 여기서 하는 이유: `_reset_idx`(누적 초기화)가 이 시점보다 먼저 돌므로
+            # 리셋된 env 는 새 에피소드분부터 쌓인다. `standing_base_h / standing_frac` 가 정지 중
+            # 평균 base 높이다(둘 다 같은 상수로 정규화되므로 비율은 그대로 [m]).
+            _stand_f = self._standing_mask.float()
+            self._episode_sums["standing_pose_reward"] += _pose_r
+            self._episode_sums["standing_frac"] += _stand_f
+            self._episode_sums["standing_base_h"] += _stand_f * root_pos_w[:, 2]
+
+        # ── Policy proprio (42-dim) ────────────────────────────────────────────
+        # priv_explicit로 분리된 신호는 policy obs에서 **제외**한다 — estimator가 추정하는
+        # 대상을 actor에게 직접 보여주면 추정 구조가 무의미해지기 때문이다.
+        # root_lin_vel_b(실측 불가)와 root_ang_vel_b(priv_explicit로 이동)가 모두 빠졌다.
         proprio = torch.cat(
             [
-                root_ang_vel_b,  # 3
                 self._robot.data.projected_gravity_b,  # 3
                 self._lin_vel_cmd,  # 2 (vx, vy)
                 self._yaw_vel_cmd.unsqueeze(-1),  # 1
@@ -324,11 +365,19 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
                 self.actions,  # 12
             ],
             dim=-1,
-        )  # total = 45
+        )  # total = 42
         policy_obs = self._apply_obs_dr(proprio)
 
-        # ── priv_explicit(3) — GT root_lin_vel_b (critic/estimator target, 노이즈 없음) ──
-        priv_explicit = root_lin_vel_b * self.cfg.priv_explicit_lin_vel_scale
+        # ── priv_explicit(6) — GT root 선속도/각속도 (critic/estimator target, 노이즈 없음) ──
+        # 두 블록 모두 policy obs에 없다 → estimator는 proprio(42)+history로부터
+        # **미관측 상태 추정**을 학습하고, critic은 GT를 본다(asymmetric actor-critic).
+        priv_explicit = torch.cat(
+            [
+                root_lin_vel_b * self.cfg.priv_explicit_lin_vel_scale,  # 3
+                root_ang_vel_b * self.cfg.priv_explicit_ang_vel_scale,  # 3
+            ],
+            dim=-1,
+        )  # total = 6
 
         # ── priv_latent(19) — quasi-static domain-rand 파라미터 ──
         priv_latent = self._get_priv_latent()
@@ -346,6 +395,22 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             "priv_latent": priv_latent,
             "history": self._proprio_history,
         }
+
+    def _compute_standing_pose_reward(self) -> torch.Tensor:
+        """정지 명령 env 에서 style reward 를 대신할 **default pose 유지 보상**.
+
+        ``r = w · exp(−scale · mean((q − q_default)²))``, 정지 env 만 값이 있고 나머지는 0 이다.
+
+        왜 style 을 대체하는가: cmd 0 구간에서 discriminator 가 **웅크린 정지를 빠른 보행보다
+        참조답다고 평가**해(0.904 vs 0.735) style 이 흡수 상태를 강화하고 있었다. 참조 18클립이
+        전부 걷는 중이라 disc 를 고칠 데이터가 없으므로, 그 구간만 튜닝 가능한 신호로 바꾼다.
+
+        기체 높이 목표를 따로 두지 않는다 — default 관절각이 서 있는 높이를 물리적으로 결정하고,
+        관측된 실패("관절이 굽어 base_h 0.217")가 곧 관절각 오차이기 때문이다.
+        """
+        err = torch.mean((self._robot.data.joint_pos - self._robot.data.default_joint_pos) ** 2, dim=-1)
+        r = self.cfg.standing_pose_reward_w * torch.exp(-self.cfg.standing_pose_err_scale * err)
+        return torch.where(self._standing_mask, r, torch.zeros_like(r))
 
     def _get_rewards(self) -> torch.Tensor:
         # ── (1) lin_vel tracking — body frame 직접 비교 ──────────
@@ -526,9 +591,12 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self._all_joint_ids = torch.arange(nj, dtype=torch.int32, device=device)
 
         # 게인 원본 (DCMotor 는 actuator.stiffness/damping 텐서로 토크를 계산 → 이 텐서를 직접 스케일)
-        self._act = self._robot.actuators["base_legs"]
-        self._base_kp = self._act.stiffness.clone()
-        self._base_kd = self._act.damping.clone()
+        # calf 는 effort_limit 이 달라 별도 actuator 그룹이므로 **전 그룹**을 돌아야 한다.
+        # 한 그룹만 잡으면 게인 DR 이 calf 에 걸리지 않는다.
+        self._acts = list(self._robot.actuators.values())
+        self._base_kp = [a.stiffness.clone() for a in self._acts]
+        self._base_kd = [a.damping.clone() for a in self._acts]
+        self._act = self._acts[0]  # 하위호환: 단일 그룹을 가정하던 외부 도구용
 
         # per-env DR 상태
         self._encoder_bias = torch.zeros(self.num_envs, 12, device=device)
@@ -618,8 +686,9 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         if dr.randomize_gains:
             kp_scale = self._sample(dr.kp_scale_range, n, 1)
             kd_scale = self._sample(dr.kd_scale_range, n, 1)
-            self._act.stiffness[env_ids_long] = self._base_kp[env_ids_long] * kp_scale
-            self._act.damping[env_ids_long] = self._base_kd[env_ids_long] * kd_scale
+            for _a, _kp0, _kd0 in zip(self._acts, self._base_kp, self._base_kd):
+                _a.stiffness[env_ids_long] = _kp0[env_ids_long] * kp_scale
+                _a.damping[env_ids_long] = _kd0[env_ids_long] * kd_scale
             self._priv_kp_scale[env_ids_long] = kp_scale
             self._priv_kd_scale[env_ids_long] = kd_scale
 
@@ -664,13 +733,17 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self._robot.write_root_com_velocity_to_sim_index(root_velocity=vel, env_ids=env_ids.to(torch.int32))
 
     def _apply_obs_dr(self, obs: torch.Tensor) -> torch.Tensor:
-        """policy proprio(45-dim) 에만 관측 노이즈 + encoder bias 를 더한다. AMP obs/priv_explicit 는 불변.
+        """policy proprio(42-dim) 에만 관측 노이즈 + encoder bias 를 더한다. AMP obs/priv_explicit 는 불변.
 
-        45-dim 레이아웃 (root_lin_vel_b 는 policy obs에서 분리되어 priv_explicit로 이동했으므로
-        여기엔 없음 — GT priv_explicit는 노이즈 없이 그대로 사용):
-            root_ang_vel_b[0:3] + projected_gravity_b[3:6] +
-            lin_vel_cmd[6:8] + yaw_vel_cmd[8:9] +
-            (joint_pos-default)[9:21] + joint_vel[21:33] + actions[33:45]
+        42-dim 레이아웃 — root_lin_vel_b(실측 불가)와 root_ang_vel_b(priv_explicit로 이동)가
+        모두 policy obs에서 빠져 있다. GT priv_explicit는 노이즈 없이 그대로 사용한다:
+            projected_gravity_b[0:3] +
+            lin_vel_cmd[3:5] + yaw_vel_cmd[5:6] +
+            (joint_pos-default)[6:18] + joint_vel[18:30] + actions[30:42]
+
+        NOTE: ``dr.ang_vel_noise`` 는 여기서 더 이상 쓰이지 않는다(각속도가 obs에 없음).
+        이 라인을 인덱스만 바꿔 남겨두면 σ=0.2 노이즈가 σ=0.05인 projected_gravity_b에
+        주입되어 4배 증폭되므로, re-point 가 아니라 **삭제**가 맞다.
         """
         if not self.cfg.domain_rand:
             return obs
@@ -678,12 +751,11 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         noise = torch.zeros_like(obs)
         if dr.obs_noise:
             n = self.num_envs
-            noise[:, 0:3] = torch.randn(n, 3, device=self.device) * dr.ang_vel_noise  # root_ang_vel_b
-            noise[:, 3:6] = torch.randn(n, 3, device=self.device) * dr.gravity_noise  # projected_gravity_b
-            noise[:, 9:21] = torch.randn(n, 12, device=self.device) * dr.joint_pos_noise  # joint_pos - default
-            noise[:, 21:33] = torch.randn(n, 12, device=self.device) * dr.joint_vel_noise  # joint_vel
+            noise[:, 0:3] = torch.randn(n, 3, device=self.device) * dr.gravity_noise  # projected_gravity_b
+            noise[:, 6:18] = torch.randn(n, 12, device=self.device) * dr.joint_pos_noise  # joint_pos - default
+            noise[:, 18:30] = torch.randn(n, 12, device=self.device) * dr.joint_vel_noise  # joint_vel
         if dr.encoder_bias:
-            noise[:, 9:21] += self._encoder_bias  # per-env 고정 엔코더 오프셋
+            noise[:, 6:18] += self._encoder_bias  # per-env 고정 엔코더 오프셋
         return obs + noise
 
     def _get_priv_latent(self) -> torch.Tensor:
@@ -754,6 +826,25 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w[env_ids] = root_pos_hist
 
+        # ── rest-init: 일부 env 는 참조 프레임 대신 **기립 정지**로 시작한다 ──────────────
+        # 참조 18 클립은 전부 "이미 걷고 있는" 상태라(가장 느린 go2_walk 도 평균 0.15 m/s),
+        # RSI 만 쓰면 정지가 초기 조건이 된 적이 없다 → 정지→이동 전이를 배울 기회가 없다.
+        if self.cfg.rel_rest_init > 0.0:
+            rest = torch.rand(n, device=self.device) < self.cfg.rel_rest_init
+            if rest.any():
+                default_root = self._robot.data.default_root_state[env_ids][rest].clone()
+                # default_root_state 는 env-local 좌표라 origin 을 더해야 한다(RSI 경로와 동일).
+                default_root[:, 0:3] = default_root[:, 0:3] + self.scene.env_origins[env_ids][rest]
+                default_root[:, 7:13] = 0.0  # lin/ang velocity = 0
+                root_state[rest] = default_root
+                joint_pos_out[rest] = self._robot.data.default_joint_pos[env_ids][rest]
+                joint_vel_out[rest] = 0.0
+                # NOTE: amp_observation_buffer 는 위에서 참조 모션으로 채워진 채 둔다. 로봇은
+                # 정지 상태이므로 첫 ~10 step 동안만 history 앞부분이 실제 상태와 어긋나는데,
+                # `_get_observations` 가 매 step 실측 amp_obs 를 밀어 넣어 그 안에 씻겨 나간다.
+                # 영향 규모: rel_rest_init × (10 step / 에피소드 1000 step) ≈ 0.1% 의 disc 샘플.
+                # 정지 상태의 amp_obs 를 정확히 만들려면 reset 시점에 FK 가 필요해 비용이 크다.
+
         return root_state, joint_pos_out, joint_vel_out
 
     # ──────────────────────────────────────────────────────────
@@ -779,6 +870,20 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self._yaw_vel_cmd[env_ids] = (
             torch.rand(n, device=self.device) * (self.cfg.yaw_vel_max - self.cfg.yaw_vel_min) + self.cfg.yaw_vel_min
         )
+
+        # 일부 env 는 **정확히 0**(정지) 명령으로 강제한다. uniform 샘플의 near-zero tail 만으로는
+        # 정지가 뚜렷한 모드로 학습되지 않는다(cmd 0 에서 task reward 는 v=0 일 때 1.0 최대인데도
+        # 정책이 그 상태에서 빠져나오지 못했다). IsaacLab 표준 velocity command 의
+        # `rel_standing_envs` 와 같은 장치.
+        if self.cfg.rel_standing_envs > 0.0:
+            standing = torch.rand(n, device=self.device) < self.cfg.rel_standing_envs
+            self._lin_vel_cmd[env_ids[standing]] = 0.0
+            self._yaw_vel_cmd[env_ids[standing]] = 0.0
+            # ④ style 대체용 마스크. **명령 기준**이라 정책이 스스로 멈춰서 pose 보상을 수확할 수
+            # 없다(실측 속도로 게이트하면 그게 가능해진다). 다음 재샘플까지 유지된다.
+            self._standing_mask[env_ids] = standing
+        else:
+            self._standing_mask[env_ids] = False
 
         # 다음 변경까지 남은 시간
         self._tar_timer[env_ids] = (
