@@ -2,7 +2,19 @@
 
 gym task id: `Go2-Pedipulation-v0`
 
-떨림 수정 sweep의 **채택본**. `2026-07-29_13-56-20_s2_circle/model_17598.pt` 에서 4000
+> ## ⚠ 채택 해제 (2026-08-05)
+>
+> 프로젝트 채택 정책은
+> [`2026-08-03_15-53-29_hipscale_scratch_s10x`](../2026-08-03_15-53-29_hipscale_scratch_s10x/)
+> (`model_19999.pt`) 로 교체됐다. 그쪽이 **몸통 표류 하나만 빼고 전 항목에서 앞선다** —
+> hold 15.60 → **9.32 mm**, 떨림 1.42 → **0.823 °/step**, step 재수렴 p95 4.37 → **0.38 s**,
+> 원 RMSE 19.72 → **13.44 mm**, 접촉 하중 24.5 → **14.9%**, push 150 N 76.5 → 78.1%.
+> 표류만 5.52 → 7.88 cm 로 열세다.
+>
+> 근거: [`../_comparisons/hipscale_2x2/`](../_comparisons/hipscale_2x2/).
+> 아래 내용은 채택 당시 기록으로 **그대로 둔다** — 수치는 유효하다.
+
+떨림 수정 sweep의 **당시 채택본**. `2026-07-29_13-56-20_s2_circle/model_17598.pt` 에서 4000
 iteration finetune (17598 → 21597), 2048 env, `trajectory_mode=circle`.
 
 ```

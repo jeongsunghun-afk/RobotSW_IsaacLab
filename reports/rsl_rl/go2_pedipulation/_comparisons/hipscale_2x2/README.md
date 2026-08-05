@@ -83,13 +83,13 @@ push 150 N 76.5%(`jtr40_jvf`), 원 RMSE 16.54(`smooth10x`), step p95 0.68 s(`smo
 ⚠ 다만 `smooth4x` 는 13599 iteration, 정정판은 20000 이다. 개선폭 중 얼마가 iteration
 덕인지는 이 쌍으로 가를 수 없다.
 
-## 채택 권고 — `hipON 10배`
+## 채택 — `hipON 10배` (2026-08-05 반영 완료)
 
 세 칸이 사실상 동률이므로 **sim2real 요구가 tie-breaker** 다. `hip_scale_reduction=True` 는
 실기 배포를 위해 도입한 것이고, 위 표대로 그 대가가 측정 한계 안에 있다. 떨림·접촉 하중·측정
 타당성에서는 오히려 앞선다.
 
-현 채택 정책 `jtr40_jvf` 대비:
+직전 채택 정책 `jtr40_jvf` 대비:
 
 | | `jtr40_jvf` | `hipON 10배` |
 |---|---:|---:|
@@ -101,7 +101,10 @@ push 150 N 76.5%(`jtr40_jvf`), 원 RMSE 16.54(`smooth10x`), step p95 0.68 s(`smo
 | S4 위반 / 하중 | 0.05% / 24.5% | **0.00% / 14.9%** |
 | 표류 | **5.52 cm** | 7.88 |
 
-표류 하나만 열세다. 교체를 권고한다.
+표류 하나만 열세다. **2026-08-05 에 교체를 반영했다** — 채택본은
+[`../../2026-08-03_15-53-29_hipscale_scratch_s10x/`](../../2026-08-03_15-53-29_hipscale_scratch_s10x/)
+의 `model_19999.pt` 다. pedipulation 은 배포·export 경로가 아직 없으므로 채택은 **문서상
+지정**이고, 코드에 박힌 기본 체크포인트는 없다.
 
 ⚠ **배포 전 확인 필요**: `scripts/real2sim/r2s_go2/policy_runtime.py` 의
 `action_to_target_art()` 에는 hip 축소가 없다. 이 정책을 실기로 내보내면 hip 명령이 2배가

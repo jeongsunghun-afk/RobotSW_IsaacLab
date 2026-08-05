@@ -2,6 +2,22 @@
 
 gym task id: `Go2-Pedipulation-v0`
 
+> ## ★ 현 채택 정책 (2026-08-05)
+>
+> ```
+> logs/rsl_rl/go2_pedipulation/2026-08-03_15-53-29_hipscale_scratch_s10x/model_19999.pt
+> ```
+>
+> 이전 채택본 [`jtr40_jvf`](../2026-07-31_09-31-33_jtr40_jvf/) 를 대체한다 — **몸통 표류
+> 하나만 빼고 전 항목에서 앞선다.** 근거는
+> [`../_comparisons/hipscale_2x2/`](../_comparisons/hipscale_2x2/).
+>
+> **평가·재현 시 반드시 지킬 것 2가지:**
+> - `hip_scale_reduction=True` 로 맞출 것. `play_pedipulation_gates.py` 는
+>   `--hip_scale_reduction auto`(기본)가 이 run 의 `params/env.yaml` 에서 자동 판별한다.
+> - **`--jvel_filter_alpha` 를 주지 말 것.** 이 정책은 필터를 끈 채(1.0) 학습됐다.
+>   `jtr40_jvf`·`drift50` 평가에 쓰던 `0.25` 를 복사하면 분포 밖 평가가 된다.
+
 [`2026-08-03_13-13-09_hipscale_scratch`](../2026-08-03_13-13-09_hipscale_scratch/) 의
 **action 규제 10배 대조군.** 둘 다 `hip_scale_reduction=True` 로 처음부터 학습한다.
 
@@ -101,12 +117,18 @@ Episode_Reward/joint_target_rate: 0.0000
 
 같은 박스인데 열세다. 다만 **이 격차를 `hip_scale_reduction` 탓으로 돌릴 수 없다** —
 `smooth4x` 는 `_post_physics_step` 버그로 에피소드 중 명령이 **바뀌지 않았고**, 이 run 은
-3~5 s 마다 바뀐다. 명령 분포가 더 어렵다. 두 요인을 가르려면 `hip_scale_reduction=False` +
-버그 수정본으로 from-scratch 대조군이 필요한데, 그런 run 은 아직 없다.
+3~5 s 마다 바뀐다. 명령 분포가 더 어렵다.
+
+> **해소됨 (2026-08-04).** 두 요인을 가르는 대조군
+> [`hipoff_4x`](../2026-08-04_09-09-20_hipoff_4x/) (= `smooth4x` 정정판)를 돌렸다. 결과는
+> **위 학습 지표의 열세가 실제 성능 열세가 아니었다는 것**이다 — 평가에서 이 run 은 hold
+> 9.32 mm 로 `smooth4x` 의 10.18 mm 를 앞선다. 정정판은 9.23 mm 로, 남는 격차는
+> hip 축소가 아니라 **버그 정정과 iteration 차이**에서 온다.
+> 상세: [`../_comparisons/hipscale_2x2/`](../_comparisons/hipscale_2x2/).
 
 ## 평가 결과 — **계보 최고. 표류 하나만 빼고 전 항목 1위**
 
-| 지표 | **이 run** | `smooth4x` | `smooth10x` | `jtr40_jvf` (현 채택) |
+| 지표 | **이 run** | `smooth4x` | `smooth10x` | `jtr40_jvf` (직전 채택) |
 |---|---:|---:|---:|---:|
 | hold 오차 중앙 | **9.32 mm** | 10.18 | 10.22 | 15.60 |
 | 떨림 | **0.823 °/step** | 1.29 | 0.91 | 1.42 |
