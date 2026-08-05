@@ -92,7 +92,7 @@ class Go2ParkourImitationPPOAMPRunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.01,  # 0.01
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=2.0e-4,
@@ -364,3 +364,385 @@ class Go2ParkourImitationSymmetryRandomGoalLidarSLPPOAMPRunnerCfg(
         # The lidar range-image mirror (H-flip) is also not wired yet; re-enable symmetry once
         # _mirror_range_image is integrated into compute_parkour_imitation_symmetric_states.
         self.algorithm.symmetry_cfg = None
+
+
+@configclass
+class Go2ParkourImitationLidarDistillRunnerCfg(Go2ParkourImitationSymmetryRandomGoalLidarSLPPOAMPRunnerCfg):
+    """Teacher-student distillation: frozen voxel teacher labels actions, LiDAR student imitates.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-EasyEntry-v0``.  The student rolls out the
+    environment (on-policy DAgger, so the state distribution is the student's), the teacher
+    scores the *same* observations deterministically, and the loss is the action MSE between
+    them.  PPO's value/advantage/surrogate terms, the AMP discriminator, symmetry and RND are
+    all unused on this path.
+
+    Differences vs the LiDAR SL runner cfg:
+    - ``class_name`` → ``OnPolicyRunnerParkourDistill``
+    - ``obs_groups`` gains ``"voxel": ["voxel"]`` so the teacher can read its terrain input
+      (the student still reads only ``"lidar"``)
+    - ``teacher_checkpoint`` points at the trained voxel teacher
+    - ``experiment_name`` → ``parkour_imitation_go2_lidar_distill``
+
+    The paired env cfg
+    (:class:`~isaaclab_tasks.direct.parkour_imitation.parkour_imitation_random_goal_lidar_env_cfg.ParkourImitationRandomGoalLidarDistillEasyEntryEnvCfg`)
+    emits ``obs["voxel"]`` and ``obs["lidar"]`` in the same step and matches the teacher's
+    terrain mix — without that, teacher labels would be generated off-distribution.
+
+    Note: this arm must be launched **without** ``--video``.  The replicator render path is
+    what crashes the 6.0 LiDAR pipeline (rc=245); no-video runs are healthy.
+    """
+
+    teacher_checkpoint: str = (
+        "/home/lgb/IsaacLab-6.0/logs/rsl_rl/parkour_imitation_go2_teacher3d_voxel/"
+        "2026-07-27_10-34-04_teacher3d_voxel_binary_50k/model_49999.pt"
+    )
+    """Absolute path to the frozen voxel-teacher checkpoint.
+
+    The actor weights live under ``model_state_dict`` (there is no ``actor_state_dict`` key in
+    this save format), so the runner loads them explicitly rather than through rsl-rl's
+    auto-detecting distillation loader.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.class_name = "OnPolicyRunnerParkourDistill"
+        self.policy.class_name = "ActorCriticRMALidar"
+        # Teacher reads voxel; student reads lidar. Both groups must be present in one env.
+        self.obs_groups = {**self.obs_groups, "voxel": ["voxel"]}
+        self.experiment_name = "parkour_imitation_go2_lidar_distill"
+        # Inherited from the SL arm and still required here (LidarEncoder over a doubled batch).
+        self.algorithm.symmetry_cfg = None
+        # Storage holds the student obs sets only — lidar(13824) is stored, voxel(7371) is NOT.
+        # ``OnPolicyRunnerParkourDistill.Storage`` deliberately excludes "voxel" because the
+        # teacher consumes it during the rollout and never needs it again.  Keep the trim from
+        # 24 anyway: lidar alone is 13,824 floats per env-step.
+        self.num_steps_per_env = 16
+
+
+@configclass
+class ParkourPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """``RslRlPpoAlgorithmCfg`` + adaptive LR 스케줄의 하한/상한 노출.
+
+    ``PPOParkour`` 의 adaptive 스케줄은 KL 이 ``desired_kl`` 의 2배를 넘으면 LR 을 1/1.5 배씩
+    낮추는데, 그 하한이 기존에는 1e-5 로 하드코딩돼 있었다. 하한이 binding 이 되면 KL 초과를
+    감지해도 LR 을 더 낮출 수 없어 정책이 계속 크게 움직인다. 두 값을 cfg 로 노출해
+    task 별로 조정할 수 있게 한다. 기본값은 기존 하드코딩과 동일하다.
+    """
+
+    learning_rate_min: float = 1.0e-5
+    """adaptive 스케줄이 LR 을 낮출 수 있는 하한."""
+
+    learning_rate_max: float = 1.0e-2
+    """adaptive 스케줄이 LR 을 올릴 수 있는 상한."""
+
+
+@configclass
+class Go2ParkourImitationSymmetryRandomGoalEasyEntryPPOAMPRunnerCfg(
+    Go2ParkourImitationSymmetryRandomGoalPPOAMPRunnerCfg
+):
+    """EasyEntry 지형 전용 — 파국 붕괴 대응 안정화 설정.
+
+    run ``2026-07-27_09-36-56`` (33800→48279) 이 iter 47255 에서 파국 붕괴했다. 진단 결과:
+
+    - 얕은 자력회복 붕괴 10회의 ``std_max`` 는 0.469~0.548 로 좁게 모여 있었고, 파국만
+      0.681 → 0.930 으로 이 범위를 넘어선 채 복귀하지 않았다. std 미복귀가 유일한 판별 지표였다.
+    - ``use_clipped_value_loss`` 는 이미 True 였으므로 value clipping 은 처방이 되지 못한다.
+    - LR 은 파국 전 구간에서 1e-5 하한에 100% 정박해 있었다. adaptive 스케줄이 포화되어
+      KL 초과를 감지하고도 더 낮출 수단이 없는 상태였다.
+
+    조치는 두 가지로 제한한다. 원인 귀속이 가능해야 하므로 ``entropy_coef`` / ``desired_kl`` /
+    ``use_clipped_value_loss`` 는 건드리지 않는다.
+
+    1. ``max_grad_norm`` 1.0 → 0.5 — per-update 정책 이동량을 직접 제한. 저위험.
+    2. ``learning_rate_min`` — LR 하한이 실제 병목인지 확인한 뒤 조정한다. 기본값(1e-5)으로
+       두고 새로 추가된 ``Loss/kl`` 태그로 KL 이 ``desired_kl`` 을 근소하게 넘는지 자릿수로
+       넘는지 관측한 다음 결정한다.
+
+    ``std`` 상한 clamp 는 검토 후 기각했다. 이 런에서 std 상승(0.488→0.530 @36900)이 국소해
+    탈출을 이끌어 자력 회복을 만든 사례가 두 번 있었으므로, 판별 지표를 눌러버리면 회복 기제까지
+    함께 없애고 붕괴가 조용히 진행된다.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        base = self.algorithm
+        # algorithm 을 교체하되 부모 __post_init__ 이 설정한 symmetry_cfg 를 반드시 보존한다.
+        self.algorithm = ParkourPpoAlgorithmCfg(
+            class_name=base.class_name,
+            num_learning_epochs=base.num_learning_epochs,
+            num_mini_batches=base.num_mini_batches,
+            learning_rate=base.learning_rate,
+            schedule=base.schedule,
+            gamma=base.gamma,
+            lam=base.lam,
+            entropy_coef=base.entropy_coef,
+            desired_kl=base.desired_kl,
+            optimizer=base.optimizer,
+            value_loss_coef=base.value_loss_coef,
+            use_clipped_value_loss=base.use_clipped_value_loss,
+            clip_param=base.clip_param,
+            normalize_advantage_per_mini_batch=base.normalize_advantage_per_mini_batch,
+            share_cnn_encoders=base.share_cnn_encoders,
+            rnd_cfg=base.rnd_cfg,
+            symmetry_cfg=base.symmetry_cfg,
+            # ── 안정화 조치 ──
+            max_grad_norm=0.5,
+            learning_rate_min=1.0e-5,
+        )
+        self.experiment_name = "parkour_imitation_go2_symmetry_random_goal"
+
+
+@configclass
+class Go2ParkourImitationLidarDistillK10RunnerCfg(Go2ParkourImitationLidarDistillRunnerCfg):
+    """Distillation runner for the widened-window arm (K=10, 1.0 s) — rung A0.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-K10-EasyEntry-v0``.  Paired with
+    :class:`~isaaclab_tasks.direct.parkour_imitation.parkour_imitation_random_goal_lidar_env_cfg.ParkourImitationRandomGoalLidarDistillK10EasyEntryEnvCfg`.
+
+    No policy-side change is needed: ``ActorCriticRMALidar`` infers K from the width of
+    ``obs["lidar"]``, so the env cfg is the single source of truth.
+
+    VRAM.  The stored lidar observation grows 3.33x (13,824 -> 46,080 floats per env-step).
+    At ``num_steps_per_env=16`` and 1024 envs the rollout storage for the lidar group alone
+    goes from ~0.91 GB to ~3.02 GB (float32), a ~2.1 GB increase.  ``num_steps_per_env`` is
+    deliberately left at 16 so the batch size matches the K=3 baseline and the A/B stays
+    clean — if this does not fit, prefer a card with more free memory over changing the
+    batch, since changing it would confound the comparison.
+
+    Compare against ``parkour_imitation_go2_lidar_distill`` at matched iterations
+    (``curriculum/mean_terrain_level_gap``: 2k 1.94 / 5k 2.13 / 10k 2.28).
+
+    Launch **without** ``--video`` — the replicator render path crashes the 6.0 LiDAR
+    pipeline (rc=245).
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_k10"
+
+
+@configclass
+class Go2ParkourImitationLidarDistillK5RunnerCfg(Go2ParkourImitationLidarDistillRunnerCfg):
+    """Distillation runner for the 0.5 s window arm (K=5) — lower bracket of rung A0.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-K5-EasyEntry-v0``.  Together with the K=3
+    baseline and the K=10 arm this gives a window-length dose-response curve
+    (0.3 / 0.5 / 1.0 s) instead of a single comparison.
+
+    VRAM: stored lidar grows 1.67x vs K=3 (13,824 -> 23,040 floats per env-step), about
+    +0.6 GB of rollout storage at ``num_steps_per_env=16`` and 1024 envs.  ``num_steps_per_env``
+    stays 16 so the batch matches every other arm.
+
+    Launch **without** ``--video``.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_k5"
+
+
+@configclass
+class Go2ParkourImitationLidarDistillK15RunnerCfg(Go2ParkourImitationLidarDistillRunnerCfg):
+    """Distillation runner for the 1.5 s window arm (K=15) — upper bracket of rung A0.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-K15-EasyEntry-v0``.  Completes the
+    window-length dose-response curve (0.3 / 0.5 / 1.0 / 1.5 s).
+
+    VRAM: stored lidar is 5x the K=3 baseline (13,824 -> 69,120 floats per env-step), about
+    +3.6 GB of rollout storage at ``num_steps_per_env=16`` and 1024 envs, putting the process
+    near 16.1 GB.  ``num_steps_per_env`` stays 16 so the batch matches every other arm — if it
+    does not fit, wait for a freer card rather than trimming the batch.
+
+    Launch **without** ``--video``.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_k15"
+
+
+@configclass
+class Go2ParkourImitationLidarDistillK10FixRunnerCfg(Go2ParkourImitationLidarDistillK10RunnerCfg):
+    """K=10 with the post-reset stack warm-up removed — discriminator for the A0 trend.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-K10Fix-EasyEntry-v0``.  Identical to the K=10
+    arm except that the env cfg sets ``lidar_fill_stack_on_reset``, so the only difference is
+    whether the ring buffer starts an episode self-consistent or zero-filled.  Compare against
+    both the K=3 baseline and the plain K=10 arm at matched iterations.
+
+    Same VRAM as K=10 (~14.6 GB at 1024 envs).  Launch **without** ``--video``.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_k10fix"
+
+
+@configclass
+class Go2ParkourImitationLidarDistillGridRunnerCfg(Go2ParkourImitationLidarDistillRunnerCfg):
+    """Rung A1-0: the student reads a metric occupancy grid through the voxel CNN.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-Grid-EasyEntry-v0``, paired with
+    :class:`~isaaclab_tasks.direct.parkour_imitation.parkour_imitation_random_goal_lidar_env_cfg.ParkourImitationRandomGoalLidarDistillGridEasyEntryEnvCfg`,
+    which makes ``obs["lidar"]`` a 27x21x13 = 7371 binary occupancy grid in the teacher's frame.
+
+    The student's encoder becomes :class:`ActorCriticRMAVoxel` — the same class as the teacher —
+    so the two are architecturally identical and differ only in the grid's provenance:
+
+    * student ``obs_groups["voxel"] = ["lidar"]``  -> grid scattered from its own Mid-360 hits
+    * teacher ``teacher_obs_groups["voxel"] = ["voxel"]`` -> grid from privileged clearance rays
+
+    Both groups stay declared so the runner's storage whitelist (which iterates the observation
+    *set* names, ``["policy", "priv_explicit", "history", "lidar"]``) still resolves to the group
+    ``"lidar"`` and keeps it in the rollout buffer.
+
+    ``teacher_policy`` is intentionally left unset: the teacher and student now take identical
+    policy kwargs, so the runner's fallback to the student's ``policy`` block is correct here
+    rather than merely tolerated.
+    """
+
+    teacher_obs_groups: dict | None = None
+    """Observation-set mapping used to build the teacher.
+
+    Required whenever the student's mapping is not also valid for the teacher — here the student
+    resolves ``"voxel"`` to the LiDAR-derived grid, so without this the teacher would be handed
+    the student's grid and its frozen weights would be scoring the wrong input.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Authoritative since OnPolicyRunnerParkourDistill._get_actor_critic_class now dispatches
+        # on this name (it used to be informational while the runner hard-coded the LiDAR class).
+        self.policy.class_name = "ActorCriticRMAVoxel"
+        # Student: the "voxel" set the voxel CNN reads is fed by the LiDAR-derived grid.
+        self.obs_groups = {**self.obs_groups, "lidar": ["lidar"], "voxel": ["lidar"]}
+        # Teacher: unchanged privileged grid.
+        self.teacher_obs_groups = {**self.obs_groups, "voxel": ["voxel"]}
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_grid"
+
+
+@configclass
+class Go2ParkourImitationLidarDistillAccRunnerCfg(Go2ParkourImitationLidarDistillGridRunnerCfg):
+    """Rung A1-1: metric grid plus pose-registered accumulation.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-Acc-EasyEntry-v0``.  Identical wiring to the
+    A1-0 grid arm — same voxel-CNN student, same observation key and width — so the only
+    difference from that arm is whether the grid carries memory.  Compare against A1-0 to isolate
+    accumulation, and against the K=3 baseline for the end-to-end effect.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_acc"
+
+
+@configclass
+class Go2ParkourImitationLidarDistillCeilingRunnerCfg(Go2ParkourImitationLidarDistillGridRunnerCfg):
+    """Ceiling control for the whole LiDAR-reconstruction programme.
+
+    Used by ``Go2-ParkourImitation-Lidar-Distill-Ceiling-EasyEntry-v0``.  The runner wiring is
+    byte-identical to A1-0 — same voxel-CNN student, same ``obs_groups["voxel"] = ["lidar"]``,
+    same storage whitelist.  The paired env cfg is what differs: it fills ``obs["lidar"]`` with
+    the teacher's privileged grid, so the student's terrain input has zero reconstruction error.
+
+    Any LiDAR history/reconstruction module can at best recover that grid, so this arm's result
+    is an upper bound on what such a module could ever buy.  Run it *before* designing one.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_ceiling"
+
+
+@configclass
+class Go2ParkourImitationLidarSLGridPPOAMPRunnerCfg(Go2ParkourImitationSymmetryRandomGoalTeacher3DVoxelPPOAMPRunnerCfg):
+    """From-scratch PPO+AMP on the metric grid — no teacher, no distillation.
+
+    Used by ``Go2-ParkourImitation-Lidar-SL-Grid-EasyEntry-v0``.  This re-opens the question the
+    earlier ``parkour_imitation_go2_lidar_sl`` arm appeared to close.  That arm learned from
+    scratch through the **angular range image**, the representation later measured to be the
+    binding defect (swapping it for the metric grid moved pinned completion 0.078 -> 0.238 under
+    distillation).  Its failure therefore does not carry over, and from-scratch RL deserves a
+    second measurement on the representation that works.
+
+    Why it matters beyond curiosity: distillation inherits a conditional-mean ceiling, because
+    the student's grid comes from a real sensor while the teacher's comes from privileged
+    clearance rays, making ``obs_student -> action_teacher`` a distribution rather than a
+    function.  RL against the actual reward has no such ceiling — the policy optimises what is
+    achievable under its *own* observability.  If this arm reaches teacher-level, the entire
+    teacher-then-distill-then-finetune pipeline becomes unnecessary.
+
+    Wiring vs the voxel teacher arm (the reference this must be read against):
+    - ``obs_groups["voxel"] -> ["lidar"]``: the actor's voxel CNN reads the grid scattered from
+      the robot's own Mid-360 hits instead of the privileged clearance grid.
+    - critic is untouched (clearance-294 in the ``"scan"`` slot) — asymmetric actor-critic, which
+      is what makes from-scratch tractable at all here.
+    - ``symmetry_cfg = None``.  ``mdp/symmetry.py`` mirrors only policy/scan/priv/history, so the
+      terrain grid would be left unmirrored while the proprioception is flipped, i.e. the
+      augmented sample would carry an inconsistent label.  This deviates from the teacher's own
+      recipe (which ran with symmetry on) and removes an augmentation, so a shortfall here is a
+      candidate confound to check before concluding from-scratch fails.
+
+    Pair with ``ParkourImitationRandomGoalLidarDistillGridEasyEntryEnvCfg`` — deliberately the
+    *same* env cfg as the A1-0 distillation arm, so env, terrain mix and representation are all
+    held fixed and the only difference is the learning objective.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Actor terrain encoder reads the LiDAR-derived grid; critic keeps privileged clearance.
+        self.obs_groups = {**self.obs_groups, "lidar": ["lidar"], "voxel": ["lidar"]}
+        self.experiment_name = "parkour_imitation_go2_lidar_sl_grid"
+        # See the class docstring: the mirror function does not cover the terrain grid.
+        self.algorithm.symmetry_cfg = None
+
+
+@configclass
+class Go2ParkourImitationLidarDistillR4RunnerCfg(Go2ParkourImitationLidarDistillRunnerCfg):
+    """Distillation runner for the 4 m range-normalisation arm.
+
+    Identical to :class:`Go2ParkourImitationLidarDistillRunnerCfg` except for the log directory,
+    so the two arms never write into the same run folder and can be compared at matched iterations.
+    Used by ``Go2-ParkourImitation-Lidar-Distill-R4-EasyEntry-v0``.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_distill_r4"
+
+
+@configclass
+class Go2ParkourImitationTeacher3DVoxelGTPPOAMPRunnerCfg(
+    Go2ParkourImitationSymmetryRandomGoalTeacher3DVoxelPPOAMPRunnerCfg
+):
+    """Voxel teacher trained on a ground-truth volume instead of a ray-hit scatter.
+
+    Used by ``Go2-ParkourImitation-Teacher3DVoxelGT-EasyEntry-v0``.  Runner wiring is unchanged;
+    only the paired env cfg differs (``voxel_gt_columns=True``), so this isolates the observation.
+
+    The resulting checkpoint is **not** interchangeable with
+    ``parkour_imitation_go2_teacher3d_voxel``: the actor's terrain input has different semantics
+    and roughly 20x more occupied cells, so distillation arms measured against the older teacher
+    form a separate baseline family.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_teacher3d_voxel_gt"
+
+
+@configclass
+class Go2ParkourImitationLidarSLGridCrawlPPOAMPRunnerCfg(Go2ParkourImitationLidarSLGridPPOAMPRunnerCfg):
+    """SL-Grid trained on a terrain mix that includes ``parkour_crawl``.
+
+    Used by ``Go2-ParkourImitation-Lidar-SL-Grid-Crawl-EasyEntry-v0``. Runner wiring is
+    identical to the crawl-free SL-Grid arm — only the paired env cfg's terrain proportions
+    differ — so any difference is attributable to the terrain distribution.
+
+    Logged separately because the two are **not** the same baseline: a checkpoint trained with
+    crawl at 0.16 cannot be placed in the same table as one that never saw the terrain.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "parkour_imitation_go2_lidar_sl_grid_crawl"

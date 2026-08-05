@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import field
 
+from isaaclab_physx.physics import PhysxCfg
+
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
@@ -18,7 +20,6 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import RenderCfg, SimulationCfg
-from isaaclab_physx.physics import PhysxCfg
 from isaaclab.terrains import FlatPatchSamplingCfg, TerrainImporterCfg
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 from isaaclab.utils.configclass import configclass
@@ -183,7 +184,14 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
         "parkour_crawl": MeshParkourCrawlTerrainCfg(
             proportion=0.0,
             platform_length=2.5,
-            num_crawls=3,
+            # Eight sections, matching every other sub-terrain's obstacle count, so all eight
+            # goals are distinct. With three, only three goals existed and the generator padded
+            # the list by repeating the last one, ending the course at ~10.95 m against ~17.8 m
+            # elsewhere. The terrain curriculum compares distance travelled against
+            # ``commanded_vx * episode_length_s`` and never looks at the course, so a short
+            # course cannot clear the promotion bar and is demoted even on a perfect run —
+            # crawl sat at level 1.32 while completing ~40% of pinned runs at every level.
+            num_crawls=8,
             ceiling_height_range=(0.28, 0.50),
             ceiling_length_x=1.2,
             ceiling_thickness=0.10,
@@ -191,7 +199,11 @@ PARKOUR_TERRAINS_CFG = TerrainGeneratorCfg(
             corridor_width=1.2,
             side_wall_height=1.0,
             side_walls=True,
-            x_spacing_range=(1.0, 2.0),
+            # Spacing shrinks with the section count to hold the course at the shared length:
+            # 2.5 + 8*1.2 + 0.3 + sum(spacing) ~= 17.8 m needs a mean gap of 0.675 m. A section
+            # is 1.2 m of tunnel, so eight of them leave less recovery room between crawls than
+            # three did — the terrain is genuinely harder, not merely longer.
+            x_spacing_range=(0.45, 0.90),
             num_goals=8,
             flat_patch_sampling={
                 "init_positions": FlatPatchSamplingCfg(
@@ -416,6 +428,17 @@ class ParkourEnvCfg(DirectRLEnvCfg):
     # Default OFF; enable alongside enable_clearance_scanner for CrawlTest or teacher runs.
     enable_voxel_scanner: bool = False
 
+    # Ground-truth voxel fill via one ray per grid column instead of the clearance scanner's
+    # hit-point scatter.  The scatter marks only the cell a ray lands in, so with 294 diverging
+    # rays roughly 70-80 of 7371 cells are occupied: solid geometry no ray struck reads 0, the
+    # space below a surface is never filled, and the marked set flickers with pose as hit points
+    # cross cell boundaries.  Column rays enumerate instead of sampling — every column is covered
+    # and everything below the surface is filled, so a hole in the floor becomes an empty column
+    # rather than a missing shell (about 1,700 occupied cells on flat ground).
+    # Requires enable_voxel_scanner=True.  Changes the teacher's observation, so a policy trained
+    # with this is not comparable to one trained without it.
+    voxel_gt_columns: bool = False
+
     # Teacher privileged 3D scan mode (R2).
     # When True: the "scan" obs group returns self._clearance_vec (294-dim, normalized to [-1,1])
     # instead of the 2D height-scan (187-dim).  Requires enable_clearance_scanner=True.
@@ -481,7 +504,7 @@ class ParkourEnvCfg(DirectRLEnvCfg):
             # 12.0 lifts the recorded video to frame mean ~63 (no clipping). NOTE: tuned on the
             # headless top-down capture (camera follow needs vcc, which is None in headless);
             # re-check after a camera-follow fix lands since the framing then includes the robot.
-            ambient_light_intensity=12.0,
+            ambient_light_intensity=1.0,  # TEMP isolation test (was 12.0): 12.0 blows out the GUI viewport to white
             carb_settings={"rtx.rendermode": "RaytracedLighting"},
         ),
     )
