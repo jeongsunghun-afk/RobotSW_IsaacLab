@@ -44,7 +44,19 @@ parser.add_argument(
     "--mode",
     type=str,
     default="push",
-    choices=["push", "drift", "hold", "step", "circle", "contact", "contactvid", "video", "showcase", "driftvid"],
+    choices=[
+        "push",
+        "drift",
+        "hold",
+        "step",
+        "circle",
+        "contact",
+        "contactvid",
+        "video",
+        "showcase",
+        "driftvid",
+        "longhold",
+    ],
     help=(
         "push=S1-G5, drift=S1-G7, hold=S1-G2/G3, step=명령 불연속 변화 응답,"
         " circle=S2-G1/G2/G4/G5, contact=S4-G4/G1'/G2', video/showcase=영상."
@@ -85,6 +97,12 @@ parser.add_argument(
     type=float,
     default=-0.03,
     help="contact 모드에서 지시할 z 오프셋 [m]. 음수면 지면 아래를 지시해 눌러 닿게 한다.",
+)
+parser.add_argument(
+    "--longhold_seconds",
+    type=float,
+    default=30.0,
+    help="longhold 모드에서 목표 하나를 유지할 시간 [s].",
 )
 parser.add_argument(
     "--world_anchor",
@@ -284,6 +302,10 @@ def build_env(seed: int):
     hold_s = 3.0 if args_cli.mode == "video" else 1.0e6
     env_cfg.command.resample_time_min = hold_s
     env_cfg.command.resample_time_max = hold_s
+    if args_cli.mode == "longhold":
+        # ⚠ 기본 에피소드는 10 s 다. 이걸 안 늘리면 시행이 중간에 타임아웃 리셋되어
+        #    "오래 붙들 때 새는가" 라는 질문 자체가 성립하지 않는다.
+        env_cfg.episode_length_s = args_cli.longhold_seconds + 5.0
     if args_cli.mode == "showcase":
         # 대본이 30 s 가까이 이어지므로 10 s 기본 에피소드로는 중간에 리셋된다.
         env_cfg.episode_length_s = 120.0
@@ -1896,6 +1918,123 @@ def run_driftvid(env, policy, seed: int) -> dict:
     }
 
 
+LONGHOLD_BIN_S = 5.0  # 시간 구간 폭 [s] — 오차가 시간에 따라 자라는지 구간별로 본다
+
+
+def run_longhold_seed(env, policy, seed: int) -> dict:
+    """목표 **하나**를 오래 유지하며 오차와 몸통 표류가 시간에 따라 자라는지 본다.
+
+    기존 ``hold`` 는 5 s 창 하나라 "오래 붙들면 새는가"를 묻지 못한다. 고정된 물체를 만지는
+    작업은 그보다 훨씬 길게 한 점을 잡고 있어야 하므로, 여기서는 구간별로 나눠 기록한다.
+
+    ``--world_anchor on`` 과 함께 쓰는 것이 요점이다. body frame 고정이면 몸통이 밀려도
+    목표가 따라가 오차가 안 생기지만, world 고정이면 표류가 그대로 오차가 된다.
+    """
+    base_env = env.unwrapped
+    device = base_env.device
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    nx, ny, nz = grid_shape(base_env)
+    n_cell = nx * ny * nz
+    slot = torch.arange(n, device=device) % (4 * n_cell)
+    slot = slot[torch.randperm(n, generator=gen, device=device)]
+    leg_idx = slot // n_cell
+    target_b = build_stratified_targets(base_env, leg_idx, slot % n_cell, gen)
+    patch_command(base_env, leg_idx, target_b)
+    obs, _ = env.reset()
+
+    n_step = int(round(args_cli.longhold_seconds / base_env.step_dt))
+    bin_steps = max(1, int(round(LONGHOLD_BIN_S / base_env.step_dt)))
+    alive = torch.ones(n, dtype=torch.bool, device=device)
+    xy0 = base_xy(base_env)
+    xy_ref = xy0.clone()
+    prev_target = base_env._processed_actions.clone()
+
+    bins: list[dict] = []
+    err_sum = torch.zeros(n, device=device)
+    jit_sum = torch.zeros(n, device=device)
+    cnt = 0
+
+    for step in range(n_step):
+        with torch.inference_mode():
+            obs, _, dones, _ = env.step(policy(obs))
+        alive = alive & (~base_env._died.clone())
+        if step == SETTLE_STEPS - 1:
+            xy_ref = base_xy(base_env).clone()
+
+        target = base_env._processed_actions
+        jit_sum += (target - prev_target).abs().mean(dim=-1)
+        prev_target = target.clone()
+        err_sum += foot_err_of_manip(base_env, leg_idx)
+        cnt += 1
+
+        if (step + 1) % bin_steps == 0 or step == n_step - 1:
+            xy = base_xy(base_env)
+            m = alive
+
+            def pct(v, q):  # noqa: E306 — 구간마다 같은 마스크로 분위수
+                return float(torch.quantile(v[m].float(), q).item()) if bool(m.any().item()) else float("nan")
+
+            bins.append(
+                {
+                    "t_end_s": (step + 1) * base_env.step_dt,
+                    "err_median_m": pct(err_sum / cnt, 0.5),
+                    "err_p95_m": pct(err_sum / cnt, 0.95),
+                    "drift_net_median_m": pct(torch.norm(xy - xy0, dim=-1), 0.5),
+                    "drift_late_median_m": pct(torch.norm(xy - xy_ref, dim=-1), 0.5),
+                    "jitter_deg_per_step": pct(jit_sum / cnt, 0.5) * 180.0 / math.pi,
+                    "alive_rate": float(alive.float().mean().item()),
+                }
+            )
+            err_sum.zero_()
+            jit_sum.zero_()
+            cnt = 0
+        del dones
+
+    return {"bins": bins, "alive": alive.cpu(), "seconds": args_cli.longhold_seconds}
+
+
+def report_longhold(results: list[dict]) -> dict:
+    """구간별 오차·표류 추이를 찍는다. 핵심 질문은 **오차가 시간에 따라 자라는가** 하나다."""
+    n_bin = min(len(r["bins"]) for r in results)
+    print("\n" + "=" * 78)
+    print(f"긴 목표 유지 ({results[0]['seconds']:.0f} s, 한 목표 고정)")
+    print("=" * 78)
+    print(
+        f"{'구간 종료 [s]':>13} {'오차 중앙 [mm]':>15} {'오차 p95 [mm]':>14} "
+        f"{'표류 [cm]':>11} {'settle후 [cm]':>14} {'떨림 [°/step]':>14} {'생존':>7}"
+    )
+    out_bins = []
+    for i in range(n_bin):
+        vals = [r["bins"][i] for r in results]
+        rec = {k: float(np.mean([v[k] for v in vals])) for k in vals[0]}
+        out_bins.append(rec)
+        print(
+            f"{rec['t_end_s']:>13.1f} {rec['err_median_m'] * 1000:>15.2f} {rec['err_p95_m'] * 1000:>14.2f} "
+            f"{rec['drift_net_median_m'] * 100:>11.2f} {rec['drift_late_median_m'] * 100:>14.2f} "
+            f"{rec['jitter_deg_per_step']:>14.3f} {rec['alive_rate'] * 100:>6.1f}%"
+        )
+    first, last = out_bins[0], out_bins[-1]
+    growth = last["err_median_m"] - first["err_median_m"]
+    print("-" * 78)
+    print(
+        f"첫 구간 → 마지막 구간 오차 변화: {growth * 1000:+.2f} mm "
+        f"({first['err_median_m'] * 1000:.2f} → {last['err_median_m'] * 1000:.2f})"
+    )
+    return {
+        "seconds": results[0]["seconds"],
+        "bin_s": LONGHOLD_BIN_S,
+        "bins": out_bins,
+        "err_growth_m": growth,
+        "alive_rate": float(np.mean([float(r["alive"].float().mean()) for r in results])),
+    }
+
+
 def run_circle_seed(env, policy, seed: int) -> dict:
     """원 궤적 추종 — S2-G1(RMSE) / G2(최대편차) / G4(위상지연) / G5(완주율).
 
@@ -2479,6 +2618,8 @@ def main():
                 results.append(run_circle_seed(env, policy, seed))
             elif args_cli.mode == "contact":
                 results.append(run_contact_seed(env, policy, seed))
+            elif args_cli.mode == "longhold":
+                results.append(run_longhold_seed(env, policy, seed))
             else:
                 results.append(run_drift_seed(env, policy, seed))
         finally:
@@ -2491,6 +2632,7 @@ def main():
         "drift": report_drift,
         "circle": report_circle,
         "contact": report_contact,
+        "longhold": report_longhold,
     }
     summary = reporters[args_cli.mode](results)
     summary["config"] = {
@@ -2508,6 +2650,7 @@ def main():
         "action_filter_alpha": args_cli.action_filter_alpha,
         "hip_scale_reduction": args_cli.hip_scale_reduction,
         "world_anchor": args_cli.world_anchor,
+        "longhold_seconds": args_cli.longhold_seconds,
         "world_anchor_delay": args_cli.world_anchor_delay,
         "no_obs_noise": args_cli.no_obs_noise,
         "zero_noise": args_cli.zero_noise,
