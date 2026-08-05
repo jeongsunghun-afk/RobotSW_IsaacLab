@@ -87,6 +87,22 @@ parser.add_argument(
     help="contact 모드에서 지시할 z 오프셋 [m]. 음수면 지면 아래를 지시해 눌러 닿게 한다.",
 )
 parser.add_argument(
+    "--world_anchor",
+    type=str,
+    default="auto",
+    choices=["auto", "on", "off"],
+    help=(
+        "목표를 world 에 고정할지. **학습 때와 같아야 한다** — 명령의 의미가 바뀌므로"
+        " 다르면 분포 밖 평가다. auto(기본) = params/env.yaml 에서 자동 판별, 키가 없으면 off."
+    ),
+)
+parser.add_argument(
+    "--world_anchor_delay",
+    type=float,
+    default=None,
+    help="world 앵커를 박기까지의 지연 [s]. --world_anchor 를 명시했을 때만 쓴다.",
+)
+parser.add_argument(
     "--hip_scale_reduction",
     type=str,
     default="auto",
@@ -193,21 +209,13 @@ G3_STD_M = 0.02  # [m] 5 s hold 오차 std 기준
 G3_RANGE_M = 0.05  # [m] 5 s hold 오차 max−min 기준
 
 
-def resolve_hip_scale_reduction(cfg_default: bool) -> bool:
-    """``hip_scale_reduction`` 을 **체크포인트가 학습된 값**으로 되돌린다.
-
-    이 플래그는 액션의 의미를 바꾸므로, 학습 때와 다르면 분포 밖 평가다. cfg 기본값을 그대로
-    쓰면 이 기능이 생기기 **전에** 학습된 정책에도 축소가 걸려 조용히 틀린 수치가 나온다.
-    그래서 기본 동작은 체크포인트 옆 ``params/env.yaml`` 에서 읽는 것이다 — 키가 없으면
-    그 run 은 기능 도입 이전이므로 ``False``.
-    """
-    if args_cli.hip_scale_reduction != "auto":
-        return args_cli.hip_scale_reduction == "on"
+def load_trained_env_cfg() -> dict | None:
+    """체크포인트 옆 ``params/env.yaml`` (= 학습 당시 env cfg)을 읽는다. 없으면 ``None``."""
     run_dir = os.path.dirname(os.path.abspath(args_cli.checkpoint))
     yaml_path = os.path.join(run_dir, "params", "env.yaml")
     if not os.path.isfile(yaml_path):
-        print(f"[gates] ⚠ {yaml_path} 없음 — cfg 기본값 {cfg_default} 사용. --hip_scale_reduction 로 명시할 것.")
-        return cfg_default
+        print(f"[gates] ⚠ {yaml_path} 없음 — cfg 기본값을 쓴다. 플래그로 명시할 것.")
+        return None
     import yaml as _yaml
 
     # IsaacLab 이 덤프한 env.yaml 은 python/tuple 태그를 쓰므로 SafeLoader 로는 그냥 못 읽는다.
@@ -219,10 +227,47 @@ def resolve_hip_scale_reduction(cfg_default: bool) -> bool:
         lambda ldr, node: tuple(ldr.construct_sequence(node)),
     )
     with open(yaml_path) as fh:
-        trained = _yaml.load(fh, Loader=_TupleLoader)
+        loaded = _yaml.load(fh, Loader=_TupleLoader)
+    return loaded if isinstance(loaded, dict) else None
+
+
+def resolve_hip_scale_reduction(cfg_default: bool) -> bool:
+    """``hip_scale_reduction`` 을 **체크포인트가 학습된 값**으로 되돌린다.
+
+    이 플래그는 액션의 의미를 바꾸므로, 학습 때와 다르면 분포 밖 평가다. cfg 기본값을 그대로
+    쓰면 이 기능이 생기기 **전에** 학습된 정책에도 축소가 걸려 조용히 틀린 수치가 나온다.
+    그래서 기본 동작은 체크포인트 옆 ``params/env.yaml`` 에서 읽는 것이다 — 키가 없으면
+    그 run 은 기능 도입 이전이므로 ``False``.
+    """
+    if args_cli.hip_scale_reduction != "auto":
+        return args_cli.hip_scale_reduction == "on"
+    trained = load_trained_env_cfg()
+    if trained is None:
+        return cfg_default
     val = bool(trained.get("hip_scale_reduction", False))
-    print(f"[gates] hip_scale_reduction={val} (학습 cfg 에서 자동 판별: {yaml_path})")
+    print(f"[gates] hip_scale_reduction={val} (학습 cfg 에서 자동 판별)")
     return val
+
+
+def resolve_world_anchor(cfg_default: bool, delay_default: float) -> tuple[bool, float]:
+    """``world_anchor`` / ``world_anchor_delay_s`` 를 학습 값으로 되돌린다.
+
+    `hip_scale_reduction` 과 같은 부류다 — **명령의 의미**를 바꾸므로 학습 때와 다르면 분포
+    밖이다. 켜고 평가하면 목표가 world 에 고정돼 몸통 표류만큼 body frame 목표가 움직이므로,
+    body frame 고정으로 학습한 정책의 hold 오차가 이유 없이 나빠진다. 키가 없으면 그 run 은
+    기능 도입 이전이므로 ``False``.
+    """
+    if args_cli.world_anchor != "auto":
+        on = args_cli.world_anchor == "on"
+        return on, (args_cli.world_anchor_delay if args_cli.world_anchor_delay is not None else delay_default)
+    trained = load_trained_env_cfg()
+    if trained is None:
+        return cfg_default, delay_default
+    cmd = trained.get("command") or {}
+    on = bool(cmd.get("world_anchor", False))
+    delay = float(cmd.get("world_anchor_delay_s", delay_default))
+    print(f"[gates] world_anchor={on} delay={delay}s (학습 cfg 에서 자동 판별)")
+    return on, delay
 
 
 def build_env(seed: int):
@@ -230,6 +275,9 @@ def build_env(seed: int):
     env_cfg = parse_env_cfg(TASK, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed = seed
     env_cfg.hip_scale_reduction = resolve_hip_scale_reduction(env_cfg.hip_scale_reduction)
+    env_cfg.command.world_anchor, env_cfg.command.world_anchor_delay_s = resolve_world_anchor(
+        env_cfg.command.world_anchor, env_cfg.command.world_anchor_delay_s
+    )
 
     # 명령이 시행 도중 재샘플되면 안 된다 (video 모드는 예외 — 여러 도달을 보여줘야 한다).
     # ⚠ min 만 키우면 (max-min) 이 음수가 되어 타이머가 즉시 만료된다. 반드시 둘 다 같은 값.
@@ -405,6 +453,9 @@ def patch_command(base_env, leg_idx, target_b):
         base_env._traj_phase[ids] = 0.0
         base_env._hold_counter[ids] = 0.0
         base_env._cmd_timer[ids] = 1.0e6
+        # ⚠ env 의 `_resample_command` 를 통째로 교체하므로 앵커 재무장도 여기서 해야 한다.
+        #    빠뜨리면 world_anchor 학습 정책 평가에서 **이전 에피소드의 world 목표**가 남는다.
+        base_env._arm_world_anchor(ids)
 
     base_env._resample_command = fixed_resample
     return fixed_resample
@@ -2456,6 +2507,8 @@ def main():
         "jvel_filter_alpha": args_cli.jvel_filter_alpha,
         "action_filter_alpha": args_cli.action_filter_alpha,
         "hip_scale_reduction": args_cli.hip_scale_reduction,
+        "world_anchor": args_cli.world_anchor,
+        "world_anchor_delay": args_cli.world_anchor_delay,
         "no_obs_noise": args_cli.no_obs_noise,
         "zero_noise": args_cli.zero_noise,
     }

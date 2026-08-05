@@ -29,3 +29,13 @@ Added
   often the manipulating foot bears load while touching, measured as the signed margin from the
   centre of mass to the polygon formed by the stance feet alone. Go2 weighs more than the ISO/TS
   15066 hand-contact limit, so load transfer is unsafe even when the contact force is small.
+* Added ``CommandCfg.world_anchor`` and ``CommandCfg.world_anchor_delay_s`` to
+  ``Go2-Pedipulation-v0``. Foot targets are expressed in the base frame, so a base that shifts
+  carries the target with it and a fixed object cannot be commanded. When enabled, the target is
+  pinned in the world and its base-frame coordinates are recomputed every step, which also makes
+  base drift show up directly in the tracking reward. It defaults to ``False``, and a policy
+  trained with a different value must be evaluated with the same value, since the flag changes
+  what the command means rather than how it is represented. The delay exists because a leg lift
+  shifts the base by 6-12 cm to bring the centre of mass over the support triangle; anchoring
+  before that settles adds an offset the command-box curriculum does not control, which stalls
+  promotion.

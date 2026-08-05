@@ -26,7 +26,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply, quat_apply_inverse
 
 from .go2_pedipulation_env_cfg import (
     LEG_NAMES,
@@ -93,6 +93,14 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._cmd_timer = torch.zeros(n_env, device=device)
         self._traj_phase = torch.zeros(n_env, device=device)  # 궤적 모드 위상 [rad]
         self._traj_center_b = torch.zeros(n_env, n_leg, 3, device=device)
+        # world 고정 목표용 — `cfg.command.world_anchor` 가 True 일 때만 쓴다.
+        # ⚠ 앵커를 리셋 안에서 못 박으면 안 된다. `write_root_link_pose_to_sim_index` 직후의
+        #   `body_pos_w` 는 아직 **리셋 전 자세**라, 그 시점에 world 로 변환하면 목표가 엉뚱한
+        #   곳에 박힌다. 그래서 "아직 안 박음"으로 표시만 하고, 물리가 한 번 돈 뒤
+        #   `_advance_trajectory` 에서 신선한 base pose 로 박는다.
+        self._traj_center_w = torch.zeros(n_env, n_leg, 3, device=device)
+        self._anchor_latched = torch.zeros(n_env, dtype=torch.bool, device=device)
+        self._anchor_timer = torch.zeros(n_env, device=device)
         # 궤적 파라미터는 env 별로 다르다 — 속도 sweep 평가를 하려면 정책이 여러 각속도를
         # 겪어야 하므로 cfg 스칼라를 그대로 쓸 수 없다.
         self._traj_radius = torch.full((n_env,), self.cfg.command.circle_radius, device=device)
@@ -357,11 +365,59 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._cmd_timer[env_ids] = (
             torch.rand(n, device=device) * (cmd.resample_time_max - cmd.resample_time_min) + cmd.resample_time_min
         )
+        # 목표가 바뀌었으니 world 앵커도 새 목표 기준으로 다시 박는다.
+        self._arm_world_anchor(env_ids)
+
+    def _arm_world_anchor(self, env_ids: torch.Tensor):
+        """해당 env 의 world 앵커를 **다시 박도록** 표시한다.
+
+        리셋 직후의 ``body_pos_w`` 는 아직 리셋 전 자세라 그 자리에서 world 로 변환하면 안 된다.
+        여기서는 표시만 하고, 물리가 한 번 돈 뒤 :meth:`_update_world_anchor` 가 박는다.
+        """
+        self._anchor_latched[env_ids] = False
+        self._anchor_timer[env_ids] = self.cfg.command.world_anchor_delay_s
+
+    def _update_world_anchor(self):
+        """world 에 못 박은 목표를 현재 base pose 기준 body frame 으로 되돌린다.
+
+        아직 안 박은 env 는 타이머를 줄이고, 0 이하가 되면 **그 시점의 자세**로 박는다.
+        지연을 두는 이유는 다리를 드는 순간의 일회성 균형 이동(실측 6~12 cm)을 앵커에
+        포함시키지 않기 위해서다 — 포함시키면 박스 커리큘럼이 통제하지 못하는 오프셋이 되어
+        승급 자체가 막힌다 (cfg ``world_anchor_delay_s`` 주석 참조).
+        """
+        root_pos_w, root_quat_w = self._base_pose()
+        n_leg = self.cfg.num_legs
+
+        def _quat_rows(ids: torch.Tensor) -> torch.Tensor:
+            return root_quat_w[ids].unsqueeze(1).expand(-1, n_leg, -1).reshape(-1, 4)
+
+        pending = ~self._anchor_latched
+        if bool(pending.any().item()):
+            self._anchor_timer = torch.where(pending, self._anchor_timer - self.step_dt, self._anchor_timer)
+            ids = (pending & (self._anchor_timer <= 0.0)).nonzero(as_tuple=False).flatten()
+            if ids.numel() > 0:
+                world = quat_apply(_quat_rows(ids), self._traj_center_b[ids].reshape(-1, 3)).view(-1, n_leg, 3)
+                self._traj_center_w[ids] = world + root_pos_w[ids].unsqueeze(1)
+                self._anchor_latched[ids] = True
+
+        ids = self._anchor_latched.nonzero(as_tuple=False).flatten()
+        if ids.numel() > 0:
+            rel = (self._traj_center_w[ids] - root_pos_w[ids].unsqueeze(1)).reshape(-1, 3)
+            self._traj_center_b[ids] = quat_apply_inverse(_quat_rows(ids), rel).view(-1, n_leg, 3)
 
     def _advance_trajectory(self):
-        """S2 궤적 모드에서 목표를 매 step 갱신한다 (static 모드는 no-op)."""
+        """목표를 매 step 갱신한다.
+
+        ``world_anchor`` 가 켜져 있으면 static 모드도 매 step 갱신해야 한다 — 몸통이 움직이면
+        world 에 못 박힌 목표의 body frame 좌표가 달라지기 때문이다.
+        """
         cmd = self.cfg.command
+        if cmd.world_anchor:
+            self._update_world_anchor()
         if cmd.trajectory_mode == "static":
+            if cmd.world_anchor:
+                # ⚠ 재할당 금지 (평가 스크립트가 이 버퍼에 밖에서 쓴다) — in-place.
+                self._foot_target_b.copy_(self._traj_center_b)
             return
         if cmd.trajectory_mode == "circle":
             # 각속도·반경·회전방향은 env 별로 다르다 (cfg 스칼라가 아니라 버퍼).
@@ -829,6 +885,10 @@ class Go2PedipulationEnv(DirectRLEnv):
         self._episode_base_xy0[env_ids_long] = root_state[:, 0:2]
 
         self._resample_command(env_ids_long)
+        # ⚠ `_resample_command` 안에서도 무장하지만, 평가 스크립트가 그 함수를 **통째로 교체**해
+        #    쓰므로 여기서 한 번 더 건다. 이게 없으면 리셋 후에도 이전 에피소드의 앵커가 남아
+        #    목표가 엉뚱한 world 좌표에 박힌 채로 평가된다.
+        self._arm_world_anchor(env_ids_long)
 
         # ── 커리큘럼 갱신 ────────────────────────────────────────
         # ⚠ 스텝을 한 번도 밟지 않은 env(최초 전체 리셋 등)는 오차 0 으로 잡혀 커리큘럼을

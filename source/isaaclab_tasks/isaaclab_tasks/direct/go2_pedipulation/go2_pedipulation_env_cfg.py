@@ -26,12 +26,17 @@ from isaaclab.utils.configclass import configclass
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 
 # ---------------------------------------------------------------------------
-# PACE 시스템 식별 결과 (go2_imitation_tracking 과 동일 값)
+# PACE 시스템 식별 결과 — go2_imitation_tracking 에서 **가져다 쓴다** (복사하지 않는다).
 # ---------------------------------------------------------------------------
-PACE_ARMATURE: dict[str, float] = {"hip": 0.173, "thigh": 0.168, "calf": 0.200}  # [kg·m²]
-PACE_VISCOUS: dict[str, float] = {"hip": 2.41, "thigh": 2.33, "calf": 2.49}  # [N·m·s/rad]
-PACE_COULOMB: dict[str, float] = {"hip": 0.023, "thigh": 0.010, "calf": 0.020}  # [N·m]
-PACE_ENCODER_BIAS_MAG: float = 0.05  # [rad]
+# 같은 로봇의 같은 식별 결과이므로 출처는 하나여야 한다. 값을 복사해 두면 재식별 때 한쪽만
+# 갱신돼 조용히 갈라진다 — 실제로 2026-08-03 재식별 전까지 그런 상태였다.
+# r2s_go2 도 같은 방식으로 이 상수를 import 한다.
+from isaaclab_tasks.direct.go2_imitation_tracking.go2_imitation_tracking_env_cfg import (  # isort: skip  # noqa: E402
+    PACE_ARMATURE,  # noqa: F401
+    PACE_COULOMB,  # noqa: F401
+    PACE_ENCODER_BIAS_MAG,  # noqa: F401
+    PACE_VISCOUS,  # noqa: F401
+)
 
 # 다리 이름 — IsaacLab GO2 articulation 의 발 body 순서와 동일하게 유지할 것.
 LEG_NAMES: tuple[str, ...] = ("FL", "FR", "RL", "RR")
@@ -128,6 +133,26 @@ class CommandCfg:
     # ── 재샘플 주기 ───────────────────────────────────────────
     resample_time_min: float = 3.0  # [s]
     resample_time_max: float = 5.0  # [s]
+
+    # ── world 고정 목표 ───────────────────────────────────────
+    # 기본(False)에서 목표는 **base frame 에 고정**이다. 즉 몸통이 움직이면 목표의 실제
+    # 위치도 같이 움직인다 — 고정된 물체와 상호작용하려면 이래서는 안 된다.
+    #
+    # True 면 목표를 **world 에 못 박는다.** 매 step 현재 base pose 로 body frame 목표를
+    # 다시 계산하므로, 몸통이 밀리면 body frame 목표가 그만큼 반대로 움직이고 그 오차가
+    # 추종 보상에 직접 잡힌다. ``w_base_drift`` 없이 표류에 대가를 매기는 경로이기도 하다
+    # (그 항은 S4 하중 전이 위반을 0.05% → 19.19% 로 만들어 쓸 수 없다).
+    #
+    # ⚠ 관측·액션 레이아웃은 바뀌지 않는다. 바뀌는 것은 **명령의 의미**뿐이므로,
+    #   `hip_scale_reduction` 과 같은 부류다 — 평가 때 학습 값과 다르면 분포 밖이다.
+    world_anchor: bool = False
+    # 목표를 world 에 못 박기까지 기다릴 시간 [s]. 그 전까지는 base frame 고정(기존 거동).
+    #
+    # ⚠ 0 으로 두면 **박스 커리큘럼이 무력화된다.** 다리를 드는 순간의 일회성 균형 이동
+    #   (실측 6~12 cm)이 박스가 통제하지 않는 오프셋으로 얹히는데, `box_init` 은
+    #   (0.06, 0.05, 0.08) 이라 승급 조건 `mean_err < 0.06 m` 을 처음부터 만족할 수 없다.
+    #   `hipscale_scratch`(승급 0회) 와 같은 실패로 간다. 기본값은 균형 이동이 끝난 뒤다.
+    world_anchor_delay_s: float = 2.0
 
 
 @configclass

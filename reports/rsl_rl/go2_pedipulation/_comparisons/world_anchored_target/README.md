@@ -1,0 +1,120 @@
+# world 고정 목표 — 고정된 물체와 상호작용하기 위한 명령 인터페이스
+
+## 문제 — 지금 목표는 몸통에 붙어 있다
+
+`go2_pedipulation_env.py` 의 명령·보상·관측이 전부 **base frame** 이다.
+
+```python
+target = nominal + off                                    # :341  nominal = _nominal_foot_pos_b
+err = torch.norm(self._foot_target_b - foot_pos_b, ...)   # :533  보상도 base frame
+```
+
+관측에는 `projected_gravity_b`, `joint_pos/vel`, `foot_pos_b`, `leg_role`, `foot_err_b` 만
+들어간다 — **world 좌표가 하나도 없다.** 정책은 자기 몸통이 어디로 얼마나 밀렸는지 알 수 없고,
+목표의 실제 위치는 몸통을 따라 함께 움직인다.
+
+고정된 물체를 만지려면(S5-B) 이래서는 안 된다. 몸통이 표류한 만큼 접촉점이 어긋난다.
+
+## 구현 — `command.world_anchor`
+
+기본값 `False` 는 기존 거동 그대로다. `True` 면 목표를 world 에 못 박고, 매 step 현재
+base pose 로 body frame 좌표를 다시 계산한다.
+
+$$\mathbf{t}_b(k) = R_{wb}(k)^{-1}\left(\mathbf{t}_w - \mathbf{p}^{\text{base}}_w(k)\right)$$
+
+기호: $\mathbf{t}_b$ 는 body frame 목표 [m], $\mathbf{t}_w$ 는 world 에 못 박은 목표 [m],
+$R_{wb}$ 는 base→world 회전, $\mathbf{p}^{\text{base}}_w$ 는 base 의 world 위치 [m], $k$ 는
+제어 스텝.
+
+**관측·액션 레이아웃은 바뀌지 않는다.** 바뀌는 것은 명령의 의미뿐이므로
+`hip_scale_reduction` 과 같은 부류다 — 평가 시 학습 값과 다르면 분포 밖이다. 그래서
+`play_pedipulation_gates.py` 의 `--world_anchor` 도 기본 `auto` 로 `params/env.yaml` 에서
+자동 판별한다 (키 없으면 `False`).
+
+### 앵커는 리셋 안에서 박으면 안 된다
+
+`write_root_link_pose_to_sim_index` 직후의 `body_pos_w` 는 아직 **리셋 전 자세**다. 그 시점에
+world 로 변환하면 목표가 엉뚱한 곳에 박힌다. 그래서 리셋에서는 "다시 박아야 함"으로 표시만
+하고(`_arm_world_anchor`), 물리가 한 번 돈 뒤 `_update_world_anchor` 가 신선한 자세로 박는다.
+
+### `world_anchor_delay_s` — 0 으로 두면 안 되는 이유
+
+다리를 드는 순간 무게중심을 지지 삼각형 안으로 넣느라 몸통이 **6~12 cm** 한 번에 움직인다
+(`../../2026-08-03_15-53-29_hipscale_scratch_s10x/videos/` 표류 영상에서 실측).
+
+지연 0 이면 이 이동이 **박스 커리큘럼이 통제하지 않는 오프셋**으로 얹힌다. `box_init` 은
+(0.06, 0.05, 0.08) 인데 승급 조건은 `mean_err < 0.06 m` 이므로 처음부터 만족이 불가능하고,
+`hipscale_scratch` 와 같은 실패(승급 0회 · std 발산)로 간다. **그래서 delay=0 arm 은 아예
+돌리지 않는다.**
+
+## 구현 검증 (`scratchpad/check_world_anchor.py`)
+
+정책 없이 랜덤 액션으로 몸통을 34 cm 흔들어 놓고 잰 값:
+
+| | `target_b` 이동 | `target` 의 **world** 이동 |
+|---|---:|---:|
+| `world_anchor=True` | 44.36 cm | **0.000 cm** |
+| `world_anchor=False` | **0.000 cm** | 44.36 cm |
+
+정확히 대칭이다 — 켜면 world 에 고정되고, 끄면 기존대로 몸통에 붙는다.
+
+**회귀 확인**: 채택 정책(`hipscale_scratch_s10x/model_19999`)의 hold 를 다시 재니
+**9.3 mm · 떨림 0.823 °/step** 으로 변경 전과 같다. `world_anchor` 는 `params/env.yaml` 에
+키가 없어 `False` 로 자동 판별됐다.
+
+## ★ 대조군 먼저 — 재학습 없이 바깥 루프만 씌우면?
+
+채택 정책을 **그대로** 두고 평가 때만 `--world_anchor on` 을 준 것이다. 정책은 body frame
+서보로 학습됐고, 목표만 매 step world 기준으로 다시 계산해 넣는다. 실기에서 base pose 를
+안다고 가정할 때 **재학습 없이 가능한 방법**이 이것이다.
+
+| | hold 오차 | 떨림 | 기준 충족 | 낙상 |
+|---|---:|---:|---:|---:|
+| body frame (학습 조건) | **9.3 mm** | 0.823 | 100.0% | 0.00% |
+| world 고정, delay 2.0 s | **9.9 mm** | 0.824 | 99.2% | 0.00% |
+| world 고정, delay 0.5 s | **9.9 mm** | 0.831 | 98.6% | 0.16% |
+
+**바깥 루프의 대가는 0.6 mm 다.** 떨림은 사실상 불변.
+
+기전: settle 이후 잔여 표류가 10 초에 0.43~1.20 cm 인데, 이 정책의 step 재수렴 p95 가
+**0.38 s** 라 그 정도로 느리게 움직이는 목표는 그냥 따라간다.
+
+⚠ **이 결과가 말하지 않는 것 3가지** — 재학습이 무의미하다고 단정하면 안 된다.
+1. hold 시행은 리셋 직후 10 초짜리다. 반복 리칭이나 긴 에피소드에서 표류가 누적되면 달라진다.
+2. 바깥 루프는 몸통 이동 **자체를 줄이지 못한다.** 워크스페이스를 먹는 문제(박스 x ±20 cm 중
+   6~12 cm)는 그대로다. 학습으로만 줄일 수 있다.
+3. delay=0.5 로도 hold 가 안 나빠진 것은 앵커가 0.5 s 에 박히고 측정 창은 2.0 s 부터라
+   **전이 구간이 측정에서 빠지기** 때문이다. 전이 자체의 추종 품질은 이 지표로 안 잡힌다.
+
+## 학습 arm 2개 — 판정 기준은 **결과 보기 전에** 정한다
+
+| run | `world_anchor_delay_s` | 뜻 |
+|---|---|---|
+| `2026-08-05_11-11-08_wanchor_d20` | 2.0 s | 균형 이동이 끝난 뒤 앵커. 배포 절차(물체 배치 → 다리 들기 → 루프 닫기)와 같다 |
+| `2026-08-05_11-11-08_wanchor_d05` | 0.5 s | 전이의 상당 부분을 정책이 흡수해야 한다 |
+
+나머지는 **채택본 레시피 그대로** — `hip_scale_reduction=True`, `w_action_rate=-0.05`,
+`w_action_smooth=-0.02`, `w_base_drift=0`, `w_joint_target_rate=0`, `jvel_filter_alpha=1.0`,
+from scratch, 2048 env, 20000 iter. 바뀐 변수는 `world_anchor` 하나다.
+
+| 판정 | 조건 |
+|---|---|
+| **성공** | world 고정 hold ≤ **9.9 mm**(바깥 루프 대조군)보다 유의하게 낮고, 떨림 ≤ 1.0 °/step · S4 위반 0% · push 150 N ≥ 70% 유지 |
+| **부분** | hold 가 대조군과 동급(9.9 mm 부근)이나 **몸통 이동(표류)이 유의하게 감소** — 워크스페이스 이득 |
+| **실패** | hold 가 대조군보다 나쁨, 또는 커리큘럼 승급 실패 |
+
+**부분·실패는 그 자체로 결론이다** — "바깥 루프로 충분하고 재학습은 불필요"라는 뜻이며,
+반복할 실험이 아니다.
+
+⚠ **진짜 게이트는 "표류가 줄었는가"가 아니라 "world 고정점을 얼마나 정확히 유지하는가"다.**
+균형 이동은 CoM 을 지지 삼각형에 넣기 위해 **필요한** 동작이라 정책이 못 줄일 수도 있다.
+그 경우 world 고정은 올바른 명령 인터페이스를 주지만 표류는 그대로다.
+
+표류 지표(`net` / `net_late`)는 harness 가 `base_xy` 로 직접 계산하므로 목표 정의와 무관하고,
+따라서 기존 값과 **그대로 비교 가능**하다. hold 오차는 아니다.
+
+## 상태
+
+- 구현·검증·회귀: **완료**
+- 바깥 루프 대조군: **완료** (9.9 mm)
+- 학습 2 arm: **진행 중** (2026-08-05 11:11 시작, GPU 0 / GPU 2)
