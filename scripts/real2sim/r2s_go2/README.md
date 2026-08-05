@@ -100,10 +100,16 @@ GUI가 뜨면 로봇은 **엎드린(prone) 자세**로 시작한다(실기 GO2�
 | **Sit** | `SIT_POSE`(웅크림)로 보간 이동 |
 | **Joint Step** | 선택 관절만 delta[rad]만큼 스텝 |
 | **Sine Sweep** | 선택 관절에 사인 궤적 주입(Start/Stop) |
+| **Policy** | `go2_imitation_tracking` 보행 정책 구동(아래 §11) |
+| **Recovery** | `go2_recovery_flip_vel` 기립 정책 구동 — **넘어진 상태 전용**(아래 §12) |
+| **Sim → Camera** | Isaac 뷰포트 카메라 `Follow robot` / `Free` 전환(아래 §13.4) |
+| **Sim → Plant** | 관절 물성 `set2`(학습 플랜트) / `set3`(재캡처, 미채택) / `Default`(nominal) 전환(아래 §13) |
 | **Monitor** | 실시간 plot 창 열기(아래 §5) |
 
 모든 명령은 `kp=25, kd=0.5`(전 관절), `mode=0x01`, `dq=0`, `tau=0`으로 50Hz 연속 발행된다
 (실로봇 watchdog heartbeat + CRC/헤더 포함, `CONTRACT.md` §6·§8).
+**단 하나의 예외가 Recovery 모드로, `kd=1.0`을 쓴다** — 그 정책의 학습 액추에이터 damping이
+1.0이기 때문이다(§12.3).
 
 **시작 자세 접근(startup approach)**: gui를 켜면 `/lowstate`로 **로봇의 현재 자세를 먼저 읽어** 그
 자세에서 시작 자세(STAND_FOLDED)로 약 2.5초에 걸쳐 **부드럽게 보간**한다(첫 상태를 받기 전엔 발행
@@ -192,6 +198,15 @@ bash scripts/real2sim/r2s_go2/check_go2_comms.sh [iface]
 | `ROS_DOMAIN_ID` | 0 | 모든 ROS2 터미널이 동일해야 discovery됨 |
 | `GPU` | 2 | sim_runner / PACE CUDA 디바이스 |
 | `R2S_LOG_BASEZ` | off | 1이면 sim_runner가 base_z + mean thigh 디버그 로그 출력 |
+| `R2S_DEPLOYABLE_POLICY` | obs42 런의 `exported/deployable_policy.pt` | Policy 모드가 로드할 jit 경로(§11) |
+| `R2S_POLICY_ACTION_CLIP` | 학습 `agent.yaml` 의 `clip_actions` | 보통 **불필요** — 정책 run 의 cfg 에서 자동으로 읽는다(§11.5). 주면 cfg 를 이긴다 |
+| `R2S_POLICY_HIP_SCALE` | 학습 `env.yaml` 의 `hip_scale_reduction` (true→`0.5`, 없거나 false→`1.0`) | 위와 같음. 주면 cfg 를 이긴다 |
+| `R2S_RECOVERY_POLICY` | floor03_ent005 런의 `exported/recovery_policy.pt` | Recovery 모드가 로드할 jit 경로(§12) |
+| `--camera follow\|free` | `follow` | sim_runner 기동 시 카메라 모드(§13.4). GUI 로 언제든 바꿀 수 있다 |
+| `--plant default\|set2\|set3` | env cfg(`use_pace_params`=True → `set2`) | sim_runner 기동 시 관절 물성 프리셋(§13). GUI 로 언제든 바꿀 수 있다. `nominal`/`pace` 는 `default`/`set2` 의 구 별칭 |
+| `--ctrl_port` | 9877 | GUI → sim_runner 제어 채널 포트 |
+| `R2S_SIM_HOST` | `127.0.0.1` | GUI 가 제어 패킷을 보낼 sim_runner 호스트 |
+| `R2S_CTRL_PORT` | 9877 | 위와 짝. sim_runner 의 `--ctrl_port` 와 맞출 것 |
 
 PACE 식별(§10) 전용:
 
@@ -323,30 +338,72 @@ ANYmal의 chirp를 **2 Hz까지만** 올렸다("structural constraints"). 수집
 4. **상한 결정.** 경고가 나온 **첫 공진 주파수보다 낮게** 본 수집의 `--max_frequency`를 잡는다.
    전 대역이 `< 0.5 rad/s`(✅)면 기본 10 Hz를 그대로 써도 된다.
 
-### 10.3 실기 순서
+### 10.3 실기 순서 (전체 런북)
+
+> 전제: GO2 ↔ 서버 이더넷, 서버 static IP `192.168.123.99/24`, 리모컨 **L2+A → L2+B** 로
+> sport 서비스 해제. 셸에 `source .../r2s_commands.sh` 로 `r2s_*` 함수 등록.
+
+| # | 명령 | 로봇 | 무엇을 하나 |
+|---|---|---|---|
+| 0 | `bash check_go2_comms.sh` | 정지 | ROS2/DDS 디스커버리 점검 (ros2 daemon 재시작 포함) |
+| 1 | `r2s_gain --selftest` | 불필요 | 기울기 추정기를 합성 데이터로 검증 |
+| 2 | `r2s_chirp --dry-run` | 정지 | 궤적 생성 + soft limit 검사만. **발행 없음** |
+| 3 | (물리) 로봇을 매단다 | — | 발이 지면·장애물에 안 닿게 |
+| 4 | `r2s_gain --suspended --joint {0,1,2} --kp 25` | 매달림 | **kp 규약 α 측정** (관절 3개 반복) |
+| 5 | `r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz` | 매달림 | **리그 공진 스윕** (저진폭) |
+| 6 | `r2s_convert --capture data/go2_real/sweep_check.npz` | — | 공진 첫 주파수 판정 |
+| 7 | `r2s_chirp --suspended --kp {15,25,35} --kd 0.5 --out chirp_kp*.npz` | 매달림 | **본 수집** (게인 3종) |
+| 8 | `r2s_convert --capture data/go2_real/chirp_kp*.npz` | — | `.npz` → `.pt` + 품질/정렬 판정 |
+| 9 | `r2s_fit` → `r2s_validate` | — | CMA-ES 적합 → hold-out 검증 |
+
+바닥에서 시작하려면 7번 첫 회를 `--interactive` 로 돌린다 — kp 램프-인 → 천천히 stand-up →
+**"매달고 Enter"** 프롬프트(대기 중에도 heartbeat 유지) → chirp. 이후는 `--suspended` 로 반복.
 
 ```bash
-r2s_gain  --selftest                                               # A-1: 추정기 검증 (로봇 불필요)
-r2s_gain  --suspended --joint 1 --kp 25                            # A: kp 규약 실측 (관절 0/1/2 반복)
-r2s_chirp --dry-run                                                # B-1: 계획/리밋 검사 (무모션)
-r2s_chirp --suspended --amplitude_scale 0.3 --out sweep_check.npz  # B: 공진 스윕
-r2s_convert --capture data/go2_real/sweep_check.npz                #    → 몇 Hz부터 흔들리는지
-# ↑ 공진 첫 주파수 확인 (기본 캡은 2 Hz — chirp_collector.MAX_FREQUENCY)
-r2s_chirp --interactive --kp 25 --kd 0.5 --out chirp_kp25.npz      # 본 수집 (게인 세트별 반복)
-#   대화형: ① 현재 자세에서 천천히 stand-up → ② 로봇 매달고 Enter → ③ chirp 발행+기록
+# 0~2: 로봇 안 움직임
+bash scripts/real2sim/r2s_go2/check_go2_comms.sh
+r2s_gain  --selftest
+r2s_chirp --dry-run
+#   확인:  chirp 0.1->8.0 Hz / 진폭 테이퍼 1.5 Hz 부터 / abort ... > 1.00 rad / soft limit 통과
+
+# 3: 로봇을 매단다
+
+# 4: kp 규약 (관절 0=hip, 1=thigh, 2=calf)
+r2s_gain --suspended --joint 0 --kp 25
+r2s_gain --suspended --joint 1 --kp 25
+r2s_gain --suspended --joint 2 --kp 25
+#   합격: |α − 1| <= 0.1  그리고  R² >= 0.9
+
+# 5~6: 리그 공진
+r2s_chirp   --suspended --amplitude_scale 0.3 --out sweep_check.npz
+r2s_convert --capture data/go2_real/sweep_check.npz
+#   전 대역 |w| < 0.5 rad/s 면 8 Hz 그대로. 경고가 나오면 그 주파수 아래로 --max_frequency 를 낮춘다.
+
+# 7: 본 수집 (공진 결과에 따라 --max_frequency 조정)
+r2s_chirp --suspended --kp 15 --kd 0.5 --out chirp_kp15.npz
+r2s_chirp --suspended --kp 25 --kd 0.5 --out chirp_kp25.npz
+r2s_chirp --suspended --kp 35 --kd 0.5 --out chirp_kp35.npz
+#   ★ 매 회 저장 직후 "상태 스트림 손실률" 과 "명령/상태 정렬 lag" 두 줄을 반드시 볼 것
+
+# 8~9
+r2s_convert --capture data/go2_real/chirp_kp15.npz
 r2s_convert --capture data/go2_real/chirp_kp25.npz
-r2s_fit ; r2s_validate                                             # 적합 → hold-out 검증
+r2s_convert --capture data/go2_real/chirp_kp35.npz
+r2s_fit ; r2s_validate
 ```
 
-**본 수집 흐름(`--interactive`)**: kp 램프-인 → **천천히 stand-up**(`--standup_time`, 기본 3s) →
-**"로봇을 매달고 Enter"** 프롬프트(대기 중에도 자세 홀드=heartbeat 유지, Ctrl+C 취소) → chirp 중심
-이동 → chirp 발행+기록 → kp 램프-다운. `--suspended`는 stand-up/Enter 없이 이미 매달린 전제로 바로
-간다(반복·자동 수집용). 주파수는 기본 **2 Hz**로 캡된다(`MAX_FREQUENCY`, 논문의 매단 ANYmal 값).
+**적합 전에 `r2s_go2_sysid_cfg.py` 의 `datasets`/`holdout` 을 새 캡처 경로로 바꿀 것.**
+배포 게인(25)은 반드시 `datasets` 에 넣는다 — 권장 배분은 `datasets={15,25}`, `holdout={35}`.
 
-**게인은 여러 세트로 수집한다.** 데이터셋마다 kp/kd가 함께 저장되고 재생 시 복원된다 — 틀린 게인으로
-재생하면 잡음이 아니라 **편향**이 생긴다. 논문 방식대로 여러 시퀀스로 적합하고, **보지 않은 게인**을
-hold-out으로 빼서 검증한다. 게인이 높은 세트는 **진폭을 줄인다**(토크가 effort limit 23.5 N·m에
-포화하면 그 구간은 파라미터에 무감각해져 정보를 파괴한다).
+#### 세 가지 사전 검사가 각각 막는 것
+
+셋 다 **"적합은 잘 되는데 값이 틀린"** 결함이라 hold-out RMSE 로는 **하나도 못 잡는다.**
+
+| 검사 | 놓치면 생기는 일 |
+|---|---|
+| 4. kp 규약 (`r2s_gain`) | 실토크가 `α·kp·e` 인데 `kp` 로 믿으면 armature/마찰이 **1/α 배 편향**. 위치 궤적은 완벽히 재현된다 |
+| 5. 리그 공진 (`--amplitude_scale 0.3`) | 관절이 아니라 **거치대를 잰다** |
+| 7. 정렬 lag (저장 시 자동) | 시간축 어긋남을 armature/viscous 가 흡수. 2026-07-15 캡처가 104 ms 로 이렇게 망가졌다 |
 
 ### 10.4 안전
 
@@ -403,6 +460,17 @@ r2s_tuner_gui
 | `read_lowstate.py` / `safe_joint_test.py` | 실로봇 상태 읽기 / 안전 관절 테스트 |
 | `check_go2_comms.sh` | 실로봇 통신 점검 |
 
+**학습 정책 구동 (§11 Policy / §12 Recovery)**
+
+| 파일 | 역할 |
+|---|---|
+| `policy_runtime.py` | tracking obs(42) 조립 + 관절 순서 변환 + jit 래퍼 (Go2 공통 상수의 source of truth) |
+| `recovery_runtime.py` | recovery obs(42) 조립 + `previous_actions` 버퍼 + jit 래퍼 (위 모듈의 상수 재사용) |
+| `export_deployable_go2.py` (상위 폴더) | tracking: actor+estimator+history_encoder → 단일 jit |
+| `export_recovery_go2.py` (상위 폴더) | recovery: rsl_rl 표준 export → `recovery_policy.pt` |
+| `verify_recovery_deploy_go2.py` (상위 폴더) | recovery 배포 경로 정합성 검증 (§12.5) |
+| `run_export_policy.sh` / `run_export_recovery.sh` | 위 두 export 의 원커맨드 래퍼 |
+
 **PACE 시스템 식별 (§10)**
 
 | 파일 | 세계 | 역할 |
@@ -429,3 +497,331 @@ r2s_tuner_gui
 | `run_pace.sh` | Isaac PACE 파이프라인 (`collect`/`fit`/`validate`/`convert`/`tb`) |
 | `run_tuner_sim.sh` / `run_tuner_gui.sh` | tuner 모드 (§10.6) |
 | `robot_env.sh` / `example_env.sh` | ROS2/로봇 env 소싱 헬퍼 |
+
+---
+
+## 11. Policy 모드 — 학습 정책을 sim/실기에서 구동
+
+GUI의 Policy 모드는 `go2_imitation_tracking` 학습 정책을 **단일 torch.jit**(actor +
+estimator + history_encoder)로 묶은 `deployable_policy.pt`를 50 Hz로 돌린다.
+
+### 11.1 체크포인트 → deployable jit
+
+```bash
+conda activate isaac-6.0
+python scripts/real2sim/export_deployable_go2.py \
+  --run_dir logs/rsl_rl/go2_imitation_tracking/<RUN> \
+  --checkpoint model_<N>.pt --device cpu
+# → <run_dir>/exported/deployable_policy.pt
+```
+
+`--device cpu`로 뽑아도 된다(체크포인트가 cuda 텐서여도 `map_location`으로 처리). GPU 없는
+배포 머신을 상정한 것이다. export는 세 가지를 자체 검증한다 — wrapper가 `act_inference`와
+일치하는지, jit 재로드가 일치하는지, 그리고 estimator가 실제로 빌드·복원됐는지.
+
+**학습이 끝나면 최종 체크포인트로 다시 뽑아야 한다.** 현재 기본 경로가 가리키는 것은
+학습 도중 체크포인트다.
+
+### 11.2 ⚠ obs 레이아웃이 맞아야 한다
+
+`policy_runtime.py`는 **obs 42 / priv_explicit 6** 레이아웃 전용이다(`POLICY_DIM = 42`).
+
+| 런 | `observation_space` | `num_priv_explicit` | 이 런타임과 |
+|---|---|---|---|
+| `2026-07-30_10-35-28_obs42_novideo` 이후 | 42 | 6 | **호환** |
+| `angvel_priv_s025` 계열 | 45 | 6 | 불가 |
+| `2026-07-24_13-03-00` 등 초기 | 45 | 3 | 불가 |
+
+다른 런을 쓰려면 그 런의 `params/env.yaml`에서 `observation_space`를 먼저 확인할 것.
+맞지 않으면 `PolicyModel` 생성 시 어떤 레이아웃을 기대했는지 밝히며 즉시 실패한다(조용히
+잘못 동작하지 않는다).
+
+### 11.3 proprio 규약 (`policy_runtime.build_proprio`)
+
+```
+projected_gravity_b(3) + lin_vel_cmd(2) + yaw_vel_cmd(1)
+  + (joint_pos − default)(12) + joint_vel(12) + actions(12, 항상 0)
+```
+
+- **자이로(각속도)를 넣지 않는다.** 학습 env가 각속도를 `priv_explicit`으로 옮겨 policy obs
+  에서 뺐으므로 정책은 이 신호를 입력으로 본 적이 없다. estimator가 proprio에서 추정한다.
+- **마지막 12칸(actions)은 항상 0이다.** 학습 env가 obs에 넣는 `self.actions`가 `DirectRLEnv.
+  __init__`에서 0으로 초기화된 뒤 갱신되지 않기 때문이다(실제 action은 `self._actions`에
+  들어간다). 배포에서 0을 넣는 것이 학습과 일치하는 동작이다.
+- history는 10칸 oldest-first, index −1이 최신. 첫 진입 시 10칸을 현재 proprio로 채운다
+  (env의 `episode_length_buf <= 1` 분기와 동일).
+- 스케일링은 하지 않는다 — 정규화는 jit 내부 `actor_obs_normalizer`가 처리한다.
+
+### 11.4 알려진 거동
+
+램프 측정(`reports/rsl_rl/go2_imitation_tracking/2026-07-30_10-35-28_obs42_novideo/`)에서 확인된 것:
+
+- 속도 천장 **~1.4 m/s** (명령 범위는 0~4 m/s).
+- **정지 상태에서 재출발하지 못한다.** 한 번 서면 명령을 올려도 웅크린 채(`base_h` 0.34 → 0.22)
+  머문다. 실기 투입 시 **정지에서 시작하지 말고** 낮은 속도로 이미 움직이는 상태에서
+  정책으로 전환할 것.
+
+  > **2026-08-01 갱신 — finetune(`2026-07-31_12-27-01_reststand_ft`, `model_59999`)으로 크게
+  > 나아졌지만 이 지시는 그대로다.** 서 있는 로봇에서 engage 하는 시나리오(= GUI Policy Start)를
+  > 64 env 로 재니 재출발이 **0/64 → 18/64 (28.1%)** 다. 개선은 확실하지만(z=4.57) 72% 는 여전히
+  > 웅크린 채 그대로다. 달리다 멈춘 뒤 재가속하는 경우는 75.9% 로 잘 되므로, **운동량이 있는
+  > 상태에서 넘기라**는 지시가 정확히 맞는 처방이다.
+  > 근거: `reports/rsl_rl/go2_imitation_tracking/2026-07-31_12-27-01_reststand_ft/` "★ 정지 스폰".
+- 정지 자세를 넣으면 action이 clip(±4)을 크게 넘는다(−20.9까지) — 위와 같은 원인이다.
+
+> 이 제약은 **정책 자체의 성질**이지 배포 경로(평균 행동 / history_latent) 탓이 아니다.
+> 행동 생성 2×2(평균·샘플 × history_latent·priv_latent)를 모두 시험했고, 학습이 실제로
+> 굴리는 조합조차 64개 중 4개만 재출발했다. 원인 분석은
+> `reports/rsl_rl/go2_imitation_tracking/2026-07-30_10-35-28_obs42_novideo/README.md`
+> "읽히는 것 4 → 원인 규명".
+
+### 11.5 action clip / hip 축소는 정책의 학습 cfg 에서 읽는다
+
+`clip(±clip_actions)` → hip 만 `×0.5` → `×action_scale` → default 더하기 순서는 학습 env
+(`go2_imitation_tracking_env.py:242-244`)와 같아야 한다. 앞의 두 값은 **정책마다 다르므로**
+`policy_runtime.configure_from_policy()` 가 jit 옆의 학습 cfg 에서 읽는다
+(`PolicyModel` 로드 시 자동 호출):
+
+| 값 | 출처 | 규칙 |
+|---|---|---|
+| `ACTION_CLIP` | `<run>/params/agent.yaml` 의 `clip_actions` | 그대로 |
+| `HIP_ACTION_SCALE` | `<run>/params/env.yaml` 의 `hip_scale_reduction` | `true` → **0.5**, `false` → 1.0, **키 없음 → 1.0** |
+
+run 디렉터리는 jit 경로에서 유도한다 (`run_export_policy.sh` 가
+`<run>/exported/deployable_policy.pt` 로 내보내므로 두 단계 위).
+
+**키가 없으면 1.0 이다.** 그 run 은 이 기능이 생기기 전에 학습된 것이므로 축소가 없었다.
+"모름"으로 보고 0.5 를 씌우면 구 정책의 hip 이 절반으로 눌린다.
+
+cfg 를 못 찾으면 **로드를 막는다.** GUI 는 이를 흡수해 fallback-hold 로 떨어지고 경고에 이유가
+찍힌다. 어떤 값이 맞는지 모르는 채 실기에 각도를 내보내지 않기 위해서다. run 디렉터리 없이
+jit 만 가진 정책이라면 환경변수로 명시한다 (cfg 보다 우선):
+
+```bash
+R2S_POLICY_ACTION_CLIP=4.0 R2S_POLICY_HIP_SCALE=1.0 r2s_gui
+```
+
+> **2026-08-05 이전에는 상수 (10.0, 0.5) 가 박혀 있었다.** 그런데 기본
+> `R2S_DEPLOYABLE_POLICY` 인 obs42 런은 `clip_actions=4.0` · `hip_scale_reduction` 키 없음
+> 이라, 환경변수를 손으로 주지 않으면 **hip 이 절반으로 눌리고 액션 범위가 2.5배로 늘어난**
+> 상태로 돌고 있었다. 지금은 자동으로 (4.0, 1.0) 로 맞는다.
+
+---
+
+## 12. Recovery 모드 — 넘어진 상태에서 기립
+
+GUI의 Recovery 모드는 `go2_recovery_flip_vel` 학습 정책(`Go2Recovery-FlipVel-v0`)을 jit로 뽑아
+50 Hz로 돌린다. Policy 모드와 완전히 별개의 정책이며 **명령(command)이 없다** — 목표가
+"default 자세로 일어서라" 하나로 고정이라 슬라이더가 없고 입력 소스(Sim/Real)만 고른다.
+
+### 12.1 체크포인트 → jit
+
+```bash
+bash scripts/real2sim/r2s_go2/run_export_recovery.sh          # 최신 ckpt 자동 선택
+# 또는
+conda activate isaac-6.0
+python scripts/real2sim/export_recovery_go2.py \
+  --run_dir logs/rsl_rl/go2_recovery_flip_vel/<RUN> \
+  --checkpoint model_<N>.pt --device cpu
+# → <run_dir>/exported/recovery_policy.pt
+```
+
+기본 런은 `2026-07-14_09-54-05_floor03_ent005`(`model_9999.pt`)다. 이 task 에서 가장 좋은 런으로,
+`success_rate` 0.679 / **넘어진 env 기준 0.958**이다. 다른 파일을 쓰려면 `R2S_RECOVERY_POLICY`로
+덮어쓴다.
+
+정책이 estimator/history 없는 plain PPO라 rsl_rl 표준 export(`export_policy_to_jit`)를 그대로
+쓴다. **직접 `actor(normalizer(obs))`로 wrapper를 짜면 안 된다** — rsl_rl 5.0.1의 `MLPModel`은
+MLP 출력이 분포 파라미터라 결정론적 행동을 얻으려면 `distribution.deterministic_output`을 거쳐야
+하고, 표준 export가 그 순서를 이미 담고 있다.
+
+### 12.2 ⚠ tracking jit 과 바꿔 끼우면 안 된다
+
+두 정책 모두 obs가 **42-dim이지만 레이아웃이 전혀 다르다.**
+
+| | tracking (`deployable_policy.pt`) | recovery (`recovery_policy.pt`) |
+|---|---|---|
+| 각속도 | 없음(priv_explicit로 이동) | **있음**, ×0.25 |
+| 명령 | `lin_vel(2) + yaw_vel(1)` | 없음 |
+| `joint_vel` | raw | **×0.05** |
+| 마지막 12칸 | actions, **항상 0** (dead channel) | **live** `previous_actions` |
+| 입력 개수 | 2 (`proprio`, `history`) | 1 (`obs`) |
+
+shape 검사로는 구분되지 않으므로 `RecoveryModel._warmup`이 **입력 인자 개수**로 잘못된 파일을
+막는다(tracking jit을 넣으면 로드 시점에 무엇이 잘못됐는지 밝히며 실패한다).
+
+### 12.3 obs 규약 (`recovery_runtime.build_obs`)
+
+```
+root_ang_vel_b × 0.25 (3) + projected_gravity_b (3)
+  + (joint_pos − default) × 1.0 (12) + joint_vel × 0.05 (12) + previous_actions (12)
+```
+
+- **`previous_actions`는 clip(±100) 직후 / hip 0.5× 적용 전 값이다** (`go2_recovery_env.py`의
+  `self._actions = clipped`). 관절 목표가 아니다. 모드 진입 시 학습 reset과 같이 0에서 시작한다.
+- action → 목표: `clip(±100)` → **hip 관절만 ×0.5** → `×0.25 + default_joint_pos`.
+- **kp=25, kd=1.0으로 발행한다.** 학습 액추에이터가 `stiffness 25 / damping 1.0`이다
+  (tracking과 GUI 기본값은 damping 0.5). Recovery Stop은 이 kd를 **유지한 채** 홀드한다 —
+  기립 직후 게인을 절반으로 떨어뜨리면 그대로 주저앉기 때문이다. 이후 Default/Stand Up/Policy
+  중 아무 버튼이나 누르면 기본 0.5로 돌아간다.
+
+### 12.4 Start가 즉시 engage 하는 이유
+
+Policy Start는 안전을 위해 `DEFAULT_POSE`로 먼저 보간한 뒤 engage하지만, Recovery Start는
+**현재 자세에서 곧바로 engage**한다. 로봇이 바닥에 있는 상태에서 default로 끌고 가는 것은
+위험할 뿐 아니라 학습 분포에서도 벗어난다: 학습 env의 settle 구간은 측정 자세를 그대로
+유지하고(`settle_mode="passive"`), 그 길이가 env마다 `U[0, 100]` step이라 **0 step**(첫 tick부터
+정책이 구동)도 학습에 포함돼 있다.
+
+### 12.5 검증된 것 / 안 된 것
+
+**검증됨** (`scripts/real2sim/verify_recovery_deploy_go2.py`, 40 step × 4 env):
+
+- articulation 관절 순서가 `policy_runtime.ART_ORDER`와 일치(env에서 직접 대조).
+- 배포 경로가 조립한 obs가 학습 env의 obs와 일치 — 최대 오차 `6.6e-07`.
+- 배포 경로의 action→목표 변환이 env `_processed_actions`와 일치 — 최대 오차 `1.2e-07`.
+- 두 변환 모두 **DDS 순서 왕복을 거친 뒤** 대조했다(순서 오류가 상쇄되지 않게).
+
+```bash
+conda activate isaac-6.0
+CUDA_VISIBLE_DEVICES=1 env -u DISPLAY python scripts/real2sim/verify_recovery_deploy_go2.py \
+  --checkpoint logs/rsl_rl/go2_recovery_flip_vel/2026-07-14_09-54-05_floor03_ent005/exported/recovery_policy.pt
+```
+
+**r2s sim end-to-end 도 검증됨** (`verify_policy_deploy_go2.py --recovery`, `--flip` 포함).
+GUI Recovery Start 와 같이 현재 자세에서 즉시 engage 하고, PACE 물성(§13) ON/OFF 양쪽으로 잰다:
+
+| 시나리오 | 플랜트 | base_h 최종 | upright | jvel p99 | 판정 |
+|---|---|---|---|---|---|
+| 엎드림(prone spawn) | PACE ON | 0.323 | 0.998 | 2.089 | 기립 성공 |
+| 엎드림 | PACE OFF | 0.316 | 0.997 | 2.453 | 기립 성공 |
+| **belly-up (roll 180°)** | **PACE ON** | **0.318** | **1.000** | **3.824** | **기립 성공** |
+| belly-up | PACE OFF | 0.317 | 0.999 | 8.115 | 기립 성공 |
+
+`use_pace_params=True`(현재 기본값)가 recovery 를 막지 않는다. PACE viscous 의 관절속도 천장은
+`23.5(1−q̇/30) = 2.41·q̇` → **7.36 rad/s** 인데, 이 정책은 flip 복구에서도 p99 3.8 rad/s 밖에 안
+쓴다 — FlipVel 학습의 `r_joint_vel` 페널티가 whip(8~22 rad/s)을 이미 제거했기 때문이다.
+PACE OFF 는 8.1 rad/s 까지 쓰므로, **PACE ON 이 오히려 더 부드럽게 복구한다**(RMS 0.786 vs 1.475).
+
+```bash
+conda activate isaac-6.0
+CUDA_VISIBLE_DEVICES=1 env -u DISPLAY python scripts/real2sim/verify_policy_deploy_go2.py \
+  --recovery --flip --checkpoint <...>/exported/recovery_policy.pt --hold_s 12 [--no_pace]
+```
+
+**아직 안 된 것 — 실기 투입 전에 반드시 볼 것:**
+
+- **실기 미수행.** 위는 전부 sim 이다.
+- **GUI 3-프로세스 실기동 미수행.** 검증 도구는 ROS/UDP 를 우회한다.
+- **`r2s_go2_env.set_setpoint` 는 LowCmd 의 kp/kd 를 저장만 하고 적용하지 않는다**(cfg 액추에이터
+  PD 고정). 즉 §12.3 의 kd=1.0 은 **sim 에서는 무효고 실기에서만 효과가 있다.**
+- **서 있는 상태에서 누르면 어떻게 되는지 모른다.** 이 런의 `success_rate_non_fallen`은
+  9999 iter 시점에도 **0.000**이다(넘어진 env는 0.958). GUI 힌트 라벨에도 적어두었지만,
+  넘어진 상태 전용으로 쓸 것.
+
+---
+
+## 13. r2s sim 관절 물성 (PACE) — `use_pace_params`
+
+`Isaac-R2S-Go2-v0` 는 **PACE 식별 물성으로 돈다** (`R2SGo2EnvCfg.use_pace_params`, 기본 `True`
+= `set2`). GUI 의 `Plant:` 콤보 또는 `--plant` 로 **세 프리셋을 런타임에 전환**할 수 있다 —
+실기 GO2 와 sim 의 명령 추종 정도를 눈으로 비교하기 위한 것이다.
+
+| 프리셋 | armature [kg·m²] | viscous [N·m·s/rad] | coulomb [N·m] | 비고 |
+|---|---|---|---|---|
+| **set2** (기본) | 0.00101 / 0.00011 / 0.01610 | 0.0019 / 0.0162 / 0.0015 | 0.198 / 0.151 / 0.670 | **현재 정책이 학습된 플랜트** |
+| **set3** | 0.00758 / 0.00531 / 0.02106 | 0.181 / 0.144 / 0.127 | 0.145 / 0.100 / 0.577 | 2026-08-04 재캡처. **미채택** — viscous 기각 |
+| **default** | 0.01 / 0.01 / 0.01 | 0 | 0 | `UNITREE_GO2_CFG` nominal |
+
+actuator kp / kd 는 25 / 0.5 고정 — **바꾸지 말 것.** viscous 가 kd 오차를 흡수하도록 함께
+식별된 조합이라 게인만 따로 바꾸면 식별 결과가 깨진다.
+
+> **⚠ 프리셋을 섞지 말 것.** armature/viscous/coulomb 은 **결합 식별**이라 set3 의 coulomb 과
+> set2 의 viscous 를 합치면 어떤 적합도 산출하지 않은 플랜트가 된다.
+>
+> **set3 는 왜 미채택인가**: coulomb(독립 회귀 대비 1.10~1.45x)과 calf armature(1.4x)는 검사를
+> 통과했지만 viscous 가 회귀 대비 **3.5~10.8x**, 에너지 수지 대비 **1.6~3.0x** 로 기각됐다.
+> 리그 오염과는 무상관(corr −0.21~+0.09)이라 원인 미상이다.
+> 상세: `reports/_comparisons/pace_go2_sysid_excitation_audit/`.
+>
+> **§11 Policy 모드는 set2 에서만 정상 동작한다** — default 로 두면 걷지 못한다(아래 A/B).
+> set3 는 감쇠가 set2 대비 +25~36% 라 거동이 달라진다. 그 차이를 보는 것이 이 콤보의 목적이다.
+
+**2026-07-31 이전에는 nominal(`UNITREE_GO2_CFG`: armature 0.01, 마찰 0)로 돌았다.** 학습 env 와
+플랜트가 전혀 달라 §11 Policy 모드가 관절 초당 ~22회 진동으로 걷지 못했다. 원인 규명과 A/B 는
+`reports/rsl_rl/go2_imitation_tracking/_comparisons/r2s_sim_plant_gap/`.
+
+수정 후 (배포 경로 end-to-end, `cmd 0`, engage 1s 이후):
+
+| | jvel RMS | 부호반전/step | base_h |
+|---|---|---|---|
+| PACE ON | **0.246** | **0.0010** | 0.228 m (기립 유지) |
+| PACE OFF | 9.406 | 0.3820 | 0.110 m (주저앉음) |
+
+### 13.1 함께 고친 것 — reset 이 로봇을 초기자세로 쓰지 않았다
+
+`R2SGo2Env._reset_idx` 가 articulation 상태를 write 하지 않아, `env.reset()` 직후 로봇이 USD
+rest(관절 ≈ 0, 다리 뻗은 자세)에 남고 prone setpoint 과 **2.57 rad** 어긋난 채 첫 스텝에 16~23 N·m
+킥이 걸렸다. nominal 에서는 흐물흐물 접혀 무해했지만 PACE 에서는 기체가 base_h 0.42 까지 튀어올라
+넘어졌다. `default_root_state`/`default_joint_pos` 를 write 하도록 고쳤다(오차 0.0000, 첫 스텝
+토크 1.58 N·m).
+
+**첫 reset 에서만** 쓴다 — 이 env 는 RL 이 아니라 라이브 제어 harness 인데 `episode_length_s=600`
+때문에 10분마다 time_out reset 이 걸린다. 매번 write 하면 조작 중인 로봇이 10분마다 spawn 자세로
+순간이동한다.
+
+### 13.2 ⚠ sysid 모드는 반드시 OFF
+
+`R2SGo2SysidEnvCfg.use_pace_params = False` 다. sysid 는 이 물성을 **찾는** 쪽이라, 켜두면 CMA-ES 가
+이미 PACE 값이 들어간 플랜트 위에서 적합을 시작해 이중 적용되고 식별이 조용히 망가진다.
+`_reset_idx` 의 초기자세 write 도 sysid 에서는 건너뛴다(PACE 적합 harness 가 상태를 직접 관리하고,
+이미 hold-out RMSE 0.017 rad 로 검증된 거동이다). tuner 모드도 같은 sysid task 를 재사용하므로 함께
+안전하다.
+
+### 13.3 런타임 전환 — GUI **Sim** 그룹
+
+GUI 의 **Sim** 그룹에서 `Plant` 를 바꾸면 sim 을 재시작하지 않고 물성이 갈아끼워진다.
+`R2SGo2Env.set_joint_plant()` 이 armature/viscous/coulomb 세 값을 한 번에 쓰므로 두 프리셋을
+오가도 상태가 섞이지 않는다(왕복 2회 후에도 값 동일함을 확인).
+
+기동 시 기본값은 `sim_runner_go2.py --plant pace|nominal` 로도 줄 수 있다.
+
+```
+GUI Sim 콤보 ─UDP:9877─▶ sim_runner_go2 ─▶ env.set_joint_plant() / set_camera_follow()
+```
+
+명령(9871)과 분리한 채널이다 — 50 Hz `/lowcmd` 스트림은 실기 watchdog 이 걸린 실시간 경로라
+필드를 늘리면 안 되고, 이쪽은 버튼을 누를 때만 나가는 one-shot 이다. `sim_bridge` 를 거치지 않고
+GUI 가 직접 보낸다(`tuner_gui` → 9875 와 같은 방식). sim 이 안 떠 있으면 조용히 무시된다.
+
+### 13.4 카메라 — Follow / Free
+
+기본은 **로봇 추적**이다. `R2SGo2EnvCfg.viewer` 가 `origin_type="asset_root"`, `asset_name="robot"`
+이라 IsaacLab 이 매 렌더 스텝마다 eye/lookat 을 로봇 base 기준 상대좌표로 다시 잡아준다
+(`eye=(-2.2, -1.6, 0.9)`, `lookat=(0, 0, 0.15)` — 뒤 왼쪽 위에서 내려다봄).
+
+GUI **Sim → Camera** 로 `Free` 를 고르면 추적만 멈추고 **카메라는 보던 자리에 그대로 있다**.
+`update_view_to_world()` 를 부르지 않는 이유가 이것이다 — 그러면 카메라가 cfg 기본 위치로 튀어서,
+각도를 유지한 채 조작을 넘겨받고 싶은 의도와 어긋난다. `Follow` 로 되돌리면 다시 붙는다.
+
+검증(뷰포트 있는 실행, 로봇을 +3 m 이동):
+
+| | 결과 |
+|---|---|
+| Follow | base Δx **+2.989** vs cam Δx **+2.990** — 따라감 |
+| Free 전환 | 카메라 위치 변화 **0.000** — 스냅 없음 |
+| Free 중 로봇 이동 | cam Δx **+0.000** — 멈춰 있음 |
+| Follow 복귀 | cam − base = **−2.200** = cfg `eye` x 그대로 |
+
+⚠ **headless 에서는 뷰포트 자체가 없어 전부 no-op 이다**(`viewport_camera_controller` 가 None).
+`r2s_sim` 은 `--viz kit` + livestream 으로 뜨므로 컨트롤러가 생긴다 — `--viz` 를 끄면 카메라 기능도
+같이 사라진다.
+
+> `R2SGo2Env.close()` 가 추적을 먼저 끈다. `DirectRLEnv.close()` 는 `del self.scene` 을 뷰포트
+> 컨트롤러 삭제보다 **먼저** 해서, 그 사이 콜백이 한 번 더 발화하면 AttributeError 를 뱉는다
+> (추적을 안 쓰던 시절엔 콜백이 즉시 반환해 드러나지 않던 순서 문제).
+
+### 13.5 되돌리기
+
+`use_pace_params=False`(또는 GUI Plant 콤보에서 `Default — nominal`, 또는 `--plant default`)로
+두면 이전 nominal 거동으로 정확히 돌아간다(PACE 이전에 수집한 데이터를 재현할 때).
