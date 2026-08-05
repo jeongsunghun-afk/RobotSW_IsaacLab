@@ -44,7 +44,7 @@ parser.add_argument(
     "--mode",
     type=str,
     default="push",
-    choices=["push", "drift", "hold", "step", "circle", "contact", "contactvid", "video", "showcase"],
+    choices=["push", "drift", "hold", "step", "circle", "contact", "contactvid", "video", "showcase", "driftvid"],
     help=(
         "push=S1-G5, drift=S1-G7, hold=S1-G2/G3, step=명령 불연속 변화 응답,"
         " circle=S2-G1/G2/G4/G5, contact=S4-G4/G1'/G2', video/showcase=영상."
@@ -141,7 +141,7 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
-RENDER_MODES = ("video", "showcase", "contactvid")
+RENDER_MODES = ("video", "showcase", "contactvid", "driftvid")
 args_cli.enable_cameras = args_cli.mode in RENDER_MODES
 args_cli.headless = True
 if args_cli.mode in RENDER_MODES and not args_cli.video_folder:
@@ -310,6 +310,9 @@ def build_env(seed: int):
         elif args_cli.mode == "contactvid":
             # 대본 길이로 잡는다 — --video_length 를 쓰면 접촉 구간이 잘린다.
             length = CONTACT_APPROACH_STEPS + CONTACT_PRESS_STEPS
+        elif args_cli.mode == "driftvid":
+            # 게이트와 같은 시행 길이로 고정한다 — 짧게 자르면 표류가 덜 쌓인 상태만 보인다.
+            length = DRIFT_TRIAL_STEPS
         else:
             length = args_cli.video_length
         env = gym.make(TASK, cfg=env_cfg, render_mode="rgb_array")
@@ -1698,7 +1701,11 @@ def annotate_video(src: str, dst: str, timeline: list[dict], title: str):
         d.rectangle([0, h - 78, w, h], fill=(0, 0, 0, 165))
         d.text((16, h - 70), rec["label"], font=f_label, fill=(120, 235, 140, 255))
 
-        if rec["marker"]:
+        if rec.get("num_text") is not None:
+            # 모드마다 강조할 수치가 다르다 (표류 모드는 발 오차가 아니라 몸통 변위를 띄운다).
+            col = (245, 200, 90, 255) if rec.get("num_warn") else (120, 235, 140, 255)
+            d.text((16, h - 34), rec["num_text"], font=f_num, fill=col)
+        elif rec["marker"]:
             err_cm = rec["err_m"] * 100.0
             col = (120, 235, 140, 255) if err_cm <= 5.0 else (245, 200, 90, 255)
             d.text((16, h - 34), f"foot-to-target error: {err_cm:5.1f} cm", font=f_num, fill=col)
@@ -1711,6 +1718,131 @@ def annotate_video(src: str, dst: str, timeline: list[dict], title: str):
     reader.close()
     writer.close()
     print(f"자막 입힌 영상: {dst}  ({count} frame @ {fps:.0f} fps)")
+
+
+DRIFTVID_TRAIL_N = 64  # 바닥에 남길 몸통 궤적 점 개수
+DRIFTVID_TRAIL_EVERY = 7  # 몇 step 마다 한 점을 남길지 (64 × 7 = 448 step ≈ 시행 전체)
+DRIFTVID_TITLE = "Go2 Pedipulation - body drift while holding a 3-leg stance (no external push)"
+
+
+def run_driftvid(env, policy, seed: int) -> dict:
+    """표류(S1-G7)를 **눈으로 볼 수 있게** 렌더한다.
+
+    ``run_drift_seed`` 와 **같은 조건**을 재현한다 — 3족 자세, 목표 하나를 9.8 s 내내 유지,
+    외력 없음. ``--mode video`` 는 3 s 마다 목표를 새로 뽑으므로 표류를 보기엔 부적절하다
+    (재배치 동작이 섞여 몸통이 왜 움직였는지 구분되지 않는다).
+
+    화면에 네 가지를 그린다:
+        - 초록 구  : 조작 다리의 발 목표
+        - 파란 구  : **시행 시작 시점의 몸통 위치**(바닥에 고정) — 표류의 기준점
+        - 빨간 구  : **현재 몸통 위치**(바닥 투영) — 파란 구와의 간격이 곧 자막의 수치다
+        - 주황 점열: 몸통이 지나온 자취
+
+    ⚠ 파란 구 하나만 두면 표류가 눈에 안 들어온다. 로봇 자체는 화면에서 거의 안 움직이는
+      것처럼 보이고(카메라가 env 원점 고정), 기준점만으로는 "지금 얼마나 벌어졌는지"를
+      비교할 대상이 없기 때문이다. 두 구의 간격으로 읽게 한다.
+
+    자막에는 두 수치를 함께 띄운다. 시작 기준 변위는 다리를 들 때의 **일회성 균형 이동**을
+    포함하지만, settle(2 s) 기준 변위는 그 뒤로도 계속 밀리는 **진짜 표류**만 센다.
+    """
+    import isaaclab.sim as sim_utils
+    from isaaclab.markers import VisualizationMarkers
+    from isaaclab.markers.config import SPHERE_MARKER_CFG
+    from isaaclab.utils.math import quat_apply
+
+    base_env = env.unwrapped
+    device = base_env.device
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    leg_names = ("FL", "FR", "RL", "RR")
+
+    env.reset()
+    assert base_env._nominal_valid, "nominal 발 위치 캡처 실패."
+
+    n = base_env.num_envs
+    if args_cli.video_leg == "cycle":
+        leg_idx = torch.arange(n, device=device) % 4
+    else:
+        leg_idx = torch.full((n,), leg_names.index(args_cli.video_leg), dtype=torch.long, device=device)
+    cond_idx = torch.full((n,), CONDITIONS.index("stance3"), dtype=torch.long, device=device)
+    target_b = build_targets(base_env, leg_idx, cond_idx, gen)
+    patch_command(base_env, leg_idx, target_b)
+    obs, _ = env.reset()
+
+    def _sphere(name: str, radius: float, color: tuple[float, float, float]):
+        cfg = SPHERE_MARKER_CFG.copy()
+        cfg.prim_path = f"/Visuals/PedipulationDrift/{name}"
+        cfg.markers["sphere"].radius = radius
+        cfg.markers["sphere"].visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+        return VisualizationMarkers(cfg)
+
+    target_marker = _sphere("target", 0.035, (0.10, 0.85, 0.25))
+    start_marker = _sphere("start", 0.040, (0.20, 0.55, 0.95))
+    now_marker = _sphere("now", 0.040, (0.95, 0.20, 0.20))
+    trail_marker = _sphere("trail", 0.018, (0.98, 0.60, 0.10))
+
+    xy0 = base_xy(base_env)
+    xy_ref = xy0.clone()
+    # 자취는 시작점으로 채워 두고 링버퍼처럼 앞으로 밀어낸다 (숨김 처리보다 코드가 짧다).
+    trail = xy0[0].unsqueeze(0).repeat(DRIFTVID_TRAIL_N, 1)
+    # 바닥에 살짝 띄운다 — 정확히 z=0 이면 지면과 z-fighting 이 난다.
+    ground_z = torch.full((1,), 0.02, device=device)
+    start_w = torch.cat([xy0[0], ground_z]).unsqueeze(0)
+
+    timeline: list[dict] = []
+    for step in range(DRIFT_TRIAL_STEPS):
+        with torch.inference_mode():
+            obs, _, _, _ = env.step(policy(obs))
+
+        xy = base_xy(base_env)
+        if step == SETTLE_STEPS - 1:
+            xy_ref = xy.clone()
+        if step % DRIFTVID_TRAIL_EVERY == 0:
+            trail = torch.cat([trail[1:], xy[0].unsqueeze(0)], dim=0)
+
+        root_pos_w, root_quat_w = base_env._base_pose()
+        tgt_w = root_pos_w + quat_apply(root_quat_w, base_env._foot_target_b[torch.arange(n, device=device), leg_idx])
+        target_marker.visualize(translations=tgt_w)
+        start_marker.visualize(translations=start_w)
+        now_marker.visualize(translations=torch.cat([xy[0], ground_z]).unsqueeze(0))
+        trail_marker.visualize(translations=torch.cat([trail, ground_z.expand(DRIFTVID_TRAIL_N, 1)], dim=1))
+
+        net = float(torch.norm(xy[0] - xy0[0]).item())
+        late = float(torch.norm(xy[0] - xy_ref[0]).item())
+        settled = step >= SETTLE_STEPS
+        timeline.append(
+            {
+                "step": step,
+                "label": ("HOLDING - drift measured" if settled else "settling (first 2 s, excluded)"),
+                "err_m": float(foot_err_of_manip(base_env, leg_idx)[0].item()),
+                "push_N": 0.0,
+                "marker": True,
+                "num_text": (
+                    f"body drift: {net * 100.0:4.1f} cm from start"
+                    + (f"   |   {late * 100.0:4.1f} cm since settle" if settled else "")
+                ),
+                # 게이트 기준(9.8 s 에 5 cm)을 넘으면 색으로 표시한다.
+                "num_warn": net > 0.05,
+            }
+        )
+
+    xy = base_xy(base_env)
+    net = float(torch.norm(xy[0] - xy0[0]).item())
+    late = float(torch.norm(xy[0] - xy_ref[0]).item())
+    print(
+        f"\n표류 시연 {DRIFT_TRIAL_STEPS} step ({DRIFT_TRIAL_STEPS / 50.0:.1f} s) 기록 완료 — "
+        f"leg={leg_names[int(leg_idx[0].item())]}  "
+        f"시작 기준 {net * 100.0:.2f} cm / settle 기준 {late * 100.0:.2f} cm"
+    )
+    return {
+        "timeline": timeline,
+        "title": DRIFTVID_TITLE,
+        "total_steps": DRIFT_TRIAL_STEPS,
+        "leg": leg_names[int(leg_idx[0].item())],
+        "net_m": net,
+        "net_late_m": late,
+        "seed": seed,
+    }
 
 
 def run_circle_seed(env, policy, seed: int) -> dict:
@@ -2261,13 +2393,18 @@ def main():
     if args_cli.mode in RENDER_MODES:
         env, policy = build_env(args_cli.seed0)
         try:
-            runner = {"showcase": run_showcase, "contactvid": run_contact_video}.get(args_cli.mode, run_video)
+            runner = {"showcase": run_showcase, "contactvid": run_contact_video, "driftvid": run_driftvid}.get(
+                args_cli.mode, run_video
+            )
             summary = runner(env, policy, args_cli.seed0)
         finally:
             env.close()  # RecordVideo 는 close 시점에 mp4 를 쓴다 — 자막은 그 뒤에 얹는다.
-        if args_cli.mode == "showcase":
+        if args_cli.mode in ("showcase", "driftvid"):
             src = os.path.join(args_cli.video_folder, "rl-video-step-0.mp4")
-            dst = os.path.join(args_cli.video_folder, "pedipulation_showcase.mp4")
+            # ⚠ 모드마다 다른 이름으로 쓴다. 예전엔 showcase 가 stage 와 무관하게 한 이름만
+            #   써서 s2 가 s1 을 덮어썼다.
+            name = "pedipulation_showcase" if args_cli.mode == "showcase" else "pedipulation_drift"
+            dst = os.path.join(args_cli.video_folder, f"{name}.mp4")
             annotate_video(src, dst, summary["timeline"], summary["title"])
             summary["video"] = dst
         if args_cli.out:
