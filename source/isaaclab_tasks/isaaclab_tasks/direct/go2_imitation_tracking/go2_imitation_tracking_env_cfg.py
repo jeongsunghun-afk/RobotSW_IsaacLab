@@ -331,13 +331,30 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     #
     # ⚠ 그룹을 나눴으므로 env 의 `_acts` 처리(게인 DR)가 두 그룹을 모두 돌아야 한다.
     #
-    # `velocity_limit` 은 Unitree 공식 URDF(`unitree_ros/robots/go2_description/urdf/
-    # go2_description.urdf`)의 `<limit>` 을 따른다:
-    #   hip/thigh  effort 23.7, velocity **30.1**
-    #   calf       effort 45.43, velocity **15.70**   ← 기어비가 커서 토크↑ 속도↓
-    # calf 의 속도 한계가 절반이므로 토크-속도 곡선이 **더 가팔라진다**. `τ_max` 는 저속에서
-    # 커지고 고속에서 작아진다(q̇=5 → 24.2 vs 기존 19.6, q̇=10 → 12.9 vs 15.7).
-    # 이는 실제 로봇 특성이므로 sim2real 정확도 쪽이 개선된다.
+    # `velocity_limit` 은 **30.0 을 쓴다(URDF 의 calf 15.70 이 아니다).**
+    #
+    # Unitree 공식 URDF 의 `<limit>` 은 hip/thigh `effort 23.7 / velocity 30.1`,
+    # calf `effort 45.43 / velocity 15.70` 이다. 2026-08-05 에 calf 를 15.70 으로 넣어 학습했는데
+    # **effort 를 51% 올린 이득이 거의 그대로 상쇄됐다.** 참조 모션이 요구하는 calf 속도
+    # `q̇ ≈ 7.9 rad/s` 에서의 실효 토크 `τ_max = sat·(1 − q̇/v_lim)` 를 비교하면:
+    #
+    #   구세대 (23.5 / 30.0) → 17.3
+    #   (35.5 / 15.70)       → 17.6     ← +2% 뿐
+    #   (35.5 / 30.0)        → 26.1     ← +51%, effort 증가분이 그대로 살아난다
+    #
+    # 두 값은 의미가 다르다. URDF `<limit velocity>` 는 **허용 최대 관절 속도**(정격/안전 한계)이고
+    # `DCMotorCfg.velocity_limit` 은 토크-속도 곡선의 **x 절편, 즉 토크가 0 이 되는 무부하 속도**다.
+    # 같은 값을 넣으면 "최대 속도에 닿는 순간 토크 0" 이 되어 그 속도에 도달할 수 없다.
+    #
+    # ★ 속도 상한 자체는 이 cfg 와 무관하게 **USD 자산에 이미 박혀 있다** —
+    #   `Go2_noninstanceable/go2.usd` 의 `physxJoint:maxJointVelocity` 가
+    #   hip/thigh 1724.60 deg/s(=30.10 rad/s), calf 899.54 deg/s(=**15.70 rad/s**)다.
+    #   그래서 실행 로그의 `Simulation Joint Information` 표는 **어느 세대에서든** calf 15.700 을 찍는다
+    #   (구세대 `clip10` 로그도 동일). 여기서 바꾸는 것은 **토크 곡선의 기울기뿐**이고 속도 벽은 그대로다.
+    #   참조 모션의 calf 요구가 max 7.91 rad/s 이므로 15.70 벽은 재현에 지장이 없다.
+    #
+    # 참조 모션은 관절 속도로는 **전 구간 재현 가능**하다(calf max 7.91 / thigh 12.09 / hip 4.39,
+    # 한계 초과 0.00%). 병목은 속도가 아니라 그 속도대에서 곡선이 깎는 **토크**다.
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
         actuators={
@@ -355,7 +372,7 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
                 joint_names_expr=[".*_calf_joint"],
                 effort_limit=35.5,
                 saturation_effort=35.5,
-                velocity_limit=15.70,
+                velocity_limit=30.0,
                 stiffness=25.0,
                 damping=0.5,
                 friction=0.0,
