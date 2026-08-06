@@ -58,6 +58,7 @@ RENDER_HZ: float = 15.0
 RENDER_PERIOD_S: float = 1.0 / RENDER_HZ
 RECV_PERIOD_S: float = 0.005  # UDP drain 주기
 RESCALE_PERIOD_S: float = 1.0
+Y_MIN_SPAN: float = 0.2  # y축 최소 폭 — 정지 중 노이즈가 화면 가득 확대되는 것을 막는다
 BUF_MAXLEN: int = 1200  # WINDOW_S × 발행율(50Hz) 여유
 
 _C_ACTION = "#f0a020"
@@ -194,6 +195,12 @@ class MonitorWindow(QMainWindow):
         now = time.monotonic()
 
         def _yrange(*cols):
+            """창 안 값의 p1~p99 로 y 범위를 잡는다 (r2s_go2 monitor에서 확립한 교훈).
+
+            min/max 를 쓰면 한 번의 스파이크가 10초 내내 축을 붙잡는다 — 특히 dq 는 스텝 전환
+            순간의 바늘이 축을 넓혀 정작 보려는 신호 본체가 바닥에 붙은 직선처럼 보인다.
+            백분위로 자르면 스파이크는 축 밖으로 나가고 신호 본체가 화면을 채운다.
+            """
             vals = []
             for row in self._buf:
                 if now - row[0] <= WINDOW_S:
@@ -201,9 +208,12 @@ class MonitorWindow(QMainWindow):
                         vals.append(row[c])
             if not vals:
                 return None
-            lo, hi = min(vals), max(vals)
-            if hi - lo < 1e-3:
-                lo, hi = lo - 0.5, hi + 0.5
+            vals.sort()
+            n = len(vals)
+            lo, hi = vals[int(0.01 * (n - 1))], vals[int(0.99 * (n - 1))]
+            if hi - lo < Y_MIN_SPAN:  # 정지 중 — 0 주변에서 노이즈가 확대되지 않게 바닥을 깐다
+                mid = 0.5 * (lo + hi)
+                lo, hi = mid - 0.5 * Y_MIN_SPAN, mid + 0.5 * Y_MIN_SPAN
             m = 0.1 * (hi - lo)
             return lo - m, hi + m
 

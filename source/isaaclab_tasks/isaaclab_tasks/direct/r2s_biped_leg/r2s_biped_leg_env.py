@@ -115,6 +115,28 @@ class R2SBipedLegEnv(DirectRLEnv):
             "tau_est": self.robot.data.applied_torque[0, self._joint_ids].cpu().numpy(),
         }
 
+    def get_joint_ieff(self) -> torch.Tensor:
+        """관절별 유효 관성 [kg·m²]을 반환 (leg-major, 길이 8).
+
+        현재 자세에서의 generalized mass matrix 대각 성분이다. GUI의 계산 게인
+        (kp = I·ωn², kd = 2ζ·I·ωn) 초기값 산정용 — 자세 의존이므로 default 자세
+        (reset 직후) 기준으로 쓰는 것을 권장한다.
+
+        Returns:
+            관절별 유효 관성 [kg·m²], shape [8], leg-major 순서, CPU 텐서.
+        """
+        # (count, N, N). fix_base면 N=num_joints, 자유베이스면 N=num_joints+6(root 6-DOF가 앞).
+        # 6.0 physx view는 warp 프론트엔드라 wp.array를 반환한다 → torch로 변환.
+        m_all = self.robot.root_physx_view.get_generalized_mass_matrices()
+        if not isinstance(m_all, torch.Tensor):
+            import warp as wp
+
+            m_all = wp.to_torch(m_all)
+        m = m_all[0]
+        offset = m.shape[-1] - self.robot.num_joints
+        diag = m.diagonal()[offset:]
+        return diag[self._joint_ids].cpu()
+
     def set_policy_target(self, target_q: torch.Tensor | list[float]) -> None:
         """policy_runner가 계산한 **articulation 순서** 목표각을 주입 (policy mode 전용).
 

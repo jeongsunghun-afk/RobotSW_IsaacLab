@@ -34,6 +34,7 @@ from r2s_udp import (  # isort: skip
     POLICY_ACT_PORT,
     POLICY_STATE_PORT,
     STATE_PORT,
+    pack_ieff,
     pack_policy_state,
     pack_state,
     unpack_cmd,
@@ -95,18 +96,28 @@ def main() -> None:
 
 
 def _run_position_loop(env) -> None:
-    """Position-control 브릿지 (gui_controller.py <-> sim, CMD/STATE 포트)."""
+    """Position-control 브릿지 (gui_controller.py <-> sim, CMD/STATE 포트).
+
+    state는 cmd 수신 여부와 무관하게 매 step (HOST, state_port)로 발행한다(sim_runner_go2 패턴).
+    GUI의 startup 실측 latch(첫 state로 현재 자세를 잡은 뒤에야 발행 시작)가 이를 전제한다 —
+    cmd를 받아야만 회신하는 구조면 GUI가 영원히 실측을 못 받는 닭-달걀이 된다.
+    """
     recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     recv_sock.bind((HOST, args_cli.cmd_port))
     recv_sock.setblocking(False)
     send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    gui_addr: tuple[str, int] | None = None  # 마지막 cmd 발신자에게 state 회신
+    state_addr = (HOST, args_cli.state_port)
 
     print(
         f"[sim_runner_bipedleg] position mode — UDP listening on {HOST}:{args_cli.cmd_port}, "
-        f"sending state to sender:{args_cli.state_port}",
+        f"sending state to {HOST}:{args_cli.state_port}",
         flush=True,
     )
+
+    # 관절별 유효 관성 (default 자세 기준, 자세 의존이라 startup 1회만 계산). GUI의 계산 게인
+    # (kp=I·ωn², kd=2ζ·I·ωn) 초기값용으로 1Hz로 state 포트에 흘린다.
+    ieff = env.unwrapped.get_joint_ieff().numpy()
+    print("[sim_runner_bipedleg] I_eff [kg·m²]: " + " ".join(f"{v:.4f}" for v in ieff), flush=True)
 
     zero_action = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
     seq = 0
@@ -116,25 +127,24 @@ def _run_position_loop(env) -> None:
             last = None
             while True:
                 try:
-                    data, src = recv_sock.recvfrom(4096)
+                    data, _ = recv_sock.recvfrom(4096)
                 except BlockingIOError:
                     break
                 cmd = unpack_cmd(data)
                 if cmd is not None:
                     last = cmd
-                    gui_addr = (src[0], args_cli.state_port)
             if last is not None:
                 env.unwrapped.set_setpoint(last["q"], last["dq"], last["kp"], last["kd"], last["tau"])
 
             with torch.inference_mode():
                 env.step(zero_action)
 
-            # publish the resulting state to whoever last sent a command
-            if gui_addr is not None:
-                st = env.unwrapped.get_lowstate()
-                sim_time = float(env.unwrapped.episode_length_buf[0].item()) * env.unwrapped.step_dt
-                packet = pack_state(seq, sim_time, st["q"], st["dq"], st["ddq"], st["tau_est"])
-                send_sock.sendto(packet, gui_addr)
+            # publish the resulting state (unconditional — GUI startup latch 전제)
+            st = env.unwrapped.get_lowstate()
+            sim_time = float(env.unwrapped.episode_length_buf[0].item()) * env.unwrapped.step_dt
+            send_sock.sendto(pack_state(seq, sim_time, st["q"], st["dq"], st["ddq"], st["tau_est"]), state_addr)
+            if seq % 50 == 0:  # 1Hz — I_eff는 상수라 저빈도면 충분
+                send_sock.sendto(pack_ieff(seq, ieff), state_addr)
             seq += 1
     finally:
         recv_sock.close()

@@ -43,6 +43,7 @@ REAL_STATE_PORT: int = 9888  # real endpoint -> policy_runner (seam)
 CMD_MAGIC: int = 0x52324243  # "R2BC"
 STATE_MAGIC: int = 0x52324253  # "R2BS"
 MONITOR_MAGIC: int = 0x5232424D  # "R2BM"
+IEFF_MAGIC: int = 0x52324249  # "R2BI" — sim_runner -> gui, 관절별 유효 관성(STATE_PORT 공유, 저빈도)
 
 # policy mode magic — 위 3개와 반드시 다른 값.
 POLICY_CMD_MAGIC: int = 0x52325043  # "R2PC" gui -> policy_runner
@@ -60,6 +61,11 @@ STATE_SIZE: int = struct.calcsize(_STATE_FMT)
 # 모니터: magic(I) seq(I) + NUM_JOINTS x action_q + NUM_JOINTS x (sim_q, sim_dq, sim_tau)
 _MON_FMT: str = "<II" + "f" * NUM_JOINTS + "3f" * NUM_JOINTS
 MON_SIZE: int = struct.calcsize(_MON_FMT)
+
+# I_eff: magic(I) seq(I) + NUM_JOINTS x ieff — sim_runner가 STATE_PORT로 1Hz 전송.
+# STATE 패킷(140B)과 크기가 달라 크기+magic 이중으로 갈린다.
+_IEFF_FMT: str = "<II" + "f" * NUM_JOINTS
+IEFF_SIZE: int = struct.calcsize(_IEFF_FMT)
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +215,39 @@ def unpack_monitor(data: bytes) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# I_eff (sim_runner -> gui): 관절별 유효 관성 — GUI의 계산 게인(kp=I·ωn², kd=2ζ·I·ωn)용
+# ---------------------------------------------------------------------------
+
+
+def pack_ieff(seq: int, ieff) -> bytes:
+    """관절별 유효 관성(generalized mass matrix 대각)을 UDP 바이트로 직렬화.
+
+    Args:
+        seq: 증가 시퀀스 번호.
+        ieff: 관절별 유효 관성 [kg·m²], 길이 8, leg-major 순서.
+
+    Returns:
+        IEFF_SIZE 바이트 패킷.
+    """
+    vals = [float(ieff[i]) for i in range(NUM_JOINTS)]
+    return struct.pack(_IEFF_FMT, IEFF_MAGIC, seq & 0xFFFFFFFF, *vals)
+
+
+def unpack_ieff(data: bytes) -> dict | None:
+    """I_eff 패킷 역직렬화. magic 불일치/크기 오류 시 None.
+
+    Returns:
+        키: ``seq``, ``ieff`` (리스트 길이 8, leg-major 순서).
+    """
+    if len(data) != IEFF_SIZE:
+        return None
+    fields = struct.unpack(_IEFF_FMT, data)
+    if fields[0] != IEFF_MAGIC:
+        return None
+    return {"seq": fields[1], "ieff": list(fields[2:])}
+
+
+# ---------------------------------------------------------------------------
 # policy mode: command (gui -> policy_runner)
 # ---------------------------------------------------------------------------
 
@@ -351,6 +390,15 @@ if __name__ == "__main__":
     assert len(unpack_monitor(m)["sim_q"]) == NUM_JOINTS
     # 다른 리그(hind_leg) magic이 섞여 들어와도 절대 파싱되지 않는지 확인.
     assert unpack_cmd(struct.pack(_CMD_FMT, 0x52324843, 0, *([0.0] * (5 * NUM_JOINTS)))) is None
+
+    # I_eff 패킷 왕복 + STATE 포트 공유 시 오파싱 없는지 확인.
+    ie = pack_ieff(7, [0.31, 0.22, 0.05, 0.01] * 2)
+    assert len(ie) == IEFF_SIZE, (len(ie), IEFF_SIZE)
+    die = unpack_ieff(ie)
+    assert die is not None and abs(die["ieff"][0] - 0.31) < 1e-6 and len(die["ieff"]) == NUM_JOINTS
+    assert unpack_state(ie) is None and unpack_ieff(s) is None
+    # policy ACT(40B)와 크기가 같지만 magic으로 갈린다 (포트도 다름 — 방어선 2중).
+    assert unpack_ieff(pack_policy_act(1, z)) is None
 
     # policy mode 패킷 왕복.
     pc = pack_policy_cmd(4, 1, 0, 1.5, -0.3)

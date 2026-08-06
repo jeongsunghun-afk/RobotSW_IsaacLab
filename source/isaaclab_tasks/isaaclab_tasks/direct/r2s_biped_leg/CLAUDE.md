@@ -68,6 +68,8 @@ gui_controller.py ─cmd(9881)─▶ sim_runner_bipedleg.py ─state(9882)─▶
 
 - `set_setpoint(q, dq, kp, kd, tau)` — q는 slew 통과 후 position target. faithful_pd=True면 kp/kd 반영.
 - `get_lowstate()` — 8관절 `(q, dq, ddq, tau_est)` numpy. IMU 없음.
+- `get_joint_ieff()` — 관절별 유효 관성 [kg·m²] (generalized mass matrix 대각, leg-major).
+  sim_runner가 기동 시 1회 계산해 1Hz로 GUI에 전송(`R2BI` 패킷) — GUI Computed Gains용.
 - **faithful PD**: `write_joint_stiffness/damping_to_sim`으로 GUI kp/kd를 실제 sim 게인에 반영
   (kp/kd 변경 시에만 write). False면 cfg 액추에이터 PD 고정.
 

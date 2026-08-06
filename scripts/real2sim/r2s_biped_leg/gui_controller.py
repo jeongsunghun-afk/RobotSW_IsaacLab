@@ -6,16 +6,27 @@
 
 """R2S-BipedLeg gui_controller — PyQt5 GUI가 순수 UDP로 sim_runner를 구동.
 
-Position mode (순수 UDP):
+Position mode (순수 UDP, **publisher 별도 프로세스** — r2s_go2 패턴):
 
-    gui ──cmd(9881)──▶ sim_runner ──state(9882)──▶ gui ──relay(9883)──▶ monitor
+    gui(UI, 모션 스펙만 씀) ──mp.Array──▶ publisher 프로세스 ──cmd(9881)──▶ sim_runner
+                                          publisher ◀──state(9882)── sim_runner
+                                          publisher ──relay(9883)──▶ monitor
 
 Policy mode (deployable jit를 **GUI 프로세스 내부에서** 직접 추론):
 
     gui(PolicyInferenceThread) ──POLICY_ACT(9886)──▶ sim_runner ──POLICY_STATE(9885)──▶ gui
                                 ──REAL_ACT(9887)──▶ real ──REAL_STATE(9888)──▶ gui  (seam)
 
-50Hz로 현재 목표각 + 관절별 kp/kd를 연속 발행하고(position), sim 상태를 수신해 monitor로 중계한다.
+프로세스 구조 — cmd 발행 AND 목표 생성(보간/사인)은 **별도 프로세스**(``publisher_process_main``)가
+담당한다 (r2s_go2 gui 에서 확립한 교훈). Qt QTimer 는 UI event loop 가 바쁘면(스핀박스 드래그,
+버튼 홀드) 슬립해 발행에 gap 이 생기고, 스레드는 GIL 때문에 못 푼다. UI 는 공유메모리(mp.Array)에
+**모션 스펙**(어디로 몇 초에 걸쳐 가라)만 쓰고, publisher 가 경과 시간 기반으로 목표를 50Hz 균일하게
+계산·발행한다. sim 상태 수신·monitor 중계·I_eff 수신도 publisher 가 맡고 실측 관절각을 공유메모리에
+되써 UI(startup latch·보간 시작점)가 읽는다.
+
+Startup: 첫 sim state 를 받을 때까지 발행을 보류하고(CMD_VALID=0), 받으면 실측 자세를 hold latch
+한다 — 로봇/sim 이 다른 자세일 때 기동 즉시 목표로 스냅하는 것을 막는다(2s 타임아웃 시 default).
+
 faithful PD가 켜져 있으므로 Gains 그룹의 kp/kd가 실제 sim drive 게인에 반영된다.
 Policy mode에서는 실제 로봇 배포와 동일한 self-contained jit(``deployable_policy.pt``)를 로드해
 policy_runner_bipedleg.py 와 bit-parity인 obs를 구성하고 요청-응답 lockstep으로 추론한다.
@@ -25,8 +36,10 @@ policy_runner_bipedleg.py 와 bit-parity인 obs를 구성하고 요청-응답 lo
 버튼:
     - Home (default): 중립(0) 자세로 보간 이동.
     - Joint Step: 선택 관절만 delta 스텝(soft limit 클램프).
-    - Sine Sweep: 선택 관절에 사인 궤적(soft limit 클램프).
+    - Sine Sweep: 선택 관절에 사인 궤적(soft limit 클램프, 실행 중 파라미터 라이브 반영).
     - Gains: 선택 관절 kp/kd 실시간 변경(faithful PD).
+    - Computed Gains: sim이 보낸 관절별 유효 관성 I_eff로 kp=I·ωn², kd=2ζ·I·ωn 을 계산해
+      전 관절에 **임시 적용**(motions.py 기본값은 불변, Restore defaults로 복귀).
     - Monitor: action/sim 실시간 plot 창(별도 프로세스).
 
 GUI는 추후 ROS2 확장을 위해 **시스템 python3(/usr/bin/python3, py3.10)**로 실행한다(run_gui_controller.sh 가
@@ -39,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import multiprocessing as mp
 import os
 import socket
 import subprocess
@@ -106,8 +120,7 @@ DEFAULT_JOINT_POS: list[float] = [0.0] * NUM_JOINTS  # hind_leg USD default 전�
 X_VEL_RANGE: tuple[float, float] = (-0.5, 2.0)
 YAW_RANGE: tuple[float, float] = (-0.5, 0.5)
 
-FRAME_HZ: float = 50.0
-FRAME_PERIOD_S: float = 1.0 / FRAME_HZ
+FRAME_HZ: float = 50.0  # 시퀀스 프레임 생성 주파수 (publisher가 경과 시간으로 인덱싱)
 PUBLISH_HZ: float = 50.0
 PUBLISH_PERIOD_S: float = 1.0 / PUBLISH_HZ
 SEQUENCE_DURATION_S: float = 1.5
@@ -122,6 +135,46 @@ KP_RANGE: tuple[float, float] = (0.0, 150.0)
 KP_STEP: float = 1.0
 KD_RANGE: tuple[float, float] = (0.0, 15.0)
 KD_STEP: float = 0.1
+
+# 계산 게인(I_eff 기반) 기본 파라미터 — kp = I·(2πf_n)², kd = 2ζ·I·(2πf_n).
+# f_n=2Hz/ζ=0.7 은 실측 게인(hip kp 65 / kd 6)과 같은 자릿수가 나오는 보수적 시작점이다.
+GAIN_FN_RANGE: tuple[float, float] = (0.5, 8.0)
+GAIN_FN_DEFAULT: float = 2.0
+GAIN_ZETA_RANGE: tuple[float, float] = (0.1, 2.0)
+GAIN_ZETA_DEFAULT: float = 0.7
+
+# 시작 자세 접근(startup latch) — 첫 sim state 로 실측 자세를 잡을 때까지 발행 보류(스냅 방지).
+STARTUP_ACQUIRE_TIMEOUT_S: float = 2.0  # 첫 state 대기 상한 [s]. 넘으면 default 자세로 진행
+
+# ---------------------------------------------------------------------------
+# 공유 메모리 레이아웃 (multiprocessing.Array('d')). UI는 **모션 스펙**만 쓰고, publisher
+# 프로세스가 50Hz 루프에서 경과 시간 기반으로 목표를 계산해 발행한다 (r2s_go2 gui 패턴).
+# time.monotonic()은 리눅스에서 프로세스 간 공통(CLOCK_MONOTONIC)이라 UI가 찍은
+# START_TIME을 publisher가 그대로 쓸 수 있다.
+# ---------------------------------------------------------------------------
+_MODE_HOLD = 0  # BASE_Q 고정 유지
+_MODE_SEQUENCE = 1  # 프레임 버퍼를 경과 시간으로 인덱싱 (Home/Step 보간)
+_MODE_SINE = 2  # BASE_Q + 선택 관절에 사인 주입 (경과 시간 기반)
+
+_SM_MODE = 0
+_SM_CMD_VALID = 1  # 0/1: 유효한 명령이 있는가. startup latch 전·policy mode 중엔 0 → 발행 보류
+_SM_START_TIME = 2  # 모션 시작 시각 (time.monotonic)
+_SM_FRAME_HZ = 3  # 시퀀스 프레임 생성 주파수 (인덱싱용)
+_SM_FRAME_COUNT = 4  # 시퀀스 프레임 수
+_SM_SINE_JOINT = 5
+_SM_SINE_AMP = 6
+_SM_SINE_FREQ = 7
+_SM_MEASURED_VALID = 8  # 0/1: publisher가 sim state를 받았는가
+_SM_IEFF_VALID = 9  # 0/1: publisher가 I_eff 패킷을 받았는가
+_SM_KP = 10  # 10..17: 관절별 kp (r2s_go2와 달리 8관절 개별 게인)
+_SM_KD = 18  # 18..25: 관절별 kd
+_SM_BASE_Q = 26  # 26..33: hold 자세 / sine 기준 자세
+_SM_MEASURED_Q = 34  # 34..41: sim 실측 관절각 (publisher가 state에서 씀)
+_SM_CURRENT_Q = 42  # 42..49: publisher의 현재 출력 목표 (UI가 읽어 보간 시작점으로)
+_SM_IEFF = 50  # 50..57: 관절별 유효 관성 [kg·m²] (publisher가 IEFF 패킷에서 씀)
+_SM_FRAMES = 58  # 58..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 8)
+MAX_FRAMES = 512  # 512/50 = 10.24s 최대 시퀀스
+_SM_LEN = _SM_FRAMES + MAX_FRAMES * NUM_JOINTS
 
 _STYLESHEET: str = """
 QWidget { background-color: #1c1e26; color: #e6e8ef;
@@ -247,7 +300,7 @@ class PolicyInferenceThread(QThread):
         try:
             model = torch.jit.load(self._model_path, map_location=self._device).eval()
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(f"모델 로드 실패: {exc}")
+            self.failed.emit(f"model load failed: {exc}")
             return
         device = self._device
         ps = PolicyState(device)
@@ -353,57 +406,131 @@ class PolicyInferenceThread(QThread):
                 s.close()
 
 
-class UdpLink:
-    """순수 UDP 링크 — cmd 발신 / state 수신 / monitor 중계."""
+def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[float]] | None:
+    """공유 메모리의 모션 스펙 + 경과 시간으로 현재 목표 자세를 계산한다 (publisher 프로세스에서 호출).
 
-    def __init__(self) -> None:
-        self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._cmd_addr = (HOST, r2s_udp.CMD_PORT)
-        self._state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._state_sock.bind((HOST, r2s_udp.STATE_PORT))
-        self._state_sock.setblocking(False)
-        self._mon_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._mon_addr = (HOST, r2s_udp.MONITOR_PORT)
-        self._seq = 0
+    Returns:
+        ``(pose, kp, kd)`` 또는 명령이 없으면(``CMD_VALID=0``, startup latch 전/policy mode 중) None.
+    """
+    with shared.get_lock():
+        if shared[_SM_CMD_VALID] < 0.5:
+            return None
+        mode = int(shared[_SM_MODE])
+        kp = [shared[_SM_KP + i] for i in range(NUM_JOINTS)]
+        kd = [shared[_SM_KD + i] for i in range(NUM_JOINTS)]
+        base = [shared[_SM_BASE_Q + i] for i in range(NUM_JOINTS)]
+        if mode == _MODE_SEQUENCE:
+            start = shared[_SM_START_TIME]
+            frame_hz = shared[_SM_FRAME_HZ]
+            count = int(shared[_SM_FRAME_COUNT])
+            idx = int((now - start) * frame_hz)
+            idx = 0 if idx < 0 else (count - 1 if idx >= count else idx)  # 끝 프레임에서 홀드
+            off = _SM_FRAMES + idx * NUM_JOINTS
+            pose = [shared[off + i] for i in range(NUM_JOINTS)]
+        elif mode == _MODE_SINE:
+            start = shared[_SM_START_TIME]
+            joint = int(shared[_SM_SINE_JOINT])
+            amp = shared[_SM_SINE_AMP]
+            freq = shared[_SM_SINE_FREQ]
+            pose = list(base)
+            pose[joint] = base[joint] + amp * math.sin(2.0 * math.pi * freq * (now - start))
+        else:  # _MODE_HOLD
+            pose = list(base)
+    # soft limit 최종 클램프 — sine이 base+amp로 한계를 넘거나 base 자체(실측 latch)가
+    # 한계 밖일 수 있다. 시퀀스 프레임은 이미 클램프된 끝점 사이 보간이지만 한 번 더는 무해.
+    return motions.clamp_to_soft(pose), kp, kd
 
-    def send_cmd(self, q: list[float], kp: list[float], kd: list[float]) -> None:
-        """목표각 q + 관절별 kp/kd 발행(dq=0, tau=0)."""
-        self._seq += 1
-        zeros = [0.0] * r2s_udp.NUM_JOINTS
-        self._cmd_sock.sendto(r2s_udp.pack_cmd(self._seq, q, zeros, kp, kd, zeros), self._cmd_addr)
 
-    def recv_state_latest(self) -> dict | None:
-        """수신 큐를 비우고 최신 상태만 반환(latest-wins). 없으면 None."""
-        latest = None
-        while True:
-            try:
-                data, _ = self._state_sock.recvfrom(4096)
-            except BlockingIOError:
-                break
-            except OSError:
-                break
-            parsed = r2s_udp.unpack_state(data)
-            if parsed is not None:
-                latest = parsed
-        return latest
+def publisher_process_main(shared, stop_flag) -> None:
+    """**별도 프로세스**: 모션 스펙에서 목표를 계산해 cmd 50Hz 발행 + state/I_eff 수신. Qt와 완전 독립.
 
-    def send_monitor(self, action_q: list[float], sim_q, sim_dq, sim_tau) -> None:
-        self._mon_sock.sendto(r2s_udp.pack_monitor(self._seq, action_q, sim_q, sim_dq, sim_tau), self._mon_addr)
+    UI event loop(위젯 조작·드래그)가 아무리 바빠도 이 프로세스는 영향받지 않는다 — 발행뿐 아니라
+    목표 생성(보간/사인)까지 UI에서 격리한다(스레드는 GIL 때문에 안 됨, r2s_go2 gui 패턴).
+    sim state의 실측 관절각을 공유 메모리에 되써 UI(startup latch·보간 시작점)가 읽을 수 있게 하고,
+    monitor로 action+sim time-aligned 패킷을 중계한다. I_eff 패킷(sim_runner 1Hz)도 여기서 받는다.
 
-    def close(self) -> None:
-        self._cmd_sock.close()
-        self._state_sock.close()
-        self._mon_sock.close()
+    Args:
+        shared: ``multiprocessing.Array('d', _SM_LEN)`` — 위 레이아웃 상수 참고.
+        stop_flag: ``multiprocessing.Value('i')`` — 1이면 루프 종료.
+    """
+    cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cmd_addr = (HOST, r2s_udp.CMD_PORT)
+    state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    state_sock.bind((HOST, r2s_udp.STATE_PORT))
+    state_sock.setblocking(False)
+    mon_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    mon_addr = (HOST, r2s_udp.MONITOR_PORT)
+
+    latest_state: dict | None = None
+    seq = 0
+    zeros = [0.0] * NUM_JOINTS
+    period = PUBLISH_PERIOD_S
+    next_t = time.monotonic()
+    try:
+        while not stop_flag.value:
+            # sim state / I_eff drain (latest-wins). 같은 포트에 두 패킷이 흘러 크기+magic으로 갈린다.
+            while True:
+                try:
+                    data, _ = state_sock.recvfrom(4096)
+                except (BlockingIOError, OSError):
+                    break
+                st = r2s_udp.unpack_state(data)
+                if st is not None:
+                    latest_state = st
+                    with shared.get_lock():
+                        for i in range(NUM_JOINTS):
+                            shared[_SM_MEASURED_Q + i] = st["q"][i]
+                        shared[_SM_MEASURED_VALID] = 1.0
+                    continue
+                ie = r2s_udp.unpack_ieff(data)
+                if ie is not None:
+                    with shared.get_lock():
+                        for i in range(NUM_JOINTS):
+                            shared[_SM_IEFF + i] = ie["ieff"][i]
+                        shared[_SM_IEFF_VALID] = 1.0
+
+            now = time.monotonic()
+            result = _compute_target(shared, now)
+            if result is not None:  # startup latch 전/policy mode 중(CMD_VALID=0)엔 발행 보류
+                pose, kp, kd = result
+                seq += 1
+                cmd_sock.sendto(r2s_udp.pack_cmd(seq, pose, zeros, kp, kd, zeros), cmd_addr)
+                with shared.get_lock():  # UI가 보간 시작점으로 읽도록 현재 목표를 되쓴다
+                    for i in range(NUM_JOINTS):
+                        shared[_SM_CURRENT_Q + i] = pose[i]
+                # monitor 중계 (action + sim, time-aligned)
+                if latest_state is not None:
+                    mon_sock.sendto(
+                        r2s_udp.pack_monitor(seq, pose, latest_state["q"], latest_state["dq"], latest_state["tau_est"]),
+                        mon_addr,
+                    )
+                else:
+                    mon_sock.sendto(r2s_udp.pack_monitor(seq, pose, zeros, zeros, zeros), mon_addr)
+
+            next_t += period
+            delay = next_t - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_t = time.monotonic()  # 밀렸으면 리싱크(누적 드리프트 방지)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cmd_sock.close()
+        state_sock.close()
+        mon_sock.close()
 
 
 class MainWindow(QMainWindow):
     """R2S-BipedLeg GUI main window."""
 
     def __init__(
-        self, link: UdpLink, model_path: str | None = None, device: str = "cpu", real_host: str | None = None
+        self, shared, model_path: str | None = None, device: str = "cpu", real_host: str | None = None
     ) -> None:
         super().__init__()
-        self._link = link
+        # 공유 메모리(mp.Array) — 모션 스펙을 여기 쓰면 publisher 프로세스가 50Hz로 발행한다.
+        # UI가 잠깐 멈춰도(사용자 조작) publisher가 목표 생성·발행을 계속한다.
+        self._shared = shared
         # policy mode: deployable jit 경로/디바이스. 모델이 있고 torch가 있어야 policy UI 활성.
         self._model_path = model_path
         self._device = device
@@ -411,23 +538,10 @@ class MainWindow(QMainWindow):
         # `model_path is not None` 로 좁혀야 os.path.isfile(model_path) 가 None 경고 없이 통과.
         self._policy_available = model_path is not None and _TORCH_OK and os.path.isfile(model_path)
         self._policy_thread: PolicyInferenceThread | None = None
-        # 중립(0) 자세에서 시작 — sim default_joint_pos 와 일치(스트림 점프 없음).
-        self._current_pose: list[float] = list(motions.DEFAULT_POSE)
-        self._latest_pose: list[float] = list(motions.DEFAULT_POSE)
         self._kp: list[float] = list(motions.DEFAULT_KP)
         self._kd: list[float] = list(motions.DEFAULT_KD)
-        self._latest_sim: dict | None = None
 
-        self._sequence: list[list[float]] = []
-        self._sequence_idx: int = 0
-        self._sequence_timer = QTimer(self)
-        self._sequence_timer.timeout.connect(self._on_sequence_tick)
-
-        self._sine_timer = QTimer(self)
-        self._sine_timer.timeout.connect(self._on_sine_tick)
-        self._sine_base_pose: list[float] = list(motions.DEFAULT_POSE)
-        self._sine_start_time: float = 0.0
-
+        self._sine_active: bool = False
         self._monitor_proc: subprocess.Popen | None = None
 
         # policy mode 상태
@@ -440,9 +554,68 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("R2S-BipedLeg Controller")
         self._build_ui()
 
-        self._publish_timer = QTimer(self)
-        self._publish_timer.timeout.connect(self._on_publish_tick)
-        self._publish_timer.start(int(PUBLISH_PERIOD_S * 1000))
+        # sine 실행 중 스핀박스/콤보를 바꾸면 publisher에 파라미터만 갱신(모션은 안 끊김).
+        self._sine_joint_combo.currentIndexChanged.connect(self._on_sine_param_changed)
+        self._sine_amp_spin.valueChanged.connect(self._on_sine_param_changed)
+        self._sine_freq_spin.valueChanged.connect(self._on_sine_param_changed)
+
+        # I_eff 수신 상태 표시 (1Hz면 충분 — 값은 상수).
+        self._ieff_timer = QTimer(self)
+        self._ieff_timer.timeout.connect(self._on_ieff_tick)
+        self._ieff_timer.start(1000)
+
+        # 시작 자세 접근 상태머신 — 첫 sim state 로 실측 자세를 latch 한 뒤에야 발행 시작(스냅 방지).
+        self._startup_done: bool = False
+        self._startup_deadline: float = time.monotonic() + STARTUP_ACQUIRE_TIMEOUT_S
+        self._startup_timer = QTimer(self)
+        self._startup_timer.timeout.connect(self._on_startup_tick)
+        self._startup_timer.start(10)
+
+    # -- 공유 메모리 헬퍼 --
+
+    def _output_pose(self) -> list[float]:
+        """publisher의 현재 출력 목표(보간/sine 시작점). 발행 전엔 default."""
+        with self._shared.get_lock():
+            if self._shared[_SM_CMD_VALID] >= 0.5:
+                return [self._shared[_SM_CURRENT_Q + i] for i in range(NUM_JOINTS)]
+        return list(motions.DEFAULT_POSE)
+
+    def _write_gains(self) -> None:
+        with self._shared.get_lock():
+            for i in range(NUM_JOINTS):
+                self._shared[_SM_KP + i] = self._kp[i]
+                self._shared[_SM_KD + i] = self._kd[i]
+
+    def _write_hold(self, base: list[float]) -> None:
+        """base 자세 고정 유지 스펙을 쓴다 (CMD_VALID=1)."""
+        with self._shared.get_lock():
+            for i in range(NUM_JOINTS):
+                self._shared[_SM_BASE_Q + i] = base[i]
+            self._shared[_SM_MODE] = _MODE_HOLD
+            self._shared[_SM_CMD_VALID] = 1.0
+
+    # -- startup latch --
+
+    def _on_startup_tick(self) -> None:
+        """첫 sim state 수신 → 실측 자세 hold latch. 타임아웃 → default 자세로 진행."""
+        if self._startup_done:
+            self._startup_timer.stop()
+            return
+        with self._shared.get_lock():
+            measured_valid = self._shared[_SM_MEASURED_VALID] >= 0.5
+            measured = [self._shared[_SM_MEASURED_Q + i] for i in range(NUM_JOINTS)]
+        if measured_valid:
+            self._write_gains()
+            self._write_hold(measured)
+            self._status_label.setText("Startup: latched measured pose - publishing (use Home for neutral)")
+        elif time.monotonic() >= self._startup_deadline:
+            self._write_gains()
+            self._write_hold(list(motions.DEFAULT_POSE))
+            self._status_label.setText("Startup: no sim state in 2s - publishing default pose")
+        else:
+            return
+        self._startup_done = True
+        self._startup_timer.stop()
 
     # -- UI --
 
@@ -454,7 +627,7 @@ class MainWindow(QMainWindow):
 
         title_label = QLabel("R2S-BipedLeg Controller")
         title_label.setObjectName("titleLabel")
-        subtitle_label = QLabel("8-DOF biped leg (HL/HR) — real2sim UDP position control")
+        subtitle_label = QLabel("8-DOF biped leg (HL/HR) - real2sim UDP position control")
         subtitle_label.setObjectName("subtitleLabel")
         header_title = QVBoxLayout()
         header_title.setSpacing(2)
@@ -469,8 +642,8 @@ class MainWindow(QMainWindow):
         if not self._policy_available:
             # torch 없음 or 모델 파일 없음 → Policy 항목 비활성(선택 불가). Position mode만 사용.
             self._mode_combo.model().item(1).setEnabled(False)
-            reason = "torch 없음" if not _TORCH_OK else "모델 파일 없음"
-            self._mode_combo.setItemData(1, f"Policy 비활성 ({reason})", Qt.ToolTipRole)
+            reason = "torch not installed" if not _TORCH_OK else "model file not found"
+            self._mode_combo.setItemData(1, f"Policy disabled ({reason})", Qt.ToolTipRole)
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         header_layout.addWidget(self._mode_combo, alignment=Qt.AlignTop)
         monitor_btn = QPushButton("Monitor")
@@ -570,8 +743,40 @@ class MainWindow(QMainWindow):
         gain_layout.addStretch(1)
         layout.addWidget(gain_group)
 
+        # Computed Gains — sim이 1Hz로 흘리는 관절별 유효 관성(I_eff)으로 kp/kd를 계산해
+        # 전 관절에 임시 적용한다. motions.py 기본값은 건드리지 않는다(Restore로 복귀).
+        cgain_group = QGroupBox("Computed Gains (I_eff based - temporary)")
+        cgain_v = QVBoxLayout(cgain_group)
+        self._ieff_label = QLabel("I_eff not received - start sim_runner (position mode) first")
+        self._ieff_label.setObjectName("subtitleLabel")
+        self._ieff_label.setWordWrap(True)
+        cgain_v.addWidget(self._ieff_label)
+        cgain_row = QHBoxLayout()
+        cgain_row.addWidget(QLabel("f_n [Hz]:"))
+        self._gain_fn_spin = QDoubleSpinBox()
+        self._gain_fn_spin.setRange(*GAIN_FN_RANGE)
+        self._gain_fn_spin.setSingleStep(0.1)
+        self._gain_fn_spin.setValue(GAIN_FN_DEFAULT)
+        cgain_row.addWidget(self._gain_fn_spin)
+        cgain_row.addWidget(QLabel("zeta:"))
+        self._gain_zeta_spin = QDoubleSpinBox()
+        self._gain_zeta_spin.setRange(*GAIN_ZETA_RANGE)
+        self._gain_zeta_spin.setSingleStep(0.05)
+        self._gain_zeta_spin.setValue(GAIN_ZETA_DEFAULT)
+        cgain_row.addWidget(self._gain_zeta_spin)
+        cgain_compute_btn = QPushButton("Compute && Apply (all joints)")
+        cgain_compute_btn.setObjectName("primaryButton")
+        cgain_compute_btn.clicked.connect(self._on_gain_compute_clicked)
+        cgain_row.addWidget(cgain_compute_btn)
+        cgain_restore_btn = QPushButton("Restore defaults")
+        cgain_restore_btn.clicked.connect(self._on_gain_restore_clicked)
+        cgain_row.addWidget(cgain_restore_btn)
+        cgain_row.addStretch(1)
+        cgain_v.addLayout(cgain_row)
+        layout.addWidget(cgain_group)
+
         # position-mode 패널 묶음 (mode 전환 시 일괄 show/hide)
-        self._position_groups = [pose_group, step_group, sine_group, gain_group]
+        self._position_groups = [pose_group, step_group, sine_group, gain_group, cgain_group]
 
         # policy-mode 패널 (초기 숨김)
         self._policy_group = self._build_policy_group()
@@ -596,7 +801,7 @@ class MainWindow(QMainWindow):
 
     def _build_policy_group(self) -> QGroupBox:
         """학습 정책 컨트롤러 패널: Run/Stop, input source(Sim/Real), x_vel/yaw."""
-        group = QGroupBox("Policy Controller (deployable jit — GUI 내부 추론)")
+        group = QGroupBox("Policy Controller (deployable jit - in-GUI inference)")
         v = QVBoxLayout(group)
 
         row1 = QHBoxLayout()
@@ -619,7 +824,7 @@ class MainWindow(QMainWindow):
         v.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("x_vel [m/s] 앞뒤:"))
+        row2.addWidget(QLabel("x_vel [m/s] fwd/back:"))
         self._x_vel_spin = QDoubleSpinBox()
         self._x_vel_spin.setRange(-0.5, 2.0)
         self._x_vel_spin.setSingleStep(0.1)
@@ -627,7 +832,7 @@ class MainWindow(QMainWindow):
         self._x_vel_spin.valueChanged.connect(self._on_x_vel_changed)
         row2.addWidget(self._x_vel_spin)
         row2.addSpacing(24)
-        row2.addWidget(QLabel("yaw [rad/s] 좌우:"))
+        row2.addWidget(QLabel("yaw [rad/s] turn:"))
         self._yaw_spin = QDoubleSpinBox()
         self._yaw_spin.setRange(-0.5, 0.5)
         self._yaw_spin.setSingleStep(0.05)
@@ -638,8 +843,8 @@ class MainWindow(QMainWindow):
         v.addLayout(row2)
 
         hint = QLabel(
-            "x_vel∈[-0.5,2.0], yaw∈[-0.5,0.5] (학습 범위). yaw 추종은 약함. Stop=정지(idle). "
-            "GUI가 직접 추론해 sim으로 lockstep 전송(real은 seam)."
+            "x_vel [-0.5, 2.0], yaw [-0.5, 0.5] (training range). Yaw tracking is weak. "
+            "Stop = idle. GUI runs inference and streams lockstep to sim (real via seam)."
         )
         hint.setObjectName("subtitleLabel")
         hint.setWordWrap(True)
@@ -673,16 +878,27 @@ class MainWindow(QMainWindow):
             g.setVisible(not is_policy)
         self._policy_group.setVisible(is_policy)
         if is_policy:
-            # policy 진입: 스레드 기동(1회). 시작은 idle(Run 눌러야 폐루프). 현재 command를 반영.
+            # policy 진입: position publisher를 멈추고(CMD_VALID=0 — policy sim은 CMD 포트를
+            # 안 듣지만 발행 계속은 무의미), 스레드 기동(1회). 시작은 idle(Run 눌러야 폐루프).
+            self._sine_deactivate()
+            with self._shared.get_lock():
+                self._shared[_SM_CMD_VALID] = 0.0
             self._ensure_policy_thread()
             self._push_policy_command()
-            self._status_label.setText("Mode: policy (idle — Run 을 눌러 시작)")
+            self._status_label.setText("Mode: policy (idle - press Run to start)")
         else:
             # position 복귀: 스레드는 살려두고 idle 명령만(로봇이 마지막 target에 멈춰있지 않도록).
             self._policy_run = 0
             self._policy_run_btn.setEnabled(True)
             self._policy_stop_btn.setEnabled(False)
             self._push_policy_command()
+            # publisher 재개 — 실측이 있으면 실측 자세, 없으면 마지막 출력 목표로 hold(스냅 방지).
+            if self._startup_done:
+                with self._shared.get_lock():
+                    measured_valid = self._shared[_SM_MEASURED_VALID] >= 0.5
+                    measured = [self._shared[_SM_MEASURED_Q + i] for i in range(NUM_JOINTS)]
+                    current = [self._shared[_SM_CURRENT_Q + i] for i in range(NUM_JOINTS)]
+                self._write_hold(measured if measured_valid else current)
             self._status_label.setText("Mode: position")
 
     def _on_policy_run_clicked(self) -> None:
@@ -721,76 +937,84 @@ class MainWindow(QMainWindow):
         """추론 스레드가 1초마다 방출하는 자세를 상태바에 표시."""
         if self._policy_run == 1:
             self._status_label.setText(
-                f"Policy running — grav_z={grav_z:+.2f} (≈-1 직립)  phase={phase:.2f}  "
+                f"Policy running - grav_z={grav_z:+.2f} (-1 = upright)  phase={phase:.2f}  "
                 f"x_vel={x_vel:+.2f} yaw={yaw:+.2f}"
             )
 
     def _on_policy_failed(self, msg: str) -> None:
         """추론 스레드 모델 로드 실패 → policy UI 비활성."""
         self._policy_available = False
-        self._status_label.setText(f"Policy 오류: {msg}")
+        self._status_label.setText(f"Policy error: {msg}")
 
-    # -- sequence playback --
-
-    def _play_poses(self, seq: list[list[float]]) -> None:
-        self._stop_sine()
-        self._sequence_timer.stop()
-        self._sequence = seq
-        self._sequence_idx = 0
-        self._sequence_timer.start(int(FRAME_PERIOD_S * 1000))
+    # -- sequence playback (publisher가 경과 시간으로 인덱싱 — UI 타이머 없음) --
 
     def _play_sequence_to(self, goal_pose: list[float], duration_s: float) -> None:
-        num_steps = max(1, int(duration_s * FRAME_HZ))
-        self._play_poses(motions.interpolate_sequence(self._current_pose, goal_pose, num_steps))
-
-    def _on_sequence_tick(self) -> None:
-        if self._sequence_idx >= len(self._sequence):
-            self._sequence_timer.stop()
-            return
-        pose = self._sequence[self._sequence_idx]
-        self._latest_pose = pose
-        self._current_pose = pose
-        self._sequence_idx += 1
+        num_steps = max(1, min(MAX_FRAMES, int(duration_s * FRAME_HZ)))
+        frames = motions.interpolate_sequence(self._output_pose(), goal_pose, num_steps)
+        self._sine_deactivate()
+        with self._shared.get_lock():
+            for f_idx, frame in enumerate(frames):
+                off = _SM_FRAMES + f_idx * NUM_JOINTS
+                for i in range(NUM_JOINTS):
+                    self._shared[off + i] = frame[i]
+            self._shared[_SM_FRAME_COUNT] = float(len(frames))
+            self._shared[_SM_FRAME_HZ] = FRAME_HZ
+            self._shared[_SM_START_TIME] = time.monotonic()
+            # 시퀀스가 끝나면 publisher가 마지막 프레임에서 홀드하지만, BASE_Q도 goal로 맞춰
+            # 이후 HOLD 전환(sine stop 등)이 자연스럽게 이어지도록 한다.
+            for i in range(NUM_JOINTS):
+                self._shared[_SM_BASE_Q + i] = frames[-1][i]
+            self._shared[_SM_MODE] = _MODE_SEQUENCE
+            self._shared[_SM_CMD_VALID] = 1.0
 
     # -- pose buttons --
 
     def _on_home_clicked(self) -> None:
         self._status_label.setText("Moving to home (default) pose...")
-        self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)
+        self._play_sequence_to(list(motions.DEFAULT_POSE), SEQUENCE_DURATION_S)
 
     def _on_step_clicked(self) -> None:
         joint_idx = self._step_joint_combo.currentIndex()
         delta = self._step_delta_spin.value()
-        goal_pose = motions.step_pose(self._current_pose, joint_idx, delta)
+        goal_pose = motions.step_pose(self._output_pose(), joint_idx, delta)
         self._status_label.setText(f"Stepping {motions.JOINT_NAMES[joint_idx]} ({delta:+.2f} rad)...")
         self._play_sequence_to(goal_pose, STEP_DURATION_S)
 
-    # -- sine --
+    # -- sine (publisher가 경과 시간 기반으로 생성 — UI 타이머 없음) --
 
     def _on_sine_start_clicked(self) -> None:
-        self._sequence_timer.stop()
-        self._sine_base_pose = list(self._current_pose)
-        self._sine_start_time = time.monotonic()
+        base = self._output_pose()
+        with self._shared.get_lock():
+            for i in range(NUM_JOINTS):
+                self._shared[_SM_BASE_Q + i] = base[i]
+            self._shared[_SM_SINE_JOINT] = float(self._sine_joint_combo.currentIndex())
+            self._shared[_SM_SINE_AMP] = self._sine_amp_spin.value()
+            self._shared[_SM_SINE_FREQ] = self._sine_freq_spin.value()
+            self._shared[_SM_START_TIME] = time.monotonic()
+            self._shared[_SM_MODE] = _MODE_SINE
+            self._shared[_SM_CMD_VALID] = 1.0
+        self._sine_active = True
         self._sine_start_btn.setEnabled(False)
         self._sine_stop_btn.setEnabled(True)
         self._status_label.setText(f"Sine sweep on {self._sine_joint_combo.currentText()}...")
-        self._sine_timer.start(int(FRAME_PERIOD_S * 1000))
 
-    def _on_sine_tick(self) -> None:
-        joint_idx = self._sine_joint_combo.currentIndex()
-        amplitude = self._sine_amp_spin.value()
-        frequency = self._sine_freq_spin.value()
-        t = time.monotonic() - self._sine_start_time
-        pose = motions.sine_offset(self._sine_base_pose, joint_idx, amplitude, frequency, t)
-        self._latest_pose = pose
-        self._current_pose = pose
+    def _on_sine_param_changed(self, _val=None) -> None:
+        """sine 실행 중 관절/amp/freq 라이브 반영 (r2s_go2 패턴 — 모션 안 끊김)."""
+        if not self._sine_active:
+            return
+        with self._shared.get_lock():
+            self._shared[_SM_SINE_JOINT] = float(self._sine_joint_combo.currentIndex())
+            self._shared[_SM_SINE_AMP] = self._sine_amp_spin.value()
+            self._shared[_SM_SINE_FREQ] = self._sine_freq_spin.value()
 
     def _on_sine_stop_clicked(self) -> None:
-        self._stop_sine()
+        # 현재 출력에서 정지(hold) — base로 스냅백하지 않는다.
+        self._write_hold(self._output_pose())
+        self._sine_deactivate()
         self._status_label.setText("Sine sweep stopped")
 
-    def _stop_sine(self) -> None:
-        self._sine_timer.stop()
+    def _sine_deactivate(self) -> None:
+        self._sine_active = False
         self._sine_start_btn.setEnabled(True)
         self._sine_stop_btn.setEnabled(False)
 
@@ -804,8 +1028,54 @@ class MainWindow(QMainWindow):
         idx = self._gain_joint_combo.currentIndex()
         self._kp[idx] = self._kp_spin.value()
         self._kd[idx] = self._kd_spin.value()
+        self._write_gains()
         # 게인이 한 자릿수라 소수 1자리까지 표시(5-DOF 리그의 %.0f 로는 12.5/1.1 구분 불가).
         self._status_label.setText(f"Gains {motions.JOINT_NAMES[idx]}: kp={self._kp[idx]:.1f} kd={self._kd[idx]:.2f}")
+
+    # -- computed gains (I_eff 기반, 임시) --
+
+    def _read_ieff(self) -> list[float] | None:
+        with self._shared.get_lock():
+            if self._shared[_SM_IEFF_VALID] < 0.5:
+                return None
+            return [self._shared[_SM_IEFF + i] for i in range(NUM_JOINTS)]
+
+    def _on_ieff_tick(self) -> None:
+        ieff = self._read_ieff()
+        if ieff is None:
+            self._ieff_label.setText("I_eff not received - start sim_runner (position mode) first")
+        else:
+            self._ieff_label.setText("I_eff [kg·m²]: " + "  ".join(f"{v:.3f}" for v in ieff))
+
+    def _on_gain_compute_clicked(self) -> None:
+        """kp = I·(2πf_n)², kd = 2ζ·I·(2πf_n) 을 전 관절에 **임시** 적용 (motions.py 기본값 불변)."""
+        ieff = self._read_ieff()
+        if ieff is None:
+            self._status_label.setText("Computed gains unavailable - no I_eff (is sim_runner running?)")
+            return
+        wn = 2.0 * math.pi * self._gain_fn_spin.value()
+        zeta = self._gain_zeta_spin.value()
+        for i in range(NUM_JOINTS):
+            self._kp[i] = min(KP_RANGE[1], max(KP_RANGE[0], ieff[i] * wn * wn))
+            self._kd[i] = min(KD_RANGE[1], max(KD_RANGE[0], 2.0 * zeta * ieff[i] * wn))
+        self._write_gains()
+        sel = self._gain_joint_combo.currentIndex()
+        self._kp_spin.setValue(self._kp[sel])
+        self._kd_spin.setValue(self._kd[sel])
+        table = "  ".join(f"{motions.JOINT_NAMES[i]}: {self._kp[i]:.1f}/{self._kd[i]:.2f}" for i in range(NUM_JOINTS))
+        print(f"[gui] computed gains (f_n={wn / (2 * math.pi):.2f}Hz, ζ={zeta:.2f})  kp/kd — {table}", flush=True)
+        self._status_label.setText(
+            f"Computed gains applied (temp): f_n={wn / (2 * math.pi):.2f}Hz zeta={zeta:.2f} - full table in console"
+        )
+
+    def _on_gain_restore_clicked(self) -> None:
+        self._kp = list(motions.DEFAULT_KP)
+        self._kd = list(motions.DEFAULT_KD)
+        self._write_gains()
+        sel = self._gain_joint_combo.currentIndex()
+        self._kp_spin.setValue(self._kp[sel])
+        self._kd_spin.setValue(self._kd[sel])
+        self._status_label.setText("Gains restored to defaults (measured, motions.py)")
 
     # -- monitor --
 
@@ -819,31 +1089,11 @@ class MainWindow(QMainWindow):
         self._monitor_proc = subprocess.Popen([sys.executable, monitor_py])
         self._status_label.setText("Monitor launched (separate process)")
 
-    # -- continuous publisher + relay --
-
-    def _on_publish_tick(self) -> None:
-        # policy 모드: 추론은 PolicyInferenceThread(내부 lockstep)가 전담 — 이 50Hz 타이머는 관여하지 않는다.
-        if self._mode == "policy":
-            return
-        # 1) 목표각 + kp/kd 발행
-        self._link.send_cmd(self._latest_pose, self._kp, self._kd)
-        # 2) sim 상태 수신(latest-wins)
-        state = self._link.recv_state_latest()
-        if state is not None:
-            self._latest_sim = state
-        # 3) monitor로 중계 (action + sim, time-aligned)
-        if self._latest_sim is not None:
-            self._link.send_monitor(
-                self._latest_pose, self._latest_sim["q"], self._latest_sim["dq"], self._latest_sim["tau_est"]
-            )
-        else:
-            zeros = [0.0] * r2s_udp.NUM_JOINTS
-            self._link.send_monitor(self._latest_pose, zeros, zeros, zeros)
+    # (position 발행/monitor 중계는 publisher 프로세스 담당 — 이 UI 프로세스엔 발행 타이머가 없다.)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override signature)
-        self._publish_timer.stop()
-        self._sequence_timer.stop()
-        self._sine_timer.stop()
+        self._startup_timer.stop()
+        self._ieff_timer.stop()
         # 추론 스레드 정지(소켓은 run() finally에서 닫힘). 여기서만 종료 → 토글 중 rebind 없음.
         if self._policy_thread is not None:
             self._policy_thread.request_stop()
@@ -873,14 +1123,30 @@ def main() -> None:
     if model_path and not os.path.isfile(model_path):
         print(f"[gui_controller] 경고: 모델 파일 없음 → Policy mode 비활성: {model_path}", flush=True)
 
-    link = UdpLink()
+    # 공유 메모리 + publisher 프로세스 — QApplication 생성 **전에** fork 한다 (Qt 상태를 자식이
+    # 물려받지 않도록, r2s_go2 gui와 동일한 기동 순서).
+    shared = mp.Array("d", _SM_LEN)
+    stop_flag = mp.Value("i", 0)
+    with shared.get_lock():
+        shared[_SM_CMD_VALID] = 0.0  # startup latch 전 발행 보류
+        for i in range(NUM_JOINTS):
+            shared[_SM_KP + i] = motions.DEFAULT_KP[i]
+            shared[_SM_KD + i] = motions.DEFAULT_KD[i]
+            shared[_SM_BASE_Q + i] = motions.DEFAULT_POSE[i]
+    publisher = mp.Process(target=publisher_process_main, args=(shared, stop_flag), daemon=True)
+    publisher.start()
+
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
     app.setStyleSheet(_STYLESHEET)
-    window = MainWindow(link, model_path=model_path, device=args.device, real_host=args.real_host)
+    window = MainWindow(shared, model_path=model_path, device=args.device, real_host=args.real_host)
     window.show()
     exit_code = app.exec_()
-    link.close()
+
+    stop_flag.value = 1
+    publisher.join(timeout=2.0)
+    if publisher.is_alive():
+        publisher.terminate()
     sys.exit(exit_code)
 
 

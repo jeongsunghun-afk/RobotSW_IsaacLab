@@ -97,12 +97,28 @@ r2s_bl_gui
 |---|---|
 | **Home (default)** | 중립(0) 자세로 보간 이동 |
 | **Joint Step** | 선택 관절만 delta[rad] 스텝 (soft limit 클램프) |
-| **Sine Sweep** | 선택 관절에 사인 궤적 주입(Start/Stop, soft limit 클램프) |
+| **Sine Sweep** | 선택 관절에 사인 궤적 주입(Start/Stop, 실행 중 amp/freq/관절 라이브 반영) |
 | **Gains (faithful PD)** | 선택 관절 kp/kd 실시간 변경 → sim drive 게인에 즉시 반영 |
+| **Computed Gains** | sim이 보낸 관절별 유효 관성 I_eff로 `kp=I·(2πf_n)²`, `kd=2ζ·I·(2πf_n)` 계산 → 전 관절 **임시** 적용(Restore defaults로 §1 실측값 복귀) |
 | **Monitor** | action/sim 실시간 plot 창(별도 프로세스) |
 
 관절 콤보에는 8개 레이블(HL 4 + HR 4)이 모두 나온다. 명령은 관절별 `kp/kd`(§1 표의 실측 기본값)와
-함께 50Hz로 연속 발행되고, soft limit을 벗어나는 명령은 GUI에서 자동 클램프된다.
+함께 50Hz로 연속 발행되고, soft limit을 벗어나는 명령은 자동 클램프된다.
+
+### 프로세스 구조 (r2s_go2 gui에서 이식, 2026-08-06)
+
+- **publisher 별도 프로세스**: cmd 발행 + 목표 생성(보간/사인)을 `multiprocessing.Process`로 격리.
+  UI는 공유메모리(mp.Array)에 모션 스펙만 쓰고, publisher가 경과 시간 기반으로 50Hz 균일 발행한다
+  — Qt event loop가 바빠도(스핀박스 드래그) 발행/목표가 굶지 않는다. sim state 수신·monitor 중계·
+  I_eff 수신도 publisher 담당.
+- **startup 실측 latch**: 첫 sim state를 받을 때까지 발행 보류(CMD_VALID=0), 받으면 실측 자세를
+  hold latch — 로봇/sim이 다른 자세일 때 기동 즉시 스냅하는 것을 막는다(2s 타임아웃 시 default).
+  이를 위해 sim_runner는 state를 cmd 수신과 무관하게 `(127.0.0.1, 9882)`로 무조건 발행한다.
+- **I_eff 채널**: sim_runner가 기동 시 generalized mass matrix 대각(관절별 유효 관성)을 계산해
+  1Hz로 state 포트에 흘린다(`R2BI` 패킷). Computed Gains 그룹이 이를 사용.
+  실측(2026-08-06, default 자세): hip 0.164 / thigh 0.134 / calf 0.030 / foot **0.002** kg·m².
+  ⚠ 단일 f_n이면 게인이 I_eff에 비례하므로 foot처럼 관성이 작은 관절은 매우 낮은 kp가 나온다
+  (§1 실측 kp 20은 f_n≈16Hz에 해당) — 계산값은 **시작점**이고 관절별 미세조정은 Gains 그룹으로.
 
 ---
 
