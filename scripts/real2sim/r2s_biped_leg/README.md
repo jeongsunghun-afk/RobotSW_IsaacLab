@@ -196,6 +196,15 @@ bash scripts/real2sim/r2s_biped_leg/run_gui_controller.sh
 - command 학습 범위: x_vel∈[-0.5, 2.0], yaw∈[-0.5, 0.5], y_vel≡0(미학습). **yaw 추종은 약함**(학습 track_ang_vel 0.145).
 - **real 주의**: real은 자기 IMU로 폐루프를 돌지 않으면(미러 target만 받으면) 자유베이스 2족이 넘어진다.
 
+### 9.1 Real 엔드포인트 — `real_runner/` (라즈베리파이 브리지)
+
+REAL_ACT(9887)/REAL_STATE(9888) seam을 받아주는 파이 쪽 브리지가 `real_runner/`에 있다.
+실기 스택(RobotEmbedded ─EtherCAT→ MCU ─CAN-FD→ MD80×8)과는 `RobotTestGait` 예제와 동일하게
+Shared Memory(`libRobotSharedMem`)로 교환하며, 단위(deg↔rad)·관절 순서(articulation↔leg-major)·
+게인 상한(kd≤5) 변환을 담당한다. **STATE 회신을 20ms로 페이싱해 policy를 50Hz로 묶는 것이 핵심**
+(sim과 달리 실기는 lockstep이 아니므로). 빌드·실행·캘리브레이션 체크리스트는
+`real_runner/README.md` 참조. ⚠ sign/zero 캘리브레이션 전 TRACK 금지.
+
 ## 10. 파일
 
 | 파일 | 역할 |
@@ -208,3 +217,5 @@ bash scripts/real2sim/r2s_biped_leg/run_gui_controller.sh
 | `r2s_udp.py` | UDP 패킷 스키마(공유, stdlib만) — 재구현 금지 |
 | `POLICY_MODE_SPEC.md` | policy 모드 아키텍처/계약/obs parity 명세 |
 | `run_*.sh` / `r2s_commands.sh` | 원커맨드 런처 + 별칭 |
+| `real_runner/` | **실기(파이) UDP↔SharedMem 브리지** (§9.1, C++/CMake, 파이에서 빌드) |
+| `RobotTestGait/` | 실기 모터 제어 예제 원본(RGA 제공) + SOEM/통신 설명 PDF — 브리지의 참조 사양 |
