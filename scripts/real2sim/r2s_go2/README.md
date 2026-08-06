@@ -102,6 +102,7 @@ GUI가 뜨면 로봇은 **엎드린(prone) 자세**로 시작한다(실기 GO2�
 | **Sine Sweep** | 선택 관절에 사인 궤적 주입(Start/Stop) |
 | **Policy** | `go2_imitation_tracking` 보행 정책 구동(아래 §11) |
 | **Recovery** | `go2_recovery_flip_vel` 기립 정책 구동 — **넘어진 상태 전용**(아래 §12) |
+| **Pedipulation** | `go2_pedipulation` 정책 구동 — 세 다리로 균형을 잡고 한 발을 목표로. **4족으로 선 상태 전용**(아래 §14) |
 | **Sim → Camera** | Isaac 뷰포트 카메라 `Follow robot` / `Free` 전환(아래 §13.4) |
 | **Sim → Plant** | 관절 물성 `set2`(학습 플랜트) / `set3`(재캡처, 미채택) / `Default`(nominal) 전환(아래 §13) |
 | **Monitor** | 실시간 plot 창 열기(아래 §5) |
@@ -825,3 +826,108 @@ GUI **Sim → Camera** 로 `Free` 를 고르면 추적만 멈추고 **카메라�
 
 `use_pace_params=False`(또는 GUI Plant 콤보에서 `Default — nominal`, 또는 `--plant default`)로
 두면 이전 nominal 거동으로 정확히 돌아간다(PACE 이전에 수집한 데이터를 재현할 때).
+
+---
+
+## 14. Pedipulation 모드 — 3족 균형 + 발 1개 조작
+
+`go2_pedipulation` 정책(`Go2-Pedipulation-v0`)을 GUI에서 구동한다. 세 다리로 균형을 잡고
+남은 한 다리의 발을 명령받은 위치로 옮겨 **유지**한다. 학습·게이트 근거는
+`reports/rsl_rl/go2_pedipulation/README.md`.
+
+### 14.1 준비 — 정책 export
+
+```bash
+./isaaclab.sh -p scripts/real2sim/export_pedipulation_go2.py \
+    --run_dir logs/rsl_rl/go2_pedipulation/2026-08-03_15-53-29_hipscale_scratch_s10x \
+    --checkpoint model_19999.pt --device cpu
+# → <run_dir>/exported/pedipulation_policy.pt
+```
+
+기본 경로가 위 채택본이라 다른 체크포인트를 쓸 때만 `R2S_PEDIPULATION_POLICY`로 덮어쓴다.
+
+### 14.2 사용
+
+sim 3프로세스를 §3 순서대로 띄운다. ⚠ **sim 전용 브릿지는 `/lowstate`로 발행하는데 GUI의
+Sim 소스 기본값은 `/sim/lowstate`다**(그건 §6 동시 구동에서 remap 하는 이름). 맞춰주지 않으면
+Source=Sim이 상태를 못 받아 `valid`가 서지 않고 **에러 없이 fallback-hold**에 머문다 —
+로봇이 가만히 있는 것으로만 보여 원인을 찾기 어렵다.
+
+```bash
+# 터미널 1 — Isaac (학습 플랜트로)
+./isaaclab.sh -p scripts/real2sim/sim_runner_go2.py --num_envs 1 --plant set2
+
+# 터미널 2 — 브릿지
+bash scripts/real2sim/r2s_go2/run_sim_bridge.sh
+
+# 터미널 3 — GUI (sim 전용이면 상태 토픽을 맞춰준다)
+R2S_SIM_STATE_TOPIC=/lowstate bash scripts/real2sim/r2s_go2/run_gui_controller.sh
+```
+
+`Pedipulation` 그룹에서 **Source**(Sim/Real) · **Leg**(조작할 다리) · **dx/dy/dz**(nominal 발
+위치 대비 목표 offset [m])를 고르고 **Start**. 실행 중에도 Leg·offset을 바꾸면 즉시 반영된다
+(정책이 에피소드 중 명령 변화를 겪도록 학습됐다). **Stop**은 현재 목표 자세로 홀드한다.
+
+offset 스핀박스의 범위는 **학습 명령 박스 그대로**다(x ±0.20, y ±0.14, z 0~0.26 m). 이 밖은
+분포 밖이고 기구학적으로 도달 못 하는 목표라 UI가 애초에 막는다.
+
+### 14.3 ⚠ 4족으로 선 상태에서 시작할 것
+
+명령은 절대 좌표가 아니라 **nominal 발 위치 대비 offset**이고, 그 nominal을 **Start 시점의
+실제 자세에서 FK로 잡는다**(`PedipulationState.try_latch_nominal`). 그래서:
+
+- 발 깊이가 0.20~0.40 m 범위여야 latch 된다. 넘어져 있거나 다리를 든 상태면 latch 되지 않고
+  정책을 구동하지 않는다(fallback-hold 유지) — 잘못된 기준으로 시작하는 사고를 막는 게이트다.
+- Recovery처럼 즉시 engage 한다. Policy 모드처럼 `DEFAULT_POSE`로 먼저 보간하지 **않는** 이유가
+  이것이다 — 보간 도중에 nominal을 잡으면 엉뚱한 자세가 명령 기준이 된다.
+
+nominal은 상수가 아니다. env도 매 실행 측정해 latch 하며 그 값이 실행마다 1~3 cm 다르다
+(default 관절각의 FK 값과도 17~33 mm 어긋난다). 그래서 런타임도 상수를 박지 않고 측정한다.
+
+### 14.4 게인·플랜트
+
+kp/kd는 **기본값(25/0.5) 그대로**다 — 이 정책의 학습 액추에이터가 stiffness 25 / damping 0.5로
+`motions.DEFAULT_KP/KD`와 같다. Recovery처럼 따로 실을 이유가 없다.
+
+⚠ sim에서 검증할 때 **Plant를 `set2`(학습 플랜트)로 둘 것**. 이 정책은 `use_pace_params=True`로
+학습됐다(§13).
+
+### 14.5 앞의 두 정책과 다른 점
+
+| | Policy(tracking) | Recovery | **Pedipulation** |
+|---|---|---|---|
+| obs | 42 + history | 42 | **83** |
+| action | 12 | 12 | **28** (a_loc 12 + a_man 12 + 강성 4 미사용) |
+| 명령 | 속도(x, yaw) | 없음 | **조작 다리 + 발 목표 offset** |
+| 상태 유지 | history 링버퍼 | prev_actions | **prev_actions + 적분형 목표 + nominal latch** |
+
+**적분형 목표가 이 모드의 핵심 차이다.** 조작 다리는 절대 각도가 아니라
+`man_target += clamp(a_man × 0.25, ±0.15)`로 직전 목표에 누적된다. 그래서 런타임이 무상태
+함수일 수 없고, 모드를 벗어난 tick마다 상태를 통째로 리셋한다(안 하면 재진입 첫 tick에 목표가
+튄다). hip 축소(×0.5)도 **지지 다리 슬롯에만** 걸린다 — 적분형에 같은 계수를 곱하면 "범위 축소"가
+아니라 "이동 속도 감쇠"가 되고, 조작 다리의 abduction 권한은 이 task의 목적 자체다.
+
+obs 83 / action 28이라 다른 두 정책과 **shape만으로 구분**된다(`PedipulationModel._warmup`).
+tracking과 recovery는 obs가 42로 같아 인자 개수로 갈라야 했던 것과 대비된다.
+
+### 14.6 검증 상태
+
+- 순기구학: 무작위 64 자세 × 4 다리에서 sim의 `_compute_foot_pos_b()`와 **최대 오차 0.0004 mm**.
+- 런타임 ↔ env 대조: DR을 끈 160 step에서 **obs 최대 5.6e-7 · 관절 목표 최대 1.9e-6 rad**
+  (float32 정밀도 수준). obs 배치·prev_actions 시점·적분 목표·hip 축소 범위까지 포함한 대조이며,
+  **네 다리를 모두 조작 다리로 돌려가며** 쟀다 — 한 다리만 쓰면 적분 경로와 hip 축소 회피가
+  나머지 세 슬롯에서 검증되지 않는다(그쪽은 쉬운 분기인 `loc_target`만 탄다).
+- jit export: 저장본과 결정론적 추론 경로가 **완전히 일치**(diff 0.0).
+- **sim 통합 구동 (2026-08-06)**: `sim_runner(--plant set2)` + 브릿지 + GUI 3프로세스를 실제로
+  띄워 GUI에서 조작했다. 아래는 **실측 `/lowstate`의 관절각을 FK로 되돌린** 조작 발 위치이므로
+  (그 FK가 위의 0.0004 mm짜리다) 명령을 되읊은 값이 아니라 실제 위치 판독이다.
+
+  | 조작 | 조작 발 위치 (base frame) |
+  |---|---|
+  | Start (FL, dz=0.15) | z **−0.287 → −0.125 m** (Δ +0.162) |
+  | dx 0.12 로 변경 | x **0.216 → 0.334 m** (nominal 0.207 + 0.12 = 0.327) |
+  | Leg FL → RR 교체 | RR 발이 z **−0.096 m** 로 들림 |
+
+  영상: `videos/model_19999__r2s_gui_pedipulation__20260806-103100.mp4`,
+  로그: `videos/r2s_gui_pedipulation_demo.log`.
+- **실기 미검증** — 위는 전부 sim이다.

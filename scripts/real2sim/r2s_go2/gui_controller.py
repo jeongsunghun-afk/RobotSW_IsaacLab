@@ -24,8 +24,17 @@ Buttons:
       runs inside the publisher process, not the Qt UI process — see ``policy_runtime.py`` and
       ``_compute_target``'s ``_MODE_POLICY`` branch. Input source (Sim/Real ``/lowstate``) and
       x_vel/yaw_vel command are live-adjustable without breaking the control loop.
+    - Recovery: drive the exported go2_recovery_flip_vel fall-recovery policy (plain PPO,
+      obs(42) -> action(12)) to stand the robot back up after it has fallen. Unlike Policy,
+      Start engages **immediately from the current pose** — the robot is on the ground and
+      interpolating to DEFAULT_POSE first would be both unsafe and out of distribution (the
+      training env's settle phase holds the measured pose, and its length is uniform on
+      [0, 100] steps, so acting from tick 0 in a fallen pose is in-distribution). This mode
+      also publishes kd=1.0, not the usual 0.5 — see ``recovery_runtime.RECOVERY_KD``.
 
 Every command is published with kp=25, kd=0.5 (all joints), mode=0x01, dq=0, tau=0 (CONTRACT.md §6).
+The one exception is Recovery mode, which publishes kd=1.0 to match the gains its policy was
+trained with (``go2_recovery_env_cfg.py`` actuator ``damping=1.0``).
 
 Process architecture — /lowcmd publishing AND target generation (interpolation/sine) run in a
 **separate process** (``publisher_process_main``), NOT in the Qt UI process. The real GO2 firmware
@@ -51,6 +60,7 @@ from __future__ import annotations
 import math
 import multiprocessing as mp
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -58,9 +68,11 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 import lowcmd_crc  # noqa: E402
 import motions  # noqa: E402
+import pedipulation_runtime  # noqa: E402
 import policy_runtime  # noqa: E402
 import r2s_udp  # noqa: E402
 import rclpy  # noqa: E402
+import recovery_runtime  # noqa: E402
 from PyQt5.QtCore import Qt, QTimer  # noqa: E402
 from PyQt5.QtGui import QFont  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
@@ -100,6 +112,14 @@ STARTUP_ACQUIRE_TIMEOUT_S: float = 2.0  # 첫 /lowstate 대기 상한 [s]. 넘�
 STARTUP_STATE_TOPIC: str = os.environ.get("R2S_STARTUP_STATE_TOPIC", "/lowstate")
 CMD_TOPIC: str = os.environ.get("R2S_CMD_TOPIC", "/lowcmd")  # publisher 프로세스가 발행하는 명령 토픽
 
+# Sim 제어 채널 (카메라 / 관절 물성) — sim_runner_go2.py 로 **직접** UDP. sim_bridge 를 거치지
+# 않는다(ROS 명령 경로는 50Hz 실시간 스트림이고 이건 버튼 one-shot). 기본은 같은 머신.
+SIM_CTRL_HOST: str = os.environ.get("R2S_SIM_HOST", "127.0.0.1")
+SIM_CTRL_PORT: int = int(os.environ.get("R2S_CTRL_PORT", r2s_udp.CTRL_PORT))
+# Plant 콤보 항목 순서 → ctrl 패킷 `plant` 값. 콤보 `addItems` 순서와 반드시 일치시킬 것.
+# 학습 플랜트(set2)를 첫 항목에 두어 GUI 기본 선택이 정책과 맞게 한다.
+PLANT_COMBO_ORDER: tuple[int, ...] = (r2s_udp.PLANT_SET2, r2s_udp.PLANT_SET3, r2s_udp.PLANT_NOMINAL)
+
 # Policy 모드 상태 소스 — 실로봇은 항상 고정 "/lowstate"(remap 안 함, CONTRACT §3). sim은
 # monitor.py와 동일한 R2S_SIM_STATE_TOPIC 관례를 재사용(run_gui_controller.sh가 shared/sim-only
 # 모드에 맞춰 이미 export함 — sim-only일 땐 "/lowstate"로 겹쳐도 rclpy가 다중구독을 허용하므로
@@ -113,7 +133,35 @@ DEPLOYABLE_POLICY_PATH: str = os.environ.get(
     os.path.join(
         # scripts/real2sim/r2s_go2/gui_controller.py -> repo root (4 levels up from this file)
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-        "logs/rsl_rl/go2_imitation_tracking/2026-07-24_13-03-00/exported/deployable_policy.pt",
+        # obs 42 / priv_explicit 6 런. 구 런(2026-07-24_13-03-00)은 obs 45 / priv_explicit 3 이라
+        # `policy_runtime.POLICY_DIM`(=42)과 맞지 않아 로드 시 shape mismatch 로 죽는다.
+        # 다른 체크포인트를 쓰려면 `R2S_DEPLOYABLE_POLICY` 로 덮어쓰되, 그 런의 env.yaml
+        # `observation_space` 가 42 인지 먼저 확인할 것.
+        "logs/rsl_rl/go2_imitation_tracking/2026-07-30_10-35-28_obs42_novideo/exported/deployable_policy.pt",
+    ),
+)
+# Recovery 모드 정책 — go2_recovery_flip_vel 런의 export 산출물(`export_recovery_go2.py`).
+# 기본값은 success_rate 0.679(넘어진 env 기준 0.958)로 가장 좋은 런이다. 다른 체크포인트를 쓰려면
+# `R2S_RECOVERY_POLICY`로 덮어쓴다. ⚠ tracking 용 deployable_policy.pt 와 obs 가 똑같이 42-dim
+# 이지만 레이아웃이 달라 shape 로는 구분되지 않는다 — `recovery_runtime.RecoveryModel._warmup`이
+# 입력 인자 개수로 잘못된 파일을 걸러낸다.
+RECOVERY_POLICY_PATH: str = os.environ.get(
+    "R2S_RECOVERY_POLICY",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "logs/rsl_rl/go2_recovery_flip_vel/2026-07-14_09-54-05_floor03_ent005/exported/recovery_policy.pt",
+    ),
+)
+
+# Pedipulation 모드 정책 — go2_pedipulation 채택본의 export 산출물
+# (`export_pedipulation_go2.py`). 다른 체크포인트를 쓰려면 `R2S_PEDIPULATION_POLICY` 로 덮어쓴다.
+# 앞의 둘과 달리 obs 83 / action 28 이라 shape 만으로 구분된다
+# (`pedipulation_runtime.PedipulationModel._warmup`).
+PEDIPULATION_POLICY_PATH: str = os.environ.get(
+    "R2S_PEDIPULATION_POLICY",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "logs/rsl_rl/go2_pedipulation/2026-08-03_15-53-29_hipscale_scratch_s10x/exported/pedipulation_policy.pt",
     ),
 )
 
@@ -287,6 +335,8 @@ _MODE_HOLD = 0  # 고정 자세 유지 (BASE_Q)
 _MODE_SEQUENCE = 1  # 프레임 버퍼를 경과 시간으로 인덱싱 (보간/Stand/Sit/Step/StandUp)
 _MODE_SINE = 2  # BASE_Q + 선택 관절에 사인 주입 (경과 시간 기반)
 _MODE_POLICY = 3  # 실측 proprio + policy 추론으로 매 tick 목표 계산 (base/start_time 미사용)
+_MODE_RECOVERY = 4  # 실측 obs + fall-recovery 정책 추론으로 매 tick 목표 계산 (명령 없음)
+_MODE_PEDIPULATION = 5  # 실측 obs + pedipulation 정책 추론 (명령 = 조작 다리 + 발 목표 offset)
 
 _SM_MODE = 0
 _SM_KP = 1
@@ -318,7 +368,19 @@ _SM_POLICY_DQ_SIM = 94  # 94..105
 _SM_POLICY_GYRO_SIM = 106  # 106..108
 _SM_POLICY_QUAT_SIM = 109  # 109..112 (wxyz)
 _SM_POLICY_VALID_SIM = 113
-_SM_FRAMES = 114  # 114..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 12)
+# Recovery 모드 — 명령이 없어(목표=기립 고정) 슬라이더 슬롯도 없다. 실측 상태는 위 _SM_POLICY_*
+# 슬롯(가공 없는 /lowstate 원본이라 모드와 무관)을 그대로 재사용하고, 입력 소스 선택만 따로 둔다:
+# 한 슬롯을 공유하면 한쪽 콤보를 바꿀 때 다른 모드의 소스까지 끌려가기 때문이다.
+_SM_RECOVERY_INPUT_SOURCE = 114  # 0=sim, 1=real (_POLICY_SOURCE_* 값 재사용)
+# Pedipulation 모드 — 실측 상태는 위 _SM_POLICY_* 슬롯을 재사용하고(가공 없는 /lowstate 원본),
+# 명령만 따로 둔다. 명령은 "어느 다리를 조작할지" + "nominal 발 위치 대비 offset[m]" 이다.
+# 적분형 목표·nominal latch 는 publisher 프로세스 로컬 상태다(§3, `_PedipulationContext`).
+_SM_PEDI_INPUT_SOURCE = 115  # 0=sim, 1=real
+_SM_PEDI_MANIP_LEG = 116  # 0=FL, 1=FR, 2=RL, 3=RR (pedipulation_runtime.LEG_NAMES)
+_SM_PEDI_OFF_X = 117  # nominal 대비 목표 offset [m]
+_SM_PEDI_OFF_Y = 118
+_SM_PEDI_OFF_Z = 119
+_SM_FRAMES = 120  # 120..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 12)
 MAX_FRAMES = 512  # 512/50 = 10.24s 최대 시퀀스
 _SM_LEN = _SM_FRAMES + MAX_FRAMES * _NUM
 
@@ -370,13 +432,63 @@ class _PolicyContext:
             node.get_logger().warning(f"[policy] 모델 로드 실패({exc}) — Policy 모드는 fallback-hold로 동작")
 
 
-def _compute_target(shared, now: float, policy_ctx: _PolicyContext) -> tuple[list[float], float, float] | None:
+class _RecoveryContext:
+    """publisher 프로세스 로컬 recovery 상태(모델 + previous_actions 버퍼). `_PolicyContext`와 동일 원칙."""
+
+    def __init__(self) -> None:
+        self.model: recovery_runtime.RecoveryModel | None = None
+        self.prev_action = recovery_runtime.PrevActionBuffer()
+        self._load_attempted = False
+
+    def ensure_loaded(self, node) -> None:
+        """모델을 1회만 로드 시도(실패해도 재시도 안 함 — Recovery 모드는 fallback-hold로 동작)."""
+        if self._load_attempted:
+            return
+        self._load_attempted = True
+        try:
+            self.model = recovery_runtime.RecoveryModel(RECOVERY_POLICY_PATH)
+            node.get_logger().info(f"[recovery] 모델 로드 완료: {RECOVERY_POLICY_PATH}")
+        except Exception as exc:  # noqa: BLE001 — 로드 실패는 fallback-hold로 안전하게 흡수
+            node.get_logger().warning(f"[recovery] 모델 로드 실패({exc}) — Recovery 모드는 fallback-hold로 동작")
+
+
+class _PedipulationContext:
+    """publisher 프로세스 로컬 pedipulation 상태. `_PolicyContext`·`_RecoveryContext`와 같은 원칙이되
+    들고 가는 상태가 더 많다 — 조작 다리 목표가 **적분형**이고 nominal 발 위치를 latch 하기 때문이다.
+    """
+
+    def __init__(self) -> None:
+        self.model: pedipulation_runtime.PedipulationModel | None = None
+        self.state = pedipulation_runtime.PedipulationState()
+        self._load_attempted = False
+
+    def ensure_loaded(self, node) -> None:
+        """모델을 1회만 로드 시도(실패해도 재시도 안 함 — Pedipulation 모드는 fallback-hold로 동작)."""
+        if self._load_attempted:
+            return
+        self._load_attempted = True
+        try:
+            self.model = pedipulation_runtime.PedipulationModel(PEDIPULATION_POLICY_PATH)
+            node.get_logger().info(f"[pedipulation] 모델 로드 완료: {PEDIPULATION_POLICY_PATH}")
+        except Exception as exc:  # noqa: BLE001 — 로드 실패는 fallback-hold로 안전하게 흡수
+            node.get_logger().warning(f"[pedipulation] 모델 로드 실패({exc}) — Pedipulation 모드는 fallback-hold")
+
+
+def _compute_target(
+    shared,
+    now: float,
+    policy_ctx: _PolicyContext,
+    recovery_ctx: _RecoveryContext,
+    pedi_ctx: _PedipulationContext,
+) -> tuple[list[float], float, float] | None:
     """공유 메모리의 모션 스펙 + 경과 시간으로 현재 목표 자세를 계산한다 (publisher 프로세스에서 호출).
 
     Returns:
         ``(pose, kp, kd)`` 또는 명령이 없으면(``CMD_VALID=0``) None.
     """
     policy_inputs = None  # _MODE_POLICY일 때만 채움 — lock 밖에서 추론하기 위해 값만 빼온다
+    recovery_inputs = None  # _MODE_RECOVERY일 때만 채움 (동일 이유)
+    pedi_inputs = None  # _MODE_PEDIPULATION일 때만 채움 (동일 이유)
     with shared.get_lock():
         if shared[_SM_CMD_VALID] < 0.5:
             return None
@@ -402,6 +514,28 @@ def _compute_target(shared, now: float, policy_ctx: _PolicyContext) -> tuple[lis
         elif mode == _MODE_POLICY:
             pose = base  # 기본값(실측 미수신/모델 미로드 시 fallback) — 아래서 조건부로 덮어씀
             source = int(shared[_SM_POLICY_INPUT_SOURCE])
+            # 자이로 오프셋은 읽지 않는다 — proprio가 42-dim이 되면서 각속도가 정책 입력에서
+            # 빠졌다(priv_explicit로 이동, estimator가 추정). 공유메모리 레이아웃 자체는
+            # 유지되므로 _SM_POLICY_GYRO_* 상수는 그대로 둔다.
+            if source == _POLICY_SOURCE_REAL:
+                valid = shared[_SM_POLICY_VALID_REAL] >= 0.5
+                q_off, dq_off, quat_off = (_SM_POLICY_Q_REAL, _SM_POLICY_DQ_REAL, _SM_POLICY_QUAT_REAL)
+            else:
+                valid = shared[_SM_POLICY_VALID_SIM] >= 0.5
+                q_off, dq_off, quat_off = (_SM_POLICY_Q_SIM, _SM_POLICY_DQ_SIM, _SM_POLICY_QUAT_SIM)
+            if valid and policy_ctx.model is not None:
+                policy_inputs = (
+                    [shared[q_off + i] for i in range(_NUM)],  # q_dds
+                    [shared[dq_off + i] for i in range(_NUM)],  # dq_dds
+                    tuple(shared[quat_off + i] for i in range(4)),  # quat_wxyz
+                    shared[_SM_POLICY_XVEL],
+                    shared[_SM_POLICY_YAWVEL],
+                )
+        elif mode == _MODE_RECOVERY:
+            pose = base  # 기본값(실측 미수신/모델 미로드 시 fallback) — 아래서 조건부로 덮어씀
+            source = int(shared[_SM_RECOVERY_INPUT_SOURCE])
+            # policy 모드와 달리 자이로를 읽는다 — recovery obs 는 각속도를 입력으로 쓴다
+            # (estimator 가 없어 자세 변화율을 직접 봐야 한다).
             if source == _POLICY_SOURCE_REAL:
                 valid = shared[_SM_POLICY_VALID_REAL] >= 0.5
                 q_off, dq_off, gyro_off, quat_off = (
@@ -418,14 +552,31 @@ def _compute_target(shared, now: float, policy_ctx: _PolicyContext) -> tuple[lis
                     _SM_POLICY_GYRO_SIM,
                     _SM_POLICY_QUAT_SIM,
                 )
-            if valid and policy_ctx.model is not None:
-                policy_inputs = (
+            if valid and recovery_ctx.model is not None:
+                recovery_inputs = (
                     [shared[q_off + i] for i in range(_NUM)],  # q_dds
                     [shared[dq_off + i] for i in range(_NUM)],  # dq_dds
-                    tuple(shared[gyro_off + i] for i in range(3)),  # gyro_xyz
+                    tuple(shared[gyro_off + i] for i in range(3)),  # ang_vel_b
                     tuple(shared[quat_off + i] for i in range(4)),  # quat_wxyz
-                    shared[_SM_POLICY_XVEL],
-                    shared[_SM_POLICY_YAWVEL],
+                )
+        elif mode == _MODE_PEDIPULATION:
+            pose = base  # 기본값(실측 미수신/모델 미로드/nominal 미확보 시 fallback)
+            source = int(shared[_SM_PEDI_INPUT_SOURCE])
+            # recovery 와 달리 자이로는 안 읽는다 — pedipulation obs 는 각속도를 쓰지 않는다
+            # (base 각속도는 critic 전용 priv 로 빠져 있다, cfg D8).
+            if source == _POLICY_SOURCE_REAL:
+                valid = shared[_SM_POLICY_VALID_REAL] >= 0.5
+                q_off, dq_off, quat_off = _SM_POLICY_Q_REAL, _SM_POLICY_DQ_REAL, _SM_POLICY_QUAT_REAL
+            else:
+                valid = shared[_SM_POLICY_VALID_SIM] >= 0.5
+                q_off, dq_off, quat_off = _SM_POLICY_Q_SIM, _SM_POLICY_DQ_SIM, _SM_POLICY_QUAT_SIM
+            if valid and pedi_ctx.model is not None:
+                pedi_inputs = (
+                    [shared[q_off + i] for i in range(_NUM)],  # q_dds
+                    [shared[dq_off + i] for i in range(_NUM)],  # dq_dds
+                    tuple(shared[quat_off + i] for i in range(4)),  # quat_wxyz
+                    int(shared[_SM_PEDI_MANIP_LEG]),
+                    (shared[_SM_PEDI_OFF_X], shared[_SM_PEDI_OFF_Y], shared[_SM_PEDI_OFF_Z]),
                 )
         else:  # _MODE_HOLD
             pose = base
@@ -436,14 +587,58 @@ def _compute_target(shared, now: float, policy_ctx: _PolicyContext) -> tuple[lis
     if policy_inputs is None:
         policy_ctx.history.clear()
     else:
-        q_dds, dq_dds, gyro_xyz, quat_wxyz, xvel, yaw_vel = policy_inputs
+        q_dds, dq_dds, quat_wxyz, xvel, yaw_vel = policy_inputs
         q_art = policy_runtime.dds_to_art(q_dds)
         dq_art = policy_runtime.dds_to_art(dq_dds)
-        proprio = policy_runtime.build_proprio(gyro_xyz, quat_wxyz, (xvel, 0.0), yaw_vel, q_art, dq_art)
+        proprio = policy_runtime.build_proprio(quat_wxyz, (xvel, 0.0), yaw_vel, q_art, dq_art)
         history = policy_ctx.history.push(proprio)
         action = policy_ctx.model.infer(proprio, history)
         target_art = policy_runtime.action_to_target_art(action)
         pose = policy_runtime.art_to_dds(target_art)
+
+    # recovery 도 같은 원칙: 추론은 lock 밖에서. previous_actions 버퍼는 policy 의 history 와
+    # 같은 역할이라 비활성 tick 에 무효화해 다음 진입 때 학습 reset(0)과 같은 상태로 시작한다.
+    if recovery_inputs is None:
+        recovery_ctx.prev_action.clear()
+    else:
+        q_dds, dq_dds, ang_vel_b, quat_wxyz = recovery_inputs
+        obs = recovery_runtime.build_obs(
+            ang_vel_b,
+            quat_wxyz,
+            recovery_runtime.dds_to_art(q_dds),
+            recovery_runtime.dds_to_art(dq_dds),
+            recovery_ctx.prev_action.get(),
+        )
+        clipped = recovery_runtime.clip_action(recovery_ctx.model.infer(obs))
+        recovery_ctx.prev_action.commit(clipped)  # 다음 tick obs 의 previous_actions
+        pose = recovery_runtime.art_to_dds(recovery_runtime.action_to_target_art(clipped))
+
+    # pedipulation 도 같은 원칙: 추론은 lock 밖에서.
+    #
+    # ⚠ 리셋 조건이 policy/recovery 와 다르다. 저 둘은 `*_inputs is None` 이면 무조건 비우지만,
+    #   여기서는 **모드를 벗어났을 때만** 비운다. `pedi_inputs` 는 모드가 맞는데도 None 이 될 수
+    #   있기 때문이다(/lowstate 한 프레임 유실, 모델 미로드). 그때 `reset()` 을 부르면
+    #   `nominal_foot_pos_b` 까지 날아가고, 다음 정상 프레임에서 **다리를 든 3족 자세**를 기준으로
+    #   다시 latch 해버린다 — 깊이 게이트(0.20~0.40 m)는 지지 발 3개로 통과하므로 못 막는다.
+    #   결과는 명령 기준계가 런 도중 조용히 어긋나는 것이다. nominal 은 학습 상태가 아니라
+    #   **latch 된 캘리브레이션**이라 recovery 의 `prev_action.clear()` 와 성격이 다르다.
+    if mode != _MODE_PEDIPULATION:
+        pedi_ctx.state.reset()
+    elif pedi_inputs is not None:
+        q_dds, dq_dds, quat_wxyz, manip_leg, offset = pedi_inputs
+        q_art = pedipulation_runtime.dds_to_art(q_dds)
+        dq_art = pedipulation_runtime.dds_to_art(dq_dds)
+        # nominal 은 4족으로 선 자세에서만 잡힌다(발 깊이 0.20~0.40 m). 못 잡으면 명령의 기준이
+        # 없으므로 정책을 구동하지 않고 fallback-hold 를 유지한다 — 넘어진 채 시작하는 사고 방지.
+        nominal = pedi_ctx.state.nominal_foot_pos_b if pedi_ctx.state.try_latch_nominal(q_art) else None
+        if nominal is not None:
+            leg_role = pedipulation_runtime.leg_role_from_manip(manip_leg)
+            target_b = pedipulation_runtime.foot_target_b(nominal, manip_leg, offset)
+            obs = pedipulation_runtime.build_obs(quat_wxyz, q_art, dq_art, leg_role, target_b, pedi_ctx.state)
+            clipped = pedipulation_runtime.clip_action(pedi_ctx.model.infer(obs))
+            target_art = pedipulation_runtime.action_to_target_art(clipped, leg_role, pedi_ctx.state)
+            pedi_ctx.state.prev_actions = clipped  # 다음 tick obs 의 prev_actions (clip 후·scale 전)
+            pose = pedipulation_runtime.art_to_dds(target_art)
 
     return pose, kp, kd
 
@@ -505,6 +700,10 @@ def publisher_process_main(shared, stop_flag) -> None:
     # PolicyModel 내부에서 fork 이후(=지금, 이 프로세스 안)에만 import 된다(CUDA-after-fork 회피).
     policy_ctx = _PolicyContext()
     policy_ctx.ensure_loaded(node)
+    recovery_ctx = _RecoveryContext()
+    recovery_ctx.ensure_loaded(node)
+    pedi_ctx = _PedipulationContext()
+    pedi_ctx.ensure_loaded(node)
 
     period = PUBLISH_PERIOD_S
     next_t = time.monotonic()
@@ -512,7 +711,7 @@ def publisher_process_main(shared, stop_flag) -> None:
         while not stop_flag.value and rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.0)
             now = time.monotonic()
-            result = _compute_target(shared, now, policy_ctx)
+            result = _compute_target(shared, now, policy_ctx, recovery_ctx, pedi_ctx)
             if result is not None:  # 시작 자세 획득 전(CMD_VALID=0)엔 발행 보류
                 pose, kp, kd = result
                 pub.publish(_build_lowcmd(pose, kp, kd))
@@ -560,6 +759,17 @@ class MainWindow(QMainWindow):
         self._policy_active: bool = False
         self._policy_engage_timer: QTimer | None = None
 
+        # Recovery 모드 상태 — Policy와 달리 engage 타이머가 없다(즉시 engage, `_on_recovery_start_clicked`).
+        self._recovery_active: bool = False
+        # Pedipulation 모드 상태 — recovery 와 같이 즉시 engage 한다. 다만 "4족으로 서 있을 때"가
+        # 전제라 publisher 쪽에서 nominal latch 게이트(발 깊이 0.20~0.40 m)가 한 번 더 막는다.
+        self._pedi_active: bool = False
+
+        # Sim 제어 채널 (카메라/플랜트). publisher 프로세스를 거치지 않고 UI 가 직접 UDP 로 보낸다 —
+        # 버튼을 누를 때만 나가는 one-shot 이라 50Hz heartbeat 와 경합하지 않는다(tuner_gui 와 같은 방식).
+        self._ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._ctrl_seq: int = 0
+
         # Monitor 는 **별도 프로세스**로 spawn 한다 (렌더를 gui heartbeat 에서 격리; CONTRACT §11).
         # None=미실행. subprocess.Popen 핸들.
         self._monitor_proc: subprocess.Popen | None = None
@@ -576,6 +786,20 @@ class MainWindow(QMainWindow):
         self._policy_xvel_spin.valueChanged.connect(self._on_policy_param_changed)
         self._policy_yaw_spin.valueChanged.connect(self._on_policy_param_changed)
         self._policy_source_combo.currentIndexChanged.connect(self._on_policy_param_changed)
+
+        # recovery 는 조정할 명령이 없어 소스 콤보만 라이브 반영한다(policy 의 cmd 갱신과 동일 패턴).
+        self._recovery_source_combo.currentIndexChanged.connect(self._on_recovery_param_changed)
+
+        # pedipulation 은 실행 중에도 조작 다리·목표 offset 을 바꿀 수 있다(정책이 명령 변화를
+        # 겪도록 학습됐다 — 에피소드 중 재샘플). policy 의 cmd 갱신과 같은 라이브 반영 패턴.
+        self._pedi_source_combo.currentIndexChanged.connect(self._on_pedi_param_changed)
+        self._pedi_leg_combo.currentIndexChanged.connect(self._on_pedi_param_changed)
+        for _spin in self._pedi_off_spins:
+            _spin.valueChanged.connect(self._on_pedi_param_changed)
+
+        # Sim 설정은 값이 바뀔 때만 sim_runner 로 one-shot 전송한다(50Hz 스트림과 무관).
+        self._sim_camera_combo.currentIndexChanged.connect(self._on_sim_ctrl_changed)
+        self._sim_plant_combo.currentIndexChanged.connect(self._on_sim_ctrl_changed)
 
         # /lowcmd 발행 + 목표 생성(보간/사인)은 별도 publisher 프로세스가 담당한다(이 UI 프로세스엔
         # 발행/모션 타이머·rclpy spin 없음) — UI 조작이 heartbeat·목표 갱신을 굶기지 못하게 하는 핵심.
@@ -717,6 +941,112 @@ class MainWindow(QMainWindow):
         policy_layout.addStretch(1)
         layout.addWidget(policy_group)
 
+        # -- Recovery (넘어진 상태에서 기립하는 fall-recovery 정책) --
+        recovery_group = QGroupBox("Recovery (fall → stand)")
+        recovery_layout = QHBoxLayout(recovery_group)
+        recovery_layout.setSpacing(10)
+        # 명령 위젯 없음 — 이 정책은 목표가 "default 자세로 일어서라" 하나로 고정이다.
+        recovery_layout.addWidget(QLabel("Source:"))
+        self._recovery_source_combo = QComboBox()
+        self._recovery_source_combo.addItems(["Sim", "Real"])  # index 0=Sim, 1=Real (_POLICY_SOURCE_*)
+        recovery_layout.addWidget(self._recovery_source_combo)
+        self._recovery_start_btn = QPushButton("Start")
+        self._recovery_start_btn.setObjectName("primaryButton")
+        self._recovery_start_btn.clicked.connect(self._on_recovery_start_clicked)
+        recovery_layout.addWidget(self._recovery_start_btn)
+        self._recovery_stop_btn = QPushButton("Stop")
+        self._recovery_stop_btn.setObjectName("dangerButton")
+        self._recovery_stop_btn.clicked.connect(self._on_recovery_stop_clicked)
+        self._recovery_stop_btn.setEnabled(False)
+        recovery_layout.addWidget(self._recovery_stop_btn)
+        recovery_hint = QLabel("넘어진 상태 전용 (kd=1.0). 서 있을 때 누르지 말 것")
+        recovery_hint.setObjectName("subtitleLabel")
+        recovery_layout.addWidget(recovery_hint)
+        recovery_layout.addStretch(1)
+        layout.addWidget(recovery_group)
+
+        # -- Pedipulation (다리 하나를 조작기로: 세 다리로 균형, 한 발을 목표 위치로) --
+        pedi_group = QGroupBox("Pedipulation (3족 균형 + 발 1개 조작)")
+        pedi_layout = QHBoxLayout(pedi_group)
+        pedi_layout.setSpacing(10)
+
+        pedi_layout.addWidget(QLabel("Source:"))
+        self._pedi_source_combo = QComboBox()
+        self._pedi_source_combo.addItems(["Sim", "Real"])  # index 0=Sim, 1=Real (_POLICY_SOURCE_*)
+        pedi_layout.addWidget(self._pedi_source_combo)
+
+        pedi_layout.addWidget(QLabel("Leg:"))
+        self._pedi_leg_combo = QComboBox()
+        self._pedi_leg_combo.addItems(pedipulation_runtime.LEG_NAMES)  # FL, FR, RL, RR
+        pedi_layout.addWidget(self._pedi_leg_combo)
+
+        # 목표 offset — 범위는 학습 명령 박스 그대로다. 넘어가면 분포 밖이라 스핀박스가 막는다.
+        self._pedi_off_spins: list[QDoubleSpinBox] = []
+        for label, (lo, hi) in zip(
+            ("dx", "dy", "dz"),
+            (pedipulation_runtime.CMD_BOX_X, pedipulation_runtime.CMD_BOX_Y, pedipulation_runtime.CMD_BOX_Z),
+        ):
+            pedi_layout.addWidget(QLabel(f"{label}:"))
+            spin = QDoubleSpinBox()
+            spin.setRange(lo, hi)
+            spin.setSingleStep(0.01)
+            spin.setDecimals(3)
+            spin.setValue(0.0)
+            spin.setSuffix(" m")
+            pedi_layout.addWidget(spin)
+            self._pedi_off_spins.append(spin)
+
+        self._pedi_start_btn = QPushButton("Start")
+        self._pedi_start_btn.setObjectName("primaryButton")
+        self._pedi_start_btn.clicked.connect(self._on_pedi_start_clicked)
+        pedi_layout.addWidget(self._pedi_start_btn)
+        self._pedi_stop_btn = QPushButton("Stop")
+        self._pedi_stop_btn.setObjectName("dangerButton")
+        self._pedi_stop_btn.clicked.connect(self._on_pedi_stop_clicked)
+        self._pedi_stop_btn.setEnabled(False)
+        pedi_layout.addWidget(self._pedi_stop_btn)
+
+        pedi_hint = QLabel("4족으로 선 상태에서 누를 것 (nominal 자세를 그때 잡는다)")
+        pedi_hint.setObjectName("subtitleLabel")
+        pedi_layout.addWidget(pedi_hint)
+        pedi_layout.addStretch(1)
+        layout.addWidget(pedi_group)
+
+        # -- Sim (Isaac 쪽 설정 — UDP 제어 채널로 sim_runner 에 직접 보낸다) --
+        sim_group = QGroupBox("Sim")
+        sim_layout = QHBoxLayout(sim_group)
+        sim_layout.setSpacing(10)
+        sim_layout.addWidget(QLabel("Camera:"))
+        self._sim_camera_combo = QComboBox()
+        self._sim_camera_combo.addItems(["Follow robot", "Free"])  # index 0=Follow, 1=Free
+        self._sim_camera_combo.setToolTip("Follow = 카메라가 로봇 base 를 따라감 / Free = Isaac 뷰포트 자유 조작")
+        sim_layout.addWidget(self._sim_camera_combo)
+        sim_layout.addWidget(QLabel("Plant:"))
+        self._sim_plant_combo = QComboBox()
+        # 콤보 순서 = PLANT_COMBO_ORDER 인덱스. 첫 항목이 기본 선택이므로 학습 플랜트인 set2 가 먼저다.
+        self._sim_plant_combo.addItems(
+            [
+                "set2 — PACE 라이브 (학습 플랜트)",
+                "set3 — 2026-08-04 재캡처 (미채택)",
+                "Default — nominal (마찰 0)",
+            ]
+        )
+        self._sim_plant_combo.setToolTip(
+            "실기 GO2 와 sim 의 추종 정도를 눈으로 비교하기 위한 관절 물성 프리셋.\n\n"
+            "set2  armature 0.001~0.016 / viscous ~0 / coulomb 0.15~0.67  ← 현재 정책이 학습된 플랜트\n"
+            "set3  armature 0.005~0.021 / viscous 0.13~0.18 / coulomb 0.10~0.58\n"
+            "        신규 5 Hz 캡처 적합. coulomb·calf armature 는 독립 검사 통과, viscous 는 기각.\n"
+            "Default  armature 0.01 / 마찰 0 — UNITREE_GO2_CFG 기본값\n\n"
+            "⚠ Policy(§11) 정책은 set2 플랜트에서 학습됐다 — Default 로 두면 걷지 못한다.\n"
+            "⚠ 프리셋을 섞지 말 것. 세 파라미터는 결합 식별이라 부분 조합은 근거가 없다."
+        )
+        sim_layout.addWidget(self._sim_plant_combo)
+        sim_hint = QLabel("sim_runner 로 직접 전송 (sim 미기동이면 무시됨)")
+        sim_hint.setObjectName("subtitleLabel")
+        sim_layout.addWidget(sim_hint)
+        sim_layout.addStretch(1)
+        layout.addWidget(sim_group)
+
         layout.addStretch(1)
 
         # -- Status bar --
@@ -744,17 +1074,25 @@ class MainWindow(QMainWindow):
                 return list(self._current_pose)
             return [self._shared[_SM_CURRENT_Q + i] for i in range(_NUM)]
 
-    def _write_hold(self, pose: list[float]) -> None:
-        """고정 자세 유지 명령."""
+    def _write_hold(self, pose: list[float], kd: float = motions.DEFAULT_KD) -> None:
+        """고정 자세 유지 명령.
+
+        Args:
+            pose: 유지할 관절각(DDS 순서).
+            kd: 발행할 damping 게인. Recovery Stop 은 :data:`recovery_runtime.RECOVERY_KD`(1.0)를
+                넘긴다 — 방금 기립을 마친 로봇의 kd 를 그 순간 절반으로 떨어뜨리지 않기 위해서다.
+        """
         self._sine_active = False
         self._policy_active = False
+        self._recovery_active = False
+        self._pedi_active = False
         self._cancel_policy_engage()  # 대기 중인 engage 타이머가 나중에 엉뚱하게 발화하는 것 방지(안전)
         self._current_pose = list(pose)
         self._latest_pose = list(pose)
         with self._shared.get_lock():
             self._shared[_SM_MODE] = _MODE_HOLD
             self._shared[_SM_KP] = motions.DEFAULT_KP
-            self._shared[_SM_KD] = motions.DEFAULT_KD
+            self._shared[_SM_KD] = kd
             for i in range(_NUM):
                 self._shared[_SM_BASE_Q + i] = float(pose[i])
             self._shared[_SM_CMD_VALID] = 1.0
@@ -768,6 +1106,8 @@ class MainWindow(QMainWindow):
         """
         self._sine_active = False
         self._policy_active = False
+        self._recovery_active = False
+        self._pedi_active = False
         self._cancel_policy_engage()
         if len(seq) > MAX_FRAMES:
             seq = seq[:MAX_FRAMES]  # 상한 초과분은 잘라낸다(10s 이상 시퀀스는 없음)
@@ -790,6 +1130,8 @@ class MainWindow(QMainWindow):
         """선택 관절에 사인을 주입하는 모션을 publisher가 생성하도록 공유 메모리에 쓴다."""
         self._sine_active = True
         self._policy_active = False
+        self._recovery_active = False
+        self._pedi_active = False
         self._cancel_policy_engage()
         self._sine_base_pose = list(base)
         self._sine_start_time = time.monotonic()
@@ -822,6 +1164,8 @@ class MainWindow(QMainWindow):
         """
         self._sine_active = False
         self._policy_active = True
+        self._recovery_active = False
+        self._pedi_active = False
         with self._shared.get_lock():
             self._shared[_SM_MODE] = _MODE_POLICY
             self._shared[_SM_KP] = motions.DEFAULT_KP
@@ -844,6 +1188,104 @@ class MainWindow(QMainWindow):
             self._shared[_SM_POLICY_YAWVEL] = float(yaw_vel)
             self._shared[_SM_POLICY_INPUT_SOURCE] = float(source)
 
+    def _write_recovery(self, source: int) -> None:
+        """Recovery 모드 진입 명령. policy 모드와 같이 목표를 미리 굽지 않고 매 tick publisher 가
+        실측 obs + 정책 추론으로 계산한다. 차이는 둘:
+
+        - **kd 를 1.0 으로 발행한다** — 이 정책의 학습 액추에이터가 damping 1.0 이다
+          (`go2_recovery_env_cfg.py`). GUI 기본값 0.5 로 돌리면 학습과 다른 플랜트가 된다.
+        - `_SM_BASE_Q` fallback 을 **현재 발행 중인 목표**로 둔다. policy 모드는 방금 보간해 도착한
+          DEFAULT_POSE 를 넣지만, recovery 는 넘어진 상태에서 시작하므로 default 로 fallback 하면
+          모델 로드 실패·실측 미수신 시 오히려 바닥에서 다리를 뻗어버린다.
+        """
+        self._sine_active = False
+        self._policy_active = False
+        self._recovery_active = True
+        self._cancel_policy_engage()
+        hold = self._read_current_target()
+        with self._shared.get_lock():
+            self._shared[_SM_MODE] = _MODE_RECOVERY
+            self._shared[_SM_KP] = recovery_runtime.RECOVERY_KP
+            self._shared[_SM_KD] = recovery_runtime.RECOVERY_KD
+            for i in range(_NUM):
+                self._shared[_SM_BASE_Q + i] = float(hold[i])
+            self._shared[_SM_RECOVERY_INPUT_SOURCE] = float(source)
+            self._shared[_SM_CMD_VALID] = 1.0
+        self._current_pose = list(hold)
+        self._latest_pose = list(hold)
+
+    def _update_recovery_source(self, source: int) -> None:
+        """recovery 실행 중 입력 소스만 갱신 — `_update_policy_cmd`와 동일 패턴."""
+        if not self._recovery_active:
+            return
+        with self._shared.get_lock():
+            self._shared[_SM_RECOVERY_INPUT_SOURCE] = float(source)
+
+    def _stop_recovery(self) -> None:
+        """recovery 비활성화 + 버튼 상태 복원 — `_stop_policy`와 동일 역할."""
+        self._recovery_active = False
+        self._recovery_start_btn.setEnabled(True)
+        self._recovery_stop_btn.setEnabled(False)
+
+    def _write_pedipulation(self, source: int, manip_leg: int, offset: tuple[float, float, float]) -> None:
+        """Pedipulation 모드 진입 명령. 매 tick publisher 가 실측 obs + 정책 추론으로 목표를 만든다.
+
+        kp/kd 는 **기본값 그대로**다 — 이 정책의 학습 액추에이터가 stiffness 25 / damping 0.5 로
+        `motions.DEFAULT_KP/KD` 와 같다(recovery 처럼 따로 실을 이유가 없다).
+
+        `_SM_BASE_Q` fallback 은 recovery 와 같이 **현재 발행 중인 목표**로 둔다. 모델 로드 실패나
+        nominal 미확보(4족이 아닐 때) 시 default 로 끌고 가면 서 있던 자세가 튀기 때문이다.
+        """
+        self._sine_active = False
+        self._policy_active = False
+        self._recovery_active = False
+        self._pedi_active = True
+        self._cancel_policy_engage()
+        hold = self._read_current_target()
+        with self._shared.get_lock():
+            self._shared[_SM_MODE] = _MODE_PEDIPULATION
+            self._shared[_SM_KP] = motions.DEFAULT_KP
+            self._shared[_SM_KD] = motions.DEFAULT_KD
+            for i in range(_NUM):
+                self._shared[_SM_BASE_Q + i] = float(hold[i])
+            self._shared[_SM_PEDI_INPUT_SOURCE] = float(source)
+            self._shared[_SM_PEDI_MANIP_LEG] = float(manip_leg)
+            self._shared[_SM_PEDI_OFF_X] = float(offset[0])
+            self._shared[_SM_PEDI_OFF_Y] = float(offset[1])
+            self._shared[_SM_PEDI_OFF_Z] = float(offset[2])
+            self._shared[_SM_CMD_VALID] = 1.0
+        self._current_pose = list(hold)
+        self._latest_pose = list(hold)
+
+    def _update_pedi_cmd(self, source: int, manip_leg: int, offset: tuple[float, float, float]) -> None:
+        """pedipulation 실행 중 명령만 갱신 — `_update_policy_cmd`와 동일 패턴.
+
+        조작 다리를 바꾸면 정책이 그 자리에서 역할을 전환한다(S3 발 교체와 같은 조작). 적분형
+        목표는 publisher 가 이어서 들고 가므로 여기서 건드리지 않는다.
+        """
+        if not self._pedi_active:
+            return
+        with self._shared.get_lock():
+            self._shared[_SM_PEDI_INPUT_SOURCE] = float(source)
+            self._shared[_SM_PEDI_MANIP_LEG] = float(manip_leg)
+            self._shared[_SM_PEDI_OFF_X] = float(offset[0])
+            self._shared[_SM_PEDI_OFF_Y] = float(offset[1])
+            self._shared[_SM_PEDI_OFF_Z] = float(offset[2])
+
+    def _stop_pedi(self) -> None:
+        """pedipulation 비활성화 + 버튼 상태 복원 — `_stop_recovery`와 동일 역할."""
+        self._pedi_active = False
+        self._pedi_start_btn.setEnabled(True)
+        self._pedi_stop_btn.setEnabled(False)
+
+    def _pedi_offset(self) -> tuple[float, float, float]:
+        """스핀박스 3개에서 목표 offset 을 읽는다 [m]."""
+        return (
+            self._pedi_off_spins[0].value(),
+            self._pedi_off_spins[1].value(),
+            self._pedi_off_spins[2].value(),
+        )
+
     def _cancel_policy_engage(self) -> None:
         """대기 중인 policy engage 타이머(있으면) 취소. 다른 모션 명령이 boarding 도중 끼어들었는데
         타이머가 그대로 살아있으면 몇 초 뒤 엉뚱하게 policy로 전환돼버리므로 — sine의 저위험
@@ -862,7 +1304,14 @@ class MainWindow(QMainWindow):
     # -- Shared sequence playback --
 
     def _play_poses(self, seq: list[list[float]]) -> None:
-        """Play a pre-built pose-frame sequence via the publisher process (also stops sine)."""
+        """Play a pre-built pose-frame sequence via the publisher process (also stops sine).
+
+        Stand Up/Default/Sit/Step 이 전부 이 경로를 지난다. `_write_sequence` 는 `_recovery_active`
+        플래그만 끄므로 버튼 복원은 여기서 한다 — 안 하면 Recovery 중에 Stand Up 을 누른 사용자가
+        Start 가 비활성인 채로 남아 GUI 재시작 없이는 Recovery 를 다시 못 켠다.
+        """
+        self._stop_recovery()
+        self._stop_pedi()
         self._write_sequence(seq)
 
     def _play_sequence_to(self, goal_pose: list[float], duration_s: float) -> None:
@@ -912,6 +1361,8 @@ class MainWindow(QMainWindow):
         joint = self._sine_joint_combo.currentIndex()
         amp = self._sine_amp_spin.value()
         freq = self._sine_freq_spin.value()
+        self._stop_recovery()  # 다른 모드가 켜져 있었으면 버튼 상태까지 정리(_write_sine 은 플래그만 끈다)
+        self._stop_pedi()
         self._sine_start_btn.setEnabled(False)
         self._sine_stop_btn.setEnabled(True)
         self._status_label.setText(f"Sine sweep on {self._sine_joint_combo.currentText()}...")
@@ -948,7 +1399,7 @@ class MainWindow(QMainWindow):
         # 정책이 default 근처 자세를 가정하고 학습됐고, 실하드웨어에서 첫 액션이 임의 자세 기준으로
         # 튀는 것(낙상 위험)보다 안전이 우선이라 Sine/Step의 무보호 즉시-시작과는 다르게 간다.
         self._status_label.setText("Policy: default 자세로 이동 중 (engage 대기)...")
-        self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)
+        self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)  # _play_poses 가 recovery 도 정리
         # 위 호출(→ _write_sequence)이 정책 버튼 상태를 건드리지 않으므로 여기서 명시적으로 설정
         # (sine과 동일 관례 — write_* 는 *_active 플래그만, 버튼 복원/설정은 핸들러가 담당).
         self._policy_start_btn.setEnabled(False)
@@ -984,6 +1435,92 @@ class MainWindow(QMainWindow):
         self._stop_policy()
         self._write_hold(pose)
         self._status_label.setText("Policy stopped")
+
+    # -- Sim 설정 (카메라 / 관절 물성) — sim_runner 로 UDP one-shot --
+
+    def _on_sim_ctrl_changed(self) -> None:
+        """Camera/Plant 콤보가 바뀌면 현재 두 값을 그대로 sim_runner 에 보낸다.
+
+        전송은 fire-and-forget 이다 — sim 이 안 떠 있으면 아무 일도 일어나지 않는다(로컬 UDP 라
+        보통 조용히 버려지고, 포트가 닫혀 ICMP 가 오면 다음 send 에서 예외가 나므로 흡수한다).
+        sim_runner 는 **값이 실제로 바뀔 때만** 적용하므로 중복 전송도 무해하다.
+        """
+        camera = r2s_udp.CAMERA_FOLLOW if self._sim_camera_combo.currentIndex() == 0 else r2s_udp.CAMERA_FREE
+        plant = PLANT_COMBO_ORDER[self._sim_plant_combo.currentIndex()]
+        self._ctrl_seq += 1
+        try:
+            self._ctrl_sock.sendto(r2s_udp.pack_ctrl(self._ctrl_seq, camera, plant), (SIM_CTRL_HOST, SIM_CTRL_PORT))
+        except OSError as exc:  # sim 미기동 등 — 상태줄에만 알리고 넘어간다
+            self._status_label.setText(f"Sim 설정 전송 실패({exc}) — sim_runner 가 떠 있는지 확인")
+            return
+        cam_label = self._sim_camera_combo.currentText()
+        plant_label = self._sim_plant_combo.currentText()
+        self._status_label.setText(f"Sim: camera={cam_label}, plant={plant_label}")
+
+    # -- Recovery (fall-recovery 정책) --
+
+    def _on_recovery_start_clicked(self) -> None:
+        # Policy Start 와 달리 **DEFAULT_POSE 로 보간하지 않고 즉시 engage** 한다. 로봇이 넘어져
+        # 있는 상태이므로 default 로 끌고 가는 것은 위험할 뿐 아니라 학습 분포에서도 벗어난다:
+        # 학습 env 의 settle 구간은 측정 자세를 그대로 유지하고(settle_mode="passive"), 그 길이가
+        # env 마다 U[0, 100] step 이라 **0 step**(=첫 tick 부터 정책이 구동)도 학습에 포함돼 있다.
+        self._stop_sine()
+        self._stop_policy()  # 다른 모드가 켜져 있었으면 버튼 상태까지 정리
+        source = self._recovery_source_combo.currentIndex()  # 0=Sim, 1=Real (_POLICY_SOURCE_*)
+        self._recovery_start_btn.setEnabled(False)
+        self._recovery_stop_btn.setEnabled(True)
+        self._write_recovery(source)
+        src_label = "Real" if source == _POLICY_SOURCE_REAL else "Sim"
+        self._status_label.setText(f"Recovery: engaged (source={src_label}, kd={recovery_runtime.RECOVERY_KD})")
+
+    def _on_recovery_param_changed(self) -> None:
+        self._update_recovery_source(self._recovery_source_combo.currentIndex())
+
+    def _on_recovery_stop_clicked(self) -> None:
+        # 현재 목표 자세로 홀드(정지 시 target 이 튀지 않게) — sine/policy stop 과 동일 관례.
+        # kd 는 recovery 값(1.0)을 유지한다: 기립 직후 게인을 절반으로 떨어뜨리면 그대로 주저앉는다.
+        # 이후 Default/Stand Up/Policy 중 아무 버튼이나 누르면 기본 kd(0.5)로 돌아간다.
+        pose = self._read_current_target()
+        self._stop_recovery()
+        self._stop_pedi()
+        self._write_hold(pose, kd=recovery_runtime.RECOVERY_KD)
+        self._status_label.setText("Recovery stopped (kd 1.0 유지 — 다른 버튼을 누르면 0.5로 복귀)")
+
+    def _on_pedi_start_clicked(self) -> None:
+        # Recovery 와 같이 즉시 engage 한다. Policy 처럼 DEFAULT_POSE 로 먼저 보간하지 않는 이유는
+        # 이 정책의 명령 기준(nominal)이 **시작 시점의 실제 4족 자세**라서다 — 보간 도중 잡으면
+        # 엉뚱한 자세가 기준이 된다. 대신 publisher 가 발 깊이 0.20~0.40 m 게이트로 4족 여부를
+        # 확인하고, 아니면 정책을 구동하지 않고 fallback-hold 를 유지한다.
+        self._stop_sine()
+        self._stop_policy()
+        self._stop_recovery()
+        source = self._pedi_source_combo.currentIndex()  # 0=Sim, 1=Real (_POLICY_SOURCE_*)
+        manip_leg = self._pedi_leg_combo.currentIndex()
+        offset = self._pedi_offset()
+        self._pedi_start_btn.setEnabled(False)
+        self._pedi_stop_btn.setEnabled(True)
+        self._write_pedipulation(source, manip_leg, offset)
+        src_label = "Real" if source == _POLICY_SOURCE_REAL else "Sim"
+        leg_label = pedipulation_runtime.LEG_NAMES[manip_leg]
+        self._status_label.setText(
+            f"Pedipulation: engaged (source={src_label}, leg={leg_label}, "
+            f"offset=({offset[0]:+.3f}, {offset[1]:+.3f}, {offset[2]:+.3f}) m)"
+        )
+
+    def _on_pedi_param_changed(self) -> None:
+        self._update_pedi_cmd(
+            self._pedi_source_combo.currentIndex(),
+            self._pedi_leg_combo.currentIndex(),
+            self._pedi_offset(),
+        )
+
+    def _on_pedi_stop_clicked(self) -> None:
+        # 현재 목표 자세로 홀드 — sine/policy/recovery stop 과 동일 관례. kd 는 기본값(0.5)
+        # 그대로라 recovery 처럼 되돌릴 것이 없다.
+        pose = self._read_current_target()
+        self._stop_pedi()
+        self._write_hold(pose)
+        self._status_label.setText("Pedipulation stopped")
 
     # -- continuous publisher --
 
@@ -1024,6 +1561,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override signature)
         self._startup_timer.stop()
         self._cancel_policy_engage()
+        self._ctrl_sock.close()
         # monitor 자식 프로세스가 살아있으면 정리 (orphan 방지). publisher 프로세스는 main()이 정리한다.
         if self._monitor_proc is not None and self._monitor_proc.poll() is None:
             self._monitor_proc.terminate()
