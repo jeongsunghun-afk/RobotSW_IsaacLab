@@ -57,6 +57,7 @@ Visual styling is a self-contained QSS stylesheet applied in :func:`main` (see
 
 from __future__ import annotations
 
+import contextlib
 import math
 import multiprocessing as mp
 import os
@@ -461,6 +462,10 @@ class _PedipulationContext:
         self.model: pedipulation_runtime.PedipulationModel | None = None
         self.state = pedipulation_runtime.PedipulationState()
         self._load_attempted = False
+        # sim 뷰포트 마커용 최신 상태 (조작 다리, base frame 목표). publisher 루프가 읽어
+        # sim_runner 로 보낸다. 모드가 아니거나 nominal 미확보면 leg 가 OFF 라 마커가 숨는다.
+        self.marker_leg: int = r2s_udp.MARKER_LEG_OFF
+        self.marker_target_b: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def ensure_loaded(self, node) -> None:
         """모델을 1회만 로드 시도(실패해도 재시도 안 함 — Pedipulation 모드는 fallback-hold로 동작)."""
@@ -624,13 +629,21 @@ def _compute_target(
     #   **latch 된 캘리브레이션**이라 recovery 의 `prev_action.clear()` 와 성격이 다르다.
     if mode != _MODE_PEDIPULATION:
         pedi_ctx.state.reset()
+        pedi_ctx.marker_leg = r2s_udp.MARKER_LEG_OFF  # 모드를 나가면 sim 마커도 숨긴다
     elif pedi_inputs is not None:
         q_dds, dq_dds, quat_wxyz, manip_leg, offset = pedi_inputs
         q_art = pedipulation_runtime.dds_to_art(q_dds)
         dq_art = pedipulation_runtime.dds_to_art(dq_dds)
         # nominal 은 4족으로 선 자세에서만 잡힌다(발 깊이 0.20~0.40 m). 못 잡으면 명령의 기준이
         # 없으므로 정책을 구동하지 않고 fallback-hold 를 유지한다 — 넘어진 채 시작하는 사고 방지.
+        had_nominal = pedi_ctx.state.nominal_foot_pos_b is not None
         nominal = pedi_ctx.state.nominal_foot_pos_b if pedi_ctx.state.try_latch_nominal(q_art) else None
+        if nominal is not None and not had_nominal:
+            # latch 는 캘리브레이션이라 값 자체가 진단 정보다 — 명령이 어긋나면 여기부터 본다.
+            _n = " ".join(
+                f"{nm}=({f[0]:+.3f},{f[1]:+.3f},{f[2]:+.3f})" for nm, f in zip(pedipulation_runtime.LEG_NAMES, nominal)
+            )
+            print(f"[pedipulation] nominal latch: {_n}", flush=True)
         if nominal is not None:
             leg_role = pedipulation_runtime.leg_role_from_manip(manip_leg)
             target_b = pedipulation_runtime.foot_target_b(nominal, manip_leg, offset)
@@ -639,6 +652,11 @@ def _compute_target(
             target_art = pedipulation_runtime.action_to_target_art(clipped, leg_role, pedi_ctx.state)
             pedi_ctx.state.prev_actions = clipped  # 다음 tick obs 의 prev_actions (clip 후·scale 전)
             pose = pedipulation_runtime.art_to_dds(target_art)
+            # sim 뷰포트 마커 — 여기서만 갱신한다(정책이 실제로 돈 tick). nominal 을 못 잡아
+            # fallback-hold 중이면 이 줄에 도달하지 않으므로 마커도 뜨지 않는다.
+            pedi_ctx.marker_leg = manip_leg
+            _tb = target_b[manip_leg]
+            pedi_ctx.marker_target_b = (_tb[0], _tb[1], _tb[2])
 
     return pose, kp, kd
 
@@ -705,6 +723,12 @@ def publisher_process_main(shared, stop_flag) -> None:
     pedi_ctx = _PedipulationContext()
     pedi_ctx.ensure_loaded(node)
 
+    # sim 뷰포트 마커 송신용 (fire-and-forget). UI 프로세스의 `_ctrl_sock` 과 별개다 —
+    # 마커 상태는 publisher 로컬이라 UI 로 왕복시킬 이유가 없다.
+    marker_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    marker_seq = 0
+    marker_last_off = True  # OFF 를 매 tick 반복해 쏘지 않기 위한 상태
+
     period = PUBLISH_PERIOD_S
     next_t = time.monotonic()
     try:
@@ -718,6 +742,19 @@ def publisher_process_main(shared, stop_flag) -> None:
                 with shared.get_lock():  # UI가 보간 시작점으로 읽도록 현재 목표를 되쓴다
                     for i in range(_NUM):
                         shared[_SM_CURRENT_Q + i] = pose[i]
+
+            # pedipulation 마커. 켜져 있으면 매 tick 보낸다(발·base 가 움직이므로 갱신이 필요).
+            # 꺼져 있으면 **전환 순간 한 번만** 보내 숨긴다 — 계속 쏠 이유가 없다.
+            leg = pedi_ctx.marker_leg
+            if leg >= 0 or not marker_last_off:
+                marker_seq += 1
+                # sim 미기동이면 조용히 넘어간다 — 마커는 표시 전용이라 실패해도 제어에 영향 없다.
+                with contextlib.suppress(OSError):
+                    marker_sock.sendto(
+                        r2s_udp.pack_marker(marker_seq, leg, pedi_ctx.marker_target_b),
+                        (SIM_CTRL_HOST, SIM_CTRL_PORT),
+                    )
+                marker_last_off = leg < 0
             next_t += period
             delay = next_t - time.monotonic()
             if delay > 0:
@@ -959,14 +996,14 @@ class MainWindow(QMainWindow):
         self._recovery_stop_btn.clicked.connect(self._on_recovery_stop_clicked)
         self._recovery_stop_btn.setEnabled(False)
         recovery_layout.addWidget(self._recovery_stop_btn)
-        recovery_hint = QLabel("넘어진 상태 전용 (kd=1.0). 서 있을 때 누르지 말 것")
+        recovery_hint = QLabel("For a fallen robot only (kd=1.0). Do not press while it is standing")
         recovery_hint.setObjectName("subtitleLabel")
         recovery_layout.addWidget(recovery_hint)
         recovery_layout.addStretch(1)
         layout.addWidget(recovery_group)
 
         # -- Pedipulation (다리 하나를 조작기로: 세 다리로 균형, 한 발을 목표 위치로) --
-        pedi_group = QGroupBox("Pedipulation (3족 균형 + 발 1개 조작)")
+        pedi_group = QGroupBox("Pedipulation (3-leg balance + 1 foot as manipulator)")
         pedi_layout = QHBoxLayout(pedi_group)
         pedi_layout.setSpacing(10)
 
@@ -1006,7 +1043,7 @@ class MainWindow(QMainWindow):
         self._pedi_stop_btn.setEnabled(False)
         pedi_layout.addWidget(self._pedi_stop_btn)
 
-        pedi_hint = QLabel("4족으로 선 상태에서 누를 것 (nominal 자세를 그때 잡는다)")
+        pedi_hint = QLabel("Press while standing on all four — the nominal pose is latched at that moment")
         pedi_hint.setObjectName("subtitleLabel")
         pedi_layout.addWidget(pedi_hint)
         pedi_layout.addStretch(1)
@@ -1019,29 +1056,30 @@ class MainWindow(QMainWindow):
         sim_layout.addWidget(QLabel("Camera:"))
         self._sim_camera_combo = QComboBox()
         self._sim_camera_combo.addItems(["Follow robot", "Free"])  # index 0=Follow, 1=Free
-        self._sim_camera_combo.setToolTip("Follow = 카메라가 로봇 base 를 따라감 / Free = Isaac 뷰포트 자유 조작")
+        self._sim_camera_combo.setToolTip("Follow = camera tracks the robot base / Free = Isaac viewport is yours")
         sim_layout.addWidget(self._sim_camera_combo)
         sim_layout.addWidget(QLabel("Plant:"))
         self._sim_plant_combo = QComboBox()
         # 콤보 순서 = PLANT_COMBO_ORDER 인덱스. 첫 항목이 기본 선택이므로 학습 플랜트인 set2 가 먼저다.
         self._sim_plant_combo.addItems(
             [
-                "set2 — PACE 라이브 (학습 플랜트)",
-                "set3 — 2026-08-04 재캡처 (미채택)",
-                "Default — nominal (마찰 0)",
+                "set2 — PACE live (training plant)",
+                "set3 — 2026-08-04 recapture (not adopted)",
+                "Default — nominal (no friction)",
             ]
         )
         self._sim_plant_combo.setToolTip(
-            "실기 GO2 와 sim 의 추종 정도를 눈으로 비교하기 위한 관절 물성 프리셋.\n\n"
-            "set2  armature 0.001~0.016 / viscous ~0 / coulomb 0.15~0.67  ← 현재 정책이 학습된 플랜트\n"
+            "Joint-property presets, for eyeballing how closely sim tracks the real GO2.\n\n"
+            "set2  armature 0.001~0.016 / viscous ~0 / coulomb 0.15~0.67  <- plant the current policy trained on\n"
             "set3  armature 0.005~0.021 / viscous 0.13~0.18 / coulomb 0.10~0.58\n"
-            "        신규 5 Hz 캡처 적합. coulomb·calf armature 는 독립 검사 통과, viscous 는 기각.\n"
-            "Default  armature 0.01 / 마찰 0 — UNITREE_GO2_CFG 기본값\n\n"
-            "⚠ Policy(§11) 정책은 set2 플랜트에서 학습됐다 — Default 로 두면 걷지 못한다.\n"
-            "⚠ 프리셋을 섞지 말 것. 세 파라미터는 결합 식별이라 부분 조합은 근거가 없다."
+            "        Fits the new 5 Hz capture. coulomb and calf armature passed independent checks; viscous did not.\n"
+            "Default  armature 0.01 / no friction — UNITREE_GO2_CFG defaults\n\n"
+            "Warning: the Policy (section 11) net trained on the set2 plant — on Default it cannot walk.\n"
+            "Warning: do not mix presets. The three parameters were identified jointly, "
+            "so partial combinations have no basis."
         )
         sim_layout.addWidget(self._sim_plant_combo)
-        sim_hint = QLabel("sim_runner 로 직접 전송 (sim 미기동이면 무시됨)")
+        sim_hint = QLabel("Sent straight to sim_runner (ignored when sim is not running)")
         sim_hint.setObjectName("subtitleLabel")
         sim_layout.addWidget(sim_hint)
         sim_layout.addStretch(1)
@@ -1377,15 +1415,12 @@ class MainWindow(QMainWindow):
         )
 
     def _on_sine_stop_clicked(self) -> None:
-        # 현재 사인 위치를 계산해 그 자세로 홀드(정지 시 base로 튀지 않게).
-        joint = self._sine_joint_combo.currentIndex()
-        amp = self._sine_amp_spin.value()
-        freq = self._sine_freq_spin.value()
-        t = time.monotonic() - self._sine_start_time
-        pose = motions.sine_offset(self._sine_base_pose, joint, amp, freq, t)
+        # **stand 자세로 보간**한다. 사인 도중 어느 위상에서 멈췄든 `_play_sequence_to` 가
+        # publisher 의 현재 목표에서 출발하므로 정지 순간 target 이 튀지 않는다
+        # (예전에는 사인 위상을 되계산해 그 자세로 홀드했다).
         self._stop_sine()
-        self._write_hold(pose)
-        self._status_label.setText("Sine sweep stopped")
+        self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)
+        self._status_label.setText("Sine sweep stopped — returning to the stand pose")
 
     def _stop_sine(self) -> None:
         self._sine_active = False
@@ -1398,7 +1433,7 @@ class MainWindow(QMainWindow):
         # 안전 handover(팀 결정, §5): 현재 자세 → DEFAULT_POSE로 먼저 보간한 뒤에만 engage한다.
         # 정책이 default 근처 자세를 가정하고 학습됐고, 실하드웨어에서 첫 액션이 임의 자세 기준으로
         # 튀는 것(낙상 위험)보다 안전이 우선이라 Sine/Step의 무보호 즉시-시작과는 다르게 간다.
-        self._status_label.setText("Policy: default 자세로 이동 중 (engage 대기)...")
+        self._status_label.setText("Policy: moving to the default pose (waiting to engage)...")
         self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)  # _play_poses 가 recovery 도 정리
         # 위 호출(→ _write_sequence)이 정책 버튼 상태를 건드리지 않으므로 여기서 명시적으로 설정
         # (sine과 동일 관례 — write_* 는 *_active 플래그만, 버튼 복원/설정은 핸들러가 담당).
@@ -1428,13 +1463,13 @@ class MainWindow(QMainWindow):
         )
 
     def _on_policy_stop_clicked(self) -> None:
-        # engage 대기 중이었으면 그 타이머부터 취소(안 그러면 뒤늦게 engage 되어버림), 이후 현재
-        # 목표 자세로 홀드(정지 시 target이 튀지 않게) — sine stop과 동일 관례.
+        # engage 대기 중이었으면 그 타이머부터 취소한다(안 그러면 뒤늦게 engage 되어버린다).
+        # 이후 **stand 자세로 보간**한다 — 정책이 남긴 임의 자세로 굳어 있으면 다음 명령을 주기
+        # 전에 사람이 손으로 세워야 하기 때문이다. 현재 목표에서 출발하므로 target 은 안 튄다.
         self._cancel_policy_engage()
-        pose = self._read_current_target()
         self._stop_policy()
-        self._write_hold(pose)
-        self._status_label.setText("Policy stopped")
+        self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)
+        self._status_label.setText("Policy stopped — returning to the stand pose")
 
     # -- Sim 설정 (카메라 / 관절 물성) — sim_runner 로 UDP one-shot --
 
@@ -1451,7 +1486,7 @@ class MainWindow(QMainWindow):
         try:
             self._ctrl_sock.sendto(r2s_udp.pack_ctrl(self._ctrl_seq, camera, plant), (SIM_CTRL_HOST, SIM_CTRL_PORT))
         except OSError as exc:  # sim 미기동 등 — 상태줄에만 알리고 넘어간다
-            self._status_label.setText(f"Sim 설정 전송 실패({exc}) — sim_runner 가 떠 있는지 확인")
+            self._status_label.setText(f"Failed to send sim setting ({exc}) — check that sim_runner is up")
             return
         cam_label = self._sim_camera_combo.currentText()
         plant_label = self._sim_plant_combo.currentText()
@@ -1484,7 +1519,7 @@ class MainWindow(QMainWindow):
         self._stop_recovery()
         self._stop_pedi()
         self._write_hold(pose, kd=recovery_runtime.RECOVERY_KD)
-        self._status_label.setText("Recovery stopped (kd 1.0 유지 — 다른 버튼을 누르면 0.5로 복귀)")
+        self._status_label.setText("Recovery stopped (kd stays 1.0 — any other button returns it to 0.5)")
 
     def _on_pedi_start_clicked(self) -> None:
         # Recovery 와 같이 즉시 engage 한다. Policy 처럼 DEFAULT_POSE 로 먼저 보간하지 않는 이유는
@@ -1515,12 +1550,12 @@ class MainWindow(QMainWindow):
         )
 
     def _on_pedi_stop_clicked(self) -> None:
-        # 현재 목표 자세로 홀드 — sine/policy/recovery stop 과 동일 관례. kd 는 기본값(0.5)
-        # 그대로라 recovery 처럼 되돌릴 것이 없다.
-        pose = self._read_current_target()
+        # **stand 자세로 보간**한다 — sine/policy stop 과 같은 관례다. 조작 다리를 든 채로
+        # 멈추면 3족으로 굳어 다음 명령 전에 사람이 세워야 한다. kd 는 기본값(0.5) 그대로라
+        # recovery 처럼 되돌릴 것이 없다.
         self._stop_pedi()
-        self._write_hold(pose)
-        self._status_label.setText("Pedipulation stopped")
+        self._play_sequence_to(motions.DEFAULT_POSE, SEQUENCE_DURATION_S)
+        self._status_label.setText("Pedipulation stopped — returning to the stand pose")
 
     # -- continuous publisher --
 
@@ -1545,10 +1580,10 @@ class MainWindow(QMainWindow):
                 measured = [self._shared[_SM_MEASURED_Q + i] for i in range(_NUM)]
         if measured is not None:
             start = list(measured)
-            status = "시작: 로봇 현재 자세에서 시작 자세로 천천히 이동 중..."
+            status = "Startup: easing from the robot's current pose to the start pose..."
         elif time.monotonic() >= self._startup_deadline:
             start = list(motions.STAND_FOLDED)  # /lowstate 미수신 — 실측 없이 시작 자세로
-            status = "시작 자세로 홀드 (현재 자세 미획득 — sim/robot 상태 확인)"
+            status = "Holding the start pose (current pose not acquired — check sim/robot state)"
         else:
             return  # 아직 첫 상태 대기
         # 현재 자세(실측)를 보간 시작점으로 두고 STAND_FOLDED 로 시퀀스 재생 — 첫 프레임이 실측이라 스냅 없음.

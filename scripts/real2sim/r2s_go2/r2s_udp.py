@@ -28,10 +28,30 @@ STATE_PORT: int = 9872  # sim_runner -> sim_bridge
 TUNER_PARAM_PORT: int = 9875  # tuner_gui -> sim_runner_tuner (물성 파라미터)
 TUNER_TELEM_PORT: int = 9876  # sim_runner_tuner -> tuner_monitor (q_sim/q_cmd/q_real)
 
+# sim 제어 채널 — gui_controller -> sim_runner (카메라 / 관절 물성 프리셋).
+# 명령(9871)과 분리한 이유: 50Hz 명령 스트림은 실기 watchdog 이 걸린 실시간 경로라 필드를 늘리면
+# 안 되고, 이쪽은 버튼을 누를 때만 나가는 저빈도 one-shot 이다. sim_bridge 를 거치지 않고 GUI 가
+# 직접 보낸다(tuner_gui -> 9875 와 같은 방식).
+CTRL_PORT: int = 9877  # gui_controller -> sim_runner
+
 CMD_MAGIC: int = 0x52324743  # "R2GC"
 STATE_MAGIC: int = 0x52324753  # "R2GS"
 TUNER_PARAM_MAGIC: int = 0x52325450  # "R2TP"
 TUNER_TELEM_MAGIC: int = 0x52325454  # "R2TT"
+CTRL_MAGIC: int = 0x52324358  # "R2CX"
+MARKER_MAGIC: int = 0x52324D4B  # "R2MK"
+
+# 카메라 모드 (ctrl 패킷 `camera` 필드)
+CAMERA_FREE: int = 0  # 추적 중지 — 사용자가 Isaac 뷰포트를 자유 조작
+CAMERA_FOLLOW: int = 1  # 로봇 base 를 따라감
+
+# 관절 물성 프리셋 (ctrl 패킷 `plant` 필드)
+PLANT_NOMINAL: int = 0  # UNITREE_GO2_CFG 기본값 (armature 0.01, 마찰 0) — 일반 시뮬 값
+PLANT_SET2: int = 1  # 현재 라이브 `PACE_*` (armature 0.001~0.016, viscous ~0, coulomb 0.15~0.67)
+PLANT_SET3: int = 2  # 2026-08-04 신규 캡처 `PACE_*_SET3` (viscous 0.13~0.18) — 미채택, 비교용
+PLANT_PACE: int = PLANT_SET2  # 하위호환 별칭 (구 코드가 쓰던 이름)
+
+PLANT_NAMES: dict[int, str] = {PLANT_NOMINAL: "default", PLANT_SET2: "set2", PLANT_SET3: "set3"}
 
 # 명령 패킷: magic(I) seq(I) + 12 x (q,dq,kp,kd,tau) f
 _CMD_FMT: str = "<II" + "5f" * NUM_MOTORS
@@ -51,6 +71,23 @@ TUNER_PARAM_SIZE: int = struct.calcsize(_TUNER_PARAM_FMT)  # 32
 #   has_real=0이면 q_real은 의미 없음(replay 없이 chirp만 구동 중).
 _TUNER_TELEM_FMT: str = "<IIfI" + "f" * (3 * NUM_MOTORS)
 TUNER_TELEM_SIZE: int = struct.calcsize(_TUNER_TELEM_FMT)  # 160
+
+# sim 제어 패킷: magic(I) seq(I) camera(i) plant(i)
+# 값이 아니라 **프리셋 선택**만 보낸다 — 실제 물성 수치는 sim 쪽 상수를 쓰므로 두 프로세스가
+# 같은 값을 중복 정의할 일이 없다(수치를 보내는 tuner 패킷과 의도적으로 다른 설계).
+_CTRL_FMT: str = "<IIii"
+CTRL_SIZE: int = struct.calcsize(_CTRL_FMT)  # 16
+
+# pedipulation 마커 패킷: magic(I) seq(I) leg(i) target_b x,y,z(fff)
+# ctrl 과 **같은 포트**로 보내고 magic 으로 가른다 — 둘 다 GUI→sim_runner 저빈도 표시 채널이라
+# 포트를 늘릴 이유가 없다. 크기가 달라(16 vs 24) 서로의 unpack 이 조용히 통과할 일도 없다.
+#
+# 목표는 **base frame** 으로 보낸다. world 로 미리 바꿔 보내면 GUI 가 base pose 를 알아야 하는데,
+# 그 값은 sim 쪽이 이미 정확히 들고 있다. 조작 발의 현재 위치도 같은 이유로 안 보낸다 —
+# sim 이 `body_pos_w` 로 직접 안다. GUI 가 보내는 것은 "어느 다리"와 "어디로"뿐이다.
+_MARKER_FMT: str = "<IIifff"
+MARKER_SIZE: int = struct.calcsize(_MARKER_FMT)  # 24
+MARKER_LEG_OFF: int = -1  # leg 에 이 값이면 마커를 숨긴다
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +299,75 @@ def unpack_tuner_telem(data: bytes) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# sim 제어 패킷 (gui_controller -> sim_runner)
+# ---------------------------------------------------------------------------
+
+
+def pack_ctrl(seq: int, camera: int, plant: int) -> bytes:
+    """카메라 / 관절 물성 프리셋 선택을 UDP 바이트로 직렬화.
+
+    Args:
+        seq: 증가 시퀀스 번호.
+        camera: :data:`CAMERA_FREE` 또는 :data:`CAMERA_FOLLOW`.
+        plant: :data:`PLANT_NOMINAL` 또는 :data:`PLANT_PACE`.
+
+    Returns:
+        16-byte 패킷.
+    """
+    return struct.pack(_CTRL_FMT, CTRL_MAGIC, seq & 0xFFFFFFFF, int(camera), int(plant))
+
+
+def unpack_ctrl(data: bytes) -> dict | None:
+    """sim 제어 패킷 역직렬화. magic 불일치/크기 오류 시 None.
+
+    Returns:
+        키: ``seq``, ``camera``, ``plant``.
+    """
+    if len(data) != CTRL_SIZE:
+        return None
+    fields = struct.unpack(_CTRL_FMT, data)
+    if fields[0] != CTRL_MAGIC:
+        return None
+    return {"seq": fields[1], "camera": fields[2], "plant": fields[3]}
+
+
+def pack_marker(seq: int, leg: int, target_b: tuple[float, float, float]) -> bytes:
+    """pedipulation 마커 상태를 UDP 바이트로 직렬화.
+
+    Args:
+        seq: 증가 시퀀스 번호.
+        leg: 조작 다리 인덱스 0~3 (FL, FR, RL, RR). :data:`MARKER_LEG_OFF` 면 마커를 숨긴다.
+        target_b: 발 목표 위치, **base frame** [m].
+
+    Returns:
+        24-byte 패킷.
+    """
+    return struct.pack(
+        _MARKER_FMT,
+        MARKER_MAGIC,
+        seq & 0xFFFFFFFF,
+        int(leg),
+        float(target_b[0]),
+        float(target_b[1]),
+        float(target_b[2]),
+    )
+
+
+def unpack_marker(data: bytes) -> dict | None:
+    """마커 패킷 역직렬화. magic 불일치/크기 오류 시 None.
+
+    Returns:
+        키: ``seq``, ``leg``, ``target_b``(3-tuple).
+    """
+    if len(data) != MARKER_SIZE:
+        return None
+    fields = struct.unpack(_MARKER_FMT, data)
+    if fields[0] != MARKER_MAGIC:
+        return None
+    return {"seq": fields[1], "leg": fields[2], "target_b": (fields[3], fields[4], fields[5])}
+
+
 if __name__ == "__main__":
     # 자체 라운드트립 검증
     z = [0.0] * NUM_MOTORS
@@ -282,7 +388,24 @@ if __name__ == "__main__":
     assert len(t) == TUNER_TELEM_SIZE == 160, (len(t), TUNER_TELEM_SIZE)
     telem = unpack_tuner_telem(t)
     assert telem is not None and telem["has_real"] and telem["q_sim"][11] == 11.0
+    x = pack_ctrl(5, CAMERA_FOLLOW, PLANT_PACE)
+    assert len(x) == CTRL_SIZE == 16, (len(x), CTRL_SIZE)
+    ctrl = unpack_ctrl(x)
+    assert ctrl is not None and ctrl["camera"] == CAMERA_FOLLOW and ctrl["plant"] == PLANT_PACE, ctrl
+    m = pack_marker(6, 2, (0.1, -0.02, 0.15))
+    assert len(m) == MARKER_SIZE == 24, (len(m), MARKER_SIZE)
+    marker = unpack_marker(m)
+    assert marker is not None and marker["leg"] == 2 and abs(marker["target_b"][2] - 0.15) < 1e-6, marker
+    off = unpack_marker(pack_marker(7, MARKER_LEG_OFF, (0.0, 0.0, 0.0)))
+    assert off is not None and off["leg"] == MARKER_LEG_OFF, off
+    # 다른 패킷과 magic 이 겹치지 않아야 한다(같은 포트로 잘못 들어와도 조용히 오해석되지 않게)
+    assert unpack_ctrl(pack_tuner_params(0, 0, 0, 0, 0, 0, 0)[:CTRL_SIZE]) is None
+    # ctrl 과 marker 는 같은 포트를 쓴다 — 서로의 unpack 을 통과하면 안 된다(크기가 갈라준다).
+    assert unpack_marker(pack_ctrl(0, CAMERA_FREE, PLANT_NOMINAL)) is None
+    assert unpack_ctrl(pack_marker(0, 0, (0.0, 0.0, 0.0))) is None
+    assert len({CMD_MAGIC, STATE_MAGIC, TUNER_PARAM_MAGIC, TUNER_TELEM_MAGIC, CTRL_MAGIC, MARKER_MAGIC}) == 6
+    assert len({CMD_PORT, STATE_PORT, TUNER_PARAM_PORT, TUNER_TELEM_PORT, CTRL_PORT}) == 5
     print(
         f"r2s_udp roundtrip OK  CMD={CMD_SIZE} STATE={STATE_SIZE} "
-        f"TUNER_PARAM={TUNER_PARAM_SIZE} TUNER_TELEM={TUNER_TELEM_SIZE}"
+        f"TUNER_PARAM={TUNER_PARAM_SIZE} TUNER_TELEM={TUNER_TELEM_SIZE} CTRL={CTRL_SIZE}"
     )

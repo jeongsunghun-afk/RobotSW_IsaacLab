@@ -89,6 +89,11 @@ r2s_gui                                     # = bash .../run_gui_controller.sh
 
 GUI가 뜨면 로봇은 **엎드린(prone) 자세**로 시작한다(실기 GO2와 동일).
 
+⚠ `sim_runner`는 **`/lowcmd` 패킷 하나당 한 번 스텝**한다(lockstep, 기본값). 그래서 publisher가
+아직 안 떴거나 죽으면 sim이 0.1 s 타임아웃마다 한 번씩만 도는 **느린 화면**으로 보인다 —
+멈춘 게 아니다. 터미널 3까지 띄우면 50 Hz로 올라온다. 기동 로그의 `stepping=lockstep`으로
+현재 모드를 확인할 수 있고, 예전 자유 구동 거동은 `--no_lockstep`으로 되돌린다(§14.2 근거).
+
 ---
 
 ## 4. GUI 버튼
@@ -853,8 +858,17 @@ Sim 소스 기본값은 `/sim/lowstate`다**(그건 §6 동시 구동에서 rema
 Source=Sim이 상태를 못 받아 `valid`가 서지 않고 **에러 없이 fallback-hold**에 머문다 —
 로봇이 가만히 있는 것으로만 보여 원인을 찾기 어렵다.
 
+ℹ `sim_runner_go2.py` 는 **lockstep 이 기본**이다 — `/lowcmd` 패킷 하나당 정확히 한 번
+스텝한다. 자유 구동(`--no_lockstep`)이면 sim 시계와 정책 시계가 따로 흘러(실측 sim 62.5 Hz
+vs 정책 50 Hz) 되먹임 지연이 tick 마다 달라지는데, 학습이 본 지연은 1 스텝뿐이다.
+Policy·Recovery 는 매 tick 목표를 통째로 다시 써서 그 오차를 덮어쓰지만, pedipulation 의 조작
+다리는 목표를 **이어받아**(`manip_target += delta`) 오차를 쌓는다. 실측: 자유 구동 발 추종
+오차 **264 mm** → lockstep **10~14 mm**(3회 반복, 같은 정책의 IsaacLab 게이트 기준점 9.3 mm).
+근거·측정은 `reports/rsl_rl/go2_pedipulation/_comparisons/r2s_deploy_tracking_gap/`.
+`--no_lockstep` 은 lockstep 기본화 이전에 수집한 데이터를 재현할 때만 쓴다.
+
 ```bash
-# 터미널 1 — Isaac (학습 플랜트로)
+# 터미널 1 — Isaac (학습 플랜트로. lockstep 은 기본값)
 ./isaaclab.sh -p scripts/real2sim/sim_runner_go2.py --num_envs 1 --plant set2
 
 # 터미널 2 — 브릿지
@@ -866,7 +880,37 @@ R2S_SIM_STATE_TOPIC=/lowstate bash scripts/real2sim/r2s_go2/run_gui_controller.s
 
 `Pedipulation` 그룹에서 **Source**(Sim/Real) · **Leg**(조작할 다리) · **dx/dy/dz**(nominal 발
 위치 대비 목표 offset [m])를 고르고 **Start**. 실행 중에도 Leg·offset을 바꾸면 즉시 반영된다
-(정책이 에피소드 중 명령 변화를 겪도록 학습됐다). **Stop**은 현재 목표 자세로 홀드한다.
+(정책이 에피소드 중 명령 변화를 겪도록 학습됐다).
+
+**Stop 은 stand 자세로 되돌린다** — Policy·Sine Sweep 의 Stop 도 같다. 조작 다리를 든 채로
+멈추면 3족으로 굳어 다음 명령 전에 사람이 세워야 하기 때문이다. publisher 의 현재 목표에서
+출발해 1.5 s 로 보간하므로 정지 순간 target 이 튀지 않는다. (Recovery Stop 만 예외로 현재
+자세를 유지한다 — kd 1.0 을 그대로 둬야 기립 직후 주저앉지 않는다.)
+
+### 14.2.1 sim 뷰포트 마커
+
+Pedipulation 이 도는 동안 Isaac 뷰포트에 구 두 개가 뜬다:
+
+| 색 | 뜻 |
+|---|---|
+| 🔴 빨강 | **조작 발의 현재 위치** |
+| 🟢 초록 | **명령받은 목표 위치** |
+
+둘이 붙어 있으면 추종이 된 것이고, 벌어진 거리가 곧 추종 오차다. Stop 하거나 다른 모드로
+가면 자동으로 사라진다.
+
+GUI publisher 가 `(조작 다리, base frame 목표)` 만 ctrl 포트(9877)로 보내고, 발의 현재 위치와
+world 변환은 sim 이 직접 한다(`R2SGo2Env.set_pedi_markers`) — GUI 가 base pose 를 알 필요가
+없게 한 것이다. 마커 패킷은 ctrl 과 **같은 포트에 magic·크기로 갈린다**(24 B vs 16 B).
+
+⚠ `quat_apply` / `quat_apply_inverse` 는 인자가 `(quat, vec)` 이고 쿼터니언이 **(x, y, z, w)** 다.
+`root_link_quat_w` 와 같은 규약이라 그대로 넣으면 되는데, **실기 IMU 는 wxyz** 라
+(`pedipulation_runtime.projected_gravity_b`) 두 규약이 한 코드베이스에 공존한다. 섞으면 목표가
+회전된 자리에 찍히고, base 가 거의 수평일 때는 오차가 작아 그럴듯해 보인다.
+
+**진단**: `R2S_LOG_MARKER=1` 로 sim_runner 를 띄우면 1 초마다 한 줄 찍는다 — world 로 보낸
+목표를 같은 base pose 로 되돌린 값(`roundtrip`)과 입력(`target_b_in`), 그리고 조작 발의 현재
+base frame 위치(`foot_b`)다. `err` 이 0 이 아니면 규약이 어긋난 것이다.
 
 offset 스핀박스의 범위는 **학습 명령 박스 그대로**다(x ±0.20, y ±0.14, z 0~0.26 m). 이 밖은
 분포 밖이고 기구학적으로 도달 못 하는 목표라 UI가 애초에 막는다.
@@ -918,6 +962,8 @@ tracking과 recovery는 obs가 42로 같아 인자 개수로 갈라야 했던 �
   **네 다리를 모두 조작 다리로 돌려가며** 쟀다 — 한 다리만 쓰면 적분 경로와 hip 축소 회피가
   나머지 세 슬롯에서 검증되지 않는다(그쪽은 쉬운 분기인 `loc_target`만 탄다).
 - jit export: 저장본과 결정론적 추론 경로가 **완전히 일치**(diff 0.0).
+- **UI 문구는 전부 영어다.** 가상 디스플레이(Xvfb)에는 CJK 폰트가 없어 한글이 □로 깨진다 —
+  화면에 렌더되는 문자열은 영어로 쓰고, 코드 주석·터미널 로그만 한글을 쓴다.
 - **sim 통합 구동 (2026-08-06)**: `sim_runner(--plant set2)` + 브릿지 + GUI 3프로세스를 실제로
   띄워 GUI에서 조작했다. 아래는 **실측 `/lowstate`의 관절각을 FK로 되돌린** 조작 발 위치이므로
   (그 FK가 위의 0.0004 mm짜리다) 명령을 되읊은 값이 아니라 실제 위치 판독이다.
@@ -930,4 +976,11 @@ tracking과 recovery는 obs가 42로 같아 인자 개수로 갈라야 했던 �
 
   영상: `videos/model_19999__r2s_gui_pedipulation__20260806-103100.mp4`,
   로그: `videos/r2s_gui_pedipulation_demo.log`.
+- **마커 (2026-08-06)**: 같은 통합 구동에서 `R2S_LOG_MARKER=1` 로 확인했다 — 좌표 round-trip
+  오차 **0.000000**(전 구간), 발 매핑 `FL→FL_foot … RR→RR_foot` 로 leg 인덱스 일치, 조작 다리를
+  FL→RR 로 바꿔도 동일. 목표 z 는 명령과 정확히 맞고(nominal −0.285 + dz 0.15 = **−0.135**)
+  발이 −0.285 → −0.126 으로 수렴하는 것이 수치로 보인다.
+  ⚠ **화면에 구가 실제로 보이는 것까지는 확인하지 못했다** — Isaac 창이 가상 디스플레이(Xvfb)에
+  뜨지 않아서다. prim 생성(`prototype 2개`)과 좌표는 검증됐으니, 실제 디스플레이가 있는 환경에서
+  한 번 눈으로 볼 것.
 - **실기 미검증** — 위는 전부 sim이다.

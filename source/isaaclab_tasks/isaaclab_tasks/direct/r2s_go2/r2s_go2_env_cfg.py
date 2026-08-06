@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from isaaclab.assets import ArticulationCfg
-from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils.configclass import configclass
@@ -91,6 +91,19 @@ class R2SGo2EnvCfg(DirectRLEnvCfg):
     # 설정은 r2s_go2_sysid_cfg.R2SGo2SysidEnvCfg 참고.
     sysid: bool = False
 
+    # PACE 식별 관절 물성(armature / viscous / coulomb) 적용 토글.
+    #
+    # **기본 True.** r2s 의 목적은 sim 이 실기와 같아지는 것이고 PACE 는 바로 그 실기 GO2 를
+    # 식별한 값이다. 예전엔 이 env 가 nominal `UNITREE_GO2_CFG`(armature 0.01, 마찰 0)로 돌아
+    # 학습 env(`Go2-Imitation-Tracking-v0`, armature 0.17~0.20 / viscous 2.3~2.5)와 플랜트가
+    # 전혀 달랐고, 그래서 학습 정책을 GUI Policy 모드로 돌리면 관절이 초당 ~22회 진동했다
+    # (`reports/rsl_rl/go2_imitation_tracking/_comparisons/r2s_sim_plant_gap/`).
+    #
+    # ⚠ kp/kd 는 25/0.5 로 **유지한다** — viscous 가 kd 오차를 흡수하도록 함께 식별된 조합이라
+    #   게인을 따로 바꾸면 식별 결과가 깨진다(`PACE_KP`/`PACE_KD` 주석 참고).
+    # False 로 두면 이전 nominal 거동으로 정확히 되돌아간다(PACE 이전 수집 데이터 재현용).
+    use_pace_params: bool = True
+
     # 로봇 (fix_base=False 기본: 지면 자유 spawn, CONTRACT §6 물성 그대로)
     # 초기 자세를 prone(엎드림)으로 오버라이드 — 실기 시작 자세와 정합.
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(
@@ -100,6 +113,17 @@ class R2SGo2EnvCfg(DirectRLEnvCfg):
 
     # 씬
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=True)
+
+    # 뷰포트 카메라 — 기본은 **로봇 추적**. `origin_type="asset_root"` 이면 IsaacLab 이 매 렌더
+    # 스텝마다 eye/lookat 을 로봇 base 기준 상대좌표로 다시 잡아준다(별도 콜백 불필요).
+    # 런타임 전환은 `R2SGo2Env.set_camera_follow()` — GUI 의 Sim 그룹이 UDP 로 호출한다.
+    # headless 에서는 `viewport_camera_controller` 자체가 None 이라 전부 no-op 이 된다.
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(-2.2, -1.6, 0.9),  # 로봇 base 기준 상대 위치 [m] — 뒤 왼쪽 위에서 내려다봄
+        lookat=(0.0, 0.0, 0.15),
+        origin_type="asset_root",
+        asset_name="robot",
+    )
 
     # 시뮬레이션
     sim: SimulationCfg = SimulationCfg(dt=1.0 / 200.0, render_interval=decimation)
