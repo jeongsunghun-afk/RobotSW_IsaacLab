@@ -338,8 +338,12 @@ DCMotor 계보(23.5 → calf 35.5 → `velocity_limit` 30.0)는 **`cmd 3.5` 를 
 달린 env 37/64(58%)와 일치한다.
 
 ⚠ `cmd 3.0` 은 8k −20%p / 16k +14%p 로 **부호가 엇갈려** 개선으로 쓸 수 없다(DC 기준선도
-42% → 23% 로 흔들린다). ⚠ pace 는 implicit 16k 가 없어 이 판정을 교차 확인하지 못한다.
-표는 `metrics/implicit_vs_dcmotor_ramp.md` 의 "매치드 iteration 달성률 차이" 절.
+42% → 23% 로 흔들린다).
+
+**pace 16k 가 나온 뒤**(top 1.385 @ cmd 2.5, 77%): 같은 `cmd 2.5` 에서 97 → 77%(−20%p)로
+**방향은 stock 과 같지만** 8k 가 −5%p 라 위 규칙(양쪽 |Δ| > 15%p)에는 미달이다. →
+**도달률 하락은 stock 확정 · pace 시사.** `cmd 3.5` 는 양 플랜트 16k 모두 0% 로 기준 미달이다.
+표는 `metrics/implicit_vs_dcmotor_ramp.md`.
 
 ### ★ 포화가 곡선에서 **평탄 캡**으로 옮겨갔다
 

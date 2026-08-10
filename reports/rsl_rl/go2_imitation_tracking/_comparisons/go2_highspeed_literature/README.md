@@ -62,15 +62,15 @@ spin 측정이면 결정된다.
 |---|---|---|
 | **MoE Go2** (arXiv:2602.00678) | **모델 없음.** `actuator strength ×[0.8,1.2]` DR 만 | 실기 **4.01 m/s** |
 | **MimicKit** | `ImplicitActuator(effort_limit=None)` → USD `maxForce` 평탄 (23.7 / calf 35.5), **속도 제한 없음** | sim 4.0 m/s |
-| **KAIST Hound** (arXiv:2312.17507) | **MOR 명시 모델링**: `−V_bus ≤ (R/K_t)τ + ω/K_v ≤ V_bus` + peak torque cap(선형에서 20% 이탈 지점), **4 사분면 전부**(회생제동 포함). 파라미터 = 데이터시트 + 단축 벤치 실측. V_bus 81 V | 실기 **6.5 m/s** (트레드밀), 야외 5.9 m/s |
+| **KAIST Hound** (arXiv:2312.17507) | **모터 작동영역(motor operating region) 명시 모델링**: `−V_bus ≤ (R/K_t)τ + ω/K_v ≤ V_bus` + peak torque cap(선형에서 20% 이탈 지점), **4 사분면 전부**(회생제동 포함). 파라미터 = 데이터시트 + 단축 벤치 실측. V_bus 81 V | 실기 **6.5 m/s** (트레드밀), 야외 5.9 m/s |
 | **IsaacLab 기본** | `DCMotorCfg` Go2 `23.5/23.5/**30.0**`, A1 `33.5/33.5/**21.0**` | — |
 
 ### ★ KAIST Hound 의 ablation 이 핵심이다
 
-- **MOR 없이**: sim 6.5 m/s 인데 실기는 5 m/s 에서 낙상, 3.5 m/s 부터 sim2real 격차 급증
-- **MOR 있으면**: 실기 6.5 m/s. ablation 표에서 MOR 없으면 최고 4.5 vs 있으면 6.5
+- **작동영역 모델 없이**: sim 6.5 m/s 인데 실기는 5 m/s 에서 낙상, 3.5 m/s 부터 sim2real 격차 급증
+- **작동영역 모델 있으면**: 실기 6.5 m/s. ablation 표에서 없으면 최고 4.5 vs 있으면 6.5
 
-→ 토크-속도 제약은 **넣는 것 자체가 아니라 맞게 넣는 것**이 이득이다. 그리고 그들의 MOR 은
+→ 토크-속도 제약은 **넣는 것 자체가 아니라 맞게 넣는 것**이 이득이다. 그리고 그들의 작동영역 모델은
 **평탄 구간 + 하강 구간의 2 구간**이지 0 rad/s 부터 선형 하강이 아니다.
 
 ### ★ IsaacLab 의 체계적 관행이 문제다
