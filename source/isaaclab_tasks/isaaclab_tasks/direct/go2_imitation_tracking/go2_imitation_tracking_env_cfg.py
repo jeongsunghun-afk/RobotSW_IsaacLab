@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -101,7 +101,14 @@ class DomainRandCfg:
     # ── 관측 노이즈 (policy obs 에만 적용, AMP obs 불변) ──────────
     obs_noise: bool = True
     joint_pos_noise: float = 0.01  # [rad]
-    joint_vel_noise: float = 0.5  # [rad/s]
+    # 2026-08-06: 0.5 → 0.15. 실기 Go2 `dq` 스트림에서 잰 잡음 **상한이 0.099 rad/s** 인데
+    # (`data/go2_real/chirp_kp*.npz` 의 10 Hz 이상 고주파 잔차 중 최소값 — 이 값조차 실제
+    # 고주파 운동을 포함하므로 진짜 잡음은 더 작다) 0.5 는 그 5.0 배였다.
+    # 램프 실측 관절속도와 비교하면 σ=0.5 는 cmd 0.5 에서 |q̇| 중앙(0.335)의 **149%** 로
+    # 신호보다 컸다. 0.15 는 측정 상한의 1.5 배라 실기 대비 여전히 보수적이면서 그 병리를 없앤다.
+    # 근거·재현: `reports/rsl_rl/go2_imitation_tracking/_comparisons/joint_vel_noise_calibration/`
+    joint_vel_noise: float = 0.15  # [rad/s]
+    # DEAD (2026-07-30): root 선속도가 policy obs 에서 빠져(estimator 가 추정) 주입할 자리가 없다.
     lin_vel_noise: float = 0.1  # [m/s]
     # DEAD (2026-07-30): 각속도가 policy obs에서 빠져 주입할 자리가 없다. 되살릴 때는
     # `_apply_obs_dr`의 인덱스를 반드시 함께 맞출 것 — 인덱스만 밀린 채 남겨두면 σ=0.2가
@@ -199,8 +206,11 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     lin_vel_x_max: float = 4.0  # vx 최대 (m/s)
     lin_vel_y_min: float = 0.0  # vy 항상 0
     lin_vel_y_max: float = 0.0  # vy 항상 0
-    yaw_vel_min: float = -1.5  # yaw rate 최소 (rad/s)
-    yaw_vel_max: float = 1.5  # yaw rate 최대 (rad/s)
+    # yaw 범위는 MimicKit(`env_config.yaml: ang_yaw_vel_min/max = ∓1.0`)에 맞춘다.
+    # ±1.5 는 고속 직진과 경쟁하는 큰 선회 명령을 만들어 lin 추종 예산을 갉아먹는다.
+    # 2026-08-06 변경 (이전 ±1.5). 실행 중인 학습은 시작 시점 cfg 를 이미 로드해 영향이 없다.
+    yaw_vel_min: float = -1.0  # yaw rate 최소 (rad/s)
+    yaw_vel_max: float = 1.0  # yaw rate 최대 (rad/s)
     tar_change_time_min: float = 2.0  # 목표 명령 변경 최소 주기 (s)
     tar_change_time_max: float = 7.0  # 목표 명령 변경 최대 주기 (s)
 
@@ -355,24 +365,42 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     #
     # 참조 모션은 관절 속도로는 **전 구간 재현 가능**하다(calf max 7.91 / thigh 12.09 / hip 4.39,
     # 한계 초과 0.00%). 병목은 속도가 아니라 그 속도대에서 곡선이 깎는 **토크**다.
+    # ══ 2026-08-10: DCMotor → ImplicitActuator ════════════════════════════════════
+    # 위 DCMotor 계보(23.5 → calf 35.5 → velocity_limit 30.0)는 `cmd 3.5` 를 **단 한 번도**
+    # 넘지 못했다(두 세대 × 7 개 체크포인트 × 양 플랜트, 전부 0%). 원인은 토크-속도 곡선이다.
+    #
+    # ★ 왜 곡선을 빼는가 — 우리 곡선이 물리보다 훨씬 가파르다:
+    #   ① `DCMotorCfg.velocity_limit` 은 **무부하 속도(x 절편)** 인데 여기 넣은 30.1/30.0 은
+    #      공식 URDF 의 **정격 최대 속도**다. "정격 속도에서 토크 0" 이라는 틀린 곡선이 된다.
+    #      (IsaacLab 기본값도 같은 관행이다 — Go2 `23.5×30.0`, A1 `33.5×21.0`.)
+    #   ② 모터 데이터시트의 "30 rad/s" 는 **24 V** 기준인데 **Go2 배터리는 29.6 V 정격**이다.
+    #      무부하 속도는 전압에 선형이라 실제는 **37~46 rad/s**(calf 19~24)다.
+    #   ③ 실제 PMSM 은 저속에서 **정전류 평탄 구간**을 갖고 코너에서 꺾인다. `sat == eff` 인
+    #      현재 설정은 0 rad/s 부터 선형 하강이라 평탄 구간이 아예 없다.
+    #   → thigh q̇=20 에서 우리 모델 7.89 N·m vs 물리 23.7 — **34% 로 깎고 있었다.**
+    #
+    # ★ 선행연구 근거 (`_comparisons/go2_highspeed_literature/`):
+    #   · arXiv:2602.00678 (MoE) — 토크-속도 모델 **없이** 실기 Go2 **4.01 m/s**
+    #   · MimicKit — `ImplicitActuator(effort_limit=None)` 평탄 캡으로 sim 4.0 m/s
+    #   · Unitree 공식 — Go2 EDU 최고 5 m/s
+    #
+    # `effort_limit=None` → **USD joint prim 의 drive maxForce 를 그대로 쓴다**
+    # (`actuator_base_cfg.py:30-34`). MimicKit 과 같은 방식이다.
+    #
+    # ⚠ 남는 것: `velocity_limit_sim` 은 None 이므로 USD 의 `physxJoint:maxJointVelocity`
+    #   (hip/thigh 30.10, **calf 15.70 rad/s**)가 **여전히 하드 클립으로 남는다.** implicit 에서는
+    #   `velocity_limit` 이 무시되므로(`actuator_base_cfg.py:70-73`) 이건 cfg 로 못 없앤다.
+    #   현재 실측 calf `|q̇|p95` 는 6.5 라 아직 안 걸리지만, 고속을 배우면 걸릴 수 있다.
+    #   그때는 USD 를 손대야 하므로 **이 런에서 calf q̇ 이 15.7 에 붙는지 반드시 확인할 것.**
+    #
+    # ⚠ kp/kd 는 25/0.5 그대로 둔다(MimicKit 은 25/1.0, MoE 는 20/0.5 로 서로 다르므로 kd 는
+    #   결정 변수가 아니다). **바뀌는 것은 액추에이터 모델 하나**여야 직전 세대와 A/B 가 된다.
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
         actuators={
-            "base_legs": DCMotorCfg(
-                joint_names_expr=[".*_hip_joint", ".*_thigh_joint"],
-                effort_limit=23.5,
-                saturation_effort=23.5,
-                velocity_limit=30.1,
-                stiffness=25.0,
-                damping=0.5,
-                friction=0.0,
-                armature=0.01,
-            ),
-            "calf": DCMotorCfg(
-                joint_names_expr=[".*_calf_joint"],
-                effort_limit=35.5,
-                saturation_effort=35.5,
-                velocity_limit=30.0,
+            "base_legs": ImplicitActuatorCfg(
+                joint_names_expr=[".*"],
+                effort_limit=None,  # USD drive maxForce (hip/thigh 23.7, calf 45.43)
                 stiffness=25.0,
                 damping=0.5,
                 friction=0.0,
