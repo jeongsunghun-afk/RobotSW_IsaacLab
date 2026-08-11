@@ -378,3 +378,55 @@ pace 열세의 후보 설명이지만 **인과는 미검증**이다.
 
 ⚠ 미리 경고해 둔 calf USD 하드 클립 **15.70 rad/s 는 최고 체크포인트에서도 안 걸린다**
 (`|q̇|p95` 4.0~6.4). 지금 벽은 USD 속도 클립이 아니라 thigh 토크다.
+
+## 10. 신규 실험 2 건 (2026-08-11) — AMP 제외 · MimicKit sim 스택 정렬
+
+### 10-a. `sim dt` / `decimation` 은 **이미 MimicKit 과 같다** (실측)
+
+`/home/lgb/MimicKit/data/engines/isaac_lab_engine.yaml`:
+
+```yaml
+control_mode: "pos"
+# control_freq: 30
+# sim_freq: 120
+control_freq: 50
+sim_freq: 200
+```
+
+`isaac_lab_engine.py:68-75` 가 `_sim_steps = sim_freq / control_freq = 4` 로 쓰고,
+`SimulationCfg(dt=1/200, render_interval=4)` 를 만든다. 우리 쪽
+(`go2_imitation_tracking_env_cfg.py:160-163`) 은 `sim_dt_hz 200` / `policy_dt_hz 50` /
+`decimation 4` — **완전히 동일**하다. 주석 처리된 `30/120` 은 폐기된 옛 설정이다.
+→ **"dt/decimation 을 MimicKit 과 맞춘다"는 실험은 바꿀 것이 없다.**
+
+### 10-b. 대신 실제로 다른 sim/플랜트 항목 (전부 소스 확인)
+
+| 항목 | 6.0 (ours) | MimicKit | 출처 |
+|---|---|---|---|
+| sim / control freq | 200 / 50 (dec 4) | 200 / 50 (dec 4) | 동일 ✓ |
+| actuator | `ImplicitActuatorCfg(effort_limit=None)` | `ImplicitActuatorCfg(effort_limit=None)` | 동일 ✓ (2026-08-10 이후) |
+| kp / kd | 25.0 / **0.5** | 25.0 / **1.0** | `isaac_lab_engine.yaml` `pd_gains` |
+| calf 토크 캡 | **45.43** (go2.usd) | **35.5** (`actuatorfrcrange`) | `data/assets/go2/go2.xml:60` |
+| hip/thigh 캡 | 23.70 | 23.7 | 동일 ✓ |
+| armature | 0.01 | 0.01 | 동일 ✓ |
+| `enabled_self_collisions` | True | True (`create_obj` 기본값) | `isaac_lab_engine.py:183` |
+| `angular_damping` | 0.0 | **0.01** | `isaac_lab_engine.py:941,976` |
+| `max_depenetration_velocity` | 1.0 | **10.0** | 같은 곳 |
+| `physx.bounce_threshold_velocity` | IsaacLab 기본값 | **0.2** | `isaac_lab_engine.py:770` |
+| solver iter (pos/vel) | 4 / 0 (articulation) | 4 / 0 (physx 전역) | 실질 동일 |
+| asset | `go2.usd` | `go2.xml` (MJCF) | 파일 자체가 다르다 |
+
+★ 이 중 물리적으로 유의미한 후보는 **kd 0.5→1.0** 과 **calf 캡 45.43→35.5** 다.
+`angular_damping`·`max_depenetration_velocity`·`bounce_threshold_velocity` 는 접촉 수치안정용
+파라미터라 속도 천장에 직접 붙일 근거가 약하다. **묶어서 한 번에 바꾸지 않는다** — leg 런에서
+4 개를 동시에 바꿔 분리 불가능해진 전례가 있다.
+
+⚠ 확인 못 한 것: MJCF joint 의 `stiffness=15 damping=2` 가 IsaacLab MJCF 변환에서 어떻게
+반영되는지, `actuatorfrcrange` 가 USD `drive maxForce` 로 매핑되는지.
+
+### 10-c. AMP 제외 학습 — 시작함
+
+`2026-08-11_11-14-27_noamp_stock` (GPU1, 60k). 러너에 AMP off 스위치가 없어
+`task_reward_lerp = 1.0` 고정으로 style term 계수를 0 으로 만든다. 설정값(`params/agent.yaml`)과
+런타임값(`Loss/amp_task_reward_lerp = 1.0 @ iter 0`) 둘 다 확인했다.
+상세: [`../2026-08-11_11-14-27_noamp_stock/`](../2026-08-11_11-14-27_noamp_stock/)
