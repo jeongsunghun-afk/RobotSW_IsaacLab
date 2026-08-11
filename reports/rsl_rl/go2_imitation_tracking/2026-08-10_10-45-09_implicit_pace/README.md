@@ -41,7 +41,7 @@
 12.3/16.5%). 같은 구간 stock 은 네 thigh 가 전부 캡에 붙는다 — 더 빠른 쪽이 네 다리를 다 쓰는
 쪽이고, pace 열세의 후보 설명이지만 **인과는 미검증**이다.
 
-전체 표·그림: `../_comparisons/mimickit_vs_60_actuator_limit/metrics/implicit_full_trajectory.txt`
+전체 표·그림: `../_comparisons/mimickit_vs_60_actuator_limit/metrics/implicit_full_trajectory.md`
 · `.../figures/implicit_full_trajectory.png`
 
 ## 산출물

@@ -44,7 +44,7 @@
 곡선을 없앤 대가로 벽이 **평탄한 `thigh maxForce = 23.7 N·m`** 로 옮겨갔고, 이 값은 Unitree
 공식 peak 라 올릴 근거가 없다.
 
-전체 표·그림: `../_comparisons/mimickit_vs_60_actuator_limit/metrics/implicit_full_trajectory.txt`
+전체 표·그림: `../_comparisons/mimickit_vs_60_actuator_limit/metrics/implicit_full_trajectory.md`
 · `.../figures/implicit_full_trajectory.png`
 
 ## 산출물

@@ -320,7 +320,7 @@ DCMotor 계보(23.5 → calf 35.5 → `velocity_limit` 30.0)는 **`cmd 3.5` 를 
 
 ### 결과 — 전 궤적 (stock 56k, pace 48k)
 
-원자료 `metrics/implicit_full_trajectory.txt`, 그림 `figures/implicit_full_trajectory.png`,
+원자료 `metrics/implicit_full_trajectory.md`, 그림 `figures/implicit_full_trajectory.png`,
 생성 `logs/implicit_full_trajectory.py`.
 
 #### ★★★ 결론: 액추에이터 모델 효과가 **플랜트마다 반대**다
