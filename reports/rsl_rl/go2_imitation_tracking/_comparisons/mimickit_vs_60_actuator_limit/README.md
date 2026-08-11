@@ -430,3 +430,39 @@ sim_freq: 200
 `task_reward_lerp = 1.0` 고정으로 style term 계수를 0 으로 만든다. 설정값(`params/agent.yaml`)과
 런타임값(`Loss/amp_task_reward_lerp = 1.0 @ iter 0`) 둘 다 확인했다.
 상세: [`../2026-08-11_11-14-27_noamp_stock/`](../2026-08-11_11-14-27_noamp_stock/)
+
+### 10-d. 세 접촉 노브의 **기본값** (설치된 스키마에서 직접 읽음)
+
+`.../isaacsim/extscache/omni.usd.schema.physx-110.1.13/plugins/PhysxSchema/resources/generatedSchema.usda`
+
+| 속성 | 의미 | 스키마 기본 | 6.0 (Go2) | MimicKit |
+|---|---|---:|---:|---:|
+| `physxRigidBody:angularDamping` | 각속도 인공 감쇠 (수치안정용, 물리적 마찰 아님) | **0.05** | 0.0 (`unitree.py:150`) | 0.01 |
+| `physxRigidBody:maxDepenetrationVelocity` | 관통 해소 속도 상한 [m/s] | **3.0** | 1.0 (`unitree.py:153`) | 10.0 |
+| `physxScene:bounceThreshold` | 이 값 미만의 상대속도 접촉은 반발 계산 안 함 [m/s] | 0 (스키마) / **0.5** (IsaacLab 기본, `isaaclab_physx/physics/physx_manager_cfg.py:172`) | 0.5 (설정 안 함) | 0.2 |
+
+`RigidBodyPropertiesCfg` 의 필드 기본값은 전부 `None` 이며, 이는 "USD 에 적힌 값을 건드리지
+않는다"는 뜻이다. 즉 위 6.0 열의 값은 **우리가 명시적으로 쓴 값**이다.
+
+⚠ MimicKit 은 IsaacLab **5.1** 에서 돈다(`env_isaaclab` conda env → `/home/lgb/IsaacLab`).
+`sim_cfg.physx.bounce_threshold_velocity` 라는 코드 자체가 6.0 에서는 동작하지 않는다 —
+6.0 의 `SimulationCfg` 에는 `physx` 가 없고 `physics: PhysicsCfg | None` 로 바뀌었다.
+
+### 10-e. `max_depenetration_velocity` 1.0 → 3.0 arm — 시작함
+
+`2026-08-11_13-58-01_depen3_stock` (GPU3, 60k, stock). `implicit_stock` 대비 **변수 1 개**.
+세 노브 중 유일하게 고속-특이적 기전이 그려진다 — 빠를수록 스텝당 발 관통이 깊어지는데
+상한 1.0 은 그걸 천천히만 뽑아내므로 **고속에서만 지면이 물렁해지는** 방향이다. 검증 가능한
+예측: `cmd 2.5` 는 변화 없고 `cmd 3.0` 이상만 움직인다.
+
+설정 반영은 `params/env.yaml` 과 **USD 프림 되읽기**(`physxRigidBody:maxDepenetrationVelocity`
+= 3.0) 두 단계로 확인했다. 상세: [`../2026-08-11_13-58-01_depen3_stock/`](../2026-08-11_13-58-01_depen3_stock/)
+
+## 현재 돌아가는 arm (2026-08-11)
+
+| run | 플랜트 | `implicit_stock` 대비 변수 | GPU |
+|---|---|---|---|
+| `2026-08-11_11-14-27_noamp_stock` | stock | AMP 혼합 off (`task_reward_lerp` 1.0) | 1 |
+| `2026-08-11_13-58-01_depen3_stock` | stock | `max_depenetration_velocity` 1.0→3.0 | 3 |
+
+둘 다 60k, 판정은 40k 이후 램프 점으로만.
