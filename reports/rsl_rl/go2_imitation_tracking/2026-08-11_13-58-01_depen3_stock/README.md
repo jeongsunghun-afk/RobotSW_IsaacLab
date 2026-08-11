@@ -36,8 +36,14 @@ CUDA_VISIBLE_DEVICES=3 python -u scripts/reinforcement_learning/train.py \
 | MimicKit | 10.0 | `mimickit/engines/isaac_lab_engine.py:941,976` |
 
 가설: 빠를수록 스텝당 발 관통 깊이가 커지는데 상한 1.0 은 그것을 충분히 빨리 못 뽑아내
-**고속에서만 지면이 물렁해진다**. 저속 구간에는 영향이 거의 없어야 한다 — 즉 `cmd 2.5` 는
-그대로이고 `cmd 3.0` 이상만 움직인다면 이 기전을 지지한다. **인과 미검증 가설이다.**
+**고속에서만 지면이 물렁해진다**. **인과 미검증 가설이다.**
+
+판정 기준 — 이 task 의 재현 산포는 달성률 **±8~15%p**, 중앙값 ±0.02 m/s 다. 따라서:
+
+- **지지**: 40k 이후 점에서 `cmd 3.0` 달성률이 **+15%p 를 넘어** 개선.
+- **반증**: 같은 구간에서 **−15%p 를 넘어** 악화.
+- ⚠ "`cmd 2.5` 가 안 움직였다"는 **판별 근거가 아니다** — `implicit_stock` 의 `cmd 2.5` Δ 도
+  40k~56k 에서 +2/+0/+6 으로 이미 밴드 안이라, 기전이 있든 없든 참이 된다.
 
 ## 설정 반영 검증
 
@@ -50,6 +56,28 @@ hydra 오버라이드가 조용히 씹히는 사고(`agent.resume` 전례)를 �
    [CHECK] /World/override/base  authored=True  value=3.0
    ```
    cfg 값이 실제로 `physxRigidBody:maxDepenetrationVelocity` 로 써진다는 것까지 확인.
+
+## ★★ 램프 측정 시 `--sync_spawn_props` 필수
+
+램프(`_workspace/go2_tracking/speed_ramp_record.py`)는 run 의 params 가 아니라 **현재 소스 cfg**
+로 env 를 만든다. 이 런의 3.0 은 hydra 오버라이드라 `unitree.py` 에는 없으므로, 아무 조치 없이
+재면 **3.0 에서 학습한 정책을 1.0 에서 재는** cross-plant 측정이 된다(`--no_pace` 누락으로 같은
+사고를 낸 적이 있다).
+
+그래서 램프 스크립트에 가드를 넣었다 — run 의 `params/env.yaml` 과 소스 cfg 의
+`robot.spawn.rigid_props` 가 다르면 **실행을 거부**하고, `--sync_spawn_props` 를 주면 run 값으로
+맞춘 뒤 무엇을 바꿨는지 출력한다. 세 경로 모두 smoke 로 실측 확인:
+
+- 플래그 없이 이 런 → `error: ... max_depenetration_velocity: (1.0, 3.0) ... cross-plant 측정이다`
+- 플래그 주고 이 런 → `>>> [sync_spawn_props] ... 1.0 → 3.0 (run 값으로 맞춤)` 후 정상 완주
+- `implicit_stock`(오버라이드 없음) → 오탐 없이 그냥 통과
+
+```bash
+python _workspace/go2_tracking/speed_ramp_record.py \
+  --checkpoint logs/rsl_rl/go2_imitation_tracking/2026-08-11_13-58-01_depen3_stock/model_40000.pt \
+  --task Go2-Imitation-Tracking-v0 --num_envs 64 --no_video --no_pace --sync_spawn_props \
+  --out_dir reports/rsl_rl/go2_imitation_tracking/_comparisons/mimickit_vs_60_actuator_limit/metrics/ramp_depen3/stock_40000
+```
 
 ## 판정 규칙
 
