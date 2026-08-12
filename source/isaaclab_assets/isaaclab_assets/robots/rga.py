@@ -435,7 +435,26 @@ R_SKELETON_HIND_LEG_CFG = ArticulationCfg(
 
 HIND_LEG_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/lgb/IsaacLab-6.0/source/isaaclab_assets/data/Robots/Hind_Leg/hind_leg.usd",
+        # usd_path="/home/lgb/IsaacLab-6.0/source/isaaclab_assets/data/Robots/Hind_Leg/hind_leg.usd",
+        # usd_path=".../data/Robots/Hind_Leg_RLCal/Hind_Leg_RLCAL_260810/Hind_Leg_RLCAL_260810.usda",  # 구 CAD+RL_INTERFACE 한계 이식본(08-10)
+        # usd_path=".../data/Robots/Hind_Leg_URDF2/Hind_Leg/Hind_Leg.usda",  # 2026-08-11: URDF2(신규 CAD 리비전, 08-11 이전 채택)
+        #   원본 URDF: /home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF2/urdf/Hind_Leg.urdf
+        #   링크 프레임/축(+Y)이 biped MJCF 모델각 규약과 동일(좌우 미러 아님) — sim q ≈ 모델각.
+        #   effort 84/84/126/100.8·velocity는 URDF에 이미 실기값. 관절한계는 URDF2 자체값
+        #   (hip ±14.9° 등 — RL_INTERFACE.md §3 실측표와 다름, 실기팀 신규 리비전 기준).
+        #   질량도 신규(총 ~16.6 kg vs 구 13.57) — 구 모델 기준 kp/kd·정책은 재검토 대상.
+        # 2026-08-11: URDF3(같은 날 배포된 추가 CAD 리비전)로 교체.
+        #   원본 URDF: /home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF3/urdf/Hind_Leg.urdf
+        #   URDF2 대비 관절명/타입/effort/lower/upper 전부 동일 — actuator cfg(velocity_limit 등)는 무수정.
+        #   base 링크가 base_collision으로 리네임(질량 5.617→2.8kg)되며, 나머지 링크 10개도 전부
+        #   "_link" -> "_link_collision"으로 리네임(코드에서 링크명 직접 참조 없어 무해).
+        #   ⚠ URDF3 원본 <limit velocity>가 foot 관절만 24.7→14.8로 퇴행(RL_INTERFACE.md 실기 감속비
+        #   재조사로 이미 폐기된 구값과 일치 — CAD 익스포터 쪽 gear ratio 가정이 미갱신인 것으로 추정).
+        #   actuator DCMotorCfg의 velocity_limit(24.6)은 URDF와 무관하게 별도 하드코딩이라 영향 없지만,
+        #   USD 변환 시 physx.usda의 physxJoint:maxJointVelocity가 14.8 rad/s(847.97754 deg/s)로
+        #   baked-in되므로 임포트 후 **수동으로 URDF2 생성본 값(1415.2058 deg/s = 24.7 rad/s)에 맞춰
+        #   패치**했다. asset 재생성 시 재적용 필요 — 아래 Newton fix와 함께 CLAUDE.md에 기록.
+        usd_path="/home/lgb/IsaacLab-6.0/source/isaaclab_assets/data/Robots/Hind_Leg_URDF3/Hind_Leg/Hind_Leg.usda",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -475,18 +494,43 @@ HIND_LEG_CFG = ArticulationCfg(
         #   τ_max별로 그룹을 3개(28/42/56)로 쪼개면 되지만, 그 경우 PACE 재적합이 필요하다.
         "legs": DCMotorCfg(
             joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint", ".*_foot_joint"],
+            # 실기 무부하 속도한계 (RL_INTERFACE.md §6-c): 모터 207.2 rad/s ÷ 실제감속비 7/7/10.5/8.4.
+            # 구값 foot 14.8은 감속비 오인(폐기).
             velocity_limit={
                 ".*_hip_joint": 29.6,
                 ".*_thigh_joint": 29.6,
                 ".*_calf_joint": 19.7,
-                ".*_foot_joint": 14.8,
+                ".*_foot_joint": 24.6,
             },
-            effort_limit={".*_hip_joint": 28, ".*_thigh_joint": 28, ".*_calf_joint": 42, ".*_foot_joint": 56},
-            saturation_effort=56.0,
-            # PACE sysid cfg의 nominal과 동일. 이전 ImplicitActuator에는 armature가 없어(=0) 두 플랜트가
-            # 어긋났다 — A/B 실측에서 잔차의 전부가 이 항이었다. PACE가 식별한 관절별 armature를
-            # 반영할 때는 이 값을 덮어쓰면 된다(현재는 nominal).
-            armature={".*": 0.01},
+            # 실기 peak 토크 (RL_INTERFACE.md §6-c actuatorfrcrange): 모터 12 N·m × 감속비 7/7/10.5/8.4.
+            # 구값 28/28/42/56은 1/3 오인(Leg_URDF2와 같은 함정) — 폐기.
+            # ⚠ 런타임 토크 트립(보고토크 15 N·m 50 ms → limp 래치, §6-i)은 이보다 훨씬 낮다.
+            #   플랜트 한계와 별개로 정책/보상 설계에서 다뤄야 한다.
+            effort_limit={
+                ".*_hip_joint": 84.0,
+                ".*_thigh_joint": 84.0,
+                ".*_calf_joint": 126.0,
+                ".*_foot_joint": 100.8,
+            },
+            saturation_effort=126.0,
+            # 실측 반사관성 ROTOR_I 7.4e-4 × 실제감속비² (RL_INTERFACE.md §6-a).
+            # hip/thigh 7²=0.0363, calf 10.5²=0.0816, foot 8.4²=0.0522 kg·m².
+            # PACE가 관절별 armature를 식별하면 이 값을 덮어쓰면 된다(현재는 실측 nominal).
+            armature={
+                ".*_hip_joint": 0.0363,
+                ".*_thigh_joint": 0.0363,
+                ".*_calf_joint": 0.0816,
+                ".*_foot_joint": 0.0522,
+            },
+            # 실측 관절 마찰/감쇠 (hip 2축 실측, 타축 외삽 — RL_INTERFACE.md §6-a).
+            # Isaac ≥5.0에서 friction/dynamic_friction은 계수가 아니라 effort [N·m]다.
+            # URDF <dynamics friction>은 physx variant 레이어에 묻혀 sim에 반영되지 않는 것을
+            # 스모크로 확인(해상표 "Not Specified") → cfg로 명시 주입한다.
+            # ⚠ 실기는 Stribeck(정지 0.63~0.71 N·m, 동 0.505~0.575)이라 상수 0.38은
+            #   저속을 25~35% 과소평가한다(§6-e) — DR 후보. PACE 식별값이 나오면 덮어쓸 것.
+            friction={".*": 0.38},
+            dynamic_friction={".*": 0.38},
+            viscous_friction={".*": 0.09},
             # PD gains: inertia-scaled (ω_n=20 rad/s, ζ=0.9) from measured per-joint
             # effective inertia I_eff (hip 0.163 / thigh 0.133 / calf 0.030 / foot 0.0019 kg·m²).
             # Previous uniform Kp=25/Kd=0.5 (= Go2 quadruped default) left hip/thigh at ζ≈0.12
@@ -513,12 +557,16 @@ HIND_LEG_CFG = ArticulationCfg(
 # Leg_URDF2 — 17-DOF 4족 로봇 (다리 4 × 4관절 + 허리 1)
 ##
 
-# URDF `actuatorfrcrange` 에서 가져온 관절 타입별 토크 한계 [N·m].
-LEG_HIP_TORQUE = 28.0
-LEG_THIGH_TORQUE = 28.0
-LEG_CALF_TORQUE = 42.0
-LEG_FOOT_TORQUE = 56.0
-LEG_WAIST_TORQUE = 28.0
+# URDF(Leg_URDF2/urdf/Leg.urdf) 의 <limit effort> × 85% [N·m].
+#   URDF effort: hip/thigh/waist = 84, calf = 126, foot = 168 (velocity 29.6/29.6/19.7/14.8 도 URDF 그대로).
+# 2026-07-28 정정: 이전엔 URDF effort 의 1/3(28/42/56)을 nominal 로 오인해 그 85%(23.8/35.7/47.6)를 썼다.
+#   실제 URDF effort 는 3배라, calf/foot 이 저토크 한계에 상시 포화 → 속도 ~3 m/s 천장이 발생했다.
+#   이제 URDF effort 기준 85% 로 상향: 84×0.85=71.4, 126×0.85=107.1, 168×0.85=142.8.
+LEG_HIP_TORQUE = 71.4
+LEG_THIGH_TORQUE = 71.4
+LEG_CALF_TORQUE = 107.1
+LEG_FOOT_TORQUE = 142.8
+LEG_WAIST_TORQUE = 71.4
 
 # 관절별 게인 — `_workspace/leg/compute_leg_ieff.py` 로 USD 에서 유효관성 I_eff 를 실측해 도출.
 # (총 질량 38.0 kg, I_eff 스프레드 922배 → 균일 게인은 관절마다 감쇠비가 제각각이 된다.)

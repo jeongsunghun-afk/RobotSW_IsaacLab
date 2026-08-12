@@ -32,22 +32,24 @@ JOINT_NAMES: list[str] = [
 # go2/R_Skeleton(300/5)과 달리 12~65로 훨씬 낮다. GUI 슬라이더 상한도 여기에 맞춰져 있다.
 # ⚠ source/isaaclab_tasks/isaaclab_tasks/direct/r2s_biped_leg/r2s_biped_leg_env_cfg.py
 #    DEFAULT_KP/DEFAULT_KD 와 값 일치 필수.
-DEFAULT_KP: list[float] = [65.0, 53.0, 12.0, 20.0, 65.0, 53.0, 12.0, 20.0]
-DEFAULT_KD: list[float] = [6.0, 4.8, 1.1, 1.0, 6.0, 4.8, 1.1, 1.0]
+# 2026-08-12 실기팀 지정값: hip(TR) 100/5, thigh(TP) 50/5, calf(KP) 50/5, foot(AP) 20/5.
+# (구값 65/53/12/20 + 6/4.8/1.1/1.0 은 구 모델 I_eff 기반 — 폐기)
+DEFAULT_KP: list[float] = [100.0, 50.0, 50.0, 20.0, 100.0, 50.0, 50.0, 20.0]
+DEFAULT_KD: list[float] = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
 
-# 실측 soft joint position limit [rad] (2026-07-21 probe). GUI 명령을 이 범위로 클램프해
+# soft joint position limit [rad]. GUI 명령을 이 범위로 클램프해
 # sim의 silent 클램핑(soft_joint_pos_limit_factor)으로 인한 추종 혼란을 방지한다.
+# 2026-08-11: 신규 CAD 리비전 Hind_Leg_URDF2 USD 기준. 좌우 동일 규약(미러 아님) — HL/HR 값 동일.
 # ⚠ r2s_biped_leg_env_cfg.py SOFT_LIMITS_RAD 와 값 일치 필수.
-# ⚠ foot 관절은 좌우가 **미러**라 비대칭이다(오타 아님). 대칭이라 가정하지 말 것.
 SOFT_LIMITS_RAD: list[tuple[float, float]] = [
-    (-0.5498, 0.5498),  # HL_hip
-    (-1.9024, 1.5533),  # HL_thigh
-    (-1.3836, 0.4236),  # HL_calf
-    (-0.4192, 1.4662),  # HL_foot
-    (-0.5498, 0.5498),  # HR_hip
-    (-1.9024, 1.5533),  # HR_thigh
-    (-1.3836, 0.4236),  # HR_calf
-    (-1.4662, 0.4192),  # HR_foot  (HL_foot의 미러 — 의도된 비대칭)
+    (-0.2340, 0.2340),  # HL_hip
+    (-0.9555, 2.1855),  # HL_thigh
+    (-0.9445, 0.7745),  # HL_calf
+    (-1.3840, 0.3440),  # HL_foot
+    (-0.2340, 0.2340),  # HR_hip
+    (-0.9555, 2.1855),  # HR_thigh (HL과 동일)
+    (-0.9445, 0.7745),  # HR_calf
+    (-1.3840, 0.3440),  # HR_foot  (HL과 동일)
 ]
 
 # 기본(중립) 자세 — 실측 default_joint_pos 전부 0.0.
@@ -94,6 +96,8 @@ if __name__ == "__main__":
     assert clamp_to_soft([9.0] * NUM_JOINTS) == [SOFT_LIMITS_RAD[i][1] for i in range(NUM_JOINTS)]
     assert clamp_to_soft([-9.0] * NUM_JOINTS) == [SOFT_LIMITS_RAD[i][0] for i in range(NUM_JOINTS)]
     assert interpolate_sequence([0.0] * NUM_JOINTS, [0.4] * NUM_JOINTS, 10)[-1] == [0.4] * NUM_JOINTS
-    # foot 좌우 비대칭(미러)이 보존되는지 — 대칭으로 "고쳐지면" 여기서 걸린다.
-    assert SOFT_LIMITS_RAD[3] == (-SOFT_LIMITS_RAD[7][1], -SOFT_LIMITS_RAD[7][0])
+    # URDF2(2026-08-11)는 좌우 동일 규약 — HL/HR soft limit이 같아야 한다.
+    # (구 자산은 thigh·foot이 미러였다. 자산을 되돌리면 이 assert부터 갱신할 것.)
+    assert SOFT_LIMITS_RAD[3] == SOFT_LIMITS_RAD[7]
+    assert SOFT_LIMITS_RAD[1] == SOFT_LIMITS_RAD[5]
     print("motions(bipedleg) OK")

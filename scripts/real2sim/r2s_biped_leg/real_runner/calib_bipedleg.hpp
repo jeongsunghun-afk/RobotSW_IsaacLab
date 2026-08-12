@@ -13,6 +13,14 @@
  *    실기 probe(README §캘리브레이션)로 확정하기 전에는 TRACK 모드 금지.
  *    RobotTestGait 예제의 fPosZero {-90,0,60,-90,30,0,90,90} 는 모터 원점이
  *    로봇 중립자세와 다를 수 있음을 시사한다 — 반드시 실측할 것.
+ *
+ * ⚠⚠ 구조적 갭 (RL_INTERFACE.md, 2026-08-10 영점 인계 문서에서 확인):
+ *    1. 드라이버가 전 축 7:1 가정으로 보고하므로 채널각 = 관절각 × gear_k
+ *       (hip/thigh 1.0 · calf 1.5 · foot 1.2). 이 표의 sign/zero 선형변환만으로는
+ *       calf·foot 배율을 표현할 수 없다 — gear 필드 추가 필요 (§4).
+ *    2. foot 은 calf 와 기구 커플링 (q_raw_foot = q_foot + 1.0·q_calf, §2).
+ *       sign/zero/gear 만으로는 표현 불가 — 커플링 항 추가 필요. 토크는 전치로 되먹임.
+ *    3. 채널각은 ±180° 래핑된다(클램프 아님) — 송신 전 포화 필수 (§5).
  */
 #ifndef __CALIB_BIPEDLEG_HPP__
 #define __CALIB_BIPEDLEG_HPP__
@@ -32,18 +40,19 @@ struct MotorCalib {
     float max_rad;
 };
 
-// kp/kd = motions.py DEFAULT_KP/DEFAULT_KD (sim 학습 게인, Nm/rad · Nm·s/rad 가정).
-// ⚠ hip kd 6.0 은 드라이버 상한(DEF_MOT_GAIN_D_MAX=5)을 넘는다 — 런타임에서 5.0 으로
-//   클램프하고 경고를 출력한다. sim(6.0)과 실기(5.0)의 plant 차이로 남는 항목.
+// kp/kd = motions.py DEFAULT_KP/DEFAULT_KD 와 값 일치 필수 (중복 정의).
+// 2026-08-12 실기팀 지정값: hip 100/5, thigh 50/5, calf 50/5, foot 20/5 — 전부 드라이버
+// 상한(kp 500 / kd 5) 이내라 기동 시 클램프 WARN 이 나오지 않아야 정상.
+// soft limit: 신규 CAD 리비전 Hind_Leg_URDF2 USD 기준 (2026-08-11). 좌우 동일 규약(미러 아님).
 constexpr MotorCalib MOTOR_CALIB[NUM_MOTORS] = {
-    {"HL_hip(LtR)", +1.0f, 0.0f, 65.0f, 6.0f, -0.5498f, 0.5498f},
-    {"HL_thigh(LtP)", +1.0f, 0.0f, 53.0f, 4.8f, -1.9024f, 1.5533f},
-    {"HL_calf(LkP)", +1.0f, 0.0f, 12.0f, 1.1f, -1.3836f, 0.4236f},
-    {"HL_foot(LaP)", +1.0f, 0.0f, 20.0f, 1.0f, -0.4192f, 1.4662f},
-    {"HR_hip(RtR)", +1.0f, 0.0f, 65.0f, 6.0f, -0.5498f, 0.5498f},
-    {"HR_thigh(RtP)", +1.0f, 0.0f, 53.0f, 4.8f, -1.9024f, 1.5533f},
-    {"HR_calf(RkP)", +1.0f, 0.0f, 12.0f, 1.1f, -1.3836f, 0.4236f},
-    {"HR_foot(RaP)", +1.0f, 0.0f, 20.0f, 1.0f, -1.4662f, 0.4192f},  // HL_foot 미러(의도된 비대칭)
+    {"HL_hip(LtR)", +1.0f, 0.0f, 100.0f, 5.0f, -0.2340f, 0.2340f},
+    {"HL_thigh(LtP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9555f, 2.1855f},
+    {"HL_calf(LkP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9445f, 0.7745f},
+    {"HL_foot(LaP)", +1.0f, 0.0f, 20.0f, 5.0f, -1.3840f, 0.3440f},
+    {"HR_hip(RtR)", +1.0f, 0.0f, 100.0f, 5.0f, -0.2340f, 0.2340f},
+    {"HR_thigh(RtP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9555f, 2.1855f},  // HL과 동일 (URDF2 비미러)
+    {"HR_calf(RkP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9445f, 0.7745f},
+    {"HR_foot(RaP)", +1.0f, 0.0f, 20.0f, 5.0f, -1.3840f, 0.3440f},  // HL과 동일 (URDF2 비미러)
 };
 
 // 드라이버 게인 상한 (defineConfigMotor.h DEF_MOT_GAIN_*_MAX)

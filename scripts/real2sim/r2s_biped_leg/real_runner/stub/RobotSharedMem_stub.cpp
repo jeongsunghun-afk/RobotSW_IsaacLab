@@ -16,6 +16,7 @@ namespace {
 constexpr int kNumMotors = 8;
 MotGeneral_t g_cmd[kNumMotors];
 float g_pos_deg[kNumMotors] = {0};
+float g_prev_pos_deg[kNumMotors] = {0};
 bool g_has_cmd[kNumMotors] = {false};
 }  // namespace
 
@@ -35,15 +36,21 @@ unsigned int RobotMemGait_GetMotorStatus16(MotorParam16_t* ptrStatus, unsigned i
         return ENUM_RESULT_FAILURE;
     }
     // 1차 지연 plant: pos += (target - pos) * alpha (호출은 1 kHz 가정)
+    float err_deg = 0.0f;
+    g_prev_pos_deg[unMotorIdx] = g_pos_deg[unMotorIdx];
     if (g_has_cmd[unMotorIdx]) {
         float target = static_cast<float>(g_cmd[unMotorIdx].fPosition);
-        g_pos_deg[unMotorIdx] += (target - g_pos_deg[unMotorIdx]) * 0.03f;
+        err_deg = target - g_pos_deg[unMotorIdx];
+        g_pos_deg[unMotorIdx] += err_deg * 0.03f;
     }
     MotGeneral_t stt;
     std::memset(&stt, 0, sizeof(stt));
     stt.ucDevID = static_cast<unsigned char>(unMotorIdx);
     stt.fPosition = static_cast<float16>(g_pos_deg[unMotorIdx]);
-    stt.fVelocity = static_cast<float16>(0.0f);
+    // 합성 텔레메트리 (TELEM 경로 검증용): vel = 위치 미분(1 kHz), tau ∝ kp·오차.
+    stt.fVelocity = static_cast<float16>((g_pos_deg[unMotorIdx] - g_prev_pos_deg[unMotorIdx]) * 1000.0f);
+    float kp = g_has_cmd[unMotorIdx] ? static_cast<float>(g_cmd[unMotorIdx].fGainKp) : 0.0f;
+    stt.fTorque = static_cast<float16>(0.02f * kp * err_deg);
     std::memcpy(ptrStatus, &stt, sizeof(MotGeneral_t));
     return ENUM_RESULT_SUCCESS;
 }

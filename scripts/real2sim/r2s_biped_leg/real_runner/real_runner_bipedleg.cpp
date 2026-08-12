@@ -57,7 +57,7 @@ constexpr double kActTimeoutSec = 0.5;    // TRACK 중 ACT 두절 → 마지막 
 constexpr unsigned kStatusWarmupCnt = 100;  // RobotTestGait 게이트와 동일
 
 enum class Mode { kProbe, kHold, kBridge };
-enum class State { kWaitStatus, kHold, kEngage, kTrack };
+enum class State { kWaitStatus, kHold, kEngage, kTrack, kRelax };
 
 double now_sec() {
     timespec ts;
@@ -167,7 +167,8 @@ int main(int argc, char** argv) {
     timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
 
-    std::printf("[real_runner] loop start (1 kHz, reply pacing %.0f ms)\n", kStepDtSec * 1e3);
+    std::printf("[real_runner] loop start (1 kHz, reply pacing %.0f ms, TELEM:%d PING 지원)\n",
+                kStepDtSec * 1e3, REAL_TELEM_PORT);
 
     while (true) {
         // ---- 1) 모터 상태 읽기 (RobotTestGait 패턴) ----
@@ -206,16 +207,59 @@ int main(int argc, char** argv) {
             ssize_t n;
             while ((n = recvfrom(sock, rx, sizeof(rx), 0, reinterpret_cast<sockaddr*>(&from), &from_len)) > 0) {
                 PolicyActPacket act;
+                PolicyPingPacket ping;
+                PolicyGainPacket gain;
                 if (unpack_policy_act(rx, static_cast<size_t>(n), act)) {
                     std::memcpy(target_pol, act.target_q, sizeof(target_pol));
                     last_act_seq = act.seq;
                     last_act_time = now_sec();
                     peer_addr = from;
                     have_peer = true;
-                    if (state == State::kHold && mode == Mode::kBridge) {
+                    if ((state == State::kHold || state == State::kRelax) && mode == Mode::kBridge) {
+                        // RELAX에서 복귀 시엔 처져 있는 **현재** 자세에서 램프를 시작해야 한다.
+                        if (state == State::kRelax) {
+                            for (int m = 0; m < NUM_MOTORS; m++) {
+                                latched_deg[m] = static_cast<float>(motor_stt[m].fPosition);
+                            }
+                        }
                         state = State::kEngage;
                         engage_t0 = last_act_time;
                         std::printf("[real_runner] ACT 수신(seq=%u) → ENGAGE %.0f ms\n", act.seq, engage_sec * 1e3);
+                    }
+                } else if (unpack_policy_ping(rx, static_cast<size_t>(n), ping)) {
+                    // 모니터 keepalive: peer 만 등록. 목표/상태머신 불변 — bridge TRACK 중에도 무해.
+                    peer_addr = from;
+                    have_peer = true;
+                } else if (unpack_policy_relax(rx, static_cast<size_t>(n), ping)) {
+                    // 무토크(limp) 요청 — bridge 모드에서만. kp=kd=tau=0 을 능동 송신한다(명령 중단이
+                    // 아님 — 드라이버가 마지막 명령을 유지할 수 있으므로 zero-torque 를 계속 보낸다).
+                    peer_addr = from;
+                    have_peer = true;
+                    if (mode == Mode::kBridge && state != State::kRelax && state != State::kWaitStatus) {
+                        state = State::kRelax;
+                        std::printf("[real_runner] RELAX 수신 → 무토크(limp)\n");
+                    }
+                } else if (unpack_policy_gain(rx, static_cast<size_t>(n), gain)) {
+                    // kp/kd 런타임 갱신 — articulation 순서로 받아 모터 순서로 매핑, 드라이버 상한 클램프.
+                    // 다음 틱부터 kp_cmd/kd_cmd 로 반영된다(relax 중엔 여전히 0 강제). 목표/상태머신 불변.
+                    peer_addr = from;
+                    have_peer = true;
+                    bool changed = false;
+                    for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+                        int m = POLICY_TO_MOTOR[p];
+                        float new_kp = clamp(gain.kp[p], 0.0f, DRV_GAIN_P_MAX);
+                        float new_kd = clamp(gain.kd[p], 0.0f, DRV_GAIN_D_MAX);
+                        if (new_kp != kp_cmd[m] || new_kd != kd_cmd[m]) {
+                            changed = true;
+                        }
+                        kp_cmd[m] = new_kp;
+                        kd_cmd[m] = new_kd;
+                    }
+                    // 값이 실제로 바뀌었을 때만 로그 — 워크스테이션이 1 Hz 로 갱신 송신하므로
+                    // 매번 찍으면 콘솔이 초당 1줄씩 오염된다.
+                    if (changed) {
+                        std::printf("[real_runner] GAIN 수신(seq=%u) kp[0]=%.1f kd[0]=%.1f (모터순서, 클램프 후)\n",
+                                    gain.seq, kp_cmd[0], kd_cmd[0]);
                     }
                 }
                 from_len = sizeof(from);
@@ -238,7 +282,13 @@ int main(int argc, char** argv) {
         }
 
         if (state != State::kWaitStatus && mode != Mode::kProbe) {
-            if (state == State::kHold) {
+            const bool relax_now = (state == State::kRelax);
+            if (relax_now) {
+                // 무토크: 목표=현재 자세(게인 0이라 사실상 무의미), slew 무관하게 현재값 추종.
+                for (int m = 0; m < NUM_MOTORS; m++) {
+                    cmd_deg[m] = static_cast<float>(motor_stt[m].fPosition);
+                }
+            } else if (state == State::kHold) {
                 for (int m = 0; m < NUM_MOTORS; m++) {
                     cmd_deg[m] = latched_deg[m];
                 }
@@ -270,8 +320,9 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // 선택적 slew 제한 (기본 off — 학습 plant 와 일치시키려면 끈 상태로 검증)
-            if (slew_dps > 0.0f && have_prev_cmd) {
+            // 선택적 slew 제한 (기본 off — 학습 plant 와 일치시키려면 끈 상태로 검증). relax 중엔
+            // 목표가 현재 자세라 제한이 무의미하고, 처지는 속도를 따라가지 못하면 오히려 유해 → 스킵.
+            if (slew_dps > 0.0f && have_prev_cmd && !relax_now) {
                 float max_step = slew_dps * static_cast<float>(kLoopDtSec);
                 for (int m = 0; m < NUM_MOTORS; m++) {
                     cmd_deg[m] = clamp(cmd_deg[m], prev_cmd_deg[m] - max_step, prev_cmd_deg[m] + max_step);
@@ -290,8 +341,8 @@ int main(int argc, char** argv) {
                     cmd.fVelocity = static_cast<float16>(0.0f);
                     cmd.fAccelrationOrTemperture = static_cast<float16>(0.0f);
                     cmd.fTorque = static_cast<float16>(0.0f);
-                    cmd.fGainKp = static_cast<float16>(kp_cmd[m]);
-                    cmd.fGainKd = static_cast<float16>(kd_cmd[m]);
+                    cmd.fGainKp = static_cast<float16>(relax_now ? 0.0f : kp_cmd[m]);
+                    cmd.fGainKd = static_cast<float16>(relax_now ? 0.0f : kd_cmd[m]);
                     cmd.fGainKi = static_cast<float16>(0.0f);
                     RobotMemGait_SetMotorCommand16(reinterpret_cast<MotorParam16_t*>(&cmd), m);
                     prev_cmd_deg[m] = cmd_deg[m];
@@ -300,36 +351,65 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ---- 6) STATE 회신 (20 ms 페이싱 = policy 50 Hz) ----
-        if (have_peer && all_stt && (t - last_reply_time) >= kStepDtSec) {
-            PolicyStatePacket st;
-            st.magic = POLICY_STATE_MAGIC;
-            st.seq = last_act_seq;
+        // ---- 6) 회신 (20 ms 페이싱 = policy 50 Hz) ----
+        // STATE 는 정책 입력이므로 all_stt(모터 8개 유효) 게이트 유지 — 가짜 0 자세로 정책이
+        // 돌면 위험. TELEM 은 관측 전용이라 peer 만 있으면 warmup 전에도 보내고, 대신
+        // valid_mask 로 어느 관절이 유효한지 알린다 → 워크스테이션에서 "링크 vs 모터데이터" 구분.
+        if (have_peer && (t - last_reply_time) >= kStepDtSec) {
+            sockaddr_in reply = peer_addr;
+            if (all_stt) {
+                PolicyStatePacket st;
+                st.magic = POLICY_STATE_MAGIC;
+                st.seq = last_act_seq;
+                for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+                    int m = POLICY_TO_MOTOR[p];
+                    st.q[p] = motor_deg_to_sim(m, static_cast<float>(motor_stt[m].fPosition));
+                    float vel = static_cast<float>(motor_stt[m].fVelocity);  // [deg/s] (Data Format 문서)
+                    st.dq[p] = MOTOR_CALIB[m].sign * vel * DEF_DEG2RAD;
+                }
+                // IMU RPY → projected gravity (ZYX, yaw 는 중력에 무영향)
+                float roll = imu_buf[IDX_OF_IMU_ARPY + 0];
+                float pitch = imu_buf[IDX_OF_IMU_ARPY + 1];
+                if (IMU_RPY_IS_DEG) {
+                    roll *= DEF_DEG2RAD;
+                    pitch *= DEF_DEG2RAD;
+                }
+                if (imu_seen) {
+                    st.gravity[0] = std::sin(pitch);
+                    st.gravity[1] = -std::sin(roll) * std::cos(pitch);
+                    st.gravity[2] = -std::cos(roll) * std::cos(pitch);
+                } else {
+                    st.gravity[0] = 0.0f;  // IMU 미수신 → 직립 가정 (경고는 주기 출력에서)
+                    st.gravity[1] = 0.0f;
+                    st.gravity[2] = -1.0f;
+                }
+                reply.sin_port = htons(static_cast<uint16_t>(REAL_STATE_PORT));
+                sendto(sock, &st, sizeof(st), 0, reinterpret_cast<sockaddr*>(&reply), sizeof(reply));
+            }
+
+            // TELEM (gui monitor 관측 전용) — warmup 전에도 송신, 무효 관절은 mask 로 표시.
+            PolicyTelemPacket tm;
+            std::memset(&tm, 0, sizeof(tm));
+            tm.magic = POLICY_TELEM_MAGIC;
+            tm.seq = last_act_seq;
             for (int p = 0; p < R2S_NUM_JOINTS; p++) {
                 int m = POLICY_TO_MOTOR[p];
-                st.q[p] = motor_deg_to_sim(m, static_cast<float>(motor_stt[m].fPosition));
-                float vel = static_cast<float>(motor_stt[m].fVelocity);  // [deg/s] (Data Format 문서)
-                st.dq[p] = MOTOR_CALIB[m].sign * vel * DEF_DEG2RAD;
-            }
-            // IMU RPY → projected gravity (ZYX, yaw 는 중력에 무영향)
-            float roll = imu_buf[IDX_OF_IMU_ARPY + 0];
-            float pitch = imu_buf[IDX_OF_IMU_ARPY + 1];
-            if (IMU_RPY_IS_DEG) {
-                roll *= DEF_DEG2RAD;
-                pitch *= DEF_DEG2RAD;
+                if (stt_valid[m]) {
+                    tm.valid_mask |= (1u << p);
+                    tm.q[p] = motor_deg_to_sim(m, static_cast<float>(motor_stt[m].fPosition));
+                    float vel = static_cast<float>(motor_stt[m].fVelocity);
+                    tm.dq[p] = MOTOR_CALIB[m].sign * vel * DEF_DEG2RAD;
+                    tm.tau[p] = MOTOR_CALIB[m].sign * static_cast<float>(motor_stt[m].fTorque);  // [N·m]
+                }
             }
             if (imu_seen) {
-                st.gravity[0] = std::sin(pitch);
-                st.gravity[1] = -std::sin(roll) * std::cos(pitch);
-                st.gravity[2] = -std::cos(roll) * std::cos(pitch);
-            } else {
-                st.gravity[0] = 0.0f;  // IMU 미수신 → 직립 가정 (경고는 주기 출력에서)
-                st.gravity[1] = 0.0f;
-                st.gravity[2] = -1.0f;
+                tm.valid_mask |= (1u << 8);
             }
-            sockaddr_in reply = peer_addr;
-            reply.sin_port = htons(static_cast<uint16_t>(REAL_STATE_PORT));
-            sendto(sock, &st, sizeof(st), 0, reinterpret_cast<sockaddr*>(&reply), sizeof(reply));
+            for (int k = 0; k < 3; k++) {
+                tm.rpy[k] = imu_buf[IDX_OF_IMU_ARPY + k];  // 원값 [deg 추정] — 해석은 수신측
+            }
+            reply.sin_port = htons(static_cast<uint16_t>(REAL_TELEM_PORT));
+            sendto(sock, &tm, sizeof(tm), 0, reinterpret_cast<sockaddr*>(&reply), sizeof(reply));
             last_reply_time = t;
         }
 
@@ -340,6 +420,7 @@ int main(int argc, char** argv) {
             const char* sname = state == State::kWaitStatus ? "WAIT_STATUS"
                                 : state == State::kHold     ? "HOLD"
                                 : state == State::kEngage   ? "ENGAGE"
+                                : state == State::kRelax    ? "RELAX"
                                                             : "TRACK";
             std::printf("[%s] q_sim[rad]:", sname);
             for (int p = 0; p < R2S_NUM_JOINTS; p++) {

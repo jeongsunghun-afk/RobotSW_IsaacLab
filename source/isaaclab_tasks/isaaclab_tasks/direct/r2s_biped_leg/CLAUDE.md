@@ -17,22 +17,35 @@ PyQt5 GUI/monitor와 통신하는 **Real2Sim** 환경. `r2s_hind_leg` 패턴 기
 | 환경 클래스 | `R2SBipedLegEnv` |
 | 설정 클래스 | `R2SBipedLegEnvCfg` |
 
-## 조인트 파라미터 (실측 2026-07-21 probe, 동결)
+## 조인트 파라미터 (2026-08-11 신규 CAD 리비전 Hind_Leg_URDF2 → 같은 날 URDF3로 재교체)
 
 8관절, `find_joints(JOINT_NAME_PATTERNS, preserve_order=True)`로 순서 고정. leg-major(HL→HR).
+asset=`data/Robots/Hind_Leg_URDF3/Hind_Leg/Hind_Leg.usda` (rga.py `HIND_LEG_CFG`).
+URDF2는 링크 프레임/축(+Y)이 biped MJCF 모델각 규약과 동일, **좌우 동일 규약(미러 아님)** — URDF3도 동일.
+τ_max/v_max는 실기값(RL_INTERFACE.md §6-c), 관절한계는 URDF2/URDF3 공통 자체값(신규 리비전 기준).
+
+- URDF3(원본 `/home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF3/urdf/Hind_Leg.urdf`)는 관절명·타입·순서·
+  effort/lower/upper가 URDF2와 전부 동일 — 아래 표 값 무수정. base 링크만 `base`→`base_collision`
+  리네임(질량 5.617→2.8kg), 다리 링크 10개도 전부 `_link`→`_link_collision` 리네임(코드에서 링크명을
+  직접 참조하는 곳 없어 무해). robot 이름이 숫자로 시작(`03_Leg_UFDF_Colision_260617_2`)해 USD prim은
+  `tn__03_Leg_UFDF_Colision_260617_2_`로 sanitize됨.
 
 | idx | 실측명 | 레이블 | KP | KD | v_max | τ_max | soft limit [rad] |
 |---|---|---|----|----|-------|-------|---|
-| 0 | HL_hip_joint | HL_hip | 65.0 | 6.0 | 29.6 | 28.0 | (-0.5498, 0.5498) |
-| 1 | HL_thigh_joint | HL_thigh | 53.0 | 4.8 | 29.6 | 28.0 | (-1.9024, 1.5533) |
-| 2 | HL_calf_joint | HL_calf | 12.0 | 1.1 | 19.7 | 42.0 | (-1.3836, 0.4236) |
-| 3 | HL_foot_joint | HL_foot | 20.0 | 1.0 | 14.8 | 56.0 | (-0.4192, 1.4662) |
-| 4 | HR_hip_joint | HR_hip | 65.0 | 6.0 | 29.6 | 28.0 | (-0.5498, 0.5498) |
-| 5 | HR_thigh_joint | HR_thigh | 53.0 | 4.8 | 29.6 | 28.0 | (-1.9024, 1.5533) |
-| 6 | HR_calf_joint | HR_calf | 12.0 | 1.1 | 19.7 | 42.0 | (-1.3836, 0.4236) |
-| 7 | HR_foot_joint | HR_foot | 20.0 | 1.0 | 14.8 | 56.0 | (-1.4662, 0.4192) |
+| 0 | HL_hip_joint | HL_hip | 65.0 | 6.0 | 29.6 | 84.0 | (-0.2340, 0.2340) |
+| 1 | HL_thigh_joint | HL_thigh | 53.0 | 4.8 | 29.6 | 84.0 | (-0.9555, 2.1855) |
+| 2 | HL_calf_joint | HL_calf | 12.0 | 1.1 | 19.7 | 126.0 | (-0.9445, 0.7745) |
+| 3 | HL_foot_joint | HL_foot | 20.0 | 1.0 | 24.6 | 100.8 | (-1.3840, 0.3440) |
+| 4 | HR_hip_joint | HR_hip | 65.0 | 6.0 | 29.6 | 84.0 | (-0.2340, 0.2340) |
+| 5 | HR_thigh_joint | HR_thigh | 53.0 | 4.8 | 29.6 | 84.0 | (-0.9555, 2.1855) |
+| 6 | HR_calf_joint | HR_calf | 12.0 | 1.1 | 19.7 | 126.0 | (-0.9445, 0.7745) |
+| 7 | HR_foot_joint | HR_foot | 20.0 | 1.0 | 24.6 | 100.8 | (-1.3840, 0.3440) |
 
-- soft limit은 **좌우 비대칭**(foot은 미러) — 실측값이므로 대칭으로 "고치지" 말 것.
+- ⚠ URDF2/URDF3 공통 관절한계는 RL_INTERFACE.md §3 실측표와 **다르다**(예: hip ±14.9° vs ±35°) —
+  실기팀 신규 리비전 값으로 그대로 사용. 질량은 URDF2 총 ~16.6 kg → URDF3는 base만 5.617→2.8kg으로
+  줄어 총 ~13.8 kg(다리 링크 질량은 URDF2와 사실상 동일). KP/KD(구 모델 I_eff 기반)는 재검토 대상.
+- ⚠ 실기 런타임 보호는 τ_max보다 훨씬 낮다: 보고토크 15 N·m 50 ms → limp 래치,
+  200 dps(≈3.5 rad/s) 속도 트립 (RL_INTERFACE.md §6-i). 정책이 τ_max까지 쓰면 실기에서 죽는다.
 - default_joint_pos 전부 0.0.
 - 게인이 `r2s_hind_leg`(300/5)보다 훨씬 낮다 → GUI 슬라이더 상한을 낮춰야 조작 가능.
 - `JOINT_NAME_PATTERNS`는 정규식이 아니라 정확한 관절명 — `.*_hip_joint`는 HL/HR 양쪽에 매칭된다.
@@ -42,6 +55,21 @@ PyQt5 GUI/monitor와 통신하는 **Real2Sim** 환경. `r2s_hind_leg` 패턴 기
 `HIND_LEG_CFG`는 자유베이스라 2족이 GUI 조작 시 즉시 넘어진다. `cfg.fix_base=True`면
 `fix_root_link=True` + spawn z=0.8(`FIXED_BASE_HEIGHT_M`). 적용은 `_setup_scene`에서 —
 `sim_runner_bipedleg.py --fix_base`가 cfg 생성 후 덮어쓴 값도 반영해야 하기 때문(r2s_go2 패턴).
+
+- ⚠ **URDF2/URDF3 asset 재생성 시 주의** (2026-08-11): 신형 URDF USD Converter는 base(URDF3는
+  `base_collision`)에 `NewtonArticulationRootAPI`를 같이 붙이는데, `fix_root_link=True`가 RootAPI를
+  부모로 옮기며 `UsdPhysics.ArticulationRootAPI`만 제거하므로 Newton API가 `HasAPI`를 계속 참으로 만들어
+  "Expected exactly one ArticulationRootAPI ... found 2" 오류가 난다.
+  fix = `payloads/Physics/physics.usda`의 base(base_collision) `apiSchemas`에서 `NewtonArticulationRootAPI`
+  제거(PhysX 경로에선 미사용). asset을 다시 임포트하면 이 제거를 재적용해야 한다.
+- ⚠ **URDF3 foot 관절 velocity limit CAD 퇴행 — asset 재생성 시 재패치 필요** (2026-08-11): URDF3
+  원본의 `HL/HR_foot_joint <limit velocity>`가 24.7(URDF2)에서 14.8로 바뀌어 있다. 이 14.8은
+  `rga.py` `HIND_LEG_CFG` 주석("구값 foot 14.8은 감속비 오인")에 이미 실기 재조사로 폐기됐다고 기록된
+  값과 정확히 일치 — CAD 익스포터 쪽 gear ratio 가정이 미갱신인 것으로 추정(actuator 쪽 실측 확정값은
+  24.6이며 DCMotorCfg에 별도 하드코딩돼 URDF와 무관, 영향 없음). 문제는 USD 변환 시
+  `payloads/Physics/physx.usda`의 `physxJoint:maxJointVelocity`가 foot 2관절만 847.97754 deg/s
+  (14.8 rad/s)로 baked-in되는 것 — asset을 다시 임포트하면 이 두 값을 URDF2 생성본과 동일한
+  `1415.2058`(=24.7 rad/s)로 수동 패치해야 한다(hip/thigh/calf는 원래 URDF2와 동일해 무수정).
 
 ## 시뮬레이션 파라미터
 

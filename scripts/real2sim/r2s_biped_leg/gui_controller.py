@@ -33,9 +33,19 @@ policy_runner_bipedleg.py 와 bit-parity인 obs를 구성하고 요청-응답 lo
 
 8-DOF 2족(HL 4관절 + HR 4관절)이라 관절 콤보에는 8개 레이블이 모두 나온다.
 
-버튼:
+Gains 그룹에서 적용한 kp/kd는 publisher 프로세스가 REAL_ACT_PORT(9887)로 GAIN(R2PK) 패킷을 통해
+실기에도 갱신한다 — ACT(POLICY_ACT) 패킷은 target_q만 실어 나르므로(kp/kd 없음), 실기 쪽 게인을
+바꾸는 유일한 경로다. 값이 바뀌면 즉시 + 그 외엔 1초 주기로 재송신한다. relax 중엔 보내지 않는다
+(relax 동안 실제 kp/kd 대신 0을 보내면 파이 드라이버에 게인 0이 영구 잔류해, GUI가 relax 상태로
+죽은 뒤 다른 peer가 engage해도 무게인 추종 불능이 된다) — relax 해제 즉시 최신 게인이 변경 감지로
+다시 나간다.
+
+버튼/컨트롤:
     - Home (default): 중립(0) 자세로 보간 이동.
-    - Joint Step: 선택 관절만 delta 스텝(soft limit 클램프).
+    - Relax (zero torque): 무토크(limp) — sim은 kp=kd=0 CMD, 실기는 RELAX 패킷. **기동 기본 상태**라
+      GUI를 켜는 것만으로는 어떤 목표도 구동하지 않는다(슬라이더/Home 조작 시 engage).
+    - Joint Sliders: 8관절(leg-major) 슬라이더로 직접 자세 조작(soft limit 범위, rad/deg 표시 토글),
+      "Send to robot" 체크박스로 목표를 REAL_ACT_PORT(9887)에도 fan-out(--real_host 지정 시 기본 ON).
     - Sine Sweep: 선택 관절에 사인 궤적(soft limit 클램프, 실행 중 파라미터 라이브 반영).
     - Gains: 선택 관절 kp/kd 실시간 변경(faithful PD).
     - Computed Gains: sim이 보낸 관절별 유효 관성 I_eff로 kp=I·ωn², kd=2ζ·I·ωn 을 계산해
@@ -68,14 +78,18 @@ from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal  # noqa: E402
 from PyQt5.QtGui import QFont  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -124,8 +138,8 @@ FRAME_HZ: float = 50.0  # 시퀀스 프레임 생성 주파수 (publisher가 경
 PUBLISH_HZ: float = 50.0
 PUBLISH_PERIOD_S: float = 1.0 / PUBLISH_HZ
 SEQUENCE_DURATION_S: float = 1.5
-STEP_DURATION_S: float = 0.5
 HOST: str = "127.0.0.1"
+GAIN_RESEND_PERIOD_S: float = 1.0  # 실기 GAIN(R2PK) 주기 재송신 간격 — UDP 유실/real_runner 재시작 대비
 
 # 게인 슬라이더 상한 — 이 리그의 실측 게인은 kp 12~65 / kd 1.0~6.0 으로, R_Skeleton 5-DOF 리그
 # (kp 300 / kd 5)보다 한 자릿수 낮다. 상한을 1000/100 그대로 두면 기본값이 눈금 바닥에 붙어
@@ -155,6 +169,7 @@ STARTUP_ACQUIRE_TIMEOUT_S: float = 2.0  # 첫 state 대기 상한 [s]. 넘으면
 _MODE_HOLD = 0  # BASE_Q 고정 유지
 _MODE_SEQUENCE = 1  # 프레임 버퍼를 경과 시간으로 인덱싱 (Home/Step 보간)
 _MODE_SINE = 2  # BASE_Q + 선택 관절에 사인 주입 (경과 시간 기반)
+_MODE_RELAX = 3  # 무토크(limp): sim엔 kp=kd=0 CMD, 실기엔 RELAX 패킷 — GUI 기동 기본 상태
 
 _SM_MODE = 0
 _SM_CMD_VALID = 1  # 0/1: 유효한 명령이 있는가. startup latch 전·policy mode 중엔 0 → 발행 보류
@@ -172,7 +187,8 @@ _SM_BASE_Q = 26  # 26..33: hold 자세 / sine 기준 자세
 _SM_MEASURED_Q = 34  # 34..41: sim 실측 관절각 (publisher가 state에서 씀)
 _SM_CURRENT_Q = 42  # 42..49: publisher의 현재 출력 목표 (UI가 읽어 보간 시작점으로)
 _SM_IEFF = 50  # 50..57: 관절별 유효 관성 [kg·m²] (publisher가 IEFF 패킷에서 씀)
-_SM_FRAMES = 58  # 58..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 8)
+_SM_REAL_ENABLE = 58  # 0/1: Joint Sliders가 목표를 실기(UDP 9887, REAL_ACT_PORT)로도 발행할지
+_SM_FRAMES = 59  # 59..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 8)
 MAX_FRAMES = 512  # 512/50 = 10.24s 최대 시퀀스
 _SM_LEN = _SM_FRAMES + MAX_FRAMES * NUM_JOINTS
 
@@ -387,9 +403,12 @@ class PolicyInferenceThread(QThread):
                 send_action(target)
 
                 # monitor 중계 (action_q=target vs sim q/dq; tau는 rich state에 없어 0).
-                mon_sock.sendto(
-                    r2s_udp.pack_monitor(seq, target, state["q"], state["dq"], [0.0] * NUM_JOINTS), mon_addr
-                )
+                # target/q/dq 는 articulation 순서라, monitor.py 가 기대하는 leg-major(motions.JOINT_NAMES)로
+                # 재배열해야 한다 — 이전엔 articulation 순서 그대로 보내 monitor의 관절 레이블과 어긋났었다.
+                target_lm = [target[a] for a in _ART_FOR_LEGMAJOR]
+                q_lm = [state["q"][a] for a in _ART_FOR_LEGMAJOR]
+                dq_lm = [state["dq"][a] for a in _ART_FOR_LEGMAJOR]
+                mon_sock.sendto(r2s_udp.pack_monitor(seq, target_lm, q_lm, dq_lm, [0.0] * NUM_JOINTS), mon_addr)
                 seq += 1
 
                 # 1초(50 step)마다 자세 로깅 — grav_z≈-1이면 직립, 0/양수면 기울어짐/전도.
@@ -406,11 +425,114 @@ class PolicyInferenceThread(QThread):
                 s.close()
 
 
-def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[float]] | None:
+# leg-major 인덱스 i(motions.JOINT_NAMES) ← articulation 인덱스 — monitor.py plot 중계용 재배열.
+_ART_FOR_LEGMAJOR: list[int] = [0, 2, 4, 6, 1, 3, 5, 7]
+# articulation 인덱스 p ← leg-major 인덱스 — pack_policy_act(articulation 순서 필요)로 실기 fan-out할 때
+# Joint Sliders(leg-major)의 pose를 재배열하는 용도. _ART_FOR_LEGMAJOR의 역순열.
+_LM_FOR_ART: list[int] = [0, 4, 1, 5, 2, 6, 3, 7]
+
+_SLIDER_STEPS: int = 1000  # Joint Sliders 내부 int 해상도 (soft limit 범위를 이 스텝 수로 양자화)
+
+
+def _slider_to_rad(joint_idx: int, value: int) -> float:
+    """슬라이더 int 값(0..``_SLIDER_STEPS``) → soft limit 범위 내 rad."""
+    lo, hi = motions.SOFT_LIMITS_RAD[joint_idx]
+    return lo + (hi - lo) * value / _SLIDER_STEPS
+
+
+def _rad_to_slider(joint_idx: int, rad: float) -> int:
+    """rad(soft limit로 클램프) → 슬라이더 int 값(0..``_SLIDER_STEPS``)."""
+    lo, hi = motions.SOFT_LIMITS_RAD[joint_idx]
+    if hi <= lo:
+        return 0
+    frac = (rad - lo) / (hi - lo)
+    return int(round(min(1.0, max(0.0, frac)) * _SLIDER_STEPS))
+
+
+class RealMonitorThread(QThread):
+    """real_runner TELEM(9889) 수신 스레드 — **관측 전용**, 로봇 명령에 관여하지 않는다.
+
+    real_runner 는 peer(마지막 수신 주소)로만 회신하므로, 링크가 조용할 때(최근 1 s 내 TELEM 없음)만
+    PING(8 B, 목표 없음 — real_runner 는 peer 등록만 하고 상태머신 불변)을 1 Hz 로 보낸다.
+    policy 스레드가 ACT 를 흘리고 있으면 그것이 peer 를 유지하므로 이 스레드는 침묵한다.
+    TELEM 포트는 STATE(9888)와 분리돼 있어 policy lockstep 수신과 충돌하지 않는다 — 보행 중 동시 사용 가능.
+    """
+
+    telem = pyqtSignal(object)  # dict: q/dq/tau/rpy/seq/hz — 10 Hz 로 최신값 방출
+    failed = pyqtSignal(str)
+
+    def __init__(self, host: str, parent=None) -> None:
+        super().__init__(parent)
+        self._host = host
+        self._stop = False
+
+    def request_stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            rx.bind(("", r2s_udp.REAL_TELEM_PORT))
+        except OSError as exc:
+            self.failed.emit(f"bind {r2s_udp.REAL_TELEM_PORT} failed: {exc}")
+            return
+        rx.settimeout(0.05)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ping_addr = (self._host, r2s_udp.REAL_ACT_PORT)
+        mon_addr = ("127.0.0.1", r2s_udp.REAL_MON_PORT)  # monitor.py plot 중계 (leg-major 재배열)
+
+        latest: dict | None = None
+        seq = 0
+        last_rx = 0.0
+        last_ping = 0.0
+        last_emit = 0.0
+        rx_stamps: list[float] = []  # 최근 1 s 수신 시각 (rate 표시용)
+        try:
+            while not self._stop:
+                now = time.monotonic()
+                if now - last_rx > 1.0 and now - last_ping > 1.0:
+                    tx.sendto(r2s_udp.pack_policy_ping(seq), ping_addr)
+                    seq += 1
+                    last_ping = now
+                try:
+                    data, _ = rx.recvfrom(2048)
+                except (TimeoutError, OSError):
+                    data = None
+                if data is not None:
+                    t = r2s_udp.unpack_policy_telem(data)
+                    if t is not None:
+                        latest = t
+                        last_rx = now
+                        rx_stamps.append(now)
+                        # plot 중계 — monitor.py 는 leg-major(motions.JOINT_NAMES) 순서를 기대한다.
+                        q_lm = [t["q"][a] for a in _ART_FOR_LEGMAJOR]
+                        dq_lm = [t["dq"][a] for a in _ART_FOR_LEGMAJOR]
+                        tau_lm = [t["tau"][a] for a in _ART_FOR_LEGMAJOR]
+                        tx.sendto(r2s_udp.pack_monitor(t["seq"], [0.0] * NUM_JOINTS, q_lm, dq_lm, tau_lm), mon_addr)
+                if rx_stamps and now - rx_stamps[0] > 1.0:
+                    rx_stamps = [s for s in rx_stamps if now - s <= 1.0]
+                if now - last_emit >= 0.1:
+                    last_emit = now
+                    if latest is not None:
+                        payload = dict(latest)
+                        payload["hz"] = float(len(rx_stamps))
+                        payload["stale"] = now - last_rx > 0.5
+                        self.telem.emit(payload)
+                    else:
+                        self.telem.emit({"stale": True, "hz": 0.0})
+        finally:
+            rx.close()
+            tx.close()
+
+
+def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[float], bool, bool] | None:
     """공유 메모리의 모션 스펙 + 경과 시간으로 현재 목표 자세를 계산한다 (publisher 프로세스에서 호출).
 
     Returns:
-        ``(pose, kp, kd)`` 또는 명령이 없으면(``CMD_VALID=0``, startup latch 전/policy mode 중) None.
+        ``(pose, kp, kd, real_enable, relax)`` 또는 명령이 없으면(``CMD_VALID=0``, startup latch
+        전/policy mode 중) None. ``real_enable``은 Joint Sliders의 "Send to robot" 체크박스 상태,
+        ``relax``면 sim엔 kp=kd=0 CMD, 실기엔 ACT 대신 RELAX 패킷이 나간다.
     """
     with shared.get_lock():
         if shared[_SM_CMD_VALID] < 0.5:
@@ -419,6 +541,12 @@ def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[
         kp = [shared[_SM_KP + i] for i in range(NUM_JOINTS)]
         kd = [shared[_SM_KD + i] for i in range(NUM_JOINTS)]
         base = [shared[_SM_BASE_Q + i] for i in range(NUM_JOINTS)]
+        real_enable = shared[_SM_REAL_ENABLE] >= 0.5
+        if mode == _MODE_RELAX:
+            # 무토크: 게인 0. 목표는 실측 자세(모니터 action 라인이 현실을 따르게) — 게인 0이라 힘엔 무영향.
+            measured_valid = shared[_SM_MEASURED_VALID] >= 0.5
+            pose = [shared[(_SM_MEASURED_Q if measured_valid else _SM_BASE_Q) + i] for i in range(NUM_JOINTS)]
+            return motions.clamp_to_soft(pose), [0.0] * NUM_JOINTS, [0.0] * NUM_JOINTS, real_enable, True
         if mode == _MODE_SEQUENCE:
             start = shared[_SM_START_TIME]
             frame_hz = shared[_SM_FRAME_HZ]
@@ -438,10 +566,10 @@ def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[
             pose = list(base)
     # soft limit 최종 클램프 — sine이 base+amp로 한계를 넘거나 base 자체(실측 latch)가
     # 한계 밖일 수 있다. 시퀀스 프레임은 이미 클램프된 끝점 사이 보간이지만 한 번 더는 무해.
-    return motions.clamp_to_soft(pose), kp, kd
+    return motions.clamp_to_soft(pose), kp, kd, real_enable, False
 
 
-def publisher_process_main(shared, stop_flag) -> None:
+def publisher_process_main(shared, stop_flag, real_host: str | None = None) -> None:
     """**별도 프로세스**: 모션 스펙에서 목표를 계산해 cmd 50Hz 발행 + state/I_eff 수신. Qt와 완전 독립.
 
     UI event loop(위젯 조작·드래그)가 아무리 바빠도 이 프로세스는 영향받지 않는다 — 발행뿐 아니라
@@ -449,23 +577,48 @@ def publisher_process_main(shared, stop_flag) -> None:
     sim state의 실측 관절각을 공유 메모리에 되써 UI(startup latch·보간 시작점)가 읽을 수 있게 하고,
     monitor로 action+sim time-aligned 패킷을 중계한다. I_eff 패킷(sim_runner 1Hz)도 여기서 받는다.
 
+    Joint Sliders의 "Send to robot" 체크박스(``_SM_REAL_ENABLE``)가 켜져 있고 ``real_host``가
+    주어졌으면, 매 틱 발행 중인 목표(leg-major)를 articulation 순서로 재배열해
+    ``pack_policy_act``로 실기(REAL_ACT_PORT=9887)에도 흘린다. 같은 조건에서 Gains 그룹의 kp/kd도
+    articulation 순서로 재배열해 ``pack_policy_gain``(R2PK)으로 실기에 갱신한다 — 값이 바뀐 즉시,
+    그 외엔 1초 주기로 재송신한다. relax 중엔 보내지 않는다(relax의 kp=kd=0을 그대로 GAIN으로 보내면
+    파이 드라이버에 게인 0이 영구 잔류해 이후 engage 시 무게인 추종 불능이 되므로) — relax 해제
+    즉시 최신 게인이 변경 감지로 다시 나간다.
+
     Args:
         shared: ``multiprocessing.Array('d', _SM_LEN)`` — 위 레이아웃 상수 참고.
         stop_flag: ``multiprocessing.Value('i')`` — 1이면 루프 종료.
+        real_host: 실기 IP. None이면 실기 fan-out은 항상 no-op(체크박스도 GUI에서 비활성화됨).
     """
     cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     cmd_addr = (HOST, r2s_udp.CMD_PORT)
     state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    state_sock.bind((HOST, r2s_udp.STATE_PORT))
+    try:
+        state_sock.bind((HOST, r2s_udp.STATE_PORT))
+    except OSError as exc:
+        # bind 실패 = 대부분 gui_controller 중복 실행(먼저 뜬 인스턴스의 publisher가 9882 점유).
+        # 별도 프로세스라 조용히 죽으면 "슬라이더/sine이 sim에 안 먹힘"으로만 보인다 — 크게 알린다.
+        print(
+            f"[publisher] FATAL: state port {r2s_udp.STATE_PORT} bind failed ({exc}) — "
+            "another gui_controller instance running? Close it and restart this GUI.",
+            flush=True,
+        )
+        return
     state_sock.setblocking(False)
     mon_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     mon_addr = (HOST, r2s_udp.MONITOR_PORT)
+    real_act_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    real_act_addr = (real_host, r2s_udp.REAL_ACT_PORT) if real_host else None
 
     latest_state: dict | None = None
     seq = 0
     zeros = [0.0] * NUM_JOINTS
     period = PUBLISH_PERIOD_S
     next_t = time.monotonic()
+    # GAIN(R2PK) 실기 송신 상태 — 값 변경 시 즉시 + 그 외엔 GAIN_RESEND_PERIOD_S 주기로 재송신.
+    last_gain_kp: list[float] | None = None
+    last_gain_kd: list[float] | None = None
+    last_gain_time: float = 0.0
     try:
         while not stop_flag.value:
             # sim state / I_eff drain (latest-wins). 같은 포트에 두 패킷이 흘러 크기+magic으로 갈린다.
@@ -492,7 +645,7 @@ def publisher_process_main(shared, stop_flag) -> None:
             now = time.monotonic()
             result = _compute_target(shared, now)
             if result is not None:  # startup latch 전/policy mode 중(CMD_VALID=0)엔 발행 보류
-                pose, kp, kd = result
+                pose, kp, kd, real_enable, relax = result
                 seq += 1
                 cmd_sock.sendto(r2s_udp.pack_cmd(seq, pose, zeros, kp, kd, zeros), cmd_addr)
                 with shared.get_lock():  # UI가 보간 시작점으로 읽도록 현재 목표를 되쓴다
@@ -506,6 +659,32 @@ def publisher_process_main(shared, stop_flag) -> None:
                     )
                 else:
                     mon_sock.sendto(r2s_udp.pack_monitor(seq, pose, zeros, zeros, zeros), mon_addr)
+                # 실기 fan-out — pose는 leg-major(motions.JOINT_NAMES), pack_policy_act는 articulation 순서.
+                # relax 중엔 목표 대신 RELAX 패킷(무토크 요청) — real_runner가 kp=kd=tau=0 능동 송신.
+                if real_enable and real_act_addr is not None:
+                    if relax:
+                        real_act_sock.sendto(r2s_udp.pack_policy_relax(seq), real_act_addr)
+                    else:
+                        pose_art = [pose[_LM_FOR_ART[p]] for p in range(NUM_JOINTS)]
+                        real_act_sock.sendto(r2s_udp.pack_policy_act(seq, pose_art), real_act_addr)
+                    # GAIN(R2PK) — ACT는 target_q만 실어 나르므로(kp/kd 없음) 실기 게인을 갱신하는
+                    # 유일한 경로다. ⚠relax 중엔 보내지 않는다: relax의 kp=kd=0을 GAIN으로 보내면
+                    # 파이 kp_cmd에 0이 영구 잔류해(real은 relax 동안 어차피 송신단에서 0 강제라
+                    # 중복), GUI가 relax 상태로 죽은 뒤 다른 peer가 ENGAGE하면 무게인 추종 불능이
+                    # 된다. relax 해제 시 첫 ACT와 같은 틱에 실게인이 변경 감지로 즉시 나간다.
+                    if not relax:
+                        kp_art = [kp[_LM_FOR_ART[p]] for p in range(NUM_JOINTS)]
+                        kd_art = [kd[_LM_FOR_ART[p]] for p in range(NUM_JOINTS)]
+                        if (
+                            last_gain_kp is None
+                            or kp_art != last_gain_kp
+                            or kd_art != last_gain_kd
+                            or (now - last_gain_time) >= GAIN_RESEND_PERIOD_S
+                        ):
+                            real_act_sock.sendto(r2s_udp.pack_policy_gain(seq, kp_art, kd_art), real_act_addr)
+                            last_gain_kp = kp_art
+                            last_gain_kd = kd_art
+                            last_gain_time = now
 
             next_t += period
             delay = next_t - time.monotonic()
@@ -519,15 +698,28 @@ def publisher_process_main(shared, stop_flag) -> None:
         cmd_sock.close()
         state_sock.close()
         mon_sock.close()
+        real_act_sock.close()
 
 
 class MainWindow(QMainWindow):
     """R2S-BipedLeg GUI main window."""
 
     def __init__(
-        self, shared, model_path: str | None = None, device: str = "cpu", real_host: str | None = None
+        self,
+        shared,
+        model_path: str | None = None,
+        device: str = "cpu",
+        real_host: str | None = None,
+        publisher_proc=None,
     ) -> None:
         super().__init__()
+        # publisher 프로세스 감시 — 9882 bind 충돌(GUI 중복 실행) 등으로 조용히 죽으면
+        # 슬라이더/sine이 sim에 안 먹히는데 원인이 안 보인다. 2초마다 생존 확인해 상태바에 알린다.
+        self._publisher_proc = publisher_proc
+        if publisher_proc is not None:
+            self._pub_watch_timer = QTimer(self)
+            self._pub_watch_timer.timeout.connect(self._on_pub_watch_tick)
+            self._pub_watch_timer.start(2000)
         # 공유 메모리(mp.Array) — 모션 스펙을 여기 쓰면 publisher 프로세스가 50Hz로 발행한다.
         # UI가 잠깐 멈춰도(사용자 조작) publisher가 목표 생성·발행을 계속한다.
         self._shared = shared
@@ -543,6 +735,7 @@ class MainWindow(QMainWindow):
 
         self._sine_active: bool = False
         self._monitor_proc: subprocess.Popen | None = None
+        self._rm_thread: RealMonitorThread | None = None
 
         # policy mode 상태
         self._mode: str = "position"  # "position" | "policy"
@@ -571,6 +764,20 @@ class MainWindow(QMainWindow):
         self._startup_timer.timeout.connect(self._on_startup_tick)
         self._startup_timer.start(10)
 
+        # RELAX 중엔 로봇/sim이 중력에 처지므로 슬라이더를 실측 자세에 계속 동기화 —
+        # 사용자가 슬라이더를 잡는 순간(HOLD 전환) 그 관절만 움직이고 나머지는 현 자세 유지.
+        self._relax_sync_timer = QTimer(self)
+        self._relax_sync_timer.timeout.connect(self._on_relax_sync_tick)
+        self._relax_sync_timer.start(500)
+
+    def _on_pub_watch_tick(self) -> None:
+        if self._publisher_proc is not None and not self._publisher_proc.is_alive():
+            self._pub_watch_timer.stop()
+            self._status_label.setText(
+                "FATAL: publisher process died - another gui_controller running? Close it and restart."
+            )
+            self._status_label.setStyleSheet("color: #ff6b6b; font-weight: 600;")
+
     # -- 공유 메모리 헬퍼 --
 
     def _output_pose(self) -> list[float]:
@@ -594,28 +801,39 @@ class MainWindow(QMainWindow):
             self._shared[_SM_MODE] = _MODE_HOLD
             self._shared[_SM_CMD_VALID] = 1.0
 
+    def _write_relax(self) -> None:
+        """무토크(limp) 스펙을 쓴다 — sim 게인 0, 실기엔 RELAX 패킷. 기동 기본 상태이기도 하다."""
+        with self._shared.get_lock():
+            self._shared[_SM_MODE] = _MODE_RELAX
+            self._shared[_SM_CMD_VALID] = 1.0
+
     # -- startup latch --
 
     def _on_startup_tick(self) -> None:
-        """첫 sim state 수신 → 실측 자세 hold latch. 타임아웃 → default 자세로 진행."""
+        """기동 기본 상태 = RELAX(무토크) — 어떤 목표도 능동 구동하지 않는다 (2026-08-12 정책 변경).
+
+        gains만 미리 써두고 relax 스펙을 쓴다. 슬라이더/Home을 조작하는 순간 hold/sequence로
+        전환되며 그때부터 구동이 시작된다. 실측 자세 latch는 relax 중 슬라이더 동기화 타이머
+        (:meth:`_on_relax_sync_tick`)가 담당한다.
+        """
         if self._startup_done:
             self._startup_timer.stop()
             return
-        with self._shared.get_lock():
-            measured_valid = self._shared[_SM_MEASURED_VALID] >= 0.5
-            measured = [self._shared[_SM_MEASURED_Q + i] for i in range(NUM_JOINTS)]
-        if measured_valid:
-            self._write_gains()
-            self._write_hold(measured)
-            self._status_label.setText("Startup: latched measured pose - publishing (use Home for neutral)")
-        elif time.monotonic() >= self._startup_deadline:
-            self._write_gains()
-            self._write_hold(list(motions.DEFAULT_POSE))
-            self._status_label.setText("Startup: no sim state in 2s - publishing default pose")
-        else:
-            return
+        self._write_gains()
+        self._write_relax()
+        self._status_label.setText("Startup: RELAX (zero torque) - move a slider or press Home to engage")
         self._startup_done = True
         self._startup_timer.stop()
+
+    def _on_relax_sync_tick(self) -> None:
+        """RELAX 모드 동안 슬라이더/값 라벨을 실측 자세로 따라가게 한다 (0.5 s 주기)."""
+        with self._shared.get_lock():
+            if self._shared[_SM_MODE] != _MODE_RELAX or self._shared[_SM_CMD_VALID] < 0.5:
+                return
+            if self._shared[_SM_MEASURED_VALID] < 0.5:
+                return
+            measured = [self._shared[_SM_MEASURED_Q + i] for i in range(NUM_JOINTS)]
+        self._sync_sliders_to_pose(measured)
 
     # -- UI --
 
@@ -663,28 +881,19 @@ class MainWindow(QMainWindow):
         home_btn.setObjectName("primaryButton")
         home_btn.clicked.connect(self._on_home_clicked)
         pose_layout.addWidget(home_btn)
+        relax_btn = QPushButton("Relax (zero torque)")
+        relax_btn.setObjectName("dangerButton")
+        relax_btn.clicked.connect(self._on_relax_clicked)
+        pose_layout.addWidget(relax_btn)
+        relax_hint = QLabel("Motors go limp - robot will droop under gravity")
+        relax_hint.setObjectName("subtitleLabel")
+        pose_layout.addWidget(relax_hint)
         pose_layout.addStretch(1)
         layout.addWidget(pose_group)
 
-        # Joint Step (콤보는 HL 4개 + HR 4개 = 8 레이블 전부)
-        step_group = QGroupBox("Joint Step")
-        step_layout = QHBoxLayout(step_group)
-        step_layout.addWidget(QLabel("Joint:"))
-        self._step_joint_combo = QComboBox()
-        self._step_joint_combo.addItems(motions.JOINT_NAMES)
-        step_layout.addWidget(self._step_joint_combo)
-        step_layout.addWidget(QLabel("delta [rad]:"))
-        self._step_delta_spin = QDoubleSpinBox()
-        self._step_delta_spin.setRange(-3.14, 3.14)
-        self._step_delta_spin.setSingleStep(0.05)
-        self._step_delta_spin.setValue(0.2)
-        step_layout.addWidget(self._step_delta_spin)
-        step_btn = QPushButton("Apply Step")
-        step_btn.setObjectName("primaryButton")
-        step_btn.clicked.connect(self._on_step_clicked)
-        step_layout.addWidget(step_btn)
-        step_layout.addStretch(1)
-        layout.addWidget(step_group)
+        # Joint Sliders (leg-major, motions.JOINT_NAMES) — 직접 자세 조작 + 선택적 실기 fan-out.
+        slider_group = self._build_joint_sliders_group()
+        layout.addWidget(slider_group)
 
         # Sine Sweep
         sine_group = QGroupBox("Sine Sweep")
@@ -776,12 +985,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(cgain_group)
 
         # position-mode 패널 묶음 (mode 전환 시 일괄 show/hide)
-        self._position_groups = [pose_group, step_group, sine_group, gain_group, cgain_group]
+        self._position_groups = [pose_group, slider_group, sine_group, gain_group, cgain_group]
 
         # policy-mode 패널 (초기 숨김)
         self._policy_group = self._build_policy_group()
         layout.addWidget(self._policy_group)
         self._policy_group.setVisible(False)
+
+        # real 모니터 패널 — 모드와 무관하게 항상 표시 (관측 전용, 9889)
+        layout.addWidget(self._build_real_monitor_group())
 
         layout.addStretch(1)
 
@@ -796,6 +1008,169 @@ class MainWindow(QMainWindow):
         layout.addWidget(status_bar)
 
         self.setCentralWidget(central)
+
+    # -- joint sliders UI --
+
+    def _build_joint_sliders_group(self) -> QGroupBox:
+        """직접 자세 조작 슬라이더(leg-major, motions.JOINT_NAMES) + 단위 토글 + 실기 fan-out 체크박스."""
+        group = QGroupBox("Joint Sliders")
+        v = QVBoxLayout(group)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("Units:"))
+        self._units_combo = QComboBox()
+        self._units_combo.addItems(["rad", "deg"])
+        self._units_combo.currentIndexChanged.connect(self._on_units_changed)
+        top_row.addWidget(self._units_combo)
+        top_row.addStretch(1)
+        v.addLayout(top_row)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(4)
+        self._joint_sliders: list[QSlider] = []
+        self._joint_value_labels: list[QLabel] = []
+        for i, name in enumerate(motions.JOINT_NAMES):
+            name_label = QLabel(name)
+            name_label.setMinimumWidth(60)
+            grid.addWidget(name_label, i, 0)
+            slider = QSlider(Qt.Horizontal)
+            slider.setMinimum(0)
+            slider.setMaximum(_SLIDER_STEPS)
+            slider.setValue(_rad_to_slider(i, motions.DEFAULT_POSE[i]))
+            slider.valueChanged.connect(lambda value, idx=i: self._on_joint_slider_changed(idx, value))
+            grid.addWidget(slider, i, 1)
+            value_label = QLabel(self._format_joint_value(motions.DEFAULT_POSE[i]))
+            value_label.setMinimumWidth(90)
+            grid.addWidget(value_label, i, 2)
+            self._joint_sliders.append(slider)
+            self._joint_value_labels.append(value_label)
+        v.addLayout(grid)
+
+        real_row = QHBoxLayout()
+        self._real_enable_check = QCheckBox("Send to robot (UDP 9887)")
+        self._real_enable_check.setEnabled(self._real_host is not None)
+        if self._real_host is None:
+            self._real_enable_check.setToolTip("launch with --real_host")
+        self._real_enable_check.toggled.connect(self._on_real_enable_toggled)
+        # --real_host 지정 시 기본 ON — 슬라이더가 sim+실기 동시 publish (사용자 요청 2026-08-11).
+        # connect 이후 setChecked라 핸들러가 _SM_REAL_ENABLE까지 세팅한다. 끊고 싶으면 체크 해제.
+        if self._real_host is not None:
+            self._real_enable_check.setChecked(True)
+        real_row.addWidget(self._real_enable_check)
+        real_warn = QLabel("Streams targets to the real robot - calibrated robots only")
+        real_warn.setObjectName("subtitleLabel")
+        real_row.addWidget(real_warn)
+        real_row.addStretch(1)
+        v.addLayout(real_row)
+        return group
+
+    def _format_joint_value(self, rad: float) -> str:
+        if self._units_combo.currentIndex() == 1:  # deg
+            return f"{math.degrees(rad):+7.2f} deg"
+        return f"{rad:+7.3f} rad"
+
+    def _on_joint_slider_changed(self, joint_idx: int, value: int) -> None:
+        rad = _slider_to_rad(joint_idx, value)
+        self._joint_value_labels[joint_idx].setText(self._format_joint_value(rad))
+        self._sine_deactivate()
+        pose = [_slider_to_rad(i, self._joint_sliders[i].value()) for i in range(NUM_JOINTS)]
+        self._write_hold(pose)
+
+    def _on_units_changed(self, _idx: int) -> None:
+        """단위 토글 — 내부는 항상 rad, 값 라벨 표시만 변환한다."""
+        for i in range(NUM_JOINTS):
+            rad = _slider_to_rad(i, self._joint_sliders[i].value())
+            self._joint_value_labels[i].setText(self._format_joint_value(rad))
+
+    def _sync_sliders_to_pose(self, pose: list[float]) -> None:
+        """슬라이더를 pose로 동기화(신호 차단 — publisher 재발행 루프 방지). Home/startup latch 후 호출."""
+        for i in range(NUM_JOINTS):
+            self._joint_sliders[i].blockSignals(True)
+            self._joint_sliders[i].setValue(_rad_to_slider(i, pose[i]))
+            self._joint_sliders[i].blockSignals(False)
+            self._joint_value_labels[i].setText(self._format_joint_value(pose[i]))
+
+    def _on_real_enable_toggled(self, checked: bool) -> None:
+        with self._shared.get_lock():
+            self._shared[_SM_REAL_ENABLE] = 1.0 if checked else 0.0
+        # _build_ui 중 기본 ON setChecked가 상태바 생성 전에 발화할 수 있어 가드.
+        if hasattr(self, "_status_label"):
+            self._status_label.setText(f"Real robot streaming: {'ON' if checked else 'off'}")
+
+    # -- real monitor UI --
+
+    def _build_real_monitor_group(self) -> QGroupBox:
+        """실기 연결 상태 패널: Host + Start/Stop + 상태 요약 1줄. 관측 전용(9889 수신, 9890 중계는 유지)."""
+        group = QGroupBox("Real Robot Monitor (read-only telemetry, port 9889)")
+        v = QVBoxLayout(group)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Host:"))
+        self._rm_host_edit = QLineEdit(self._real_host or "192.168.60.5")
+        self._rm_host_edit.setMaximumWidth(140)
+        row.addWidget(self._rm_host_edit)
+        self._rm_start_btn = QPushButton("Start")
+        self._rm_start_btn.clicked.connect(self._on_rm_start_clicked)
+        row.addWidget(self._rm_start_btn)
+        self._rm_stop_btn = QPushButton("Stop")
+        self._rm_stop_btn.setEnabled(False)
+        self._rm_stop_btn.clicked.connect(self._on_rm_stop_clicked)
+        row.addWidget(self._rm_stop_btn)
+        row.addSpacing(12)
+        self._rm_link_label = QLabel("Disconnected")
+        row.addWidget(self._rm_link_label)
+        row.addStretch(1)
+        v.addLayout(row)
+        return group
+
+    def start_real_monitor(self) -> None:
+        """Real Robot Monitor 를 프로그램적으로 시작 (``--monitor`` 플래그용)."""
+        self._on_rm_start_clicked()
+
+    def _on_rm_start_clicked(self) -> None:
+        host = self._rm_host_edit.text().strip()
+        if not host:
+            self._rm_link_label.setText("enter host IP first")
+            return
+        self._rm_thread = RealMonitorThread(host)
+        self._rm_thread.telem.connect(self._on_rm_telem)
+        self._rm_thread.failed.connect(self._on_rm_failed)
+        self._rm_thread.start()
+        self._rm_start_btn.setEnabled(False)
+        self._rm_stop_btn.setEnabled(True)
+        self._rm_host_edit.setEnabled(False)
+        self._rm_link_label.setText(f"Connecting to {host}...")
+
+    def _on_rm_stop_clicked(self) -> None:
+        if self._rm_thread is not None:
+            self._rm_thread.request_stop()
+            self._rm_thread.wait(1000)
+            self._rm_thread = None
+        self._rm_start_btn.setEnabled(True)
+        self._rm_stop_btn.setEnabled(False)
+        self._rm_host_edit.setEnabled(True)
+        self._rm_link_label.setText("Disconnected")
+
+    def _on_rm_telem(self, d: dict) -> None:
+        if "q" not in d or d.get("stale"):
+            self._rm_link_label.setText("Disconnected")
+            return
+        mask = d.get("valid_mask", 0x1FF)
+        n_valid = sum(1 for j in range(NUM_JOINTS) if mask & (1 << j))
+        imu_ok = bool(mask & (1 << 8))
+        if n_valid < NUM_JOINTS:
+            self._rm_link_label.setText(f"Connected (motors {n_valid}/8 - check RobotEmbedded)")
+        else:
+            self._rm_link_label.setText(
+                f"Connected (motors {n_valid}/8, {d['hz']:.0f} Hz, IMU {'ok' if imu_ok else 'stale'})"
+            )
+
+    def _on_rm_failed(self, msg: str) -> None:
+        self._rm_link_label.setText(f"error: {msg}")
+        self._rm_start_btn.setEnabled(True)
+        self._rm_stop_btn.setEnabled(False)
+        self._rm_host_edit.setEnabled(True)
 
     # -- policy mode UI --
 
@@ -898,7 +1273,9 @@ class MainWindow(QMainWindow):
                     measured_valid = self._shared[_SM_MEASURED_VALID] >= 0.5
                     measured = [self._shared[_SM_MEASURED_Q + i] for i in range(NUM_JOINTS)]
                     current = [self._shared[_SM_CURRENT_Q + i] for i in range(NUM_JOINTS)]
-                self._write_hold(measured if measured_valid else current)
+                hold_pose = measured if measured_valid else current
+                self._write_hold(hold_pose)
+                self._sync_sliders_to_pose(hold_pose)
             self._status_label.setText("Mode: position")
 
     def _on_policy_run_clicked(self) -> None:
@@ -972,13 +1349,13 @@ class MainWindow(QMainWindow):
     def _on_home_clicked(self) -> None:
         self._status_label.setText("Moving to home (default) pose...")
         self._play_sequence_to(list(motions.DEFAULT_POSE), SEQUENCE_DURATION_S)
+        self._sync_sliders_to_pose(list(motions.DEFAULT_POSE))
 
-    def _on_step_clicked(self) -> None:
-        joint_idx = self._step_joint_combo.currentIndex()
-        delta = self._step_delta_spin.value()
-        goal_pose = motions.step_pose(self._output_pose(), joint_idx, delta)
-        self._status_label.setText(f"Stepping {motions.JOINT_NAMES[joint_idx]} ({delta:+.2f} rad)...")
-        self._play_sequence_to(goal_pose, STEP_DURATION_S)
+    def _on_relax_clicked(self) -> None:
+        """무토크(limp): sim은 kp=kd=0, 실기는 RELAX 패킷 — 기동 기본 상태와 동일."""
+        self._sine_deactivate()
+        self._write_relax()
+        self._status_label.setText("RELAX (zero torque) - move a slider or press Home to engage")
 
     # -- sine (publisher가 경과 시간 기반으로 생성 — UI 타이머 없음) --
 
@@ -1009,7 +1386,9 @@ class MainWindow(QMainWindow):
 
     def _on_sine_stop_clicked(self) -> None:
         # 현재 출력에서 정지(hold) — base로 스냅백하지 않는다.
-        self._write_hold(self._output_pose())
+        pose = self._output_pose()
+        self._write_hold(pose)
+        self._sync_sliders_to_pose(pose)
         self._sine_deactivate()
         self._status_label.setText("Sine sweep stopped")
 
@@ -1098,6 +1477,9 @@ class MainWindow(QMainWindow):
         if self._policy_thread is not None:
             self._policy_thread.request_stop()
             self._policy_thread.wait(2000)
+        if self._rm_thread is not None:
+            self._rm_thread.request_stop()
+            self._rm_thread.wait(1000)
         if self._monitor_proc is not None and self._monitor_proc.poll() is None:
             self._monitor_proc.terminate()
         super().closeEvent(event)
@@ -1117,6 +1499,11 @@ def main() -> None:
         help="정책 추론 디바이스 (기본 cpu — 273KB MLP라 CPU로 충분하고 디스플레이 GPU 경합 회피).",
     )
     parser.add_argument("--real_host", default=None, help="real 엔드포인트 IP (미지정 시 real fan-out no-op).")
+    parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help="기동 즉시 Real Robot Monitor 시작 (호스트는 --real_host 또는 패널 기본값).",
+    )
     args = parser.parse_args()
 
     model_path = os.path.normpath(args.model) if args.model else None
@@ -1129,17 +1516,22 @@ def main() -> None:
     stop_flag = mp.Value("i", 0)
     with shared.get_lock():
         shared[_SM_CMD_VALID] = 0.0  # startup latch 전 발행 보류
+        shared[_SM_REAL_ENABLE] = 0.0  # 실기 전달 기본 OFF
         for i in range(NUM_JOINTS):
             shared[_SM_KP + i] = motions.DEFAULT_KP[i]
             shared[_SM_KD + i] = motions.DEFAULT_KD[i]
             shared[_SM_BASE_Q + i] = motions.DEFAULT_POSE[i]
-    publisher = mp.Process(target=publisher_process_main, args=(shared, stop_flag), daemon=True)
+    publisher = mp.Process(target=publisher_process_main, args=(shared, stop_flag, args.real_host), daemon=True)
     publisher.start()
 
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
     app.setStyleSheet(_STYLESHEET)
-    window = MainWindow(shared, model_path=model_path, device=args.device, real_host=args.real_host)
+    window = MainWindow(
+        shared, model_path=model_path, device=args.device, real_host=args.real_host, publisher_proc=publisher
+    )
+    if args.monitor:
+        window.start_real_monitor()
     window.show()
     exit_code = app.exec_()
 

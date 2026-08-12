@@ -36,6 +36,8 @@ POLICY_STATE_PORT: int = 9885  # sim_runner -> policy_runner (rich state: q,dq,g
 POLICY_ACT_PORT: int = 9886  # policy_runner -> sim_runner (target q)
 REAL_ACT_PORT: int = 9887  # policy_runner -> real endpoint (seam)
 REAL_STATE_PORT: int = 9888  # real endpoint -> policy_runner (seam)
+REAL_TELEM_PORT: int = 9889  # real endpoint -> gui monitor (q/dq/tau/rpy, 관측 전용)
+REAL_MON_PORT: int = 9890  # gui monitor(relay) -> monitor.py plot (MON 패킷, leg-major 재배열)
 
 # magic — r2s_hind_leg("R2HC"/"R2HS"/"R2MN")와 반드시 다른 값을 쓴다. 두 리그를 동시에 띄웠을 때
 # 다른 리그로 잘못 보낸 패킷이 (관절 수가 달라 크기로도 걸러지지만) magic 단계에서 확실히 거부되어
@@ -49,6 +51,10 @@ IEFF_MAGIC: int = 0x52324249  # "R2BI" — sim_runner -> gui, 관절별 유효 �
 POLICY_CMD_MAGIC: int = 0x52325043  # "R2PC" gui -> policy_runner
 POLICY_STATE_MAGIC: int = 0x52325053  # "R2PS" sim_runner -> policy_runner
 POLICY_ACT_MAGIC: int = 0x52325041  # "R2PA" policy_runner -> sim_runner (and real)
+POLICY_TELEM_MAGIC: int = 0x52325054  # "R2PT" real -> gui monitor (REAL_TELEM_PORT)
+POLICY_PING_MAGIC: int = 0x52325047  # "R2PG" monitor -> real: peer 등록만 (목표 없음, 상태 불변)
+POLICY_RELAX_MAGIC: int = 0x5232504C  # "R2PL" gui -> real: 무토크(limp) 요청 — kp=kd=tau=0 능동 송신
+POLICY_GAIN_MAGIC: int = 0x5232504B  # "R2PK" gui -> real: kp/kd 런타임 갱신 (실기팀 2026-08-12 추가)
 
 # 명령: magic(I) seq(I) + NUM_JOINTS x (q,dq,kp,kd,tau) f
 _CMD_FMT: str = "<II" + "5f" * NUM_JOINTS
@@ -374,6 +380,134 @@ def unpack_policy_act(data: bytes) -> dict | None:
     return {"seq": fields[1], "target_q": list(fields[2:])}
 
 
+# ---------------------------------------------------------------------------
+# policy mode: telemetry (real -> gui monitor) / ping (monitor -> real)
+# ---------------------------------------------------------------------------
+
+# magic(I) seq(I) valid_mask(I) + q(8f) + dq(8f) + tau(8f) + rpy(3f)  — **articulation 순서**, sim 좌표
+# valid_mask: bit p(0~7)=관절 p 상태 유효, bit 8=IMU 수신됨. warmup 전에도 송신되므로 mask 로 구분.
+_POLICY_TELEM_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f"
+POLICY_TELEM_SIZE: int = struct.calcsize(_POLICY_TELEM_FMT)
+# v1(2026-08-10, mask 없음 116 B) 하위호환 — unpack 은 양쪽 다 받는다.
+_POLICY_TELEM_V1_FMT: str = "<II" + "f" * NUM_JOINTS * 3 + "3f"
+_POLICY_TELEM_V1_SIZE: int = struct.calcsize(_POLICY_TELEM_V1_FMT)
+
+# magic(I) seq(I) — 페이로드 없음
+_POLICY_PING_FMT: str = "<II"
+POLICY_PING_SIZE: int = struct.calcsize(_POLICY_PING_FMT)
+
+
+def pack_policy_telem(seq: int, q, dq, tau, rpy, valid_mask: int = 0x1FF) -> bytes:
+    """real 엔드포인트 -> gui monitor 텔레메트리 직렬화 (articulation 순서).
+
+    Args:
+        seq: 마지막 ACT seq (peer 없이 자생 seq여도 무방 — 관측 전용).
+        q: 관절각 [rad], 길이 8.
+        dq: 관절각속도 [rad/s], 길이 8.
+        tau: 관절 토크 [N·m], 길이 8 (모터 fTorque에 sign 적용).
+        rpy: IMU roll/pitch/yaw 원값 [deg], 길이 3.
+        valid_mask: bit p(0~7)=관절 p 유효, bit 8=IMU 수신 (기본 전부 유효).
+
+    Returns:
+        POLICY_TELEM_SIZE 바이트 패킷.
+    """
+    vals = [float(q[i]) for i in range(NUM_JOINTS)]
+    vals += [float(dq[i]) for i in range(NUM_JOINTS)]
+    vals += [float(tau[i]) for i in range(NUM_JOINTS)]
+    vals += [float(rpy[i]) for i in range(3)]
+    return struct.pack(_POLICY_TELEM_FMT, POLICY_TELEM_MAGIC, seq & 0xFFFFFFFF, valid_mask & 0xFFFFFFFF, *vals)
+
+
+def unpack_policy_telem(data: bytes) -> dict | None:
+    """텔레메트리 역직렬화. magic 불일치/크기 오류 시 None. v1(116 B, mask 없음)도 수용.
+
+    Returns:
+        키: ``seq``, ``valid_mask``, ``q`` (8), ``dq`` (8), ``tau`` (8), ``rpy`` (3).
+        v1 패킷은 ``valid_mask=0x1FF`` (전부 유효 가정)로 채워진다.
+    """
+    if len(data) == POLICY_TELEM_SIZE:
+        fields = struct.unpack(_POLICY_TELEM_FMT, data)
+        mask = fields[2]
+        body = fields[3:]
+    elif len(data) == _POLICY_TELEM_V1_SIZE:
+        fields = struct.unpack(_POLICY_TELEM_V1_FMT, data)
+        mask = 0x1FF
+        body = fields[2:]
+    else:
+        return None
+    if fields[0] != POLICY_TELEM_MAGIC:
+        return None
+    return {
+        "seq": fields[1],
+        "valid_mask": mask,
+        "q": list(body[:NUM_JOINTS]),
+        "dq": list(body[NUM_JOINTS : 2 * NUM_JOINTS]),
+        "tau": list(body[2 * NUM_JOINTS : 3 * NUM_JOINTS]),
+        "rpy": list(body[3 * NUM_JOINTS : 3 * NUM_JOINTS + 3]),
+    }
+
+
+def pack_policy_ping(seq: int) -> bytes:
+    """monitor -> real keepalive 직렬화. real_runner는 peer 등록만 하고 상태를 바꾸지 않는다."""
+    return struct.pack(_POLICY_PING_FMT, POLICY_PING_MAGIC, seq & 0xFFFFFFFF)
+
+
+def pack_policy_relax(seq: int) -> bytes:
+    """gui -> real 무토크(limp) 요청 직렬화 (PING과 같은 8B, magic만 다름).
+
+    real_runner(bridge 모드)는 RELAX 상태로 전환해 kp=kd=tau=0 명령을 능동 송신한다 — 명령을
+    끊는 게 아니라 zero-torque를 계속 보내는 것이 확실한 limp다. 이후 ACT를 받으면 현재 자세를
+    재래치하고 ENGAGE 램프로 복귀한다. probe/hold 모드에서는 무시된다.
+    """
+    return struct.pack(_POLICY_PING_FMT, POLICY_RELAX_MAGIC, seq & 0xFFFFFFFF)
+
+
+def unpack_policy_relax(data: bytes) -> dict | None:
+    """relax 역직렬화. magic 불일치/크기 오류 시 None. 키: ``seq``."""
+    if len(data) != POLICY_PING_SIZE:
+        return None
+    fields = struct.unpack(_POLICY_PING_FMT, data)
+    if fields[0] != POLICY_RELAX_MAGIC:
+        return None
+    return {"seq": fields[1]}
+
+
+# magic(I) seq(I) + kp(8f) + kd(8f) — **articulation 순서** (real_runner가 모터 순서로 매핑·클램프)
+_POLICY_GAIN_FMT: str = "<II" + "f" * NUM_JOINTS * 2
+POLICY_GAIN_SIZE: int = struct.calcsize(_POLICY_GAIN_FMT)
+
+
+def pack_policy_gain(seq: int, kp, kd) -> bytes:
+    """gui -> real kp/kd 런타임 갱신 직렬화 (articulation 순서).
+
+    real_runner는 수신 시 모터 순서로 매핑하고 드라이버 상한(kp≤500, kd≤5)으로 클램프해
+    다음 틱부터 반영한다. 목표각·상태머신은 불변이며 relax 중엔 여전히 0이 강제된다.
+    """
+    vals = [float(kp[i]) for i in range(NUM_JOINTS)]
+    vals += [float(kd[i]) for i in range(NUM_JOINTS)]
+    return struct.pack(_POLICY_GAIN_FMT, POLICY_GAIN_MAGIC, seq & 0xFFFFFFFF, *vals)
+
+
+def unpack_policy_gain(data: bytes) -> dict | None:
+    """gain 역직렬화. magic 불일치/크기 오류 시 None. 키: ``seq``, ``kp`` (8), ``kd`` (8)."""
+    if len(data) != POLICY_GAIN_SIZE:
+        return None
+    fields = struct.unpack(_POLICY_GAIN_FMT, data)
+    if fields[0] != POLICY_GAIN_MAGIC:
+        return None
+    return {"seq": fields[1], "kp": list(fields[2 : 2 + NUM_JOINTS]), "kd": list(fields[2 + NUM_JOINTS :])}
+
+
+def unpack_policy_ping(data: bytes) -> dict | None:
+    """ping 역직렬화. magic 불일치/크기 오류 시 None. 키: ``seq``."""
+    if len(data) != POLICY_PING_SIZE:
+        return None
+    fields = struct.unpack(_POLICY_PING_FMT, data)
+    if fields[0] != POLICY_PING_MAGIC:
+        return None
+    return {"seq": fields[1]}
+
+
 if __name__ == "__main__":
     z = [0.0] * NUM_JOINTS
     c = pack_cmd(1, z, z, [65.0] * NUM_JOINTS, [6.0] * NUM_JOINTS, z)
@@ -417,7 +551,35 @@ if __name__ == "__main__":
     assert unpack_policy_cmd(pack_cmd(1, z, z, z, z, z)) is None
     assert unpack_cmd(pack_policy_act(1, z)) is None
 
+    # telemetry/ping 왕복.
+    pt = pack_policy_telem(7, z, z, [1.5] * NUM_JOINTS, [0.5, -0.2, 10.0], valid_mask=0x103)
+    assert len(pt) == POLICY_TELEM_SIZE, (len(pt), POLICY_TELEM_SIZE)
+    dpt = unpack_policy_telem(pt)
+    assert abs(dpt["tau"][0] - 1.5) < 1e-6 and abs(dpt["rpy"][2] - 10.0) < 1e-6 and len(dpt["q"]) == NUM_JOINTS
+    assert dpt["valid_mask"] == 0x103
+    # v1(116B, mask 없음) 하위호환 — 전부 유효로 채워진다.
+    v1 = struct.pack(_POLICY_TELEM_V1_FMT, POLICY_TELEM_MAGIC, 9, *([0.25] * (3 * NUM_JOINTS)), 0.0, 0.0, 0.0)
+    dv1 = unpack_policy_telem(v1)
+    assert dv1 is not None and dv1["valid_mask"] == 0x1FF and abs(dv1["q"][0] - 0.25) < 1e-6
+    # STATE(84B)/ACT(40B)와 크기가 달라 크기 단계에서 갈리고, magic으로도 거부.
+    assert unpack_policy_state(pt) is None and unpack_policy_telem(ps) is None
+    pg = pack_policy_ping(8)
+    assert len(pg) == POLICY_PING_SIZE == 8
+    assert unpack_policy_ping(pg)["seq"] == 8
+    assert unpack_policy_act(pg) is None and unpack_policy_ping(pa) is None
+    # relax: PING과 크기 동일, magic으로만 구분 — 상호 오파싱 불가 확인.
+    pr = pack_policy_relax(9)
+    assert unpack_policy_relax(pr)["seq"] == 9
+    assert unpack_policy_ping(pr) is None and unpack_policy_relax(pg) is None
+    # gain: 72B, r2s_bridge(실기팀) PolicyGainPacket과 바이트 일치.
+    pk = pack_policy_gain(10, [100.0, 100.0, 50.0, 50.0, 50.0, 50.0, 20.0, 20.0], [5.0] * NUM_JOINTS)
+    assert len(pk) == POLICY_GAIN_SIZE == 72, (len(pk), POLICY_GAIN_SIZE)
+    dpk = unpack_policy_gain(pk)
+    assert dpk["kp"][2] == 50.0 and dpk["kd"][7] == 5.0 and dpk["seq"] == 10
+    assert unpack_policy_gain(pa) is None and unpack_policy_act(pk) is None
+
     print(
         f"r2s_udp(bipedleg) OK  CMD={CMD_SIZE} STATE={STATE_SIZE} MON={MON_SIZE} "
-        f"POLICY_CMD={POLICY_CMD_SIZE} POLICY_STATE={POLICY_STATE_SIZE} POLICY_ACT={POLICY_ACT_SIZE}"
+        f"POLICY_CMD={POLICY_CMD_SIZE} POLICY_STATE={POLICY_STATE_SIZE} POLICY_ACT={POLICY_ACT_SIZE} "
+        f"POLICY_TELEM={POLICY_TELEM_SIZE} POLICY_PING={POLICY_PING_SIZE}"
     )
