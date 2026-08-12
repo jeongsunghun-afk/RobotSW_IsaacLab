@@ -13,7 +13,9 @@ Unlike the ANYmal reference (``manager_based/locomotion/velocity/mdp/symmetry/an
   forward-only (command = forward velocity, scan offset +0.375m forward), so front-back /
   diagonal symmetries do NOT hold and must not be used.
 - parkour observations are a **TensorDict with 5 groups** (``policy / scan / priv_explicit /
-  priv_latent / history``), not a single flat tensor. All five groups are mirrored.
+  priv_latent / history``), not a single flat tensor. All five groups are mirrored. The optional
+  terrain-grid keys ``voxel`` (privileged GT) and ``lidar`` (SL-Grid metric grid, same flat
+  (27, 21, 13) layout) are y-flipped when present.
 - joint swap and foot swap are constructed **dynamically from runtime names** to avoid
   hard-coded index ordering ambiguity (leg-grouped vs joint-type-grouped) and to keep the
   contact-sensor foot order and articulation foot order independently correct.
@@ -196,7 +198,7 @@ def _build_clearance_mirror_perm(num_azimuth: int, num_elevation: int, device: t
     """
     perm = torch.zeros(num_azimuth * num_elevation, dtype=torch.long, device=device)
     for az_idx in range(num_azimuth):
-        mirror_az = (num_azimuth - 1 - az_idx)
+        mirror_az = num_azimuth - 1 - az_idx
         for el_idx in range(num_elevation):
             src = mirror_az * num_elevation + el_idx
             dst = az_idx * num_elevation + el_idx
@@ -226,17 +228,15 @@ def _build_voxel_mirror_perm(nx: int, ny: int, nz: int, device: torch.device) ->
         perm: (nx*ny*nz,) LongTensor where ``output[dst] = input[perm[dst]]``
               gives the y-mirrored voxel grid.
     """
-    assert nx * ny * nz == _VOXEL_DIM, (
-        f"[parkour symmetry] voxel grid {nx}×{ny}×{nz} = {nx * ny * nz} ≠ {_VOXEL_DIM}"
-    )
+    assert nx * ny * nz == _VOXEL_DIM, f"[parkour symmetry] voxel grid {nx}×{ny}×{nz} = {nx * ny * nz} ≠ {_VOXEL_DIM}"
     # Vectorised construction — no Python triple-loop needed.
     gx = torch.arange(nx, device=device)
     gy = torch.arange(ny, device=device)
     gz = torch.arange(nz, device=device)
     gx3, gy3, gz3 = torch.meshgrid(gx, gy, gz, indexing="ij")  # (nx, ny, nz) each
-    mirror_gy = ny - 1 - gy3                                    # y-flip
+    mirror_gy = ny - 1 - gy3  # y-flip
     # For each destination (ix, iy, iz), the source is (ix, ny-1-iy, iz).
-    src = gx3 * (ny * nz) + mirror_gy * nz + gz3               # (nx, ny, nz) source flat indices
+    src = gx3 * (ny * nz) + mirror_gy * nz + gz3  # (nx, ny, nz) source flat indices
     # C-order flatten: perm[dst_flat] = src[ix, iy, iz] where dst_flat = ix*(ny*nz)+iy*nz+iz
     return src.reshape(-1)  # (nx*ny*nz,)
 
@@ -262,9 +262,7 @@ def _mirror_scan(scan: torch.Tensor) -> torch.Tensor:
         # Clearance 3D: az-reversal permutation (L/R flip, values are distances — no sign change).
         device_key = str(scan.device)
         if device_key not in _clearance_perm_cache:
-            _clearance_perm_cache[device_key] = _build_clearance_mirror_perm(
-                _CLEAR_AZ, _CLEAR_EL, scan.device
-            )
+            _clearance_perm_cache[device_key] = _build_clearance_mirror_perm(_CLEAR_AZ, _CLEAR_EL, scan.device)
         perm = _clearance_perm_cache[device_key]
         return scan[..., perm]
     else:
@@ -288,9 +286,7 @@ def _mirror_voxel(voxel: torch.Tensor) -> torch.Tensor:
     """
     device_key = str(voxel.device)
     if device_key not in _voxel_perm_cache:
-        _voxel_perm_cache[device_key] = _build_voxel_mirror_perm(
-            _VOXEL_NX, _VOXEL_NY, _VOXEL_NZ, voxel.device
-        )
+        _voxel_perm_cache[device_key] = _build_voxel_mirror_perm(_VOXEL_NX, _VOXEL_NY, _VOXEL_NZ, voxel.device)
     perm = _voxel_perm_cache[device_key]
     return voxel[..., perm]
 
@@ -362,6 +358,13 @@ def compute_parkour_symmetric_states(*, env, obs: TensorDict | None = None, acti
                 f"[parkour symmetry] voxel dim {obs['voxel'].shape[-1]} != {_VOXEL_DIM}; "
                 "check enable_voxel_scanner and parkour_env flatten order (C-order expected)."
             )
+        if "lidar" in obs.keys() and obs["lidar"].shape[-1] != _VOXEL_DIM:
+            raise AssertionError(
+                f"[parkour symmetry] lidar dim {obs['lidar'].shape[-1]} != {_VOXEL_DIM}. "
+                "Mirror support covers only the metric-grid representation "
+                "(lidar_obs_as_occupancy_grid=True). The angular range-image stack would need an "
+                "azimuth-flip mirror that is not implemented — keep symmetry_cfg=None for those arms."
+            )
         if obs["priv_latent"].shape[-1] != _PRIV_LATENT_DIM:
             raise AssertionError(
                 f"[parkour symmetry] priv_latent dim {obs['priv_latent'].shape[-1]} != {_PRIV_LATENT_DIM}; "
@@ -374,6 +377,15 @@ def compute_parkour_symmetric_states(*, env, obs: TensorDict | None = None, acti
         # voxel (voxel-arm only — baseline obs do not contain this key; skip silently)
         if "voxel" in obs.keys():
             out["voxel"][b:] = _mirror_voxel(obs["voxel"])
+        # lidar metric grid (SL-Grid arms): the env scatters Mid-360 hits into the teacher's
+        # exact voxel frame — same flat (27, 21, 13) C-order layout as obs["voxel"] — so the
+        # same y-flip permutation applies. Values are occupancy in [0, 1]: permutation only.
+        # Approximation note: the mirrored grid is distributionally, not exactly, realisable —
+        # the Mid-360 rosette pattern and the measured body-occlusion mask (~2.5% of cells
+        # asymmetric) are not instantaneously L/R symmetric. Same second-order status as not
+        # mirroring per-step sensor noise.
+        if "lidar" in obs.keys():
+            out["lidar"][b:] = _mirror_voxel(obs["lidar"])
         out["priv_explicit"][b:] = _mirror_priv_explicit(obs["priv_explicit"])
         out["priv_latent"][b:] = _mirror_priv_latent(obs["priv_latent"], joint_swap, friction_foot_swap)
         # history (N, T, 46): apply proprio mirror per time-frame (last dim = proprio).

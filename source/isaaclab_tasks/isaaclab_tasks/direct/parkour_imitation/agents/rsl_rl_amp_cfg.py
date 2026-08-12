@@ -677,11 +677,13 @@ class Go2ParkourImitationLidarSLGridPPOAMPRunnerCfg(Go2ParkourImitationSymmetryR
       the robot's own Mid-360 hits instead of the privileged clearance grid.
     - critic is untouched (clearance-294 in the ``"scan"`` slot) — asymmetric actor-critic, which
       is what makes from-scratch tractable at all here.
-    - ``symmetry_cfg = None``.  ``mdp/symmetry.py`` mirrors only policy/scan/priv/history, so the
-      terrain grid would be left unmirrored while the proprioception is flipped, i.e. the
-      augmented sample would carry an inconsistent label.  This deviates from the teacher's own
-      recipe (which ran with symmetry on) and removes an augmentation, so a shortfall here is a
-      candidate confound to check before concluding from-scratch fails.
+    - ``symmetry_cfg = None``.  At the time this arm was created ``mdp/symmetry.py`` did not
+      cover the ``"lidar"`` obs key, so the terrain grid would have been left unmirrored while
+      the proprioception was flipped — an inconsistent label.  The mirror now y-flips
+      ``obs["lidar"]`` (same layout as ``obs["voxel"]``); this arm stays OFF to preserve the
+      baseline identity, and :class:`Go2ParkourImitationLidarSLGridCrawlSymPPOAMPRunnerCfg`
+      re-enables it.  The deviation from the teacher's recipe (symmetry ON) remains a candidate
+      confound for any shortfall measured on the symmetry-OFF arms.
 
     Pair with ``ParkourImitationRandomGoalLidarDistillGridEasyEntryEnvCfg`` — deliberately the
     *same* env cfg as the A1-0 distillation arm, so env, terrain mix and representation are all
@@ -746,3 +748,33 @@ class Go2ParkourImitationLidarSLGridCrawlPPOAMPRunnerCfg(Go2ParkourImitationLida
     def __post_init__(self):
         super().__post_init__()
         self.experiment_name = "parkour_imitation_go2_lidar_sl_grid_crawl"
+
+
+@configclass
+class Go2ParkourImitationLidarSLGridCrawlSymPPOAMPRunnerCfg(Go2ParkourImitationLidarSLGridCrawlPPOAMPRunnerCfg):
+    """SL-Grid + crawl with the L/R mirror data-augmentation restored.
+
+    Used by ``Go2-ParkourImitation-Lidar-SL-Grid-Crawl-Sym-EasyEntry-v0``.  The SL-Grid arms
+    disabled ``symmetry_cfg`` because ``mdp/symmetry.py`` did not cover the ``"lidar"`` obs key,
+    so an augmented sample would have paired flipped proprioception with an unflipped terrain
+    grid.  The mirror now y-flips ``obs["lidar"]`` — the env scatters Mid-360 hits into the
+    teacher's exact voxel frame, so the flat (27, 21, 13) y-flip permutation used for
+    ``obs["voxel"]`` applies verbatim.
+
+    This closes the one recipe difference against the voxel teacher, which trained with the same
+    augmentation ON.  Logged under a separate ``experiment_name`` so the symmetry-OFF arm keeps
+    its baseline identity — the pair is the A/B for "does the missing augmentation explain part
+    of the scratch-vs-teacher gap".
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            use_mirror_loss=False,
+            mirror_loss_coeff=0.0,
+            data_augmentation_func=(
+                "isaaclab_tasks.direct.parkour_imitation.mdp.symmetry:compute_parkour_imitation_symmetric_states"
+            ),
+        )
+        self.experiment_name = "parkour_imitation_go2_lidar_sl_grid_crawl_sym"
