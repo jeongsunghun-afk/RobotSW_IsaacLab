@@ -84,13 +84,23 @@ task 구조(goal chain 길이 vs episode 길이 → time_out 지배) 쪽 제약�
 |---|---|---|---|
 | flat | `videos/flat_off_vs_sym.mp4` | 0.995 / 1.051 | |
 | hurdle | `videos/hurdle_off_vs_sym.mp4` | 1.072 / 1.095 | |
-| step | `videos/step_off_vs_sym.mp4` | 1.063 / 1.032 | ⚠ SYM 추적 개체는 클립 구간에 높은 단(z 1.8m)을 안 오름 (OFF는 오름) — 카메라 1개체 일화 |
+| step | `videos/step_off_vs_sym.mp4` | 1.063 / 1.032 | ⚠ **SYM 추적 개체는 t≈1.5s에 단 벽면에 엎어져 클립 끝까지 정지** (OFF 추적 개체는 등반). 레벨 8 스폰, tilt/base_contact 종료가 안 걸려 리셋 없는 흡수 상태 — 아래 주의 참조 |
 | gap | `videos/gap_off_vs_sym.mp4` | 1.082 / 1.088 | |
 | stair | `videos/stair_off_vs_sym.mp4` | 1.083 / 1.131 | |
 | crawl | `videos/crawl_off_vs_sym.mp4` | 1.049 / 1.052 | 양쪽 모두 몸 낮춰 터널 진입 |
 
-12클립 전부 전진 ~1.0–1.1 m/s로 실주행 (collapse·누워버티기 없음). 개별 클립(합치기 전)은
-`_workspace/slgrid_sym_probe/videos/`에 남아 있다.
+⚠ **주의 (2026-08-12 프레임 재검수로 정정)** — 초판의 "12클립 전부 실주행" 판정은 오류였다.
+LIVENESS는 12 env **평균** 전진속도라 카메라 추적 개체의 실주행을 보증하지 않는다: step SYM 클립의
+추적 개체는 t≈1.5s에 엎어져 끝까지 정지했는데 평균은 1.032 m/s로 정상처럼 보였다. 재검수 결과
+flat/hurdle/gap/stair는 추적 개체의 이동을 프레임 대조로 확인했고, crawl은 t=2·6s에 카메라가 터널
+벽·바닥만 비춰 개체 확인 불가(t=4s에는 양쪽 모두 정상 진입 자세).
+
+★파생 관찰: 엎어진 자세로 tilt/base_contact 종료가 안 걸리는 **흡수 상태**가 존재한다. probe의
+time_out(종료의 59~70%)에 이런 낙상-미종료 상태가 섞여 있을 수 있으므로, "완주율 천장 ~35% = 순수
+task 구조(코스 길이) 제약"이라는 해석에는 유보가 필요하다. 종료 규칙은 양 정책 동일이라 OFF/SYM
+**A/B 공정성 자체는 유지**된다.
+
+개별 클립(합치기 전)은 `_workspace/slgrid_sym_probe/videos/`에 남아 있다.
 
 ## 산출물 인덱스
 
