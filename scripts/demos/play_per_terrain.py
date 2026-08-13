@@ -22,14 +22,19 @@ of the four methods (height_scan / clearance / voxel / lidar) loads correctly.
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+
+# local imports — reuse the RSL-RL CLI arg helpers from the play/train scripts.
+import os as _os_boot
 import sys
 
 from isaaclab.app import AppLauncher
 
-# local imports — reuse the RSL-RL CLI arg helpers from the play/train scripts.
-import os as _os_boot
-
-sys.path.insert(0, _os_boot.path.join(_os_boot.path.dirname(_os_boot.path.abspath(__file__)), "..", "reinforcement_learning", "rsl_rl"))
+sys.path.insert(
+    0,
+    _os_boot.path.join(
+        _os_boot.path.dirname(_os_boot.path.abspath(__file__)), "..", "reinforcement_learning", "rsl_rl"
+    ),
+)
 import cli_args  # isort: skip  # noqa: E402
 
 # add argparse arguments
@@ -53,10 +58,18 @@ parser.add_argument(
 )
 parser.add_argument("--out_path", type=str, required=True, help="Exact output mp4 path for the recorded video.")
 parser.add_argument(
+    "--max_init_level",
+    type=int,
+    default=8,
+    help="Cap on the initial terrain level spread. The camera tracks the highest-level target env, "
+    "so this sets the difficulty of the recorded course (8 surfaces near-failure difficulty; "
+    "lower it to film levels the policy reliably clears).",
+)
+parser.add_argument(
     "--sensor",
     type=str,
     default="none",
-    choices=["none", "height_scan", "clearance", "voxel", "lidar"],
+    choices=["none", "height_scan", "clearance", "voxel", "lidar", "lidar_grid", "voxel_compare"],
     help="Which perception-sensor visualization to overlay (goal markers stay OFF). 'none' = no overlay.",
 )
 # append RSL-RL cli arguments (adds --load_run, --checkpoint, --experiment_name, ...)
@@ -84,7 +97,12 @@ import shutil
 
 import gymnasium as gym
 import torch
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
+from rsl_rl.runners import (
+    DistillationRunner,
+    OnPolicyRunner,
+    OnPolicyRunnerParkour,
+    OnPolicyRunnerParkourDistill,
+)
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP, OnPolicyRunnerAMPBase
 from rsl_rl.runners.on_policy_runner_parkour_amp import (
     OnPolicyRunnerParkourAMP,
@@ -240,6 +258,15 @@ def _draw_sensor_overlay(env_unwrapped, sensor: str, view_idx: int, hs_vis, lida
     elif sensor == "voxel":
         if hasattr(env_unwrapped, "_draw_voxel_occupied"):
             env_unwrapped._draw_voxel_occupied()
+    elif sensor == "voxel_compare":
+        # GT volume (orange) plus the ray-sampled cells it replaces (magenta), same frame.
+        if hasattr(env_unwrapped, "_draw_voxel_compare"):
+            env_unwrapped._draw_voxel_compare()
+    elif sensor == "lidar_grid":
+        # The LiDAR student's own metric occupancy grid (cyan), as opposed to "voxel" which
+        # draws the teacher's privileged grid (orange). Only the LiDAR env defines it.
+        if hasattr(env_unwrapped, "_draw_lidar_grid"):
+            env_unwrapped._draw_lidar_grid()
     elif sensor == "lidar":
         mid = getattr(env_unwrapped, "_mid360", None)
         if mid is None:
@@ -248,7 +275,9 @@ def _draw_sensor_overlay(env_unwrapped, sensor: str, view_idx: int, hs_vis, lida
         valid = torch.isfinite(hits).all(dim=-1)
         if hasattr(mid.data, "distances"):
             mid_cfg = getattr(env_unwrapped.cfg, "mid360_lidar", None)
-            max_range = float(getattr(mid_cfg, "max_distance", None) or getattr(env_unwrapped.cfg, "lidar_max_range", 20.0))
+            max_range = float(
+                getattr(mid_cfg, "max_distance", None) or getattr(env_unwrapped.cfg, "lidar_max_range", 20.0)
+            )
             valid = valid & (mid.data.distances[view_idx] < max_range - 0.1)
         pts = hits[valid]
         if pts.shape[0] > max_lidar_pts:
@@ -256,6 +285,56 @@ def _draw_sensor_overlay(env_unwrapped, sensor: str, view_idx: int, hs_vis, lida
         if pts.shape[0] > 0:
             lidar_vis.set_visibility(True)
             lidar_vis.visualize(translations=pts)
+
+
+_RUNNER_CLASSES = {
+    "OnPolicyRunner": OnPolicyRunner,
+    "OnPolicyRunnerParkour": OnPolicyRunnerParkour,
+    "OnPolicyRunnerAMP": OnPolicyRunnerAMP,
+    "OnPolicyRunnerAMPBase": OnPolicyRunnerAMPBase,
+    "OnPolicyRunnerParkourAMP": OnPolicyRunnerParkourAMP,
+    "OnPolicyRunnerParkourAMPVoxel": OnPolicyRunnerParkourAMPVoxel,
+    "OnPolicyRunnerParkourAMPLidar": OnPolicyRunnerParkourAMPLidar,
+    "DistillationRunner": DistillationRunner,
+    "OnPolicyRunnerParkourDistill": OnPolicyRunnerParkourDistill,
+}
+"""Runner classes selectable through ``agent_cfg.class_name``, mirroring play.py's switch."""
+
+_RAW_CFG_RUNNERS = frozenset({"OnPolicyRunner", "DistillationRunner", "OnPolicyRunnerParkourDistill"})
+"""Runners that must receive the unfiltered agent cfg.
+
+The others forward their ``algorithm`` block straight into ``PPOParkour``, so unknown keys raise;
+these three read theirs with ``.get()`` defaults instead, and filtering would strip fields they
+still need.
+"""
+
+
+def _build_runner(env, agent_cfg: RslRlBaseRunnerCfg):
+    """Construct the runner named by ``agent_cfg.class_name``.
+
+    Args:
+        env: Wrapped environment the runner will drive.
+        agent_cfg: Resolved runner configuration.
+
+    Returns:
+        The constructed runner, with no log directory (playback only).
+
+    Raises:
+        ValueError: If ``class_name`` is not a supported runner.
+    """
+    import inspect
+
+    from rsl_rl.algorithms.ppo_parkour import PPOParkour
+
+    name = agent_cfg.class_name
+    if name not in _RUNNER_CLASSES:
+        raise ValueError(f"Unsupported runner class: {name}")
+
+    cfg = agent_cfg.to_dict()
+    if name not in _RAW_CFG_RUNNERS:
+        accepted = set(inspect.signature(PPOParkour.__init__).parameters) - {"self"}
+        cfg["algorithm"] = {k: v for k, v in cfg["algorithm"].items() if k in accepted or k == "class_name"}
+    return _RUNNER_CLASSES[name](env, cfg, log_dir=None, device=agent_cfg.device)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -295,7 +374,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ── Spawn at high difficulty so the recorded gap is prominent (wide gaps that
     #    require real leaping), not the near-flat level-0..3 patches. The camera picks
     #    the highest-level target env, so raising the init spread surfaces a hard gap. ──
-    _high = 8
+    _high = args_cli.max_init_level
     if hasattr(env_cfg, "terrain_max_init_level"):
         env_cfg.terrain_max_init_level = _high
     if hasattr(env_cfg.terrain, "max_init_terrain_level"):
@@ -361,7 +440,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ── video recording into a temp folder, then rename to the exact out_path ──
     out_path = os.path.abspath(args_cli.out_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    tmp_video_dir = os.path.join(os.path.dirname(out_path), ".rec_tmp_" + os.path.basename(out_path).replace(".mp4", ""))
+    tmp_video_dir = os.path.join(
+        os.path.dirname(out_path), ".rec_tmp_" + os.path.basename(out_path).replace(".mp4", "")
+    )
     if os.path.isdir(tmp_video_dir):
         shutil.rmtree(tmp_video_dir)
     os.makedirs(tmp_video_dir, exist_ok=True)
@@ -382,34 +463,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 6.0 migration: IsaacLab 3.0 (rsl-rl-lib 5.0.1) adds algorithm-cfg fields (e.g. optimizer,
     # share_cnn_encoders) that the vendored 3.2.0 PPOParkour.__init__ does not accept. Filter the
     # algorithm cfg to the vendored PPOParkour signature (mirrors play.py's ParkourAMP branch).
-    import inspect as _inspect
-
-    from rsl_rl.algorithms.ppo_parkour import PPOParkour as _VendoredPPOParkour
-
-    _accepted = set(_inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
-    _cfg_dict = agent_cfg.to_dict()
-    _cfg_dict["algorithm"] = {
-        k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted or k == "class_name"
-    }
-
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkour":
-        runner = OnPolicyRunnerParkour(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerAMP":
-        runner = OnPolicyRunnerAMP(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerAMPBase":
-        runner = OnPolicyRunnerAMPBase(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
-        runner = OnPolicyRunnerParkourAMP(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPVoxel":
-        runner = OnPolicyRunnerParkourAMPVoxel(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPLidar":
-        runner = OnPolicyRunnerParkourAMPLidar(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    runner = _build_runner(env, agent_cfg)
     runner.load(resume_path)
 
     policy = runner.get_inference_policy(device=env.unwrapped.device)

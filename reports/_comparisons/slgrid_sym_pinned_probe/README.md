@@ -86,6 +86,7 @@ task 구조(goal chain 길이 vs episode 길이 → time_out 지배) 쪽 제약�
 | hurdle | `videos/hurdle_off_vs_sym.mp4` | 1.072 / 1.095 | |
 | step | `videos/step_off_vs_sym.mp4` | 1.063 / 1.032 | ⚠ **SYM 추적 개체는 t≈1.5s에 단 벽면에 엎어져 클립 끝까지 정지** (OFF 추적 개체는 등반). 레벨 8 스폰, tilt/base_contact 종료가 안 걸려 리셋 없는 흡수 상태 — 아래 주의 참조 |
 | step (재렌더, seed 7) | `videos/step_off_vs_sym_seed7.mp4` | 0.951 / 0.986 | **양쪽 다 낙상**: SYM 추적 개체는 t≈2.5s부터 단 아래 엎어져 정지(seed 1과 동일 흡수 상태), OFF 추적 개체도 이번엔 등반 실패(z_min 0.154, z_max 0.437 — 낙상 후 전경 블록에 가려 화면 이탈). seed 1의 "OFF 등반 vs SYM 낙상" 대비는 우연이었음 |
+| **step (대표, L6)** | `videos/step_off_vs_sym_L6.mp4` | 1.080 / 1.105 | ✅ **양쪽 다 완등**: `--max_init_level 6`(probe 판정 레벨)으로 촬영. 추적 개체 둘 다 낙상 없이(z_min 0.31~0.32 유지) 정상부 z≈2.0까지 등반, 프레임 4시점 검수 통과. L8 클립 2개는 흡수 상태 증거용, 등반 시연은 이 클립이 정본 |
 | gap | `videos/gap_off_vs_sym.mp4` | 1.082 / 1.088 | |
 | stair | `videos/stair_off_vs_sym.mp4` | 1.083 / 1.131 | |
 | crawl | `videos/crawl_off_vs_sym.mp4` | 1.049 / 1.052 | 양쪽 모두 몸 낮춰 터널 진입 |
