@@ -85,6 +85,7 @@ task 구조(goal chain 길이 vs episode 길이 → time_out 지배) 쪽 제약�
 | flat | `videos/flat_off_vs_sym.mp4` | 0.995 / 1.051 | |
 | hurdle | `videos/hurdle_off_vs_sym.mp4` | 1.072 / 1.095 | |
 | step | `videos/step_off_vs_sym.mp4` | 1.063 / 1.032 | ⚠ **SYM 추적 개체는 t≈1.5s에 단 벽면에 엎어져 클립 끝까지 정지** (OFF 추적 개체는 등반). 레벨 8 스폰, tilt/base_contact 종료가 안 걸려 리셋 없는 흡수 상태 — 아래 주의 참조 |
+| step (재렌더, seed 7) | `videos/step_off_vs_sym_seed7.mp4` | 0.951 / 0.986 | **양쪽 다 낙상**: SYM 추적 개체는 t≈2.5s부터 단 아래 엎어져 정지(seed 1과 동일 흡수 상태), OFF 추적 개체도 이번엔 등반 실패(z_min 0.154, z_max 0.437 — 낙상 후 전경 블록에 가려 화면 이탈). seed 1의 "OFF 등반 vs SYM 낙상" 대비는 우연이었음 |
 | gap | `videos/gap_off_vs_sym.mp4` | 1.082 / 1.088 | |
 | stair | `videos/stair_off_vs_sym.mp4` | 1.083 / 1.131 | |
 | crawl | `videos/crawl_off_vs_sym.mp4` | 1.049 / 1.052 | 양쪽 모두 몸 낮춰 터널 진입 |
@@ -99,6 +100,11 @@ flat/hurdle/gap/stair는 추적 개체의 이동을 프레임 대조로 확인�
 time_out(종료의 59~70%)에 이런 낙상-미종료 상태가 섞여 있을 수 있으므로, "완주율 천장 ~35% = 순수
 task 구조(코스 길이) 제약"이라는 해석에는 유보가 필요하다. 종료 규칙은 양 정책 동일이라 OFF/SYM
 **A/B 공정성 자체는 유지**된다.
+
+seed 7 재렌더(2026-08-13)가 이를 보강한다: 이번에는 **OFF·SYM 추적 개체 둘 다** L8 step에서
+낙상 후 정지했다(위 표). 즉 낙상-흡수 상태는 SYM 특이 결함이 아니라 L8 step에서 양 정책 공통으로
+빈발하는 현상이고, seed 1 클립의 대비는 개체 추첨 우연이다 — probe L6에서 step은 SYM이 앞선
+지형(37.74 vs 36.08%)이라는 정량 판정과도 상충하지 않는다.
 
 개별 클립(합치기 전)은 `_workspace/slgrid_sym_probe/videos/`에 남아 있다.
 
