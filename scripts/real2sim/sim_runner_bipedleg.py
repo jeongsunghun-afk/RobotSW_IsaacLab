@@ -17,6 +17,12 @@ Isaac Sim(conda Python 3.12) 쪽 프로세스. rclpy는 사용하지 않는다.
 ``--viz kit``은 6.0 라이브스트림에 필수다. ``--viz``를 생략하면 헤드리스로 돌아간다
 (``--headless``는 deprecated). 8-DOF 2족이라 ``--fix_base`` 없이는 GUI로 관절을 스텝하는
 순간 넘어지므로, 관절 추종 확인 용도로는 ``--fix_base``를 켠다.
+
+position 모드 루프는 step_dt(20ms) wall-clock 페이싱으로 실시간 1.0배를 유지한다. 렌더가
+병목이면(kit 라이브스트림 ~25ms/frame) 페이싱만으론 부족하므로 ``--render_decimation``(기본 2)
+으로 env step N회당 1회만 렌더해 한 바퀴를 20ms 아래로 끌어내린다 — 실측: 렌더 매 step이면
+루프가 33Hz로 떨어지고 sim이 0.66배속 슬로모션이 돼 monitor plot이 계단(40~100ms hold)+
+겉보기 지연 180ms로 보인다.
 """
 
 """Launch Omniverse Toolkit first."""
@@ -38,6 +44,7 @@ from r2s_udp import (  # isort: skip
     pack_policy_state,
     pack_state,
     unpack_cmd,
+    unpack_plant,
     unpack_policy_act,
 )
 
@@ -55,6 +62,13 @@ parser.add_argument(
 )
 parser.add_argument("--cmd_port", type=int, default=CMD_PORT, help="UDP port to receive motor commands on.")
 parser.add_argument("--state_port", type=int, default=STATE_PORT, help="UDP port to send sim state to.")
+parser.add_argument(
+    "--render_decimation",
+    type=int,
+    default=2,
+    help="Render once every N env steps (kit viz). 1 = every step (legacy, drops the loop below "
+    "real time when render is the bottleneck). Headless runs are unaffected.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -64,6 +78,7 @@ simulation_app = app_launcher.app
 """Rest everything else."""
 
 import socket
+import time
 
 import gymnasium as gym
 import torch
@@ -85,6 +100,13 @@ def main() -> None:
         env_cfg.fix_base = False
     else:
         env_cfg.fix_base = args_cli.fix_base
+
+    # 렌더 데시메이션 — render_interval은 physics step 단위라 env step 단위 인자에 decimation을 곱한다.
+    # 헤드리스(is_rendering=False)에선 무효과. DirectRLEnv가 render_interval < decimation이면 경고하므로
+    # 1 미만은 받지 않는다.
+    if args_cli.render_decimation < 1:
+        raise ValueError(f"--render_decimation must be >= 1, got {args_cli.render_decimation}")
+    env_cfg.sim.render_interval = env_cfg.decimation * args_cli.render_decimation
 
     env = gym.make(TASK_NAME, cfg=env_cfg)
     env.reset()
@@ -121,6 +143,12 @@ def _run_position_loop(env) -> None:
 
     zero_action = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
     seq = 0
+    # step_dt(20ms) wall-clock 페이싱 — 없으면 루프가 "도는 만큼만" 돌아 렌더/물리 부하에 따라
+    # sim이 슬로모션 또는 fast-forward가 된다 (gui_controller publisher와 같은 sleep 패턴).
+    period = float(env.unwrapped.step_dt)
+    next_t = time.monotonic()
+    rate_n, overrun_n = 0, 0
+    rate_t0 = time.monotonic()
     try:
         while simulation_app.is_running():
             # drain the recv queue and keep only the latest command
@@ -133,6 +161,22 @@ def _run_position_loop(env) -> None:
                 cmd = unpack_cmd(data)
                 if cmd is not None:
                     last = cmd
+                    continue
+                # PLANT(R2PP, one-shot): 플랜트 물성 선택 적용 — CMD와 크기·magic이 달라 오파싱 없음.
+                pl = unpack_plant(data)
+                if pl is not None:
+                    env.unwrapped.set_plant_params(pl["mode"], pl["armature"], pl["viscous"], pl["coulomb"])
+                    if pl["mode"] == 0:
+                        print("[sim_runner_bipedleg] plant → stock cfg 복원", flush=True)
+                    else:
+                        arma = " ".join(f"{v:.4f}" for v in pl["armature"])
+                        visc = " ".join(f"{v:.3f}" for v in pl["viscous"])
+                        coulomb_s = " ".join(f"{v:.3f}" for v in pl["coulomb"])
+                        print(
+                            f"[sim_runner_bipedleg] plant → PACE 적용  armature=[{arma}] "
+                            f"viscous=[{visc}] coulomb=[{coulomb_s}]",
+                            flush=True,
+                        )
             if last is not None:
                 env.unwrapped.set_setpoint(last["q"], last["dq"], last["kp"], last["kd"], last["tau"])
 
@@ -146,6 +190,26 @@ def _run_position_loop(env) -> None:
             if seq % 50 == 0:  # 1Hz — I_eff는 상수라 저빈도면 충분
                 send_sock.sendto(pack_ieff(seq, ieff), state_addr)
             seq += 1
+
+            next_t += period
+            delay = next_t - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_t = time.monotonic()  # 밀렸으면 리싱크 (누적 드리프트 방지)
+                overrun_n += 1
+            rate_n += 1
+            now = time.monotonic()
+            if now - rate_t0 >= 10.0:
+                rate = rate_n / (now - rate_t0)
+                if rate < 0.9 / period:  # 지속 저속 = 페이싱으로 못 잡는 병목 — 슬로모션 상태
+                    print(
+                        f"[sim_runner_bipedleg] WARN: loop {rate:.1f}Hz < target {1.0 / period:.0f}Hz "
+                        f"({overrun_n}/{rate_n} overruns) — sim is below real time; "
+                        "raise --render_decimation",
+                        flush=True,
+                    )
+                rate_n, overrun_n, rate_t0 = 0, 0, now
     finally:
         recv_sock.close()
         send_sock.close()

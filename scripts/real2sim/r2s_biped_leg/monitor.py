@@ -54,12 +54,18 @@ sys.path.insert(0, os.path.dirname(__file__))
 import motions  # noqa: E402
 import r2s_udp  # noqa: E402
 
-pg.setConfigOptions(antialias=True, background="#1c1e26", foreground="#c7cbe0")
+# SSH X11 포워딩(DISPLAY=localhost:N 등) 감지 — 그리기 명령이 매 프레임 네트워크를 건너가
+# Qt 이벤트 루프가 막히고 UDP 큐에 초 단위 backlog가 쌓인다(실측: 9883 큐 2~15KB 진동).
+# 원격이면 antialias를 끄고 렌더율을 낮춰 X 왕복량을 줄인다.
+_REMOTE_DISPLAY: bool = not os.environ.get("DISPLAY", ":0").startswith(":")
+
+pg.setConfigOptions(antialias=not _REMOTE_DISPLAY, background="#1c1e26", foreground="#c7cbe0")
 
 HOST: str = "127.0.0.1"
 WINDOW_S: float = 10.0
-RENDER_HZ: float = 30.0  # pyqtgraph 증분 렌더 기준 (matplotlib 시절 15Hz)
+RENDER_HZ: float = 15.0 if _REMOTE_DISPLAY else 30.0  # pyqtgraph 증분 렌더 기준 (matplotlib 시절 15Hz)
 RENDER_PERIOD_S: float = 1.0 / RENDER_HZ
+SAMPLE_PERIOD_S: float = 0.02  # 발행측(publisher/TELEM 중계) 공칭 주기 50Hz — drain 배치 시각 복원용
 RECV_PERIOD_S: float = 0.005  # UDP drain 주기
 RESCALE_PERIOD_S: float = 1.0
 Y_MIN_SPAN: float = 0.2  # y축 최소 폭 — 정지 중 노이즈가 화면 가득 확대되는 것을 막는다
@@ -98,10 +104,15 @@ class MonitorWindow(QMainWindow):
         self._sel_idx: int = 0
         self._paused: bool = False
         self._deg_units: bool = False
-        # (t, action_q, sim_q, sim_dq, sim_tau) — 선택 관절만.
+        # (seq, action_q, sim_q, sim_dq, sim_tau) — 선택 관절만. x축은 도착 시각이 아니라
+        # 발행측 seq(20ms/틱)로 재구성한다 — 원격 X11 등으로 이벤트 루프가 막혀 패킷이 몰려
+        # 들어와도 샘플 간격이 정확히 유지된다 (도착 시각 방식은 backlog가 세로선으로 뭉친다).
         self._buf: collections.deque = collections.deque(maxlen=BUF_MAXLEN)
-        # (t, real_q, real_dq, real_tau) — REAL_MON_PORT 중계, action 없음.
+        # (seq, real_q, real_dq, real_tau) — REAL_MON_PORT 중계, action 없음.
         self._real_buf: collections.deque = collections.deque(maxlen=BUF_MAXLEN)
+        # (최신 seq, 그 도착 wall 시각) — 스트림이 멈추면 곡선이 왼쪽으로 흘러가게 하는 기준점.
+        self._anchor: tuple[int, float] | None = None
+        self._real_anchor: tuple[int, float] | None = None
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.bind((HOST, self._port))
@@ -210,6 +221,9 @@ class MonitorWindow(QMainWindow):
             lines["sim"] = plot.plot([], [], pen=pg.mkPen(_C_SIM, width=1.4), name=self._label)
             if self._show_real:
                 lines["real"] = plot.plot([], [], pen=pg.mkPen(_C_REAL, width=1.4), name="real")
+            # 화면 픽셀 폭 기준 자동 다운샘플('peak'=구간 극값 보존) — 원격 X11에서 그리기 왕복량 절감.
+            for line in lines.values():
+                line.setDownsampling(auto=True, method="peak")
             self._axes.append(plot)
             self._lines.append(lines)
         self._axes[-1].setLabel("bottom", "time [s] (0 = now)")
@@ -245,7 +259,13 @@ class MonitorWindow(QMainWindow):
             m = r2s_udp.unpack_monitor(data)
             if m is None:
                 continue
-            self._buf.append((now, m["action_q"][i], m["sim_q"][i], m["sim_dq"][i], m["sim_tau"][i]))
+            self._anchor = self._append_seq(
+                self._buf,
+                self._anchor,
+                m["seq"],
+                (m["action_q"][i], m["sim_q"][i], m["sim_dq"][i], m["sim_tau"][i]),
+                now,
+            )
         if self._real_sock is not None:
             while True:
                 try:
@@ -256,7 +276,27 @@ class MonitorWindow(QMainWindow):
                 if m is None:
                     continue
                 # real 중계는 action_q=0(무의미) — sim_q/sim_dq/sim_tau 필드에 실기 q/dq/tau가 담긴다.
-                self._real_buf.append((now, m["sim_q"][i], m["sim_dq"][i], m["sim_tau"][i]))
+                self._real_anchor = self._append_seq(
+                    self._real_buf, self._real_anchor, m["seq"], (m["sim_q"][i], m["sim_dq"][i], m["sim_tau"][i]), now
+                )
+
+    @staticmethod
+    def _append_seq(
+        buf: collections.deque, anchor: tuple[int, float] | None, seq: int, values: tuple, now: float
+    ) -> tuple[int, float] | None:
+        """샘플을 seq 키로 append하고 갱신된 anchor(최신 seq, 도착 시각)를 반환한다.
+
+        seq가 뒤로 크게 점프하면 발행측 재시작(seq 리셋)으로 보고 버퍼를 비운다. 소폭 역행/중복은
+        UDP 재정렬로 보고 버린다 (x 단조 유지).
+        """
+        if anchor is not None:
+            last_seq = anchor[0]
+            if seq <= last_seq:
+                if seq > last_seq - BUF_MAXLEN:
+                    return anchor  # 재정렬/중복 — 버린다
+                buf.clear()  # 발행측 재시작
+        buf.append((seq, *values))
+        return (seq, now)
 
     # -- UI 콜백 --
 
@@ -264,6 +304,8 @@ class MonitorWindow(QMainWindow):
         self._sel_idx = idx
         self._buf.clear()
         self._real_buf.clear()
+        self._anchor = None
+        self._real_anchor = None
 
     def _on_pause_clicked(self) -> None:
         self._paused = not self._paused
@@ -297,9 +339,12 @@ class MonitorWindow(QMainWindow):
             ``buf_cols``: (buffer, col) 쌍 목록 — sim/real 버퍼를 함께 넣어 합산 범위를 잡는다.
             """
             vals = []
-            for buf, c in buf_cols:
+            for buf, anchor, c in buf_cols:
+                if anchor is None:
+                    continue
+                a_seq, a_t = anchor
                 for row in buf:
-                    if now - row[0] <= WINDOW_S:
+                    if (a_seq - row[0]) * SAMPLE_PERIOD_S + (now - a_t) <= WINDOW_S:
                         vals.append(row[c])
             if not vals:
                 return None
@@ -312,35 +357,42 @@ class MonitorWindow(QMainWindow):
             m = 0.1 * (hi - lo)
             return lo - m, hi + m
 
-        q_cols = [(self._buf, 2)]  # sim q
+        q_cols = [(self._buf, self._anchor, 2)]  # sim q
         if self._show_action:
-            q_cols.append((self._buf, 1))  # action q
+            q_cols.append((self._buf, self._anchor, 1))  # action q
         if self._show_real:
-            q_cols.append((self._real_buf, 1))  # real q
+            q_cols.append((self._real_buf, self._real_anchor, 1))  # real q
         r = _yrange(*q_cols)
         if r:
             self._axes[0].setYRange(r[0] * scale, r[1] * scale, padding=0)
 
-        tau_cols = [(self._buf, 4)]  # sim tau
+        tau_cols = [(self._buf, self._anchor, 4)]  # sim tau
         if self._show_real:
-            tau_cols.append((self._real_buf, 3))  # real tau
+            tau_cols.append((self._real_buf, self._real_anchor, 3))  # real tau
         r = _yrange(*tau_cols)
         if r:
             self._axes[1].setYRange(r[0], r[1], padding=0)  # tau 는 단위 토글 영향 없음
 
-        dq_cols = [(self._buf, 3)]  # sim dq
+        dq_cols = [(self._buf, self._anchor, 3)]  # sim dq
         if self._show_real:
-            dq_cols.append((self._real_buf, 2))  # real dq
+            dq_cols.append((self._real_buf, self._real_anchor, 2))  # real dq
         r = _yrange(*dq_cols)
         if r:
             self._axes[2].setYRange(r[0] * scale, r[1] * scale, padding=0)
 
-    def _set_line(self, line, buf, col: int, now: float, scale: float = 1.0) -> None:
+    def _set_line(self, line, buf, anchor, col: int, now: float, scale: float = 1.0) -> None:
         if line is None:
             return
+        if anchor is None:
+            line.setData([], [])
+            return
+        # x = (seq 차이)·20ms − (최신 샘플 이후 경과 wall 시간): 스트리밍 중엔 정확한 20ms 격자,
+        # 스트림이 멈추면 곡선 전체가 왼쪽으로 흘러간다.
+        a_seq, a_t = anchor
+        shift = now - a_t
         xs, ys = [], []
         for row in buf:
-            dt = row[0] - now
+            dt = (row[0] - a_seq) * SAMPLE_PERIOD_S - shift
             if dt < -WINDOW_S:
                 continue
             xs.append(dt)
@@ -350,14 +402,14 @@ class MonitorWindow(QMainWindow):
     def _on_render_tick(self) -> None:
         now = time.monotonic()
         scale = self._unit_scale()
-        self._set_line(self._lines[0].get("action"), self._buf, 1, now, scale)
-        self._set_line(self._lines[0].get("sim"), self._buf, 2, now, scale)
-        self._set_line(self._lines[1].get("sim"), self._buf, 4, now)
-        self._set_line(self._lines[2].get("sim"), self._buf, 3, now, scale)
+        self._set_line(self._lines[0].get("action"), self._buf, self._anchor, 1, now, scale)
+        self._set_line(self._lines[0].get("sim"), self._buf, self._anchor, 2, now, scale)
+        self._set_line(self._lines[1].get("sim"), self._buf, self._anchor, 4, now)
+        self._set_line(self._lines[2].get("sim"), self._buf, self._anchor, 3, now, scale)
         if self._show_real:
-            self._set_line(self._lines[0].get("real"), self._real_buf, 1, now, scale)
-            self._set_line(self._lines[1].get("real"), self._real_buf, 3, now)
-            self._set_line(self._lines[2].get("real"), self._real_buf, 2, now, scale)
+            self._set_line(self._lines[0].get("real"), self._real_buf, self._real_anchor, 1, now, scale)
+            self._set_line(self._lines[1].get("real"), self._real_buf, self._real_anchor, 3, now)
+            self._set_line(self._lines[2].get("real"), self._real_buf, self._real_anchor, 2, now, scale)
 
         if (now - self._last_rescale) >= RESCALE_PERIOD_S:
             self._last_rescale = now
@@ -405,6 +457,13 @@ def main() -> None:
     parser.add_argument("--title", default="R2S-BipedLeg Monitor", help="창 제목")
     parser.add_argument("--joint", default=None, help="초기 선택 관절 이름 (예: HL_thigh)")
     args = parser.parse_args()
+
+    if _REMOTE_DISPLAY:
+        print(
+            f"[monitor] remote DISPLAY({os.environ.get('DISPLAY', '')}) detected — "
+            f"antialias off, render {RENDER_HZ:.0f}Hz (X11 forwarding load reduction)",
+            flush=True,
+        )
 
     app = QApplication(sys.argv)
     app.setStyleSheet(

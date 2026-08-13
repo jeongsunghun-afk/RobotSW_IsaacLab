@@ -27,16 +27,20 @@ NUM_MOTORS: int = 8
 # 여기신호 파라미터 (다리당 [hip, thigh, calf, foot], HL → HR)
 # ---------------------------------------------------------------------------
 
-# 진동 중심 [rad]. 실측 soft limit 구간의 중앙 근처로 잡아 진폭 여유를 최대화한다.
-# ⚠ foot은 좌우 **미러**라서 center 부호가 반대다(HL +0.52 / HR -0.52). 대칭이라 "고치지" 말 것.
-CHIRP_CENTER: list[float] = [0.0, -0.17, -0.48, 0.52, 0.0, -0.17, -0.48, -0.52]
+# 진동 중심 [rad]. soft limit 구간의 중앙 근처로 잡아 진폭 여유를 최대화한다.
+# 2026-08-11: 신규 CAD 리비전 Hind_Leg_URDF2 (좌우 동일 규약)로 soft limit이 바뀌어
+#   중심·진폭을 재설계했다. 이 값으로 수집한 chirp은 구 플랜트 데이터셋과 비교 불가 —
+#   새 플랜트에서 재수집할 것.
+# 2026-08-12 SignFix: HL_calf/HL_foot/HR_thigh 축 반전(자산 Hind_Leg_URDF3_SignFix)에 맞춰
+# 반전 관절의 중심 부호를 뒤집었다 — 물리적 자세는 반전 전과 동일하다.
+CHIRP_CENTER: list[float] = [0.0, 0.62, 0.09, 0.52, 0.0, -0.62, -0.09, -0.52]
 
-# 진폭 [rad]. soft limit(soft_joint_pos_limit_factor=0.9) 안쪽으로 최소 ~0.089 rad 여유를 둔다:
-#   hip    0.00 ± 0.45 ⊂ soft[-0.5498, 0.5498]
-#   thigh -0.17 ± 0.60 ⊂ soft[-1.9024, 1.5533]   ← 가장 여유 큼
-#   calf  -0.48 ± 0.80 ⊂ soft[-1.3836, 0.4236]
-#   foot  ±0.52 ± 0.85 ⊂ soft[∓0.4192, ±1.4662]  ← 가장 빡빡함. 0.85를 넘기지 말 것.
-CHIRP_AMPLITUDE: list[float] = [0.45, 0.60, 0.80, 0.85, 0.45, 0.60, 0.80, 0.85]
+# 진폭 [rad]. soft limit(soft_joint_pos_limit_factor=0.9) 안쪽으로 최소 ~0.09 rad 여유를 둔다:
+#   hip       0.00 ± 0.14 ⊂ soft[-0.2340, 0.2340]  ← hip 가동범위가 ±14.9°로 좁아져 진폭 대폭 축소
+#   HL_thigh  0.62 ± 0.60 ⊂ soft[-0.9555, 2.1855]  ← 가장 여유 큼 (HR은 미러: -0.62 ⊂ [-2.1855, 0.9555])
+#   HL_calf   0.09 ± 0.75 ⊂ soft[-0.7745, 0.9445]  (HR은 미러: -0.09 ⊂ [-0.9445, 0.7745])
+#   HL_foot   0.52 ± 0.76 ⊂ soft[-0.3440, 1.3840]  (HR은 미러: -0.52 ⊂ [-1.3840, 0.3440])
+CHIRP_AMPLITUDE: list[float] = [0.14, 0.60, 0.75, 0.76, 0.14, 0.60, 0.75, 0.76]
 
 # 좌우 hip 부호 반전 — 베이스에 걸리는 롤 모멘트를 상쇄한다(매단 리그 흔들림 최소화).
 # 관절 순서가 HL(좌) 4개 → HR(우) 4개이므로 HR_hip만 -1.
@@ -61,18 +65,20 @@ DEFAULT_RATE_HZ: float = 500.0  # sysid 제어율 = 실기 명령 발행률 (CON
 # 공진(PACE 논문의 매단 리그 공진 관측)이 2 Hz 부근부터 데이터를 오염시키므로, 실기 수집에서는
 # f1을 2 Hz로 낮춰야 한다. sim 합성 게이트에서만 10 Hz를 쓴다.
 
-# 실측 soft joint position limit [rad] (soft_joint_pos_limit_factor=0.9 반영, 2026-07-21 probe).
+# soft joint position limit [rad] (soft_joint_pos_limit_factor=0.9 반영).
+# 2026-08-12 SignFix: 실기 방향 실측에 맞춘 Hind_Leg_URDF3_SignFix 자산 기준 —
+# HL_hip/HL_calf/HL_foot/HR_hip/HR_thigh 축 반전으로 좌우가 thigh/calf/foot에서 미러 관계.
 # 이걸 넘는 목표각은 sim이 조용히 클램프하고, 실기에서는 관절이 기계 한계에 부딪친다.
 # ⚠ `r2s_biped_leg_env_cfg.SOFT_LIMITS_RAD` / `motions.py`의 값과 반드시 일치해야 한다(다른 패키지라 중복).
 SOFT_LIMITS: list[tuple[float, float]] = [
-    (-0.5498, 0.5498),  # HL_hip
-    (-1.9024, 1.5533),  # HL_thigh
-    (-1.3836, 0.4236),  # HL_calf
-    (-0.4192, 1.4662),  # HL_foot
-    (-0.5498, 0.5498),  # HR_hip
-    (-1.9024, 1.5533),  # HR_thigh
-    (-1.3836, 0.4236),  # HR_calf
-    (-1.4662, 0.4192),  # HR_foot  ← HL_foot의 미러
+    (-0.2340, 0.2340),  # HL_hip   (축 반전 — 대칭이라 값 동일)
+    (-0.9555, 2.1855),  # HL_thigh
+    (-0.7745, 0.9445),  # HL_calf  (축 반전)
+    (-0.3440, 1.3840),  # HL_foot  (축 반전)
+    (-0.2340, 0.2340),  # HR_hip   (축 반전 — 대칭이라 값 동일)
+    (-2.1855, 0.9555),  # HR_thigh (축 반전)
+    (-0.9445, 0.7745),  # HR_calf
+    (-1.3840, 0.3440),  # HR_foot
 ]
 
 # GUI/로그 표시용 짧은 레이블 (관절 순서 동일).

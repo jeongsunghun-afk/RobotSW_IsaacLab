@@ -17,12 +17,24 @@ PyQt5 GUI/monitor와 통신하는 **Real2Sim** 환경. `r2s_hind_leg` 패턴 기
 | 환경 클래스 | `R2SBipedLegEnv` |
 | 설정 클래스 | `R2SBipedLegEnvCfg` |
 
-## 조인트 파라미터 (2026-08-11 신규 CAD 리비전 Hind_Leg_URDF2 → 같은 날 URDF3로 재교체)
+## 조인트 파라미터 (2026-08-11 URDF2 → URDF3 → **2026-08-12 URDF3_SignFix**)
 
 8관절, `find_joints(JOINT_NAME_PATTERNS, preserve_order=True)`로 순서 고정. leg-major(HL→HR).
-asset=`data/Robots/Hind_Leg_URDF3/Hind_Leg/Hind_Leg.usda` (rga.py `HIND_LEG_CFG`).
-URDF2는 링크 프레임/축(+Y)이 biped MJCF 모델각 규약과 동일, **좌우 동일 규약(미러 아님)** — URDF3도 동일.
-τ_max/v_max는 실기값(RL_INTERFACE.md §6-c), 관절한계는 URDF2/URDF3 공통 자체값(신규 리비전 기준).
+asset=`data/Robots/Hind_Leg_URDF3_SignFix/Hind_Leg_SignFix/Hind_Leg_SignFix.usda` (rga.py `HIND_LEG_CFG`).
+τ_max/v_max는 실기값(RL_INTERFACE.md §6-c).
+
+**SignFix (2026-08-12)**: 실기 통신 실측에서 같은 목표에 **반대로 도는 관절**이 확인돼
+(HL: hip/calf/foot, HR: hip/thigh), sim을 실기에 맞추기 위해 URDF3에서 이 5개 관절의
+`<axis>` 부호와 `<limit>`([lo,hi]→[-hi,-lo])을 반전한 파생 URDF
+(`/home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF3/urdf/Hind_Leg_SignFix.urdf`,
+저장소 사본 `data/Robots/Hind_Leg_URDF3_SignFix/urdf/Hind_Leg.urdf`)에서 재변환했다.
+- 결과: **thigh/calf/foot이 좌우 미러 규약**(soft limit 좌우 다름), hip은 대칭이라 값 동일.
+- real_runner `calib_bipedleg.hpp`의 sign은 전 관절 **+1 유지가 정답**(sim이 실기에 맞춰졌으므로).
+  min/max_rad 클램프만 반전 관절에서 갱신 → **파이 re-scp+rebuild 필요**.
+- ⚠ 구 규약(URDF2/URDF3)으로 학습된 정책·수집 데이터(chirp 포함)는 반전 관절 부호가 달라
+  호환되지 않는다.
+- 검증: 구·신 자산 동시 스폰, 반전 관절 q_new=−q_old ↔ 발끝 상대위치 일치(케이스1) +
+  동일 q에서 불일치(케이스2)로 물리 방향 반전 실증.
 
 - URDF3(원본 `/home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF3/urdf/Hind_Leg.urdf`)는 관절명·타입·순서·
   effort/lower/upper가 URDF2와 전부 동일 — 아래 표 값 무수정. base 링크만 `base`→`base_collision`
@@ -49,6 +61,26 @@ URDF2는 링크 프레임/축(+Y)이 biped MJCF 모델각 규약과 동일, **�
 - default_joint_pos 전부 0.0.
 - 게인이 `r2s_hind_leg`(300/5)보다 훨씬 낮다 → GUI 슬라이더 상한을 낮춰야 조작 가능.
 - `JOINT_NAME_PATTERNS`는 정규식이 아니라 정확한 관절명 — `.*_hip_joint`는 HL/HR 양쪽에 매칭된다.
+
+## foot↔calf 전달기구 커플링 (2026-08-12, `cfg.foot_coupling=True` 기본)
+
+실기 실측: foot 모터는 관절각이 아니라 **raw각 `q_raw = q_foot + q_calf`**(RL_INTERFACE coef=+1)를
+구동한다 — calf가 +10° 돌면 foot 관절각이 −10° 따라가고(역방향 없음), **무토크에서도** 기어 마찰이
+raw를 잠가 커플링이 유지된다(비가역 전달기구).
+
+sim 재현(live 모드 전용, `_apply_action`에서 physics step 200Hz마다):
+- foot 위치목표 = `raw_target − q_calf`, 속도목표 = `−q̇_calf` → actuator PD가 raw 공간 오차로 계산
+  (위치 강제 쓰기 아님 — 전달기구 강성으로 미는 방식이라 접촉/동역학 무손상)
+- **전치 토크**: `τ_calf += τ_foot_motor` (모터좌표 r=(q_c, q_f+q_c) ⇒ τ_joint=Tᵀτ_motor.
+  ⚠RL_INTERFACE의 `τ_raw_src −= …`는 역방향(관절토크→모터명령) 식이라 부호가 반대)
+- relax(foot kp≈0): 진입 순간 raw 래치 + `coupling_hold_kp/kd`(기본 200/2)로 잠금 — 실기의
+  비가역 마찰 재현. 해제 시 GUI 게인 복귀.
+- **CMD/ACT의 foot 목표 의미 = raw 목표**(실기 real_runner 해석과 동일), `get_lowstate` foot q/dq도
+  raw 보고(실기 TELEM과 정합). soft limit 클램프는 GUI publisher(`_clamp_target`)와 real_runner가
+  각각 `관절각 한계 + calf`로 평행이동해 적용.
+- policy/sysid 모드 미적용(관절 공간 규약 유지, sysid cfg는 `foot_coupling=False` 명시).
+- 검증: calf sine+foot raw 고정 → `q_foot = raw_t − q_calf` 추종, foot 단독 시 calf 부동,
+  relax에서 calf 강제 이동 시 foot이 raw 래치 유지하며 역추종.
 
 ## 베이스 (fix_base)
 

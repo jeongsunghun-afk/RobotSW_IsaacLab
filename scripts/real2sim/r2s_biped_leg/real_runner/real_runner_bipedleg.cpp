@@ -57,7 +57,7 @@ constexpr double kActTimeoutSec = 0.5;    // TRACK 중 ACT 두절 → 마지막 
 constexpr unsigned kStatusWarmupCnt = 100;  // RobotTestGait 게이트와 동일
 
 enum class Mode { kProbe, kHold, kBridge };
-enum class State { kWaitStatus, kHold, kEngage, kTrack, kRelax };
+enum class State { kWaitStatus, kHold, kEngage, kTrack, kRelaxRamp, kRelaxFade, kRelax };
 
 double now_sec() {
     timespec ts;
@@ -157,6 +157,12 @@ int main(int argc, char** argv) {
 
     State state = State::kWaitStatus;
     double engage_t0 = 0.0;
+    // staged relax: 휴지(droop) 자세로 램프 후 무토크 (RELAX_REST_POSE_SIM, calib 참조)
+    float relax_start_deg[NUM_MOTORS] = {0};  // 램프 시작 자세 [deg]
+    float relax_rest_deg[NUM_MOTORS] = {0};   // 휴지 자세 [deg] (클램프 없이 변환 — calib 주석 참조)
+    double relax_t0 = 0.0;
+    double relax_ramp_sec = 1.0;
+    double relax_fade_t0 = 0.0;  // 게인 페이드 시작 시각
     double last_act_time = -1.0;
     double last_reply_time = -1.0;
     double last_print_time = 0.0;
@@ -215,9 +221,11 @@ int main(int argc, char** argv) {
                     last_act_time = now_sec();
                     peer_addr = from;
                     have_peer = true;
-                    if ((state == State::kHold || state == State::kRelax) && mode == Mode::kBridge) {
-                        // RELAX에서 복귀 시엔 처져 있는 **현재** 자세에서 램프를 시작해야 한다.
-                        if (state == State::kRelax) {
+                    if ((state == State::kHold || state == State::kRelax || state == State::kRelaxRamp
+                         || state == State::kRelaxFade)
+                        && mode == Mode::kBridge) {
+                        // RELAX(램프 포함)에서 복귀 시엔 처져 있는 **현재** 자세에서 램프를 시작해야 한다.
+                        if (state == State::kRelax || state == State::kRelaxRamp || state == State::kRelaxFade) {
                             for (int m = 0; m < NUM_MOTORS; m++) {
                                 latched_deg[m] = static_cast<float>(motor_stt[m].fPosition);
                             }
@@ -235,9 +243,27 @@ int main(int argc, char** argv) {
                     // 아님 — 드라이버가 마지막 명령을 유지할 수 있으므로 zero-torque 를 계속 보낸다).
                     peer_addr = from;
                     have_peer = true;
-                    if (mode == Mode::kBridge && state != State::kRelax && state != State::kWaitStatus) {
-                        state = State::kRelax;
-                        std::printf("[real_runner] RELAX 수신 → 무토크(limp)\n");
+                    // staged relax (2026-08-12): 즉시 무토크가 아니라 실측 휴지(droop) 자세로
+                    // RELAX_RAMP_RADPS 속도로 이동한 뒤 무토크로 전환한다 — 높은 자세에서 바로
+                    // 풀면 낙하 충격이 있기 때문. RELAX 패킷은 50Hz로 반복 수신되므로 램프/무토크
+                    // 중에는 재트리거하지 않는다.
+                    if (mode == Mode::kBridge && state != State::kRelax && state != State::kRelaxRamp
+                        && state != State::kRelaxFade && state != State::kWaitStatus) {
+                        float max_delta_rad = 0.0f;
+                        for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+                            int m = POLICY_TO_MOTOR[p];
+                            relax_start_deg[m] = static_cast<float>(motor_stt[m].fPosition);
+                            relax_rest_deg[m] = sim_to_motor_deg(m, RELAX_REST_POSE_SIM[p]);
+                            float cur_sim = motor_deg_to_sim(m, relax_start_deg[m]);
+                            float d = std::fabs(RELAX_REST_POSE_SIM[p] - cur_sim);
+                            if (d > max_delta_rad) max_delta_rad = d;
+                        }
+                        relax_ramp_sec = max_delta_rad / RELAX_RAMP_RADPS;
+                        if (relax_ramp_sec < 0.5) relax_ramp_sec = 0.5;
+                        relax_t0 = now_sec();
+                        state = State::kRelaxRamp;
+                        std::printf("[real_runner] RELAX 수신 → 휴지 자세로 램프 %.1f s (max Δ %.2f rad) 후 무토크\n",
+                                    relax_ramp_sec, max_delta_rad);
                     }
                 } else if (unpack_policy_gain(rx, static_cast<size_t>(n), gain)) {
                     // kp/kd 런타임 갱신 — articulation 순서로 받아 모터 순서로 매핑, 드라이버 상한 클램프.
@@ -288,6 +314,31 @@ int main(int argc, char** argv) {
                 for (int m = 0; m < NUM_MOTORS; m++) {
                     cmd_deg[m] = static_cast<float>(motor_stt[m].fPosition);
                 }
+            } else if (state == State::kRelaxRamp) {
+                // staged relax: 실측 휴지 자세로 선형 램프 (게인은 정상 유지 — 낙하 아님, 이동).
+                // soft limit 클램프 없음 — calib RELAX_REST_POSE_SIM 주석 참조.
+                double t_now = now_sec();
+                float a = static_cast<float>(clamp(static_cast<float>((t_now - relax_t0) / relax_ramp_sec), 0.0f, 1.0f));
+                for (int m = 0; m < NUM_MOTORS; m++) {
+                    cmd_deg[m] = relax_start_deg[m] + (relax_rest_deg[m] - relax_start_deg[m]) * a;
+                }
+                if (a >= 1.0f) {
+                    // 즉시 무토크로 끊지 않는다 — 잔여 중력 하중이 한 번에 풀리며 과도하게 처지는
+                    // 실기 관찰(2026-08-13). 게인을 RELAX_FADE_SEC에 걸쳐 선형으로 0까지 내린다.
+                    state = State::kRelaxFade;
+                    relax_fade_t0 = now_sec();
+                    std::printf("[real_runner] 휴지 자세 도달 → 게인 페이드 %.1f s 후 무토크\n",
+                                static_cast<double>(RELAX_FADE_SEC));
+                }
+            } else if (state == State::kRelaxFade) {
+                // 게인 페이드: 휴지 자세를 목표로 유지한 채 kp/kd만 서서히 0으로 (아래 gain_scale).
+                for (int m = 0; m < NUM_MOTORS; m++) {
+                    cmd_deg[m] = relax_rest_deg[m];
+                }
+                if (now_sec() - relax_fade_t0 >= RELAX_FADE_SEC) {
+                    state = State::kRelax;
+                    std::printf("[real_runner] 게인 페이드 완료 → 무토크(limp)\n");
+                }
             } else if (state == State::kHold) {
                 for (int m = 0; m < NUM_MOTORS; m++) {
                     cmd_deg[m] = latched_deg[m];
@@ -297,7 +348,18 @@ int main(int argc, char** argv) {
                 float track_deg[NUM_MOTORS];
                 for (int p = 0; p < R2S_NUM_JOINTS; p++) {
                     int m = POLICY_TO_MOTOR[p];
-                    float q = clamp(target_pol[p], MOTOR_CALIB[m].min_rad, MOTOR_CALIB[m].max_rad);
+                    float lo = MOTOR_CALIB[m].min_rad;
+                    float hi = MOTOR_CALIB[m].max_rad;
+                    // foot(p=6,7)↔calf(p=4,5) 전달기구 커플링(coef=+1): foot 목표는 관절각이 아니라
+                    // raw각(q_foot+q_calf)이다. calib의 min/max는 foot **관절각** 한계이므로,
+                    // raw 목표의 허용범위는 같은 다리 calf 실측만큼 평행이동한다.
+                    if (p >= 6) {
+                        int mc = POLICY_TO_MOTOR[p - 2];
+                        float qc = motor_deg_to_sim(mc, static_cast<float>(motor_stt[mc].fPosition));
+                        lo += qc;
+                        hi += qc;
+                    }
+                    float q = clamp(target_pol[p], lo, hi);
                     track_deg[m] = sim_to_motor_deg(m, q);
                 }
                 if (state == State::kEngage) {
@@ -341,8 +403,16 @@ int main(int argc, char** argv) {
                     cmd.fVelocity = static_cast<float16>(0.0f);
                     cmd.fAccelrationOrTemperture = static_cast<float16>(0.0f);
                     cmd.fTorque = static_cast<float16>(0.0f);
-                    cmd.fGainKp = static_cast<float16>(relax_now ? 0.0f : kp_cmd[m]);
-                    cmd.fGainKd = static_cast<float16>(relax_now ? 0.0f : kd_cmd[m]);
+                    // 게인 스케일: TRACK/HOLD/램프=1, 페이드=1→0 선형, 무토크=0.
+                    float gain_scale = 1.0f;
+                    if (relax_now) {
+                        gain_scale = 0.0f;
+                    } else if (state == State::kRelaxFade) {
+                        gain_scale = clamp(
+                            1.0f - static_cast<float>((now_sec() - relax_fade_t0) / RELAX_FADE_SEC), 0.0f, 1.0f);
+                    }
+                    cmd.fGainKp = static_cast<float16>(kp_cmd[m] * gain_scale);
+                    cmd.fGainKd = static_cast<float16>(kd_cmd[m] * gain_scale);
                     cmd.fGainKi = static_cast<float16>(0.0f);
                     RobotMemGait_SetMotorCommand16(reinterpret_cast<MotorParam16_t*>(&cmd), m);
                     prev_cmd_deg[m] = cmd_deg[m];
@@ -417,11 +487,13 @@ int main(int argc, char** argv) {
         double print_dt = (mode == Mode::kProbe) ? 0.5 : 2.0;
         if (t - last_print_time >= print_dt) {
             last_print_time = t;
-            const char* sname = state == State::kWaitStatus ? "WAIT_STATUS"
-                                : state == State::kHold     ? "HOLD"
-                                : state == State::kEngage   ? "ENGAGE"
-                                : state == State::kRelax    ? "RELAX"
-                                                            : "TRACK";
+            const char* sname = state == State::kWaitStatus  ? "WAIT_STATUS"
+                                : state == State::kHold      ? "HOLD"
+                                : state == State::kEngage    ? "ENGAGE"
+                                : state == State::kRelaxRamp ? "RELAX_RAMP"
+                                : state == State::kRelaxFade ? "RELAX_FADE"
+                                : state == State::kRelax     ? "RELAX"
+                                                             : "TRACK";
             std::printf("[%s] q_sim[rad]:", sname);
             for (int p = 0; p < R2S_NUM_JOINTS; p++) {
                 int m = POLICY_TO_MOTOR[p];

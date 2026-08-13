@@ -41,15 +41,17 @@ DEFAULT_KD: list[float] = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
 # sim의 silent 클램핑(soft_joint_pos_limit_factor)으로 인한 추종 혼란을 방지한다.
 # 2026-08-11: 신규 CAD 리비전 Hind_Leg_URDF2 USD 기준. 좌우 동일 규약(미러 아님) — HL/HR 값 동일.
 # ⚠ r2s_biped_leg_env_cfg.py SOFT_LIMITS_RAD 와 값 일치 필수.
+# 2026-08-12 SignFix: 실기 방향 실측에 맞춰 HL_hip/HL_calf/HL_foot/HR_hip/HR_thigh 축 반전
+# (asset Hind_Leg_URDF3_SignFix) — 반전 관절은 limit이 [lo,hi]→[-hi,-lo]로 뒤집힌다.
 SOFT_LIMITS_RAD: list[tuple[float, float]] = [
-    (-0.2340, 0.2340),  # HL_hip
+    (-0.2340, 0.2340),  # HL_hip   (축 반전 — 대칭이라 값 동일)
     (-0.9555, 2.1855),  # HL_thigh
-    (-0.9445, 0.7745),  # HL_calf
-    (-1.3840, 0.3440),  # HL_foot
-    (-0.2340, 0.2340),  # HR_hip
-    (-0.9555, 2.1855),  # HR_thigh (HL과 동일)
+    (-0.7745, 0.9445),  # HL_calf  (축 반전)
+    (-0.3440, 1.3840),  # HL_foot  (축 반전)
+    (-0.2340, 0.2340),  # HR_hip   (축 반전 — 대칭이라 값 동일)
+    (-2.1855, 0.9555),  # HR_thigh (축 반전)
     (-0.9445, 0.7745),  # HR_calf
-    (-1.3840, 0.3440),  # HR_foot  (HL과 동일)
+    (-1.3840, 0.3440),  # HR_foot
 ]
 
 # 기본(중립) 자세 — 실측 default_joint_pos 전부 0.0.
@@ -96,8 +98,10 @@ if __name__ == "__main__":
     assert clamp_to_soft([9.0] * NUM_JOINTS) == [SOFT_LIMITS_RAD[i][1] for i in range(NUM_JOINTS)]
     assert clamp_to_soft([-9.0] * NUM_JOINTS) == [SOFT_LIMITS_RAD[i][0] for i in range(NUM_JOINTS)]
     assert interpolate_sequence([0.0] * NUM_JOINTS, [0.4] * NUM_JOINTS, 10)[-1] == [0.4] * NUM_JOINTS
-    # URDF2(2026-08-11)는 좌우 동일 규약 — HL/HR soft limit이 같아야 한다.
-    # (구 자산은 thigh·foot이 미러였다. 자산을 되돌리면 이 assert부터 갱신할 것.)
-    assert SOFT_LIMITS_RAD[3] == SOFT_LIMITS_RAD[7]
-    assert SOFT_LIMITS_RAD[1] == SOFT_LIMITS_RAD[5]
+    # SignFix(2026-08-12): HL_calf/HL_foot/HR_thigh 축 반전으로 좌우가 미러 관계가 됐다
+    # (hip은 양쪽 다 반전 + 대칭 범위라 값 동일). 자산을 되돌리면 이 assert부터 갱신할 것.
+    assert SOFT_LIMITS_RAD[0] == SOFT_LIMITS_RAD[4]
+    assert SOFT_LIMITS_RAD[5] == (-SOFT_LIMITS_RAD[1][1], -SOFT_LIMITS_RAD[1][0])  # thigh 미러
+    assert SOFT_LIMITS_RAD[2] == (-SOFT_LIMITS_RAD[6][1], -SOFT_LIMITS_RAD[6][0])  # calf 미러
+    assert SOFT_LIMITS_RAD[3] == (-SOFT_LIMITS_RAD[7][1], -SOFT_LIMITS_RAD[7][0])  # foot 미러
     print("motions(bipedleg) OK")

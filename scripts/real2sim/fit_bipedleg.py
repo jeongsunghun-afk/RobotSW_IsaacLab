@@ -39,6 +39,28 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="R2S-BipedLeg multi-trajectory PACE system identification.")
 parser.add_argument("--num_envs", type=int, default=4096, help="CMA-ES population (one candidate per env).")
 parser.add_argument("--task", type=str, default="Isaac-R2S-BipedLeg-Sysid-v0", help="Name of the task.")
+parser.add_argument(
+    "--datasets",
+    nargs="*",
+    default=None,
+    help="적합용 .pt 목록 (<repo>/data/ 기준 상대경로) — BipedLegPaceCfg.datasets 오버라이드. "
+    "실기 데이터(data/bipedleg_real/*.pt, convert_gui_chirp_bipedleg.py 산출물)를 줄 때 사용.",
+)
+parser.add_argument("--holdout", nargs="*", default=None, help="hold-out .pt 목록 — cfg 오버라이드 (적합 미사용).")
+parser.add_argument("--robot_name", default=None, help="로그 디렉토리 이름 (logs/pace/<robot_name>) 오버라이드.")
+parser.add_argument("--max_iteration", type=int, default=None, help="CMA-ES 세대 수 오버라이드 (기본 cfg=200).")
+parser.add_argument(
+    "--fit_joints",
+    default=None,
+    help="부분 적합: 이 관절들의 파라미터(armature/viscous/coulomb/bias)+delay만 탐색하고 나머지는 "
+    "--freeze_from 값으로 고정. 콤마 구분 — 그룹(hip/thigh/calf/foot) 또는 관절명(HL_foot 등). "
+    "예: 'foot' = foot 단독 chirp로 foot만 재적합 (커플링 잔차 판별용).",
+)
+parser.add_argument(
+    "--freeze_from",
+    default=None,
+    help="--fit_joints에서 고정할 파라미터의 출처 — 이전 적합의 mean_*.pt (이미 물리 단위, 33개).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -97,6 +119,7 @@ def load_dataset(path, joint_order: list[str], device: str) -> dict:
         "des_dof_pos": raw["des_dof_pos"].to(device),
         "kp": raw["kp"].to(device).reshape(num_joints),
         "kd": raw["kd"].to(device).reshape(num_joints),
+        "meta": raw.get("meta", {}),
     }
 
 
@@ -125,7 +148,50 @@ def main():
     device = env.unwrapped.device
     articulation = env.unwrapped.scene["robot"]
     sim2real = env_cfg.sim2real
+    # CLI 오버라이드 — 실기 데이터셋 적합 등 cfg 편집 없이 데이터/로그 대상을 바꾼다.
+    if args_cli.datasets is not None:
+        sim2real.datasets = args_cli.datasets
+    if args_cli.holdout is not None:
+        sim2real.holdout = args_cli.holdout
+    if args_cli.robot_name is not None:
+        sim2real.robot_name = args_cli.robot_name
+    if args_cli.max_iteration is not None:
+        sim2real.cmaes.max_iteration = args_cli.max_iteration
     joint_order = sim2real.joint_order
+
+    # 부분 적합 (--fit_joints): 선택 관절의 4개 블록(armature/viscous/coulomb/bias)+delay만 탐색.
+    # 나머지 파라미터는 bounds 상하한을 freeze 값으로 접어(폭 0) 상수로 만든다 — CMA-ES가 그 차원을
+    # 탐색해도 sim에는 항상 고정값이 쓰인다. foot 단독 chirp로 foot 물성만 재적합해 "all-joint
+    # 적합의 foot viscous가 커플링 잔차인지"를 판별하는 용도 (calf 정지 ⇒ raw ≡ 관절각).
+    if args_cli.fit_joints is not None:
+        if args_cli.freeze_from is None:
+            raise RuntimeError("--fit_joints에는 --freeze_from(이전 적합 mean_*.pt)이 필요하다.")
+        frozen = torch.load(args_cli.freeze_from, map_location="cpu").to(torch.float32)
+        if frozen.numel() != sim2real.bounds_params.shape[0]:
+            raise RuntimeError(f"freeze_from 파라미터 수 불일치: {frozen.numel()} != {sim2real.bounds_params.shape[0]}")
+        groups = {"hip": [0, 4], "thigh": [1, 5], "calf": [2, 6], "foot": [3, 7]}
+        lm_sel: set[int] = set()
+        for tok in args_cli.fit_joints.split(","):
+            tok = tok.strip()
+            if tok in groups:
+                lm_sel.update(groups[tok])
+            else:
+                full = tok if tok.endswith("_joint") else tok + "_joint"
+                if full not in joint_order:
+                    raise RuntimeError(f"--fit_joints 토큰 인식 불가: {tok} (그룹 {list(groups)} 또는 관절명)")
+                lm_sel.add(joint_order.index(full))
+        n = len(joint_order)
+        free = {4 * n}  # delay는 항상 함께 식별
+        for blk in range(4):
+            free.update(blk * n + i for i in lm_sel)
+        for k in range(sim2real.bounds_params.shape[0]):
+            if k not in free:
+                sim2real.bounds_params[k, 0] = frozen[k]
+                sim2real.bounds_params[k, 1] = frozen[k]
+        print(
+            f"[INFO]: 부분 적합 — 탐색 {len(free)}개(관절 {sorted(lm_sel)} × 4블록 + delay), "
+            f"나머지 {sim2real.bounds_params.shape[0] - len(free)}개는 {args_cli.freeze_from} 값으로 고정"
+        )
 
     # warp 커널은 관절 인덱스를 int32로 요구한다. 텐서 인덱싱에는 long 버전을 쓴다.
     joint_ids = torch.tensor(
@@ -163,6 +229,22 @@ def main():
 
     actions = torch.zeros(env.unwrapped.num_envs, articulation.num_joints, device=device)
 
+    # foot↔calf 커플링 재생 (env_cfg.foot_coupling=True): 데이터셋의 foot 명령·실측은 raw각
+    # (= 엔코더가 실제로 재는 유일한 양, q_foot+q_calf)이다. env가 raw 구동+전치를 재생하고,
+    # 여기서는 ①초기 자세만 관절각으로 환산해 넣고(sim 상태는 관절각) ②채점 시 sim 쪽도
+    # 가상 엔코더(q_f+q_c)로 환산해 **엔코더끼리** 비교한다.
+    coupled = bool(getattr(env_cfg, "foot_coupling", False))
+    calf_lm = [2, 6]  # leg-major (HL_calf, HR_calf)
+    foot_lm = [3, 7]  # leg-major (HL_foot, HR_foot)
+    if coupled:
+        print("[INFO]: foot↔calf 커플링 재생 ON — 데이터셋 foot=raw(엔코더) 규약, 채점도 raw끼리")
+        for d in datasets:
+            if d.get("meta", {}).get("coupling_converted", None) is True:
+                raise RuntimeError(
+                    f"{d['name']}: 관절각으로 변환된 데이터셋이다 — 커플링 재생에는 raw 데이터가 필요하다. "
+                    "convert_gui_chirp_bipedleg.py --keep_raw_foot 산출물을 쓸 것."
+                )
+
     # 루프 전체를 inference_mode로 감싼다. env.step이 만든 버퍼는 inference tensor가 되므로,
     # 이후의 env.reset()/actuator write를 inference_mode 밖에서 하면 in-place 갱신이 거부된다
     # (upstream fit.py도 같은 이유로 전체를 감싼다).
@@ -172,7 +254,10 @@ def main():
                 measured = dataset["dof_pos"]
                 target = dataset["des_dof_pos"]
                 num_steps = measured.shape[0]
-                initial_pos = measured[0].unsqueeze(0).repeat(env.unwrapped.num_envs, 1)
+                initial_pos = measured[0].unsqueeze(0).repeat(env.unwrapped.num_envs, 1).clone()
+                if coupled:
+                    # 실측 foot은 raw — sim 관절 상태 초기화는 관절각으로 (q_f = raw − q_c)
+                    initial_pos[:, foot_lm] -= initial_pos[:, calf_lm]
 
                 # 이 시퀀스가 녹화될 때의 게인을 복원한 뒤, 후보 파라미터를 다시 써 넣는다.
                 # explicit actuator는 PD를 파이썬에서 계산하므로 진짜 게인은 actuator.stiffness /
@@ -183,8 +268,13 @@ def main():
                 opt.begin_trajectory(idx)
 
                 for counter in range(num_steps):
+                    sim_pos = articulation.data.joint_pos[:, joint_ids_long]
+                    if coupled:
+                        # 가상 엔코더: sim foot도 raw(q_f+q_c)로 환산해 실기 엔코더와 같은 양끼리 비교
+                        sim_pos = sim_pos.clone()
+                        sim_pos[:, foot_lm] += sim_pos[:, calf_lm]
                     opt.tell(
-                        articulation.data.joint_pos[:, joint_ids_long],
+                        sim_pos,
                         measured[counter].unsqueeze(0).repeat(env.unwrapped.num_envs, 1),
                     )
                     actions[:, joint_ids_long] = target[counter].unsqueeze(0)

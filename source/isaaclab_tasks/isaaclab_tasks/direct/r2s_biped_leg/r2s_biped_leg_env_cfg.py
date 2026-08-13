@@ -60,22 +60,25 @@ JOINT_LABELS: list[str] = [
 DEFAULT_KP: list[float] = [65.0, 53.0, 12.0, 20.0, 65.0, 53.0, 12.0, 20.0]
 DEFAULT_KD: list[float] = [6.0, 4.8, 1.1, 1.0, 6.0, 4.8, 1.1, 1.0]
 
-# 관절 최대 속도 [rad/s] — slew rate limiter용 (rga.py velocity_limit_sim 실측).
-V_MAX_RAD: list[float] = [29.6, 29.6, 19.7, 14.8, 29.6, 29.6, 19.7, 14.8]
+# 관절 최대 속도 [rad/s] — slew rate limiter용 (실기 무부하 한계, RL_INTERFACE.md §6-c).
+V_MAX_RAD: list[float] = [29.6, 29.6, 19.7, 24.6, 29.6, 29.6, 19.7, 24.6]
 
-# 실측 soft joint position limit [rad] (soft_joint_pos_limit_factor=0.9 반영, 2026-07-21 probe).
+# soft joint position limit [rad] (soft_joint_pos_limit_factor=0.9 반영).
+# 2026-08-12 SignFix: 실기 방향 실측(같은 목표에 반대로 도는 관절 발견)에 맞춰
+#   HL_hip/HL_calf/HL_foot/HR_hip/HR_thigh 축을 반전한 Hind_Leg_URDF3_SignFix 자산 기준.
+#   반전 관절은 limit이 [lo,hi]→[-hi,-lo]로 뒤집힌다(hip은 대칭이라 값 동일).
+#   좌우가 thigh/calf/foot에서 미러 관계가 됐다.
 # ⚠ scripts/real2sim/r2s_biped_leg/motions.py 의 SOFT_LIMITS_RAD 와 값 일치 필수(다른 패키지라 중복).
 #   sim이 position target을 이 범위로 silently 클램프하므로 GUI 범위도 여기에 맞춘다.
-# ⚠ 좌우 **비대칭**이다(foot은 HL/HR이 서로 미러). 대칭이라 가정하고 "고치지" 말 것.
 SOFT_LIMITS_RAD: list[tuple[float, float]] = [
-    (-0.5498, 0.5498),  # HL_hip
-    (-1.9024, 1.5533),  # HL_thigh
-    (-1.3836, 0.4236),  # HL_calf
-    (-0.4192, 1.4662),  # HL_foot
-    (-0.5498, 0.5498),  # HR_hip
-    (-1.9024, 1.5533),  # HR_thigh
-    (-1.3836, 0.4236),  # HR_calf
-    (-1.4662, 0.4192),  # HR_foot
+    (-0.2340, 0.2340),  # HL_hip   (raw ±0.26 rad = ±14.9°, 축 반전 — 대칭이라 값 동일)
+    (-0.9555, 2.1855),  # HL_thigh (raw −1.13~+2.36 rad)
+    (-0.7745, 0.9445),  # HL_calf  (축 반전, raw −0.87~+1.04 rad)
+    (-0.3440, 1.3840),  # HL_foot  (축 반전, raw −0.44~+1.48 rad)
+    (-0.2340, 0.2340),  # HR_hip   (축 반전 — 대칭이라 값 동일)
+    (-2.1855, 0.9555),  # HR_thigh (축 반전, raw −2.36~+1.13 rad)
+    (-0.9445, 0.7745),  # HR_calf
+    (-1.3840, 0.3440),  # HR_foot
 ]
 
 # 기본(중립) 자세 — 실측 default_joint_pos 전부 0.0.
@@ -113,6 +116,17 @@ class R2SBipedLegEnvCfg(DirectRLEnvCfg):
     # 시스템 식별(PACE) 모드 — True면 _pre_physics_step이 action을 절대 관절 목표각으로 직접 쓰고
     # slew limiter/faithful PD를 우회한다 (chirp 고주파 왜곡 방지). R2SBipedLegSysidEnvCfg가 켠다.
     sysid: bool = False
+
+    # foot↔calf 전달기구 커플링 (2026-08-12 실기 실측, RL_INTERFACE.md §0~§1의 "foot만 커플링" 항목).
+    # 실기 foot 모터는 관절각이 아니라 **raw각 q_raw = q_foot + q_calf**(coef=+1)를 구동한다 —
+    # calf가 +10° 돌면 foot 관절각이 −10° 따라가고(역방향 없음), 무토크에서도 기어 마찰이 raw를
+    # 잠가 커플링이 유지된다(비가역 전달기구, 실기 관찰). True면 live(position) 모드에서 foot PD를
+    # raw 공간으로 계산(+ 전치 토크 τ_calf += τ_foot_motor)하고, foot kp≈0(relax)이면 raw를 래치해
+    # coupling_hold_kp/kd로 잠근다. GUI/CMD의 foot 목표 의미는 **raw 목표**가 되며(실기 해석과 동일),
+    # get_lowstate의 foot q/dq도 raw로 보고한다(실기 TELEM과 정합). policy/sysid 모드에는 미적용.
+    foot_coupling: bool = True
+    coupling_hold_kp: float = 200.0  # relax 시 raw 잠금(기어 마찰 등가) 강성 — 실기 실측 후 조정
+    coupling_hold_kd: float = 2.0
 
     # policy 모드 — True면 _pre_physics_step이 외부(policy_runner_bipedleg.py)가 set_policy_target()으로
     # 주입한 **articulation 순서** 목표각을 set_joint_position_target()으로 직접 적용한다.

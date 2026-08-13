@@ -47,6 +47,9 @@ Gains 그룹에서 적용한 kp/kd는 publisher 프로세스가 REAL_ACT_PORT(98
     - Joint Sliders: 8관절(leg-major) 슬라이더로 직접 자세 조작(soft limit 범위, rad/deg 표시 토글),
       "Send to robot" 체크박스로 목표를 REAL_ACT_PORT(9887)에도 fan-out(--real_host 지정 시 기본 ON).
     - Sine Sweep: 선택 관절에 사인 궤적(soft limit 클램프, 실행 중 파라미터 라이브 반영).
+    - Motion Playback: 리타게팅된 SMR 모션 클립(``motion_data/*_joints.npz``) 재생. 현재 자세에서
+      클립 첫 프레임까지 SEQUENCE_DURATION_S 보간으로 진입한 뒤 50Hz 그리드로 리샘플된 클립을
+      publisher가 경과 시간으로 인덱싱한다. 배속 0.25~1.0, Loop 시 합성 복귀 구간 삽입.
     - Gains: 선택 관절 kp/kd 실시간 변경(faithful PD).
     - Computed Gains: sim이 보낸 관절별 유효 관성 I_eff로 kp=I·ωn², kd=2ζ·I·ωn 을 계산해
       전 관절에 **임시 적용**(motions.py 기본값은 불변, Restore defaults로 복귀).
@@ -61,6 +64,7 @@ conda를 비활성화하고 시스템 python3로 기동 — rclpy 호환). Posit
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import multiprocessing as mp
 import os
@@ -72,6 +76,7 @@ import time
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, os.path.dirname(__file__))
+import chirp  # noqa: E402
 import motions  # noqa: E402
 import r2s_udp  # noqa: E402
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal  # noqa: E402
@@ -89,6 +94,8 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QRadioButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -110,6 +117,16 @@ else:
     except ImportError:  # pragma: no cover - 시스템 python(torch 없음) 경로
         torch = None
         _TORCH_OK = False
+
+# motion_clips 는 numpy 를 요구한다(순수 numpy 로더). torch 와 같은 이유로 top-level try/except —
+# numpy 가 없어도 GUI 는 뜨고 Motion Playback 패널만 비활성화된다.
+try:
+    import motion_clips  # noqa: E402
+
+    _MOTION_OK = True
+except ImportError:  # pragma: no cover - numpy 미설치 경로
+    motion_clips = None
+    _MOTION_OK = False
 
 # 기본 deployable 모델 경로 (export_deployable_bipedleg.py 산출물).
 _DEFAULT_MODEL_PATH: str = os.path.join(
@@ -160,6 +177,10 @@ GAIN_ZETA_DEFAULT: float = 0.7
 # 시작 자세 접근(startup latch) — 첫 sim state 로 실측 자세를 잡을 때까지 발행 보류(스냅 방지).
 STARTUP_ACQUIRE_TIMEOUT_S: float = 2.0  # 첫 state 대기 상한 [s]. 넘으면 default 자세로 진행
 
+# 저장 경로 기준 repo 루트 (이 파일 = scripts/real2sim/r2s_biped_leg/). chirp npz는
+# data/bipedleg_gui/ 아래에 쌓인다 (go2 실기 캡처의 data/go2_real/ 관례를 따른 위치).
+_REPO_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
 # ---------------------------------------------------------------------------
 # 공유 메모리 레이아웃 (multiprocessing.Array('d')). UI는 **모션 스펙**만 쓰고, publisher
 # 프로세스가 50Hz 루프에서 경과 시간 기반으로 목표를 계산해 발행한다 (r2s_go2 gui 패턴).
@@ -170,6 +191,14 @@ _MODE_HOLD = 0  # BASE_Q 고정 유지
 _MODE_SEQUENCE = 1  # 프레임 버퍼를 경과 시간으로 인덱싱 (Home/Step 보간)
 _MODE_SINE = 2  # BASE_Q + 선택 관절에 사인 주입 (경과 시간 기반)
 _MODE_RELAX = 3  # 무토크(limp): sim엔 kp=kd=0 CMD, 실기엔 RELAX 패킷 — GUI 기동 기본 상태
+_MODE_CHIRP = 4  # chirp.py 사인 스윕(f0→f1) 여기 — 램프→스윕→중심 홀드, sysid 데이터 수집용
+_MODE_MOTION = 5  # 리타게팅 모션 클립 재생 (SEQUENCE와 같은 프레임 버퍼 + 반복 구간 wrap)
+# ⚠ MOTION을 SEQUENCE의 플래그가 아니라 별도 모드로 둔 이유: 재생 중 Home/슬라이더가 끼어들면
+# MODE가 바뀌므로 UI 폴링이 "누가 버퍼의 주인인가"를 MODE만으로 판정할 수 있다 (chirp와 같은 패턴).
+
+# chirp 시작 전 현재 자세→CHIRP_CENTER 램프 길이 [s] — 순간 점프 방지 (go2 collector의 stand-up
+# 홀드 역할). 스윕 시간(_SM_CHIRP_DUR)에는 포함되지 않고, 기록도 램프가 끝난 뒤에만 한다.
+CHIRP_RAMP_S: float = 2.0
 
 _SM_MODE = 0
 _SM_CMD_VALID = 1  # 0/1: 유효한 명령이 있는가. startup latch 전·policy mode 중엔 0 → 발행 보류
@@ -188,8 +217,20 @@ _SM_MEASURED_Q = 34  # 34..41: sim 실측 관절각 (publisher가 state에서 �
 _SM_CURRENT_Q = 42  # 42..49: publisher의 현재 출력 목표 (UI가 읽어 보간 시작점으로)
 _SM_IEFF = 50  # 50..57: 관절별 유효 관성 [kg·m²] (publisher가 IEFF 패킷에서 씀)
 _SM_REAL_ENABLE = 58  # 0/1: Joint Sliders가 목표를 실기(UDP 9887, REAL_ACT_PORT)로도 발행할지
-_SM_FRAMES = 59  # 59..: 시퀀스 프레임 버퍼 (MAX_FRAMES × 8)
-MAX_FRAMES = 512  # 512/50 = 10.24s 최대 시퀀스
+_SM_CHIRP_F0 = 59  # chirp 시작 주파수 [Hz]
+_SM_CHIRP_F1 = 60  # chirp 종료 주파수 [Hz]
+_SM_CHIRP_DUR = 61  # chirp 스윕 길이 [s] (램프 제외)
+_SM_CHIRP_AMP = 62  # chirp.CHIRP_AMPLITUDE에 곱할 배율 (0..1]
+_SM_CHIRP_MASK = 63  # 여기할 관절 비트마스크 (bit i = leg-major 관절 i)
+_SM_CHIRP_DONE = 64  # publisher→UI: 스윕 자연 종료 알림 (1.0 = 종료, 중심 홀드 중)
+_SM_CHIRP_START_Q = 65  # 65..72: 램프 시작 자세 (UI가 chirp 시작 시 현재 출력 목표를 기록)
+_SM_MOTION_LOOP = 73  # 0/1: 모션 클립 반복 재생 여부
+_SM_MOTION_LOOP_START = 74  # 반복 구간 시작 프레임 인덱스 (이 앞은 진입 보간 — 1회만 재생)
+_SM_MOTION_DONE = 75  # publisher→UI: 비반복 재생이 마지막 프레임에 도달 (1.0 = 종료, 홀드 중)
+_SM_FRAMES = 76  # 76..: 시퀀스/모션 프레임 버퍼 (MAX_FRAMES × 8)
+# 4096/50 = 81.9s. 모션 클립 재생이 진입 보간(1.5s) + 클립/배속 + 루프 bridge 를 한 버퍼에 담고,
+# 0.25배속이면 클립이 4배로 늘어난다 (trot0 3.48s → 13.9s = 697프레임). 구 512로는 모자란다.
+MAX_FRAMES = 4096
 _SM_LEN = _SM_FRAMES + MAX_FRAMES * NUM_JOINTS
 
 _STYLESHEET: str = """
@@ -465,9 +506,22 @@ class RealMonitorThread(QThread):
         super().__init__(parent)
         self._host = host
         self._stop = False
+        # chirp 기록: start_recording() 후 수신하는 모든 TELEM을 (t, q, dq, tau) leg-major로 쌓는다.
+        # telem 시그널은 10Hz 최신값만 방출하므로 풀레이트 기록은 이 리스트가 유일한 경로다.
+        self._rec: list[tuple[float, list[float], list[float], list[float]]] | None = None
 
     def request_stop(self) -> None:
         self._stop = True
+
+    def start_recording(self) -> None:
+        """TELEM 풀레이트 기록 시작 (리스트 교체 — rx 루프와는 GIL append로만 경합)."""
+        self._rec = []
+
+    def stop_recording(self) -> list[tuple[float, list[float], list[float], list[float]]]:
+        """기록을 멈추고 지금까지 쌓인 (t, q, dq, tau) 행을 반환한다 (leg-major)."""
+        rows = self._rec
+        self._rec = None
+        return rows if rows is not None else []
 
     def run(self) -> None:
         rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -484,6 +538,9 @@ class RealMonitorThread(QThread):
 
         latest: dict | None = None
         seq = 0
+        mon_seq = 0  # MON 중계 전용 단조 카운터 — TELEM의 seq(=last_act_seq)는 ACT 유휴 시
+        # 매 패킷 동일해서, seq 기반 x축(monitor.py)이 중복으로 버린다. TELEM은 브리지가
+        # 20ms 페이싱하므로 수신 1건당 +1이 곧 시간 격자다.
         last_rx = 0.0
         last_ping = 0.0
         last_emit = 0.0
@@ -509,7 +566,11 @@ class RealMonitorThread(QThread):
                         q_lm = [t["q"][a] for a in _ART_FOR_LEGMAJOR]
                         dq_lm = [t["dq"][a] for a in _ART_FOR_LEGMAJOR]
                         tau_lm = [t["tau"][a] for a in _ART_FOR_LEGMAJOR]
-                        tx.sendto(r2s_udp.pack_monitor(t["seq"], [0.0] * NUM_JOINTS, q_lm, dq_lm, tau_lm), mon_addr)
+                        mon_seq += 1
+                        tx.sendto(r2s_udp.pack_monitor(mon_seq, [0.0] * NUM_JOINTS, q_lm, dq_lm, tau_lm), mon_addr)
+                        rec = self._rec  # 로컬 참조 — stop_recording()의 None 교체와의 경합 회피
+                        if rec is not None:
+                            rec.append((now, q_lm, dq_lm, tau_lm))
                 if rx_stamps and now - rx_stamps[0] > 1.0:
                     rx_stamps = [s for s in rx_stamps if now - s <= 1.0]
                 if now - last_emit >= 0.1:
@@ -526,14 +587,34 @@ class RealMonitorThread(QThread):
             tx.close()
 
 
-def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[float], bool, bool] | None:
+# foot↔calf 전달기구 커플링 (RL_INTERFACE coef=+1, 2026-08-12 실기 실측): CMD/ACT의 foot 목표는
+# 관절각이 아니라 **raw각(q_foot+q_calf)** 의미다(sim env·실기 동일 해석). 따라서 foot의 soft limit
+# 클램프는 관절각 예측(raw − 같은 다리 calf 목표) 기준으로 해야 한다. leg-major에서 foot = calf+1.
+_COUPLED_CALF_FOOT: tuple[tuple[int, int], ...] = ((2, 3), (6, 7))
+
+
+def _clamp_target(pose: list[float]) -> list[float]:
+    """soft limit 클램프 — foot은 calf 목표만큼 이동한 raw 범위로 클램프한다."""
+    out = motions.clamp_to_soft(pose)
+    for c, f in _COUPLED_CALF_FOOT:
+        lo, hi = motions.SOFT_LIMITS_RAD[f]
+        out[f] = min(hi + out[c], max(lo + out[c], pose[f]))
+    return out
+
+
+def _compute_target(
+    shared, now: float
+) -> tuple[list[float], list[float], list[float], bool, bool, float | None] | None:
     """공유 메모리의 모션 스펙 + 경과 시간으로 현재 목표 자세를 계산한다 (publisher 프로세스에서 호출).
 
     Returns:
-        ``(pose, kp, kd, real_enable, relax)`` 또는 명령이 없으면(``CMD_VALID=0``, startup latch
-        전/policy mode 중) None. ``real_enable``은 Joint Sliders의 "Send to robot" 체크박스 상태,
-        ``relax``면 sim엔 kp=kd=0 CMD, 실기엔 ACT 대신 RELAX 패킷이 나간다.
+        ``(pose, kp, kd, real_enable, relax, chirp_t)`` 또는 명령이 없으면(``CMD_VALID=0``,
+        startup latch 전/policy mode 중) None. ``real_enable``은 Joint Sliders의 "Send to robot"
+        체크박스 상태, ``relax``면 sim엔 kp=kd=0 CMD, 실기엔 ACT 대신 RELAX 패킷이 나간다.
+        ``chirp_t``는 chirp **스윕 구간**(램프 제외)의 경과 시간 [s] — publisher가 이 틱을 기록할지
+        판단하는 신호이며, chirp가 아니거나 램프/종료 홀드 중이면 None.
     """
+    chirp_t: float | None = None
     with shared.get_lock():
         if shared[_SM_CMD_VALID] < 0.5:
             return None
@@ -546,7 +627,7 @@ def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[
             # 무토크: 게인 0. 목표는 실측 자세(모니터 action 라인이 현실을 따르게) — 게인 0이라 힘엔 무영향.
             measured_valid = shared[_SM_MEASURED_VALID] >= 0.5
             pose = [shared[(_SM_MEASURED_Q if measured_valid else _SM_BASE_Q) + i] for i in range(NUM_JOINTS)]
-            return motions.clamp_to_soft(pose), [0.0] * NUM_JOINTS, [0.0] * NUM_JOINTS, real_enable, True
+            return _clamp_target(pose), [0.0] * NUM_JOINTS, [0.0] * NUM_JOINTS, real_enable, True, None
         if mode == _MODE_SEQUENCE:
             start = shared[_SM_START_TIME]
             frame_hz = shared[_SM_FRAME_HZ]
@@ -555,6 +636,40 @@ def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[
             idx = 0 if idx < 0 else (count - 1 if idx >= count else idx)  # 끝 프레임에서 홀드
             off = _SM_FRAMES + idx * NUM_JOINTS
             pose = [shared[off + i] for i in range(NUM_JOINTS)]
+        elif mode == _MODE_MOTION:
+            # 모션 클립 재생 — SEQUENCE와 같은 프레임 버퍼를 쓰되 반복 구간을 wrap 한다.
+            # [0, loop_start) = 현재 자세→클립 첫 프레임 진입 보간(1회), [loop_start, count) = 반복 구간
+            # (클립 + loop면 합성 복귀 bridge). 프레임은 UI가 이미 raw각 + soft limit 클램프까지
+            # 마쳐 넣으므로 여기선 시간→프레임 위치 계산만 한다.
+            #
+            # ★SEQUENCE와 달리 **프레임 사이를 선형보간**한다. 프레임 그리드(50Hz)와 발행 루프(50Hz)가
+            # 같은 주파수라도 위상은 자유롭게 떠다니므로, 정수 인덱싱하면 경계에서 같은 프레임을 두 번
+            # 내거나 한 프레임을 건너뛴다. 건너뛰면 그 틱의 명령 변화량이 2배가 되는데(trot0 1.0배속
+            # 13.2 rad/s → 26 rad/s, 실기 무부하 한계 29.6 rad/s 근처) 모션 클립은 SEQUENCE의 짧은
+            # 보간과 달리 이 변화율이 계속 이어지므로 보간해서 없앤다.
+            start = shared[_SM_START_TIME]
+            frame_hz = shared[_SM_FRAME_HZ]
+            count = int(shared[_SM_FRAME_COUNT])
+            loop_start = int(shared[_SM_MOTION_LOOP_START])
+            loop = shared[_SM_MOTION_LOOP] >= 0.5 and count > loop_start
+            t = (now - start) * frame_hz  # 실수 프레임 위치
+            if t < 0.0:
+                t = 0.0
+            elif loop:
+                if t >= count:  # [loop_start, count) 로 되감기 — 마지막↔loop_start 구간도 보간된다
+                    t = loop_start + math.fmod(t - loop_start, float(count - loop_start))
+            elif t > count - 1:
+                t = float(count - 1)  # 끝 프레임에서 홀드 — UI가 DONE을 보고 HOLD로 전환
+                shared[_SM_MOTION_DONE] = 1.0
+            i0 = int(t)
+            i0 = count - 1 if i0 >= count else i0
+            alpha = t - i0
+            i1 = i0 + 1
+            if i1 >= count:
+                i1 = loop_start if loop else count - 1
+            off0 = _SM_FRAMES + i0 * NUM_JOINTS
+            off1 = _SM_FRAMES + i1 * NUM_JOINTS
+            pose = [shared[off0 + i] + (shared[off1 + i] - shared[off0 + i]) * alpha for i in range(NUM_JOINTS)]
         elif mode == _MODE_SINE:
             start = shared[_SM_START_TIME]
             joint = int(shared[_SM_SINE_JOINT])
@@ -562,14 +677,58 @@ def _compute_target(shared, now: float) -> tuple[list[float], list[float], list[
             freq = shared[_SM_SINE_FREQ]
             pose = list(base)
             pose[joint] = base[joint] + amp * math.sin(2.0 * math.pi * freq * (now - start))
+        elif mode == _MODE_CHIRP:
+            # chirp.py(순수 stdlib, sim/실기 공유 정의)와 같은 위상식. 마스크된 관절만 여기하고
+            # 나머지는 시작 자세를 유지한다. 램프 → 스윕 → 중심 홀드(DONE=1) 3단계.
+            #
+            # ★파형은 **관절각 공간**에서 설계하고 발행 직전에 foot만 raw로 변환한다(아래 커플링 블록).
+            # foot 명령 의미가 raw(q_foot+q_calf)라서, raw 공간에 직접 파형을 쓰면 calf·foot이 같은
+            # 위상으로 여기될 때 foot 관절각 = (raw 파형)−(calf 파형)이 상쇄돼 거의 안 움직인다
+            # (진폭 0.76−0.75 — 2026-08-12 실측). start_q의 foot 항도 raw라 관절각으로 먼저 환산한다.
+            start = shared[_SM_START_TIME]
+            f0 = shared[_SM_CHIRP_F0]
+            f1 = shared[_SM_CHIRP_F1]
+            dur = shared[_SM_CHIRP_DUR]
+            ascale = shared[_SM_CHIRP_AMP]
+            mask = int(shared[_SM_CHIRP_MASK])
+            start_q = [shared[_SM_CHIRP_START_Q + i] for i in range(NUM_JOINTS)]
+            start_j = list(start_q)
+            for c, f in _COUPLED_CALF_FOOT:
+                start_j[f] = start_q[f] - start_q[c]
+            t = now - start
+            if t < CHIRP_RAMP_S:
+                # 현재 자세 → chirp 중심 선형 램프 (마스크 관절만 이동)
+                a = t / CHIRP_RAMP_S
+                pose = [
+                    start_j[i] + (chirp.CHIRP_CENTER[i] - start_j[i]) * a if (mask >> i) & 1 else start_j[i]
+                    for i in range(NUM_JOINTS)
+                ]
+            elif t < CHIRP_RAMP_S + dur:
+                tc = t - CHIRP_RAMP_S
+                s = math.sin(chirp.chirp_phase(tc, f0, f1, dur))
+                pose = list(start_j)
+                for i in range(NUM_JOINTS):
+                    if (mask >> i) & 1:
+                        pose[i] = (
+                            chirp.CHIRP_CENTER[i] + chirp.CHIRP_DIRECTION[i] * chirp.CHIRP_AMPLITUDE[i] * ascale * s
+                        )
+                chirp_t = tc
+            else:
+                # 스윕 종료 — 중심에서 홀드하고 UI에 알린다 (UI가 npz 저장 후 HOLD로 전환).
+                pose = [chirp.CHIRP_CENTER[i] if (mask >> i) & 1 else start_j[i] for i in range(NUM_JOINTS)]
+                shared[_SM_CHIRP_DONE] = 1.0
+            # 커플링 변환: 관절각 설계 파형 → raw 발행값. calf가 어떤 파형이든 foot **관절**이
+            # 설계 파형대로 움직인다 (비마스크 foot은 관절각 홀드 = foot 모터가 calf를 보상).
+            for c, f in _COUPLED_CALF_FOOT:
+                pose[f] = pose[f] + pose[c]
         else:  # _MODE_HOLD
             pose = list(base)
     # soft limit 최종 클램프 — sine이 base+amp로 한계를 넘거나 base 자체(실측 latch)가
     # 한계 밖일 수 있다. 시퀀스 프레임은 이미 클램프된 끝점 사이 보간이지만 한 번 더는 무해.
-    return motions.clamp_to_soft(pose), kp, kd, real_enable, False
+    return _clamp_target(pose), kp, kd, real_enable, False, chirp_t
 
 
-def publisher_process_main(shared, stop_flag, real_host: str | None = None) -> None:
+def publisher_process_main(shared, stop_flag, real_host: str | None = None, rec_queue=None) -> None:
     """**별도 프로세스**: 모션 스펙에서 목표를 계산해 cmd 50Hz 발행 + state/I_eff 수신. Qt와 완전 독립.
 
     UI event loop(위젯 조작·드래그)가 아무리 바빠도 이 프로세스는 영향받지 않는다 — 발행뿐 아니라
@@ -589,6 +748,9 @@ def publisher_process_main(shared, stop_flag, real_host: str | None = None) -> N
         shared: ``multiprocessing.Array('d', _SM_LEN)`` — 위 레이아웃 상수 참고.
         stop_flag: ``multiprocessing.Value('i')`` — 1이면 루프 종료.
         real_host: 실기 IP. None이면 실기 fan-out은 항상 no-op(체크박스도 GUI에서 비활성화됨).
+        rec_queue: chirp 기록용 ``multiprocessing.Queue``. 스윕 구간(``chirp_t is not None``) 동안
+            ``("cmd", t, pose)`` 를 매 틱, ``("state", t, q, dq, tau)`` 를 새 STATE seq가 있을 때만
+            넣는다 (leg-major). UI가 드레인해 npz로 저장한다. None이면 기록 없음.
     """
     cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     cmd_addr = (HOST, r2s_udp.CMD_PORT)
@@ -611,6 +773,8 @@ def publisher_process_main(shared, stop_flag, real_host: str | None = None) -> N
     real_act_addr = (real_host, r2s_udp.REAL_ACT_PORT) if real_host else None
 
     latest_state: dict | None = None
+    latest_state_t: float = 0.0  # STATE 수신(드레인) 시각 — chirp 기록의 상태 타임스탬프
+    last_rec_state_seq: int | None = None  # 같은 STATE를 중복 기록하지 않기 위한 seq 추적
     seq = 0
     zeros = [0.0] * NUM_JOINTS
     period = PUBLISH_PERIOD_S
@@ -630,6 +794,7 @@ def publisher_process_main(shared, stop_flag, real_host: str | None = None) -> N
                 st = r2s_udp.unpack_state(data)
                 if st is not None:
                     latest_state = st
+                    latest_state_t = time.monotonic()
                     with shared.get_lock():
                         for i in range(NUM_JOINTS):
                             shared[_SM_MEASURED_Q + i] = st["q"][i]
@@ -645,7 +810,25 @@ def publisher_process_main(shared, stop_flag, real_host: str | None = None) -> N
             now = time.monotonic()
             result = _compute_target(shared, now)
             if result is not None:  # startup latch 전/policy mode 중(CMD_VALID=0)엔 발행 보류
-                pose, kp, kd, real_enable, relax = result
+                pose, kp, kd, real_enable, relax, chirp_t = result
+                # chirp 스윕 구간 기록 — cmd는 매 틱, state는 새 seq일 때만 (put_nowait 실패는
+                # 기록 손실일 뿐 발행 루프를 멈추지 않는다).
+                if rec_queue is not None and chirp_t is not None:
+                    try:
+                        rec_queue.put_nowait(("cmd", now, list(pose)))
+                        if latest_state is not None and latest_state["seq"] != last_rec_state_seq:
+                            last_rec_state_seq = latest_state["seq"]
+                            rec_queue.put_nowait(
+                                (
+                                    "state",
+                                    latest_state_t,
+                                    list(latest_state["q"]),
+                                    list(latest_state["dq"]),
+                                    list(latest_state["tau_est"]),
+                                )
+                            )
+                    except Exception:
+                        pass
                 seq += 1
                 cmd_sock.sendto(r2s_udp.pack_cmd(seq, pose, zeros, kp, kd, zeros), cmd_addr)
                 with shared.get_lock():  # UI가 보간 시작점으로 읽도록 현재 목표를 되쓴다
@@ -711,8 +894,25 @@ class MainWindow(QMainWindow):
         device: str = "cpu",
         real_host: str | None = None,
         publisher_proc=None,
+        rec_queue=None,
+        pace_params_path: str | None = None,
     ) -> None:
         super().__init__()
+        # PACE 식별 플랜트 파라미터 (export_pace_params.py 산출 json). 없거나 깨졌으면 None —
+        # Plant 그룹의 "PACE identified" 라디오가 비활성화된다.
+        self._pace_params: dict | None = None
+        self._pace_params_err: str = "no file given"
+        if pace_params_path:
+            try:
+                with open(pace_params_path) as f:
+                    loaded = json.load(f)
+                order = loaded.get("joint_order")
+                if order != motions.JOINT_NAMES:
+                    raise ValueError(f"joint_order mismatch: {order}")
+                self._pace_params = loaded
+                self._pace_params_err = ""
+            except (OSError, ValueError, KeyError) as exc:
+                self._pace_params_err = f"{type(exc).__name__}: {exc}"
         # publisher 프로세스 감시 — 9882 bind 충돌(GUI 중복 실행) 등으로 조용히 죽으면
         # 슬라이더/sine이 sim에 안 먹히는데 원인이 안 보인다. 2초마다 생존 확인해 상태바에 알린다.
         self._publisher_proc = publisher_proc
@@ -736,6 +936,22 @@ class MainWindow(QMainWindow):
         self._sine_active: bool = False
         self._monitor_proc: subprocess.Popen | None = None
         self._rm_thread: RealMonitorThread | None = None
+
+        # 모션 클립 재생 상태 — 로드한 클립은 캐시(배속/Loop 변경 시 재조립만 하면 된다).
+        # ⚠_build_ui 안에서 _refresh_motion_info가 이 둘을 쓰므로 반드시 그 전에 만든다.
+        self._motion_active: bool = False
+        self._motion_cache: dict[str, dict] = {}
+        self._motion_poll_timer = QTimer(self)
+        self._motion_poll_timer.timeout.connect(self._on_motion_poll_tick)
+
+        # chirp 수집 상태 — publisher가 rec_queue로 보내는 cmd/state 행을 폴링 드레인해 npz로 저장.
+        self._rec_queue = rec_queue
+        self._chirp_active: bool = False
+        self._chirp_cmd_rows: list = []
+        self._chirp_state_rows: list = []
+        self._chirp_meta: dict = {}
+        self._chirp_poll_timer = QTimer(self)
+        self._chirp_poll_timer.timeout.connect(self._on_chirp_poll_tick)
 
         # policy mode 상태
         self._mode: str = "position"  # "position" | "policy"
@@ -925,6 +1141,71 @@ class MainWindow(QMainWindow):
         sine_layout.addWidget(self._sine_stop_btn)
         layout.addWidget(sine_group)
 
+        # Motion Playback — 리타게팅된 SMR 모션 클립 재생 (motion_data/, 로더 motion_clips.py).
+        motion_group = self._build_motion_group()
+        layout.addWidget(motion_group)
+
+        # Chirp (sysid) — chirp.py 공유 정의(f0→f1 선형 스윕)를 publisher가 재생하고,
+        # 스윕 동안 action/sim/real 스트림을 기록해 npz로 저장한다 (go2 chirp_collector 관례).
+        chirp_group = QGroupBox("Chirp (sysid capture)")
+        chirp_v = QVBoxLayout(chirp_group)
+        chirp_layout = QHBoxLayout()
+        chirp_v.addLayout(chirp_layout)
+        chirp_layout.addWidget(QLabel("Preset:"))
+        self._chirp_joint_combo = QComboBox()
+        self._chirp_joint_combo.addItems(["all", "hip", "thigh", "calf", "foot", *motions.JOINT_NAMES])
+        chirp_layout.addWidget(self._chirp_joint_combo)
+        chirp_layout.addWidget(QLabel("Amp scale:"))
+        self._chirp_amp_spin = QDoubleSpinBox()
+        self._chirp_amp_spin.setRange(0.05, 1.0)
+        self._chirp_amp_spin.setSingleStep(0.05)
+        self._chirp_amp_spin.setValue(0.5)
+        chirp_layout.addWidget(self._chirp_amp_spin)
+        chirp_layout.addWidget(QLabel("f0 [Hz]:"))
+        self._chirp_f0_spin = QDoubleSpinBox()
+        self._chirp_f0_spin.setRange(0.05, 5.0)
+        self._chirp_f0_spin.setSingleStep(0.05)
+        self._chirp_f0_spin.setValue(chirp.DEFAULT_F0_HZ)
+        chirp_layout.addWidget(self._chirp_f0_spin)
+        chirp_layout.addWidget(QLabel("f1 [Hz]:"))
+        self._chirp_f1_spin = QDoubleSpinBox()
+        self._chirp_f1_spin.setRange(0.1, 10.0)
+        self._chirp_f1_spin.setSingleStep(0.1)
+        # 실기 매단 리그 공진(chirp.py 주석: 2 Hz 위로는 리그를 재게 된다) + GUI 50Hz 발행률에
+        # 맞춘 안전 기본값. sim 전용이면 올려도 된다.
+        self._chirp_f1_spin.setValue(2.0)
+        chirp_layout.addWidget(self._chirp_f1_spin)
+        chirp_layout.addWidget(QLabel("Dur [s]:"))
+        self._chirp_dur_spin = QDoubleSpinBox()
+        self._chirp_dur_spin.setRange(5.0, 120.0)
+        self._chirp_dur_spin.setSingleStep(5.0)
+        self._chirp_dur_spin.setValue(chirp.DEFAULT_DURATION_S)
+        chirp_layout.addWidget(self._chirp_dur_spin)
+        self._chirp_start_btn = QPushButton("Start + Record")
+        self._chirp_start_btn.setObjectName("primaryButton")
+        self._chirp_start_btn.clicked.connect(self._on_chirp_start_clicked)
+        chirp_layout.addWidget(self._chirp_start_btn)
+        self._chirp_stop_btn = QPushButton("Stop")
+        self._chirp_stop_btn.setObjectName("dangerButton")
+        self._chirp_stop_btn.clicked.connect(self._on_chirp_stop_clicked)
+        self._chirp_stop_btn.setEnabled(False)
+        chirp_layout.addWidget(self._chirp_stop_btn)
+        # 관절 체크박스 행 — **실제 여기 마스크의 정본**. 프리셋 콤보는 체크 상태를 세팅하는
+        # 단축키일 뿐이라, 체크박스를 직접 조합하면 임의 부분 chirp(예: HL_calf+HL_foot)이 된다.
+        # 비체크 관절은 시작 자세를 관절각 홀드한다.
+        check_row = QHBoxLayout()
+        check_row.addWidget(QLabel("Joints:"))
+        self._chirp_joint_checks: list[QCheckBox] = []
+        for name in motions.JOINT_NAMES:
+            cb = QCheckBox(name)
+            cb.setChecked(True)  # 초기 프리셋 "all"과 일치
+            self._chirp_joint_checks.append(cb)
+            check_row.addWidget(cb)
+        check_row.addStretch(1)
+        chirp_v.addLayout(check_row)
+        self._chirp_joint_combo.currentTextChanged.connect(self._on_chirp_preset_changed)
+        layout.addWidget(chirp_group)
+
         # Gains (faithful PD) — 슬라이더 상한은 이 리그의 낮은 실측 게인에 맞춰 재조정(KP_RANGE/KD_RANGE).
         gain_group = QGroupBox("Gains (faithful PD)")
         gain_layout = QHBoxLayout(gain_group)
@@ -984,8 +1265,20 @@ class MainWindow(QMainWindow):
         cgain_v.addLayout(cgain_row)
         layout.addWidget(cgain_group)
 
+        plant_group = self._build_plant_group()
+        layout.addWidget(plant_group)
+
         # position-mode 패널 묶음 (mode 전환 시 일괄 show/hide)
-        self._position_groups = [pose_group, slider_group, sine_group, gain_group, cgain_group]
+        self._position_groups = [
+            pose_group,
+            slider_group,
+            sine_group,
+            motion_group,
+            chirp_group,
+            gain_group,
+            cgain_group,
+            plant_group,
+        ]
 
         # policy-mode 패널 (초기 숨김)
         self._policy_group = self._build_policy_group()
@@ -1007,7 +1300,83 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self._status_label)
         layout.addWidget(status_bar)
 
-        self.setCentralWidget(central)
+        # 콘텐츠가 화면보다 길면 세로 스크롤 — 그룹이 늘어나며(chirp/plant/...) 작은 화면에서
+        # 하단이 잘리는 것을 막는다. 가로는 콘텐츠 폭에 맞추고 스크롤하지 않는다.
+        scroll = QScrollArea()
+        scroll.setWidget(central)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        self.setCentralWidget(scroll)
+
+        # 기동 크기 = 콘텐츠 선호 크기를 화면 가용 영역(작업표시줄 제외)에 맞춰 클램프.
+        # 콘텐츠가 화면보다 길면 창은 화면 높이까지만 커지고 나머지는 스크롤로 본다.
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            hint = central.sizeHint()
+            sb = scroll.verticalScrollBar().sizeHint().width() + 4
+            w = min(hint.width() + sb, int(avail.width() * 0.95))
+            h = min(hint.height() + 8, int(avail.height() * 0.92))
+            self.resize(w, h)
+
+    # -- plant params UI --
+
+    def _build_plant_group(self) -> QGroupBox:
+        """Plant 그룹 — 스톡 actuator cfg vs PACE 식별 파라미터 선택 적용.
+
+        Apply는 PLANT(R2PP) 패킷을 CMD 포트로 one-shot 송신한다(publisher 미개입 —
+        50Hz 명령 스트림과 크기·magic이 달라 sim_runner drain에서 안전하게 갈린다).
+        PACE json이 없거나 깨졌으면 라디오를 비활성화하고 사유를 표시한다.
+        """
+        group = QGroupBox("Plant (sim physics params)")
+        v = QVBoxLayout(group)
+        row = QHBoxLayout()
+        self._plant_stock_radio = QRadioButton("Stock cfg")
+        self._plant_stock_radio.setChecked(True)
+        self._plant_pace_radio = QRadioButton("PACE identified")
+        row.addWidget(self._plant_stock_radio)
+        row.addWidget(self._plant_pace_radio)
+        plant_btn = QPushButton("Apply Plant")
+        plant_btn.setObjectName("primaryButton")
+        plant_btn.clicked.connect(self._on_plant_apply_clicked)
+        row.addWidget(plant_btn)
+        row.addStretch(1)
+        v.addLayout(row)
+        if self._pace_params is not None:
+            src = str(self._pace_params.get("source_run", "?"))
+            delay = self._pace_params.get("delay_ms_unapplied", "?")
+            src_short = f"{os.path.basename(os.path.dirname(src))}/{os.path.basename(src)}"
+            info = f"PACE params: {src_short}  (bias/delay {delay}ms not applied)"
+        else:
+            self._plant_pace_radio.setEnabled(False)
+            info = f"PACE params unavailable: {self._pace_params_err}"
+        info_label = QLabel(info)
+        info_label.setWordWrap(True)
+        v.addWidget(info_label)
+        return group
+
+    def _on_plant_apply_clicked(self) -> None:
+        use_pace = self._plant_pace_radio.isChecked()
+        if use_pace and self._pace_params is None:
+            return
+        if use_pace:
+            p = self._pace_params
+            arma = [float(p["armature"][n]) for n in motions.JOINT_NAMES]
+            visc = [float(p["viscous"][n]) for n in motions.JOINT_NAMES]
+            coulomb = [float(p["coulomb"][n]) for n in motions.JOINT_NAMES]
+            pkt = r2s_udp.pack_plant(1, 1, arma, visc, coulomb)
+        else:
+            zeros = [0.0] * NUM_JOINTS
+            pkt = r2s_udp.pack_plant(1, 0, zeros, zeros, zeros)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            tx.sendto(pkt, (HOST, r2s_udp.CMD_PORT))
+        finally:
+            tx.close()
+        self._status_label.setText(
+            "Plant: PACE identified params sent to sim" if use_pace else "Plant: stock cfg restore sent to sim"
+        )
 
     # -- joint sliders UI --
 
@@ -1256,6 +1625,9 @@ class MainWindow(QMainWindow):
             # policy 진입: position publisher를 멈추고(CMD_VALID=0 — policy sim은 CMD 포트를
             # 안 듣지만 발행 계속은 무의미), 스레드 기동(1회). 시작은 idle(Run 눌러야 폐루프).
             self._sine_deactivate()
+            self._motion_finish(aborted=True, take_hold=False)
+            if self._chirp_active:  # 진행 중이던 chirp는 중단 처리 + 지금까지의 기록 저장
+                self._chirp_finish(aborted=True, take_hold=False)
             with self._shared.get_lock():
                 self._shared[_SM_CMD_VALID] = 0.0
             self._ensure_policy_thread()
@@ -1397,6 +1769,381 @@ class MainWindow(QMainWindow):
         self._sine_start_btn.setEnabled(True)
         self._sine_stop_btn.setEnabled(False)
 
+    # -- motion playback (리타게팅 SMR 클립 — publisher가 경과 시간으로 인덱싱) --
+
+    def _build_motion_group(self) -> QGroupBox:
+        """모션 클립 재생 패널: 클립 선택 + 배속 + Loop + Play/Stop + 사전 스캔 요약."""
+        group = QGroupBox("Motion Playback (retargeted SMR clips)")
+        v = QVBoxLayout(group)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Clip:"))
+        self._motion_clip_combo = QComboBox()
+        self._motion_clip_combo.setMinimumWidth(140)
+        row.addWidget(self._motion_clip_combo)
+        row.addWidget(QLabel("Speed:"))
+        self._motion_speed_spin = QDoubleSpinBox()
+        self._motion_speed_spin.setRange(*(motion_clips.SPEED_RANGE if _MOTION_OK else (0.25, 1.0)))
+        self._motion_speed_spin.setSingleStep(0.05)
+        self._motion_speed_spin.setValue(1.0)
+        self._motion_speed_spin.setToolTip("1.0 = 원속. 실기에서는 낮은 배속부터 확인할 것.")
+        row.addWidget(self._motion_speed_spin)
+        self._motion_loop_check = QCheckBox("Loop")
+        row.addWidget(self._motion_loop_check)
+        self._motion_play_btn = QPushButton("Play")
+        self._motion_play_btn.setObjectName("primaryButton")
+        self._motion_play_btn.clicked.connect(self._on_motion_play_clicked)
+        row.addWidget(self._motion_play_btn)
+        self._motion_stop_btn = QPushButton("Stop")
+        self._motion_stop_btn.setObjectName("dangerButton")
+        self._motion_stop_btn.setEnabled(False)
+        self._motion_stop_btn.clicked.connect(self._on_motion_stop_clicked)
+        row.addWidget(self._motion_stop_btn)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self._motion_info_label = QLabel("")
+        self._motion_info_label.setObjectName("subtitleLabel")
+        self._motion_info_label.setWordWrap(True)
+        v.addWidget(self._motion_info_label)
+
+        if not _MOTION_OK:
+            self._motion_clip_combo.setEnabled(False)
+            self._motion_play_btn.setEnabled(False)
+            self._motion_info_label.setText("Motion playback disabled - numpy not installed")
+            return group
+
+        clips = motion_clips.list_clips()
+        self._motion_clip_combo.addItems(clips)
+        if not clips:
+            self._motion_play_btn.setEnabled(False)
+            self._motion_info_label.setText(f"No clips found in {motion_clips.MOTION_DIR}")
+        # 클립/배속을 바꾸면 사전 스캔 요약(클램프·seam·최대 관절속도)을 즉시 갱신 —
+        # 배속에 따라 최대 관절속도가 그대로 스케일되므로 선택 시점에 안전 판단이 보이게 한다.
+        self._motion_clip_combo.currentIndexChanged.connect(self._refresh_motion_info)
+        self._motion_speed_spin.valueChanged.connect(self._refresh_motion_info)
+        self._motion_loop_check.toggled.connect(self._refresh_motion_info)
+        self._refresh_motion_info()
+        return group
+
+    def _motion_build(self, start_pose: list[float] | None = None) -> dict | None:
+        """선택 클립 + 현재 배속/Loop 로 재생 프레임을 조립한다. 실패하면 상태바에 알리고 None."""
+        name = self._motion_clip_combo.currentText()
+        if not _MOTION_OK or not name:
+            return None
+        try:
+            clip = self._motion_cache.get(name)
+            if clip is None:
+                clip = motion_clips.load_clip(name)
+                self._motion_cache[name] = clip
+            return motion_clips.build_playback(
+                clip,
+                start_pose if start_pose is not None else [0.0] * NUM_JOINTS,
+                FRAME_HZ,
+                speed=self._motion_speed_spin.value(),
+                loop=self._motion_loop_check.isChecked(),
+                intro_s=SEQUENCE_DURATION_S,
+            )
+        except Exception as exc:  # noqa: BLE001 - 손상된 npz/관절 순서 불일치를 UI로 알린다
+            self._motion_info_label.setText(f"clip load failed: {exc}")
+            return None
+
+    def _refresh_motion_info(self, _val=None) -> None:
+        """선택 클립의 사전 스캔 요약(클램프 통계·seam·최대 관절속도)을 라벨에 쓴다."""
+        pb = self._motion_build()
+        if pb is None:
+            return
+        name = self._motion_clip_combo.currentText()
+        text = motion_clips.describe_scan(name, pb["scan"], pb["seam"], pb["peak_rate"])
+        text += f" | {pb['num_clip']} ticks @{FRAME_HZ:.0f}Hz ({pb['clip_s']:.2f} s)"
+        if self._motion_loop_check.isChecked():
+            text += f" + synthetic return bridge {pb['bridge_s']:.2f} s"
+        self._motion_info_label.setText(text)
+
+    def _on_motion_play_clicked(self) -> None:
+        """현재 자세→클립 첫 프레임 진입 보간 후 클립 재생 (publisher가 프레임을 소비)."""
+        pb = self._motion_build(self._output_pose())
+        if pb is None:
+            self._status_label.setText("Motion playback: no clip selected")
+            return
+        frames = pb["frames"]
+        n = int(frames.shape[0])
+        if n > MAX_FRAMES:
+            self._status_label.setText(
+                f"Motion blocked: {n} frames exceeds buffer {MAX_FRAMES} - raise speed or MAX_FRAMES"
+            )
+            return
+        self._sine_deactivate()
+        if self._chirp_active:  # 진행 중이던 chirp는 중단 처리 + 지금까지의 기록 저장
+            self._chirp_finish(aborted=True, take_hold=False)
+        flat = frames.reshape(-1).tolist()
+        with self._shared.get_lock():
+            # 슬라이스 대입 — 최대 수천 프레임이라 원소별 루프로 쓰면 락을 쥔 채 publisher 틱을 굶긴다.
+            self._shared[_SM_FRAMES : _SM_FRAMES + len(flat)] = flat
+            self._shared[_SM_FRAME_COUNT] = float(n)
+            self._shared[_SM_FRAME_HZ] = FRAME_HZ
+            self._shared[_SM_MOTION_LOOP] = 1.0 if self._motion_loop_check.isChecked() else 0.0
+            self._shared[_SM_MOTION_LOOP_START] = float(pb["loop_start"])
+            self._shared[_SM_MOTION_DONE] = 0.0
+            self._shared[_SM_START_TIME] = time.monotonic()
+            # 재생 후 HOLD 전환이 자연스럽도록 BASE_Q도 마지막 프레임으로 (_play_sequence_to와 동일).
+            for i in range(NUM_JOINTS):
+                self._shared[_SM_BASE_Q + i] = float(frames[-1, i])
+            self._shared[_SM_MODE] = _MODE_MOTION
+            self._shared[_SM_CMD_VALID] = 1.0
+        self._motion_active = True
+        self._motion_play_btn.setEnabled(False)
+        self._motion_stop_btn.setEnabled(True)
+        self._motion_poll_timer.start(200)
+        name = self._motion_clip_combo.currentText()
+        self._status_label.setText(
+            f"Motion '{name}' x{self._motion_speed_spin.value():.2f}"
+            f"{' loop' if self._motion_loop_check.isChecked() else ''}: entering clip start "
+            f"({SEQUENCE_DURATION_S:.1f}s) then {pb['clip_s']:.2f}s clip"
+        )
+
+    def _on_motion_stop_clicked(self) -> None:
+        self._motion_finish(aborted=True)
+
+    def _on_motion_poll_tick(self) -> None:
+        """재생 진행 표시 + 종료/가로채기 감지 (chirp 폴링과 같은 패턴)."""
+        with self._shared.get_lock():
+            mode = int(self._shared[_SM_MODE])
+            done = self._shared[_SM_MOTION_DONE] >= 0.5
+            start = self._shared[_SM_START_TIME]
+            count = int(self._shared[_SM_FRAME_COUNT])
+            loop_start = int(self._shared[_SM_MOTION_LOOP_START])
+            loop = self._shared[_SM_MOTION_LOOP] >= 0.5
+        if mode != _MODE_MOTION:
+            # 슬라이더/Home/Relax 등 다른 명령이 재생을 가로챘다 — 그 명령을 존중하고 UI만 정리한다.
+            self._motion_finish(aborted=True, take_hold=False)
+            return
+        if done and not loop:
+            self._motion_finish(aborted=False)
+            return
+        idx = int((time.monotonic() - start) * FRAME_HZ)
+        name = self._motion_clip_combo.currentText()
+        if idx < loop_start:
+            self._status_label.setText(f"Motion '{name}': entering clip start ({idx}/{loop_start})")
+        elif count > loop_start:
+            span = count - loop_start
+            k = idx - loop_start
+            cycle = f" cycle {k // span + 1}" if loop else ""
+            self._status_label.setText(f"Motion '{name}': frame {k % span + 1}/{span}{cycle}")
+
+    def _motion_finish(self, aborted: bool, take_hold: bool = True) -> None:
+        """재생 종료 — 현재 출력 자세에서 HOLD (스냅백 없음)."""
+        if not self._motion_active:
+            return
+        self._motion_active = False
+        self._motion_poll_timer.stop()
+        self._motion_play_btn.setEnabled(bool(self._motion_clip_combo.count()))
+        self._motion_stop_btn.setEnabled(False)
+        if take_hold:
+            pose = self._output_pose()
+            self._write_hold(pose)
+            self._sync_sliders_to_pose(pose)
+            self._status_label.setText("Motion stopped (holding current pose)" if aborted else "Motion finished")
+
+    # -- chirp (sysid capture) --
+
+    _CHIRP_PRESET_GROUPS: dict[str, tuple[int, ...]] = {
+        "all": tuple(range(NUM_JOINTS)),
+        "hip": (0, 4),
+        "thigh": (1, 5),
+        "calf": (2, 6),
+        "foot": (3, 7),
+    }
+
+    def _on_chirp_preset_changed(self, sel: str) -> None:
+        """프리셋 콤보 → 체크박스 세팅 (그룹 또는 단일 관절). 이후 사용자가 자유 수정 가능."""
+        idxs = self._CHIRP_PRESET_GROUPS.get(sel)
+        if idxs is None:
+            idxs = (motions.JOINT_NAMES.index(sel),)
+        for i, cb in enumerate(self._chirp_joint_checks):
+            cb.setChecked(i in idxs)
+
+    def _chirp_mask(self) -> int:
+        """체크박스 선택을 leg-major 관절 비트마스크로 (콤보는 프리셋 세터일 뿐, 정본은 체크박스)."""
+        return sum(1 << i for i, cb in enumerate(self._chirp_joint_checks) if cb.isChecked())
+
+    def _chirp_group_label(self, mask: int) -> str:
+        """마스크의 표시/파일명용 이름 — 프리셋명, 단일·2관절은 관절명, 그 외 custom_m<mask>."""
+        for name, idxs in self._CHIRP_PRESET_GROUPS.items():
+            if mask == sum(1 << i for i in idxs):
+                return name
+        on = [i for i in range(NUM_JOINTS) if (mask >> i) & 1]
+        if 1 <= len(on) <= 2:
+            return "+".join(motions.JOINT_NAMES[i] for i in on)
+        return f"custom_m{mask}"
+
+    def _drain_rec_queue(self, discard: bool = False) -> None:
+        """publisher rec_queue를 비운다 — cmd/state 행을 수집 버퍼로 (discard=True면 버림)."""
+        if self._rec_queue is None:
+            return
+        while True:
+            try:
+                row = self._rec_queue.get_nowait()
+            except Exception:
+                break
+            if discard:
+                continue
+            if row[0] == "cmd":
+                self._chirp_cmd_rows.append(row)
+            elif row[0] == "state":
+                self._chirp_state_rows.append(row)
+
+    def _on_chirp_start_clicked(self) -> None:
+        with self._shared.get_lock():
+            relax = int(self._shared[_SM_MODE]) == _MODE_RELAX and self._shared[_SM_CMD_VALID] >= 0.5
+        if relax:
+            self._status_label.setText("Chirp blocked: disable RELAX first (press Home or move a slider)")
+            return
+        f0 = self._chirp_f0_spin.value()
+        f1 = self._chirp_f1_spin.value()
+        dur = self._chirp_dur_spin.value()
+        ascale = self._chirp_amp_spin.value()
+        if f1 <= f0:
+            self._status_label.setText("Chirp blocked: f1 must be greater than f0")
+            return
+        mask = self._chirp_mask()
+        if mask == 0:
+            self._status_label.setText("Chirp blocked: no joints selected")
+            return
+        # soft limit 사전 검사 — 테이퍼가 없으므로 극값은 center ± amp·scale (publisher가 매 틱
+        # clamp_to_soft로 한 번 더 지키지만, 조용한 클램프는 여기신호를 왜곡하므로 시작 전에 막는다).
+        for i in range(NUM_JOINTS):
+            if not (mask >> i) & 1:
+                continue
+            lo = chirp.CHIRP_CENTER[i] - chirp.CHIRP_AMPLITUDE[i] * ascale
+            hi = chirp.CHIRP_CENTER[i] + chirp.CHIRP_AMPLITUDE[i] * ascale
+            s_lo, s_hi = motions.SOFT_LIMITS_RAD[i]
+            if lo <= s_lo or hi >= s_hi:
+                self._status_label.setText(
+                    f"Chirp blocked: {motions.JOINT_NAMES[i]} range [{lo:+.3f}, {hi:+.3f}] exceeds "
+                    f"soft limit [{s_lo:+.3f}, {s_hi:+.3f}] - lower amp scale"
+                )
+                return
+        start_q = self._output_pose()
+        self._sine_deactivate()
+        self._chirp_cmd_rows = []
+        self._chirp_state_rows = []
+        self._drain_rec_queue(discard=True)  # 이전 세션 잔류 행 제거
+        if self._rm_thread is not None and self._rm_thread.isRunning():
+            self._rm_thread.start_recording()
+        self._chirp_meta = {
+            "f0": f0,
+            "f1": f1,
+            "dur": dur,
+            "amp": ascale,
+            "mask": mask,
+            "group": self._chirp_group_label(mask),
+            "kp": list(self._kp),
+            "kd": list(self._kd),
+        }
+        with self._shared.get_lock():
+            for i in range(NUM_JOINTS):
+                self._shared[_SM_CHIRP_START_Q + i] = start_q[i]
+            self._shared[_SM_CHIRP_F0] = f0
+            self._shared[_SM_CHIRP_F1] = f1
+            self._shared[_SM_CHIRP_DUR] = dur
+            self._shared[_SM_CHIRP_AMP] = ascale
+            self._shared[_SM_CHIRP_MASK] = float(mask)
+            self._shared[_SM_CHIRP_DONE] = 0.0
+            self._shared[_SM_START_TIME] = time.monotonic()
+            self._shared[_SM_MODE] = _MODE_CHIRP
+            self._shared[_SM_CMD_VALID] = 1.0
+        self._chirp_active = True
+        self._chirp_start_btn.setEnabled(False)
+        self._chirp_stop_btn.setEnabled(True)
+        self._chirp_poll_timer.start(200)
+        total = CHIRP_RAMP_S + dur
+        self._status_label.setText(
+            f"Chirp on {self._chirp_meta['group']}: ramp {CHIRP_RAMP_S:.0f}s + sweep "
+            f"{f0:.2f}->{f1:.2f} Hz over {dur:.0f}s (total {total:.0f}s, recording)"
+        )
+
+    def _on_chirp_stop_clicked(self) -> None:
+        self._chirp_finish(aborted=True)
+
+    def _on_chirp_poll_tick(self) -> None:
+        self._drain_rec_queue()
+        with self._shared.get_lock():
+            mode = int(self._shared[_SM_MODE])
+            done = self._shared[_SM_CHIRP_DONE] >= 0.5
+        if done:
+            self._chirp_finish(aborted=False)
+        elif mode != _MODE_CHIRP:
+            # 슬라이더/Home/Relax 등 다른 명령이 chirp를 가로챘다 — 그 명령을 존중하고 저장만 한다.
+            self._chirp_finish(aborted=True, take_hold=False)
+
+    def _chirp_finish(self, aborted: bool, take_hold: bool = True) -> None:
+        if not self._chirp_active:
+            return
+        self._chirp_active = False
+        self._chirp_poll_timer.stop()
+        self._chirp_start_btn.setEnabled(True)
+        self._chirp_stop_btn.setEnabled(False)
+        if take_hold:
+            pose = self._output_pose()
+            self._write_hold(pose)
+            self._sync_sliders_to_pose(pose)
+        self._chirp_meta["aborted"] = aborted
+        self._status_label.setText(("Chirp stopped" if aborted else "Chirp finished") + " - saving...")
+        # publisher가 마지막 행들을 큐에 넣을 시간을 준 뒤 저장한다 (50Hz 발행 대비 충분한 여유).
+        QTimer.singleShot(400, self._chirp_save)
+
+    def _chirp_save(self) -> None:
+        self._drain_rec_queue()
+        telem_rows: list = []
+        if self._rm_thread is not None:
+            telem_rows = self._rm_thread.stop_recording()
+        if not self._chirp_cmd_rows:
+            self._status_label.setText("Chirp: no samples recorded - nothing saved (stopped during ramp?)")
+            return
+        import numpy as np  # 시스템 numpy — GUI 기동 경로에 불필요해 지연 임포트
+
+        m = self._chirp_meta
+        out_dir = os.path.join(_REPO_ROOT, "data", "bipedleg_gui")
+        os.makedirs(out_dir, exist_ok=True)
+        # 파일명에 여기 부위 태그를 넣는다 (예: chirp_gui_foot_..., chirp_gui_custom_m40_...) —
+        # 부분/전체 여부가 파일 목록에서 바로 드러나게. 태그는 [A-Za-z0-9_+]만 나온다(관절명/프리셋).
+        group_tag = str(m.get("group", "all")).replace("+", "-")
+        out_path = os.path.join(out_dir, time.strftime(f"chirp_gui_{group_tag}_%Y%m%d_%H%M%S.npz"))
+        # go2 chirp_collector.py의 npz 스키마를 따른다: 명령/상태가 각자 타임스탬프를 가진 원시
+        # 스트림 (t_* 는 같은 monotonic 시계). 여기에 sim(STATE)과 real(TELEM)을 나란히 담는다.
+        arrays = {
+            "t_cmd": np.asarray([r[1] for r in self._chirp_cmd_rows], dtype=np.float64),
+            "q_cmd": np.asarray([r[2] for r in self._chirp_cmd_rows], dtype=np.float32),
+            "t_state": np.asarray([r[1] for r in self._chirp_state_rows], dtype=np.float64),
+            "q": np.asarray([r[2] for r in self._chirp_state_rows], dtype=np.float32),
+            "dq": np.asarray([r[3] for r in self._chirp_state_rows], dtype=np.float32),
+            "tau_est": np.asarray([r[4] for r in self._chirp_state_rows], dtype=np.float32),
+            "kp": np.asarray(m["kp"], dtype=np.float32),
+            "kd": np.asarray(m["kd"], dtype=np.float32),
+            "joint_order": np.asarray(motions.JOINT_NAMES),
+            "rate_hz": np.float64(PUBLISH_HZ),
+            "f0_hz": np.float64(m["f0"]),
+            "f1_hz": np.float64(m["f1"]),
+            "duration_s": np.float64(m["dur"]),
+            "amplitude_scale": np.float64(m["amp"]),
+            "joint_group": np.asarray(m["group"]),
+            "joint_mask": np.int64(m["mask"]),
+            "aborted": np.bool_(m.get("aborted", False)),
+        }
+        if telem_rows:
+            arrays["t_real"] = np.asarray([r[0] for r in telem_rows], dtype=np.float64)
+            arrays["q_real"] = np.asarray([r[1] for r in telem_rows], dtype=np.float32)
+            arrays["dq_real"] = np.asarray([r[2] for r in telem_rows], dtype=np.float32)
+            arrays["tau_real"] = np.asarray([r[3] for r in telem_rows], dtype=np.float32)
+        np.savez(out_path, **arrays)
+        msg = (
+            f"Chirp saved: {out_path} (cmd {len(self._chirp_cmd_rows)}, "
+            f"sim {len(self._chirp_state_rows)}, real {len(telem_rows)})"
+        )
+        print(f"[gui_controller] {msg}", flush=True)
+        self._status_label.setText(msg)
+
     # -- gains (faithful PD) --
 
     def _on_gain_joint_changed(self, idx: int) -> None:
@@ -1473,6 +2220,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override signature)
         self._startup_timer.stop()
         self._ieff_timer.stop()
+        self._motion_poll_timer.stop()
         # 추론 스레드 정지(소켓은 run() finally에서 닫힘). 여기서만 종료 → 토글 중 rebind 없음.
         if self._policy_thread is not None:
             self._policy_thread.request_stop()
@@ -1504,6 +2252,12 @@ def main() -> None:
         action="store_true",
         help="기동 즉시 Real Robot Monitor 시작 (호스트는 --real_host 또는 패널 기본값).",
     )
+    parser.add_argument(
+        "--pace_params",
+        default="data/bipedleg_pace_params.json",
+        help="PACE 식별 플랜트 파라미터 json (export_pace_params.py 산출). "
+        "상대경로는 repo 루트 기준. 없으면 Plant 그룹의 PACE 라디오 비활성.",
+    )
     args = parser.parse_args()
 
     model_path = os.path.normpath(args.model) if args.model else None
@@ -1521,14 +2275,28 @@ def main() -> None:
             shared[_SM_KP + i] = motions.DEFAULT_KP[i]
             shared[_SM_KD + i] = motions.DEFAULT_KD[i]
             shared[_SM_BASE_Q + i] = motions.DEFAULT_POSE[i]
-    publisher = mp.Process(target=publisher_process_main, args=(shared, stop_flag, args.real_host), daemon=True)
+    rec_queue = mp.Queue()  # chirp 기록: publisher → UI (스윕 중에만 흐른다)
+    publisher = mp.Process(
+        target=publisher_process_main, args=(shared, stop_flag, args.real_host, rec_queue), daemon=True
+    )
     publisher.start()
 
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
     app.setStyleSheet(_STYLESHEET)
+    # --pace_params 상대경로는 repo 루트 기준으로 해석 (GUI를 어느 cwd에서 띄워도 동일).
+    pace_params_path = args.pace_params
+    if pace_params_path and not os.path.isabs(pace_params_path):
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        pace_params_path = os.path.join(repo_root, pace_params_path)
     window = MainWindow(
-        shared, model_path=model_path, device=args.device, real_host=args.real_host, publisher_proc=publisher
+        shared,
+        model_path=model_path,
+        device=args.device,
+        real_host=args.real_host,
+        publisher_proc=publisher,
+        rec_queue=rec_queue,
+        pace_params_path=pace_params_path,
     )
     if args.monitor:
         window.start_real_monitor()

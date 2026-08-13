@@ -508,6 +508,53 @@ def unpack_policy_ping(data: bytes) -> dict | None:
     return {"seq": fields[1]}
 
 
+# ---------------------------------------------------------------------------
+# PLANT — gui -> sim_runner: sim 플랜트 파라미터 선택 적용 (PACE 식별값 vs 스톡 cfg)
+# ---------------------------------------------------------------------------
+
+PLANT_MAGIC: int = 0x52325050  # "R2PP" — gui -> sim (CMD_PORT 공유, one-shot)
+# magic(I) seq(I) mode(I) + armature(8f)+viscous(8f)+coulomb(8f) — **leg-major** 순서.
+# mode 0 = stock cfg 복원(배열 무시), 1 = 실린 값 적용.
+_PLANT_FMT: str = "<III" + "f" * NUM_JOINTS * 3
+PLANT_SIZE: int = struct.calcsize(_PLANT_FMT)
+
+
+def pack_plant(seq: int, mode: int, armature, viscous, coulomb) -> bytes:
+    """gui -> sim 플랜트 파라미터 직렬화 (leg-major 순서).
+
+    Args:
+        seq: 시퀀스 번호.
+        mode: 0=stock cfg 복원(배열 무시), 1=armature/viscous/coulomb 적용.
+        armature: 관절별 armature [kg·m²], 길이 8.
+        viscous: 관절별 점성 마찰 [N·m·s/rad], 길이 8.
+        coulomb: 관절별 Coulomb 마찰 [N·m], 길이 8.
+    """
+    vals = [float(armature[i]) for i in range(NUM_JOINTS)]
+    vals += [float(viscous[i]) for i in range(NUM_JOINTS)]
+    vals += [float(coulomb[i]) for i in range(NUM_JOINTS)]
+    return struct.pack(_PLANT_FMT, PLANT_MAGIC, seq & 0xFFFFFFFF, int(mode), *vals)
+
+
+def unpack_plant(data: bytes) -> dict | None:
+    """plant 역직렬화. magic 불일치/크기 오류 시 None.
+
+    키: ``seq``, ``mode``, ``armature`` (8), ``viscous`` (8), ``coulomb`` (8).
+    """
+    if len(data) != PLANT_SIZE:
+        return None
+    fields = struct.unpack(_PLANT_FMT, data)
+    if fields[0] != PLANT_MAGIC:
+        return None
+    n = NUM_JOINTS
+    return {
+        "seq": fields[1],
+        "mode": fields[2],
+        "armature": list(fields[3 : 3 + n]),
+        "viscous": list(fields[3 + n : 3 + 2 * n]),
+        "coulomb": list(fields[3 + 2 * n : 3 + 3 * n]),
+    }
+
+
 if __name__ == "__main__":
     z = [0.0] * NUM_JOINTS
     c = pack_cmd(1, z, z, [65.0] * NUM_JOINTS, [6.0] * NUM_JOINTS, z)
@@ -576,6 +623,14 @@ if __name__ == "__main__":
     assert len(pk) == POLICY_GAIN_SIZE == 72, (len(pk), POLICY_GAIN_SIZE)
     dpk = unpack_policy_gain(pk)
     assert dpk["kp"][2] == 50.0 and dpk["kd"][7] == 5.0 and dpk["seq"] == 10
+
+    # plant: 108B, CMD 포트 공유 — CMD(168B)와 크기가 달라 크기 단계에서 갈리고 magic으로도 거부.
+    pp = pack_plant(11, 1, [0.03] * NUM_JOINTS, [0.5] * NUM_JOINTS, [0.2] * NUM_JOINTS)
+    assert len(pp) == PLANT_SIZE == 108, (len(pp), PLANT_SIZE)
+    dpp = unpack_plant(pp)
+    assert dpp["mode"] == 1 and abs(dpp["armature"][0] - 0.03) < 1e-6 and abs(dpp["coulomb"][7] - 0.2) < 1e-6
+    assert unpack_plant(c) is None and unpack_cmd(pp) is None and unpack_ieff(pp) is None
+    assert unpack_plant(pack_plant(12, 0, z, z, z))["mode"] == 0
     assert unpack_policy_gain(pa) is None and unpack_policy_act(pk) is None
 
     print(

@@ -44,20 +44,37 @@ struct MotorCalib {
 // 2026-08-12 실기팀 지정값: hip 100/5, thigh 50/5, calf 50/5, foot 20/5 — 전부 드라이버
 // 상한(kp 500 / kd 5) 이내라 기동 시 클램프 WARN 이 나오지 않아야 정상.
 // soft limit: 신규 CAD 리비전 Hind_Leg_URDF2 USD 기준 (2026-08-11). 좌우 동일 규약(미러 아님).
+// 2026-08-12 SignFix: 실기 방향 실측에서 HL_hip/HL_calf/HL_foot/HR_hip/HR_thigh가 sim과
+// 반대로 돌아 **sim 자산(Hind_Leg_URDF3_SignFix) 쪽 축을 반전**해 실기에 맞췄다. 따라서
+// sign은 전 관절 +1 유지가 정답이고, 반전 관절의 sim 좌표 클램프(min/max)만 [lo,hi]→[-hi,-lo]로
+// 뒤집혔다. zero_deg는 여전히 placeholder — probe 실측 후 채울 것.
 constexpr MotorCalib MOTOR_CALIB[NUM_MOTORS] = {
-    {"HL_hip(LtR)", +1.0f, 0.0f, 100.0f, 5.0f, -0.2340f, 0.2340f},
+    {"HL_hip(LtR)", +1.0f, 0.0f, 100.0f, 5.0f, -0.2340f, 0.2340f},   // 축 반전(대칭이라 값 동일)
     {"HL_thigh(LtP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9555f, 2.1855f},
-    {"HL_calf(LkP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9445f, 0.7745f},
-    {"HL_foot(LaP)", +1.0f, 0.0f, 20.0f, 5.0f, -1.3840f, 0.3440f},
-    {"HR_hip(RtR)", +1.0f, 0.0f, 100.0f, 5.0f, -0.2340f, 0.2340f},
-    {"HR_thigh(RtP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9555f, 2.1855f},  // HL과 동일 (URDF2 비미러)
+    {"HL_calf(LkP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.7745f, 0.9445f},   // 축 반전
+    {"HL_foot(LaP)", +1.0f, 0.0f, 20.0f, 5.0f, -0.3440f, 1.3840f},   // 축 반전
+    {"HR_hip(RtR)", +1.0f, 0.0f, 100.0f, 5.0f, -0.2340f, 0.2340f},   // 축 반전(대칭이라 값 동일)
+    {"HR_thigh(RtP)", +1.0f, 0.0f, 50.0f, 5.0f, -2.1855f, 0.9555f},  // 축 반전 — thigh/calf/foot 좌우 미러
     {"HR_calf(RkP)", +1.0f, 0.0f, 50.0f, 5.0f, -0.9445f, 0.7745f},
-    {"HR_foot(RaP)", +1.0f, 0.0f, 20.0f, 5.0f, -1.3840f, 0.3440f},  // HL과 동일 (URDF2 비미러)
+    {"HR_foot(RaP)", +1.0f, 0.0f, 20.0f, 5.0f, -1.3840f, 0.3440f},
 };
 
 // 드라이버 게인 상한 (defineConfigMotor.h DEF_MOT_GAIN_*_MAX)
 constexpr float DRV_GAIN_P_MAX = 500.0f;
 constexpr float DRV_GAIN_D_MAX = 5.0f;
+
+// RELAX 휴지(droop) 자세 [sim rad, **policy(articulation) 순서**] — 2026-08-12 실기에서 무토크로
+// 늘어뜨렸을 때의 자세를 [RELAX] q_sim 로그로 캡처한 값. staged relax(이 자세로 천천히 이동한 뒤
+// 무토크)의 목표로 쓴다. ⚠ zero_deg placeholder 프레임의 실측값이라 MOTOR_CALIB min/max 클램프를
+// **거치지 않고** 그대로 변환·명령한다(실측 droop 자세 = 물리적으로 도달 가능함이 정의상 보장 —
+// 클램프하면 HL_calf +1.284 등이 잘려 자세가 왜곡된다). zero 캘리브레이션 후 재캡처할 것.
+constexpr float RELAX_REST_POSE_SIM[NUM_MOTORS] = {+0.205f, -0.235f, +0.621f, -0.478f,
+                                                   +1.284f, -0.940f, +0.033f, -0.032f};
+// staged relax 이동 속도 [rad/s] — 최대 관절 델타 / 이 값 = 램프 시간(최소 0.5 s).
+constexpr float RELAX_RAMP_RADPS = 0.5f;
+// staged relax 게인 페이드 시간 [s] — 휴지 자세 도달 후 kp/kd를 이 시간에 걸쳐 선형으로 0까지
+// 내린다 (즉시 0으로 끊으면 잔여 중력 하중이 한 번에 풀리며 과도하게 처지는 실기 관찰, 2026-08-13).
+constexpr float RELAX_FADE_SEC = 2.0f;
 
 // IMU RPY 단위 — RobotTestGait 는 %6.1f 로 출력(도 단위로 추정). 실측으로 확정할 것.
 constexpr bool IMU_RPY_IS_DEG = true;
