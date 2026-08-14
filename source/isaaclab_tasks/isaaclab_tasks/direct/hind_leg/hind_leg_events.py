@@ -207,7 +207,12 @@ class randomize_coupled_plant_scale(ManagerTermBase):
         fric_static = torch.clamp(self._def_fric_static[ids] * factor, min=0.0)
         fric_visc = torch.clamp(self._def_fric_visc[ids] * factor, min=0.0)
         fric_dyn = torch.clamp(self._def_fric_dyn[ids] * factor, min=0.0)
-        fric_dyn = torch.minimum(fric_dyn, fric_static)  # dynamic ≤ static (코어와 동일 보정)
+        # dynamic ≤ static (코어와 동일 보정). ⚠ 이 클램프가 물리면 fric_dyn 만 factor 를 못 받아
+        # **다양체 밖으로 나간다** — "다섯 물성이 같은 배수"라는 이 term 의 전제가 깨진다.
+        # 현 cfg 는 static=dynamic=0.38 이라 같은 배수를 곱한 뒤에도 계속 같아서 클램프가 no-op 다
+        # (2026-08-14 실측: dynamic>static 인 관절 0개). 경계에 정확히 걸쳐 있으므로, dynamic 을
+        # static 보다 크게 바꾸면 이 전제가 조용히 깨진다는 점만 기억할 것.
+        fric_dyn = torch.minimum(fric_dyn, fric_static)
 
         self.asset.write_joint_armature_to_sim_index(
             armature=armature, joint_ids=self._all_joint_ids_i32, env_ids=env_ids_i32
