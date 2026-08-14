@@ -125,6 +125,14 @@ baseline(0.305)보다 높다.
 0.08 s 간격 프레임. 위(style 0.2)는 다리가 스윙/스탠스 위상을 오가는 사족 주행이고,
 아래(style 0)는 몸통이 눌린 채 다리가 벌어져 끌린다.
 
+**램프 체이스캠** — 같은 명령 단계에서 baseline(lerp 0.5)과 나란히:
+
+![램프 체이스캠 비교](../_comparisons/mimickit_vs_60_actuator_limit/figures/ramp_chase_lerp08_vs_base.png)
+
+⚠ 체이스캠은 로봇을 따라가므로 **정지 프레임으로는 속도 차이가 안 보인다**(둘 다 화면 중앙).
+속도는 램프 표로 읽고, 이 그림은 자세·다리 위상만 본다. 두 정책 모두 사족 보행 형태는 정상이며,
+`noamp`(style 0)에서 보인 눌린 몸통·벌어진 다리는 어느 쪽에도 없다.
+
 ### ⚠ 남은 것
 
 - `cmd 4.0` 은 **명령 범위 상한**이다(`lin_vel_x` 0~4.0). 즉 이 값이 정책의 최고 속도라는
@@ -140,4 +148,5 @@ baseline(0.305)보다 높다.
 | 파일 | 체크포인트 | 태그 | 렌더 시각 |
 |---|---|---|---|
 | [`model_32000__lerp08_stock_32k_4ms__20260813-110251.mp4`](videos/model_32000__lerp08_stock_32k_4ms__20260813-110251.mp4) | `model_32000.pt` | `lerp08_stock_32k_4ms` | 2026-08-13 11:09:38 |
+| [`model_59999__lerp08_stock_ramp_0to4ms__20260814.mp4`](videos/model_59999__lerp08_stock_ramp_0to4ms__20260814.mp4) | `model_59999.pt` | `ramp_0to4ms` (체이스캠, 0→4 m/s) | 2026-08-14 |
 <!-- /report-video:videos -->

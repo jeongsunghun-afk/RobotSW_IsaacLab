@@ -56,4 +56,5 @@
 |---|---|---|---|
 | [`model_16000__implicit_stock_16k__20260810-170343.mp4`](videos/model_16000__implicit_stock_16k__20260810-170343.mp4) | `model_16000.pt` | `implicit_stock_16k` | 2026-08-10 17:04:37 |
 | [`model_48000__implicit_stock_48k_best__20260811-090503.mp4`](videos/model_48000__implicit_stock_48k_best__20260811-090503.mp4) | `model_48000.pt` | `implicit_stock_48k_best` | 2026-08-11 09:05:58 |
+| [`model_59999__implicit_stock_ramp_0to4ms__20260814.mp4`](videos/model_59999__implicit_stock_ramp_0to4ms__20260814.mp4) | `model_59999.pt` | `ramp_0to4ms` (체이스캠, 0→4 m/s) | 2026-08-14 |
 <!-- /report-video:videos -->
