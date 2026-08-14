@@ -341,9 +341,56 @@ chirp 는 주파수를 쓸어 τ_foot 크기를 자연히 바꾸므로, 추가 �
 부수: Δq_calf rms 는 HL 21.9 / HR 6.8 mrad 로 상당하지만 **τ_foot 과 무상관**(|r| ≤ 0.16)이다 —
 중력 처짐 등 정상상태 오차이지 전치가 아니다.
 
+## 10. sim 커플링 구현 검증 — 구속은 맞고, **강성이 게인만큼밖에 안 된다** (2026-08-14)
+
+"sim 이 구현한 게 맞는가"는 세 층으로 갈린다. 아래 둘은 **실기 없이** 확인된다.
+
+### A. 기구 구속 재현 — ✅ PASS
+
+실기 확인 사실(2026-08-14): *"모든 토크를 푼 채 무릎을 돌리면 발은 공간에서 방향을 유지하고,
+그만큼 발목 관절각이 변한다."* 같은 것을 sim 에 물었다 — foot 드라이브 목표(raw)를 고정하고
+무릎을 쓸었을 때 발의 절대각이 유지되는가.
+
+| 항목 | 값 |
+|---|---:|
+| 무릎 가동폭 | 38.74° |
+| 발 절대각 최대 편차 | **0.538°** (가동폭의 1.4%) |
+| Δq_foot vs Δq_calf 기울기 | **−0.9943** (이상적 −1.0000) |
+
+⇒ **sim 이 기구 구속을 재현한다.** 목표 치환 방식이 의도대로 동작한다.
+
+### B. ★구속 강성 — 유효 59.6 N·m/rad = **foot 의 PD 게인 그 자체**
+
+sim 은 벨트를 강체가 아니라 **목표 치환 + PD 강성**으로 흉내낸다. 그래서 하중이 걸리면 구속이 어긋난다.
+발에 외부 하중을 키워 가며 위반량을 쟀다 (중력 OFF, 마찰 OFF, `kp_foot = 60`):
+
+| 하중 (N·m) | 1 | 2 | 4 | 8 | 12 |
+|---|---:|---:|---:|---:|---:|
+| 구속 위반 (°) | 0.62 | 1.62 | 3.59 | 7.53 | **11.33** |
+
+기울기 0.961 °/N·m ⇒ **유효 구속 강성 59.6 N·m/rad**. 시험에 쓴 `kp_foot` 이 60 이었으므로
+**구속 강성 = foot 게인**이다.
+
+> ⚠ **배포 게인에서는 더 무르다.** 실기 채널 게인 `kp_foot = 20` 이면 **2.9 °/N·m** —
+> 보행 중 지면 반력이 발목에 몇 N·m 만 들어와도 구속이 수 도씩 어긋난다.
+> 실기 벨트는 탄성 범위 안에서 사실상 강체다. **접촉이 큰 학습 구간에서 sim2real 갭으로 나타날 수 있다.**
+> (relax/hold 경로는 `coupling_hold_kp = 200` 이라 그때만 5 배 단단하다.)
+
+### C. 남은 것 — 실기가 필요한 항목
+
+| 질문 | 방법 | 상태 |
+|---|---|---|
+| 전치 비율이 맞는가 | calf 게인 0 + `applied_torque` | ✅ §8 (1.011 / 1.017) |
+| 구속을 재현하는가 | A | ✅ |
+| 구속이 충분히 단단한가 | B | ⚠ 게인만큼만 |
+| 자유 calf 거동이 실기와 같은가 | `backdrive_probe.py` | 실기 필요 |
+| 전치가 실제로 무릎에 도달하는가 | τ_foot 10~12 N·m 캡처 (§9) | 실기 필요 |
+
 ## 재현
 
 ```bash
+python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/verify_coupling_constraint.py --headless
+# → metrics/verify_coupling_constraint.json  (§10 — 구속 재현 + 구속 강성)
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_from_chirp.py
 # → metrics/transpose_from_chirp.json  (§9 — 기존 foot 단독 chirp 만 쓴다, Isaac 불필요)
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_in_applied_torque.py --headless
