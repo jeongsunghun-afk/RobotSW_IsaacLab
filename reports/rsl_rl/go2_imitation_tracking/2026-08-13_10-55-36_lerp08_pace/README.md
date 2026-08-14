@@ -71,6 +71,28 @@ python _workspace/go2_tracking/speed_ramp_record.py \
   --out_dir reports/rsl_rl/go2_imitation_tracking/_comparisons/mimickit_vs_60_actuator_limit/metrics/ramp_lerp08_pace/pace_40000
 ```
 
-## 결과 요약
+## 결과 요약 (중간, 47.8k / 60k) — ★★ 플랜트 반전 없음
 
-학습 진행 중 — 램프 미측정.
+**PACE 에서도 재현된다.** 40k 판정점 하나:
+
+| cmd | `implicit_pace`(0.5) 중앙 | **0.8 중앙** | base % | **0.8 %** |
+|---|---:|---:|---:|---:|
+| 2.5 | 1.375 | 2.396 | 78 | **97** |
+| 3.0 | 1.294 | 2.904 | 28 | **97** |
+| 3.5 | 0.174 | 3.419 | 0 | **97** |
+| 4.0 | 0.101 | **3.969** | 0 | **97** |
+
+top: base 1.375 @cmd 2.5 → **3.969 @cmd 4.0**.
+
+걸음 품질 (`cmd 4.0`): `base_h` **0.335 m**, 관절속도 부호반전 **12.8 Hz**,
+캡 도달률 최대 8% — 스톡 40k(0.295 / 12.9 Hz / 10%)와 사실상 같다.
+
+★ **이 arm 을 띄운 이유였던 "플랜트별 부호 반전" 우려는 해소됐다.** 액추에이터 변경 때는
+stock +14~+30%p / pace −36~−42%p 로 정반대였지만, style 가중치는 **두 플랜트에서 같은
+방향으로 같은 크기**다. 오히려 PACE 쪽 `cmd 4.0` 중앙값(3.969)이 스톡 40k(3.893)보다 약간 높다.
+
+같은 플랜트 DCMotor 세대의 최고 기록 **1.724 @cmd 3.0** 도 넘는다.
+
+⚠ 40k 한 점이다. 48k·56k 로 확인한다.
+
+원자료: `../_comparisons/mimickit_vs_60_actuator_limit/metrics/ramp_lerp08_pace/`

@@ -123,3 +123,11 @@ off 는 순수 task 라 정의가 다른 값이다.
 아니다. 계속 돌릴지는 GPU 배분 문제다.
 
 원자료: `../_comparisons/mimickit_vs_60_actuator_limit/metrics/ramp_noamp/`
+
+### videos
+
+<!-- report-video:videos -->
+| 파일 | 체크포인트 | 태그 | 렌더 시각 |
+|---|---|---|---|
+| [`model_24000__noamp_stock_24k_collapse__20260813-110939.mp4`](videos/model_24000__noamp_stock_24k_collapse__20260813-110939.mp4) | `model_24000.pt` | `noamp_stock_24k_collapse` | 2026-08-13 11:16:14 |
+<!-- /report-video:videos -->
