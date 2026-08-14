@@ -98,29 +98,38 @@ HOST = "127.0.0.1"
 
 
 def _policy_state_convention_version(env_cfg) -> int:
-    """POLICY_STATE 에 실을 좌표 규약 버전을 env cfg 로부터 정한다 (r2s_udp.R2S_CONVENTION_VERSION 참조).
+    """POLICY_STATE 에 실을 좌표 규약 버전을 env cfg 에서 읽는다 (:data:`r2s_udp.R2S_CONVENTION_VERSION`).
 
-    **POLICY_STATE 경로(9885)는 이미 관절 좌표다 → 버전 1.** 코드 세 곳으로 확인한 사실이다:
+    **env cfg 가 자기 규약을 신고하고, 여기서는 그대로 옮긴다.** 하드코딩하지 않는 이유는
+    "송신자는 자기가 실제로 하는 것을 신고한다"가 이 필드의 계약이기 때문이다 — env 가 규약을
+    바꿨는데 여기가 옛 값을 계속 보내면, 수신측(policy_runner)은 **바이트를 잘못 해석하고도
+    조용히 돈다.** 크기가 같아 거부도 안 된다.
 
-    * ``r2s_biped_leg_env.py`` ``_pre_physics_step`` policy 분기 — ``set_joint_position_target``
-      한 줄 뒤 **즉시 return**. 커플링 치환 없음 ⇒ 들어온 ACT foot 목표를 **관절** 목표로 해석.
-    * 같은 파일 ``_apply_action`` — ``if cfg.policy_mode ...: return`` 로 live 커플링 블록을 건너뜀.
-    * 같은 파일 ``get_policy_state`` — ``robot.data.joint_pos[0]`` 를 그대로 반환(커플링 미적용)
-      ⇒ 보고되는 foot 도 **관절각**.
+    ⚠ **2026-08-14 정정**: 이 docstring 은 한때 "코드 세 곳으로 확인한 사실"이라며 근거를 나열했는데,
+    그중 둘이 좌표 이관(:data:`r2s_biped_leg_env_cfg.CONVENTION_VERSION` 0 → 1)으로 거짓이 됐다 —
+    ``_apply_action`` 이 policy 를 즉시 return 한다는 서술(지금은 policy 전용 커플링 분기가 있다)과
+    ``get_lowstate`` 가 foot 을 raw 로 보고한다는 서술(지금은 관절각이다)이다. **결론(버전 1)은
+    그때도 지금도 맞지만 근거가 낡았다** — 낡은 근거로 재유도하면 "커플링이 없다"는 틀린 결론이
+    나온다. 결론이 맞다고 근거까지 최신인 것은 아니다.
+    (같은 유형: ``COORDINATE_MIGRATION_CHECKLIST.md`` §F6)
 
-    ⚠ ``get_lowstate`` 가 foot 을 raw 로 보고하는 것은 사실이나, 그건 **GUI position 모드 STATE
-    (포트 9882, ``_STATE_FMT``)** 경로다 — 여기서 스탬프하는 ``_POLICY_STATE_FMT``(9885)와 다른
-    패킷이다. 그 경로는 이번 이관 범위 밖이고 아직 raw 다.
+    Args:
+        env_cfg: :class:`R2SBipedLegEnvCfg` — ``convention_version`` 필드를 읽는다.
 
-    또 POLICY_STATE 에는 ``tau`` 가 없어서 규약 정의의 gear/tau 절은 이 패킷과 무관하다 —
-    버전을 가르는 유일한 조항이 foot 프레임이고, sim 은 관절이다.
+    Returns:
+        POLICY_STATE 에 스탬프할 규약 버전.
 
-    ⚠ 지금 env cfg 에는 규약을 나타내는 필드가 **없다**(``convention``/``foot_frame`` 류 grep 0건).
-    그래서 아래는 cfg 에서 읽는 게 아니라 위 근거로 못박은 값이다. worker-3 의 env 좌표 이관에서
-    규약 필드가 생기면 여기서 그 필드를 읽도록 바꿀 것 (TODO).
+    Raises:
+        RuntimeError: cfg 에 ``convention_version`` 이 없을 때. 기본값으로 넘기지 않는 이유는
+            규약 미상 패킷을 내보내는 것이 조용한 오독으로 이어지기 때문이다.
     """
-    del env_cfg  # 아직 읽을 필드가 없다 — 시그니처만 미리 맞춰 둔다
-    return 1
+    ver = getattr(env_cfg, "convention_version", None)
+    if ver is None:
+        raise RuntimeError(
+            "env cfg 에 convention_version 이 없다 — POLICY_STATE 규약을 추측해서 내보낼 수 없다. "
+            "r2s_biped_leg_env_cfg.CONVENTION_VERSION 을 확인할 것."
+        )
+    return int(ver)
 
 
 def main() -> None:

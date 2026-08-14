@@ -169,6 +169,13 @@ team lead 가 `get_lowstate` 를 보고 "sim 은 규약 0" 이라 판단해 sim 
    > 커플링이 착지했는데, 이 문서는 12:07 에 **더 나중에** 갱신됐음에도 §B4 는 "커플링 물리 없음"
    > 인 채였다. 그때 고친 건 §D7 뿐이었다. 즉 **문서가 자기보다 먼저 있었던 변경을 놓쳤다.**
    >
+   > **더 짧은 간격의 사례** — `sim_runner_bipedleg.py` 의 `_policy_state_convention_version`
+   > docstring(mtime 11:30)은 `r2s_biped_leg_env.py`(mtime 11:28)를 설명하는데,
+   > **코드보다 2분 늦게 쓰였는데도 변경 전 동작을 서술한다**: "`_apply_action` — `if cfg.policy_mode
+   > ...: return` 로 live 커플링 블록을 건너뜀" 과 "`get_lowstate` 가 foot 을 raw 로 보고" 둘 다
+   > 이제 사실이 아니다. ⚠ 결론(버전 1)은 여전히 맞지만 **근거 셋 중 둘이 낡았다** — 그 근거로
+   > 재유도하면 "커플링이 없다"는 틀린 결론이 나온다. **결론이 맞다고 근거까지 최신인 건 아니다.**
+   >
    > 오늘 이 팀이 반복해서 겪은 실패의 공통 뿌리다 — lead 가 편집 전 grep 결과로 오판했고,
    > worker-4 가 컨버터의 stale docstring 으로 sysid 규약을 정반대로 파악했고, 이 §B4 건이 있었다.
    > **셋 다 "읽은 것이 최신이라고 가정"한 데서 나왔다.**

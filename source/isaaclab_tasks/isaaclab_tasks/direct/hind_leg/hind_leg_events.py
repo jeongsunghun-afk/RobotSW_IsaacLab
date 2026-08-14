@@ -36,12 +36,19 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 
-from isaaclab.actuators import ImplicitActuator
-from isaaclab.assets import Articulation
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
 
 if TYPE_CHECKING:
+    from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedEnv
+
+# ⚠ `isaaclab.assets.Articulation` / `isaaclab.actuators.ImplicitActuator` 를 **모듈 최상단에서
+#   import 하지 않는다.** 이 모듈은 `hind_leg_env_cfg` 가 최상단에서 import 하고, 학습 스크립트는
+#   env cfg 를 `SimulationApp` 생성 **전에** 해석한다. 그 시점에 물리 백엔드/pxr 바인딩을 끌어오면
+#   Kit 이 뒤늦게 같은 모듈을 다시 적재하며 `free(): invalid pointer` 로 프로세스가 죽는다
+#   (2026-08-14 실측: HindLeg 학습만 100% abort, 같은 스크립트로 Cartpole 은 정상).
+#   Articulation 은 타입 주석 전용이라 TYPE_CHECKING 으로 충분하고, ImplicitActuator 는
+#   런타임 isinstance 검사에만 쓰이므로 호출 시점에 지역 import 한다.
 
 # 관절 종류별 gear_k (RL_INTERFACE.md §4 = 실제감속비/7). 지수 하한은 1/gear_k 다.
 #   hip/thigh 는 k=1 이라 지수와 무관 → s ≡ 1.
@@ -156,10 +163,10 @@ class randomize_coupled_plant_scale(ManagerTermBase):
         del asset_cfg  # __init__에서 이미 해석해 뒀다
         device = self.asset.device
         num_joints = self.asset.num_joints
-        if env_ids is None:
-            env_ids = torch.arange(env.scene.num_envs, device=device)
-        env_ids = env_ids.to(device=device, dtype=torch.long)
-        n = len(env_ids)
+        ids: torch.Tensor = (torch.arange(env.scene.num_envs, device=device) if env_ids is None else env_ids).to(
+            device=device, dtype=torch.long
+        )
+        n = int(ids.numel())
         if n == 0:
             return
 
@@ -195,11 +202,11 @@ class randomize_coupled_plant_scale(ManagerTermBase):
         factor = s * u  # (n, num_joints)
 
         # ---- 적용: default × factor (코어 규약 — 캐시된 default 로 리셋 후 scale) ----
-        env_ids_i32 = env_ids.to(torch.int32)
-        armature = self._def_armature[env_ids] * factor
-        fric_static = torch.clamp(self._def_fric_static[env_ids] * factor, min=0.0)
-        fric_visc = torch.clamp(self._def_fric_visc[env_ids] * factor, min=0.0)
-        fric_dyn = torch.clamp(self._def_fric_dyn[env_ids] * factor, min=0.0)
+        env_ids_i32 = ids.to(torch.int32)
+        armature = self._def_armature[ids] * factor
+        fric_static = torch.clamp(self._def_fric_static[ids] * factor, min=0.0)
+        fric_visc = torch.clamp(self._def_fric_visc[ids] * factor, min=0.0)
+        fric_dyn = torch.clamp(self._def_fric_dyn[ids] * factor, min=0.0)
         fric_dyn = torch.minimum(fric_dyn, fric_static)  # dynamic ≤ static (코어와 동일 보정)
 
         self.asset.write_joint_armature_to_sim_index(
@@ -213,18 +220,20 @@ class randomize_coupled_plant_scale(ManagerTermBase):
             env_ids=env_ids_i32,
         )
         # ⚠ 캐시도 갱신 — 클래스 docstring 의 raw 마찰 항목 참고 (안 하면 foot 마찰 DR 이 사라진다).
-        self._t(self.asset.data.default_joint_armature)[env_ids] = armature
-        self._t(self.asset.data.default_joint_friction_coeff)[env_ids] = fric_static
-        self._t(self.asset.data.default_joint_viscous_friction_coeff)[env_ids] = fric_visc
+        self._t(self.asset.data.default_joint_armature)[ids] = armature
+        self._t(self.asset.data.default_joint_friction_coeff)[ids] = fric_static
+        self._t(self.asset.data.default_joint_viscous_friction_coeff)[ids] = fric_visc
 
         # ---- 게인 ----
+        from isaaclab.actuators import ImplicitActuator  # 지역 import — 모듈 상단 주석 참고
+
         for aname, actuator in self.asset.actuators.items():
             cols = self._act_cols[aname]
             f = factor[:, cols]
-            kp = self._def_kp[aname][env_ids] * f
-            kd = self._def_kd[aname][env_ids] * f
-            actuator.stiffness[env_ids] = kp
-            actuator.damping[env_ids] = kd
+            kp = self._def_kp[aname][ids] * f
+            kd = self._def_kd[aname][ids] * f
+            actuator.stiffness[ids] = kp
+            actuator.damping[ids] = kd
             if isinstance(actuator, ImplicitActuator):
                 # implicit 은 PhysX 쪽이 진짜 게인이다.
                 self.asset.write_joint_stiffness_to_sim_index(
