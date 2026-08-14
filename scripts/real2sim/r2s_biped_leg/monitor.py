@@ -94,6 +94,7 @@ class MonitorWindow(QMainWindow):
         show_action: bool = True,
         title: str = "R2S-BipedLeg Monitor",
         joint: str | None = None,
+        gain_exponent: float = r2s_udp.DEFAULT_GAIN_EXPONENT,
     ) -> None:
         super().__init__()
         self._joint_names = joint_names
@@ -101,6 +102,9 @@ class MonitorWindow(QMainWindow):
         self._port = port if port is not None else r2s_udp.MONITOR_PORT
         self._label = label
         self._show_action = show_action
+        # 실기 tau(채널기준) → 관절토크 환산의 게인 지수. **미판정 값에 대한 베팅**이므로
+        # 축 라벨에 함께 표시한다 (:func:`r2s_udp.channel_tau_to_joint`).
+        self._gain_exponent = float(gain_exponent)
         self._sel_idx: int = 0
         self._paused: bool = False
         self._deg_units: bool = False
@@ -192,7 +196,9 @@ class MonitorWindow(QMainWindow):
         # _update_axis_labels()가 다시 채운다.
         specs = [
             ("Joint position q", (-2.0, 2.0)),
-            ("Torque tau_est [Nm]", (-60.0, 60.0)),
+            # 실기 tau 는 채널기준으로 도착하므로 관절 좌표로 올려서 담는다(_poll). 지수 n 은
+            # 미판정 값이라 라벨에 노출한다 — 보는 사람이 어떤 가정의 그림인지 알아야 한다.
+            (f"Joint torque [Nm] (real lifted, n={self._gain_exponent:g})", (-60.0, 60.0)),
             ("Joint velocity dq", (-30.0, 30.0)),
         ]
         self._axes: list[pg.PlotItem] = []
@@ -276,8 +282,14 @@ class MonitorWindow(QMainWindow):
                 if m is None:
                     continue
                 # real 중계는 action_q=0(무의미) — sim_q/sim_dq/sim_tau 필드에 실기 q/dq/tau가 담긴다.
+                # ⚠ tau 만 좌표가 다르다: 브리지가 tau 를 변환 없이 통과시켜 **채널기준**인데 sim 은
+                #   관절기준(applied_torque)이라, 그대로 겹쳐 그리면 서로 다른 자로 잰 값을 비교하게
+                #   된다(calf 1.5배·foot 1.2배 + calf 전치항). 관절 좌표로 올려서 담는다.
+                #   ★환산은 **8-벡터 전체에** 해야 한다 — calf 는 같은 다리 foot 값이 필요하므로
+                #   관절 선택(i) 뒤에 하면 계산이 불가능하다.
+                tau_joint = r2s_udp.channel_tau_to_joint(m["sim_tau"], self._gain_exponent)
                 self._real_anchor = self._append_seq(
-                    self._real_buf, self._real_anchor, m["seq"], (m["sim_q"][i], m["sim_dq"][i], m["sim_tau"][i]), now
+                    self._real_buf, self._real_anchor, m["seq"], (m["sim_q"][i], m["sim_dq"][i], tau_joint[i]), now
                 )
 
     @staticmethod

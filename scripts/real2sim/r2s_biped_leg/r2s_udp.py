@@ -314,6 +314,59 @@ def unpack_policy_cmd(data: bytes) -> dict | None:
 # ⚠ 이 상수는 C++ ``R2S_CONVENTION_VERSION`` 과 값 일치 필수 (다른 언어라 중복 정의).
 R2S_CONVENTION_VERSION: int = 1
 
+# ---------------------------------------------------------------------------
+# 채널기준 토크 → 관절토크 (표시·비교 전용 파생값)
+# ---------------------------------------------------------------------------
+
+#: 관절별 ``gear_k`` = 실제감속비 / 7 — **leg-major** (:data:`NUM_JOINTS` 주석 순서).
+#: ⚠ articulation(type-major) 순서와 다르다. 거기서는 foot 의 calf 짝이 ``i−2`` 지만
+#: 여기(UDP/monitor, leg-major)에서는 ``i−1`` 이다 — 헷갈리면 **반대 다리** 값을 더하게 된다.
+GEAR_K: tuple[float, ...] = (1.0, 1.0, 1.5, 1.2, 1.0, 1.0, 1.5, 1.2)
+
+#: foot 슬롯 인덱스와 같은 다리 calf 슬롯 (leg-major).
+_FOOT_CALF_PAIRS: tuple[tuple[int, int], ...] = ((3, 2), (7, 6))
+
+#: 게인 지수 기본값. 컨버터 ``GAIN_GEAR_SCALE`` 와 같은 베팅이며 **확정이 아니다**.
+DEFAULT_GAIN_EXPONENT: float = 2.0
+
+
+def channel_tau_to_joint(tau_ch, gain_exponent: float = DEFAULT_GAIN_EXPONENT) -> list[float]:
+    """드라이버가 보고한 **채널기준** 토크를 관절토크로 올린다 (leg-major 8-벡터).
+
+    브리지는 ``tau`` 를 변환 없이 통과시킨다(:data:`R2S_CONVENTION_VERSION` 주석 참조). 그래서
+    실기 TELEM 의 tau 는 채널 좌표, sim 의 ``applied_torque`` 는 관절 좌표라 **그대로 겹쳐 그리면
+    서로 다른 자로 잰 값을 비교**하게 된다. 이 함수는 실기 쪽을 sim 과 같은 관절 좌표로 올린다.
+
+    변환은 두 단계다::
+
+        τ_raw  = k^(n−1) · τ_ch                       # 감속비
+        τ_joint_calf = τ_raw_calf + τ_raw_foot        # 커플링 전치 (역방향)
+        τ_joint_foot = τ_raw_foot
+
+    전치항이 필요한 이유는 **sim 쪽에 그 항이 실제로 들어 있기 때문**이다 — 2026-08-14 실측:
+    calf 게인을 0 으로 두고 ``foot_transpose`` 를 켜면 ``applied_torque[calf]`` 가 전치항 예측과
+    비 1.011 / 1.017 로 일치하고, 끄면 정확히 ``0.0000`` 이 된다. 반면 실기 보고값은 **지령 토크
+    에코**라 calf 채널 자신의 PD 법칙만 담고 전치항이 없다.
+
+    ⚠ 부호 주의: ``calib_bipedleg.hpp`` 의 ``τ_raw_calf −= τ_foot`` 은 **정방향**(원하는 관절토크
+    → 모터 명령)이고, 여기 ``+`` 는 그 역방향이다. 같은 식의 양쪽이라 모순이 아니다.
+
+    Args:
+        tau_ch: 채널기준 토크 [N·m], 길이 8, leg-major.
+        gain_exponent: 게인 지수 ``n``. **미판정 값에 대한 베팅이다** — ``n=2`` 면 감속비 배율이
+            ``k`` 이고, ``n=1`` 이면 ``1`` 이라 감속비 보정이 사라진다(전치는 남는다).
+
+    Returns:
+        관절 좌표 토크 [N·m], 길이 8, leg-major.
+    """
+    p = float(gain_exponent) - 1.0
+    tau_raw = [float(tau_ch[i]) * (GEAR_K[i] ** p) for i in range(NUM_JOINTS)]
+    out = list(tau_raw)
+    for foot_i, calf_i in _FOOT_CALF_PAIRS:
+        out[calf_i] = tau_raw[calf_i] + tau_raw[foot_i]
+    return out
+
+
 # magic(I) seq(I) + q(8f) + dq(8f) + gravity(3f) + convention_version(B)
 #   — **articulation 순서** (재매핑 없음). 84 → 85 B, offset 0~83 은 불변.
 # ⚠ STATE 에는 **legacy(84 B) 분기를 두지 않는다** — 하드 컷오버다. TELEM 과 다르게 가는 이유:
@@ -634,6 +687,23 @@ if __name__ == "__main__":
     assert unpack_state(ie) is None and unpack_ieff(s) is None
     # policy ACT(40B)와 크기가 같지만 magic으로 갈린다 (포트도 다름 — 방어선 2중).
     assert unpack_ieff(pack_policy_act(1, z)) is None
+
+    # --- 채널기준 tau → 관절토크 ---
+    # leg-major 슬롯: 0 HL_hip · 1 HL_thigh · 2 HL_calf · 3 HL_foot · 4 HR_hip · … · 7 HR_foot
+    t = channel_tau_to_joint([1.0, 2.0, 10.0, 5.0, 1.0, 2.0, 20.0, 4.0], gain_exponent=2.0)
+    assert abs(t[0] - 1.0) < 1e-9 and abs(t[1] - 2.0) < 1e-9, t  # k=1 축은 그대로
+    assert abs(t[3] - 1.2 * 5.0) < 1e-9, t  # foot = k_f·τ_ch
+    assert abs(t[2] - (1.5 * 10.0 + 1.2 * 5.0)) < 1e-9, t  # calf = k_c·τ_calf + k_f·τ_foot
+    assert abs(t[7] - 1.2 * 4.0) < 1e-9, t
+    assert abs(t[6] - (1.5 * 20.0 + 1.2 * 4.0)) < 1e-9, t
+    # ★좌우가 섞이지 않는가 — HL foot 만 크게 넣고 HR calf 가 변하지 않는지 본다.
+    #   leg-major 에서 짝은 i−1 인데 articulation(type-major) 규칙 i−2 를 잘못 쓰면 여기서 걸린다.
+    t2 = channel_tau_to_joint([0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0], gain_exponent=2.0)
+    assert abs(t2[2] - 120.0) < 1e-9, t2  # HL calf 가 받는다
+    assert abs(t2[6]) < 1e-9, t2  # HR calf 는 무관
+    # n=1 이면 감속비 배율이 사라지고 전치만 남는다.
+    t3 = channel_tau_to_joint([0.0, 0.0, 10.0, 5.0, 0.0, 0.0, 0.0, 0.0], gain_exponent=1.0)
+    assert abs(t3[3] - 5.0) < 1e-9 and abs(t3[2] - 15.0) < 1e-9, t3
 
     # policy mode 패킷 왕복.
     pc = pack_policy_cmd(4, 1, 0, 1.5, -0.3)

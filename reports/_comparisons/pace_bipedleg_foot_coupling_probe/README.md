@@ -239,9 +239,62 @@ gen 50 의 +40% 가 지금까지 최대지만 gen 60 에 +35% 로 되돌았고, 
 > 독자가 판단할 수 있도록 남겨 둔다. 다만 둘 다 값과 무관한 근거가 있다 — bias 는 bounds 가
 > 0 을 중심으로 한다는 사실에서, delay 는 전역 스칼라라는 사실에서 나온다.
 
+## 8. 모니터가 서로 다른 좌표를 겹쳐 그리고 있었다 (2026-08-14)
+
+**sim-to-real 일치를 눈으로 판정하는 바로 그 도구가 서로 다른 자로 잰 값을 한 축에 올리고 있었다.**
+
+| | 출처 | 좌표 |
+|---|---|---|
+| sim tau | `robot.data.applied_torque` | **관절** |
+| real tau | 드라이버 `fTorque` 무변환 통과 | **채널** |
+
+`monitor.py` 는 둘을 같은 `axes[1]` 에 스케일 없이 올린다. 그런데 sim 은 GUI 가 보낸 **채널 게인**을
+관절 drive 게인으로 그대로 쓰므로, 같은 추종오차에 대해 `real = k × sim` 이다 —
+**calf 1.5배 · foot 1.2배 · hip/thigh 1.0배.** hip/thigh 가 맞아떨어져 안 보였다.
+**`gear_k` 원 버그와 똑같은 서명(k≠1 축에만 몰림)이다.**
+
+### 실측 — sim calf 에는 전치항이 들어 있다
+
+환산식에 전치항이 필요한지는 `applied_torque` 가 effort target 을 계상하는지에 달렸다.
+**calf 게인을 0 으로** 두면 calf PD 기여가 0 이라 남는 것이 effort target 뿐이다:
+
+| `foot_transpose` | `applied_torque[calf]` | 전치항 예측 | 비 |
+|---|---|---|---|
+| ON | −2.4988 / −1.4744 | −2.4710 / −1.4504 | **1.011 / 1.017** |
+| OFF | **0.0000 / 0.0000** | — | — |
+
+⇒ **계상된다.** sim calf 에는 전치항이 있고, 실기 보고값은 **지령 토크 에코**라 calf 채널 자신의
+PD 법칙만 담아 전치항이 없다.
+
+> ⚠ **`foot_transpose` True/False A/B 는 이 질문에 답하지 못한다.** 전치를 켜면 운동 자체가 바뀌어
+> calf tau 가 어차피 달라지므로 "전치항"과 "궤적 발산"이 분리되지 않는다. 실측으로도 Δcalf/τ_foot 이
+> 40스텝에서 0.003 / 0.42, 3스텝에서 −3.98 / −0.79 로 **≈+1 과 전혀 맞지 않았다** — 두 번 다
+> 전치항이 아니라 발산을 보고 있었다. 게인을 0 으로 죽이는 설계라야 분리된다.
+
+### 환산식과 적용 위치
+
+$$\tau_{\text{raw}} = k^{\,n-1}\,\tau_{\text{ch}}, \qquad
+\tau_{\text{joint,calf}} = \tau_{\text{raw,calf}} + \tau_{\text{raw,foot}}, \qquad
+\tau_{\text{joint,foot}} = \tau_{\text{raw,foot}}$$
+
+`n=2` 면 배율이 `k`, `n=1` 이면 `1`(전치는 남는다). **브리지가 아니라 소비자(모니터)에서** 환산한다 —
+선로 위 tau 는 raw 로 두어야 미판정 지수 `n` 에 대한 베팅이 데이터에 구워지지 않는다.
+구현은 `r2s_udp.channel_tau_to_joint()`, 축 라벨에 `n` 을 노출한다.
+
+⚠ **순서 함정**: UDP·모니터는 **leg-major** 라 foot 의 calf 짝이 `i−1` 이다. articulation(type-major)
+규칙 `i−2` 를 쓰면 **반대 다리** 값을 더한다. `gui_controller` 가 중계 전에 재배열한다
+(`tau_lm = [t["tau"][a] for a in _ART_FOR_LEGMAJOR]`).
+
+### 부수 — 토크 트립도 채널기준이다
+
+설정 15 N·m 이 채널기준이라 **calf 실제 관절토크는 22.5 N·m**(foot 18). 트립을 관절 기준으로
+착각하면 15 에서 보호받는다고 믿지만 관절은 22.5 까지 간다.
+
 ## 재현
 
 ```bash
+python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_in_applied_torque.py --headless
+# → §8 — calf 게인 0 으로 두고 applied_torque 가 effort target 을 계상하는지 판정
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/compare_foot_fits.py
 # → metrics/foot_fit_comparison.json  (mean_*.pt 에서 직접 읽음)
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/torque_budget_check.py
