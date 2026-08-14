@@ -60,6 +60,13 @@ parser.add_argument(
     help="Policy mode: receive articulation-order target from policy_runner_bipedleg.py (POLICY_ACT_PORT) "
     "and publish rich state (q,dq,gravity) on POLICY_STATE_PORT. Free base (fix_base forced False).",
 )
+parser.add_argument(
+    "--convention_version",
+    type=int,
+    default=None,
+    help="Override the coordinate-convention version stamped into POLICY_STATE. Default: derived "
+    "from the env (see _policy_state_convention_version).",
+)
 parser.add_argument("--cmd_port", type=int, default=CMD_PORT, help="UDP port to receive motor commands on.")
 parser.add_argument("--state_port", type=int, default=STATE_PORT, help="UDP port to send sim state to.")
 parser.add_argument(
@@ -90,6 +97,32 @@ TASK_NAME = "Isaac-R2S-BipedLeg-v0"
 HOST = "127.0.0.1"
 
 
+def _policy_state_convention_version(env_cfg) -> int:
+    """POLICY_STATE 에 실을 좌표 규약 버전을 env cfg 로부터 정한다 (r2s_udp.R2S_CONVENTION_VERSION 참조).
+
+    **POLICY_STATE 경로(9885)는 이미 관절 좌표다 → 버전 1.** 코드 세 곳으로 확인한 사실이다:
+
+    * ``r2s_biped_leg_env.py`` ``_pre_physics_step`` policy 분기 — ``set_joint_position_target``
+      한 줄 뒤 **즉시 return**. 커플링 치환 없음 ⇒ 들어온 ACT foot 목표를 **관절** 목표로 해석.
+    * 같은 파일 ``_apply_action`` — ``if cfg.policy_mode ...: return`` 로 live 커플링 블록을 건너뜀.
+    * 같은 파일 ``get_policy_state`` — ``robot.data.joint_pos[0]`` 를 그대로 반환(커플링 미적용)
+      ⇒ 보고되는 foot 도 **관절각**.
+
+    ⚠ ``get_lowstate`` 가 foot 을 raw 로 보고하는 것은 사실이나, 그건 **GUI position 모드 STATE
+    (포트 9882, ``_STATE_FMT``)** 경로다 — 여기서 스탬프하는 ``_POLICY_STATE_FMT``(9885)와 다른
+    패킷이다. 그 경로는 이번 이관 범위 밖이고 아직 raw 다.
+
+    또 POLICY_STATE 에는 ``tau`` 가 없어서 규약 정의의 gear/tau 절은 이 패킷과 무관하다 —
+    버전을 가르는 유일한 조항이 foot 프레임이고, sim 은 관절이다.
+
+    ⚠ 지금 env cfg 에는 규약을 나타내는 필드가 **없다**(``convention``/``foot_frame`` 류 grep 0건).
+    그래서 아래는 cfg 에서 읽는 게 아니라 위 근거로 못박은 값이다. worker-3 의 env 좌표 이관에서
+    규약 필드가 생기면 여기서 그 필드를 읽도록 바꿀 것 (TODO).
+    """
+    del env_cfg  # 아직 읽을 필드가 없다 — 시그니처만 미리 맞춰 둔다
+    return 1
+
+
 def main() -> None:
     """Run the UDP <-> Isaac Sim biped-leg bridge loop (latest-wins, non-blocking recv)."""
     # parse and override the environment configuration (CONTRACT §5: fix_base toggle)
@@ -112,7 +145,12 @@ def main() -> None:
     env.reset()
 
     if args_cli.policy_mode:
-        _run_policy_loop(env)
+        conv_ver = (
+            args_cli.convention_version
+            if args_cli.convention_version is not None
+            else _policy_state_convention_version(env_cfg)
+        )
+        _run_policy_loop(env, conv_ver)
     else:
         _run_position_loop(env)
 
@@ -216,11 +254,15 @@ def _run_position_loop(env) -> None:
         env.close()
 
 
-def _run_policy_loop(env) -> None:
+def _run_policy_loop(env, conv_ver: int) -> None:
     """Policy 브릿지 (policy_runner_bipedleg.py <-> sim).
 
     POLICY_ACT_PORT 에서 articulation-순서 목표각을 받아 set_policy_target 으로 적용하고,
     매 step 후 rich state(q,dq,gravity)를 POLICY_STATE_PORT 로 회신한다 (latest-wins).
+
+    Args:
+        env: gym 환경 (policy_mode=True).
+        conv_ver: STATE 에 실을 좌표 규약 버전 — :func:`_policy_state_convention_version` 참조.
     """
     recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     recv_sock.bind((HOST, POLICY_ACT_PORT))
@@ -229,7 +271,7 @@ def _run_policy_loop(env) -> None:
 
     print(
         f"[sim_runner_bipedleg] policy mode (lockstep) — UDP listening on {HOST}:{POLICY_ACT_PORT}, "
-        f"sending rich state to sender:{POLICY_STATE_PORT}",
+        f"sending rich state to sender:{POLICY_STATE_PORT}  (convention_version={conv_ver})",
         flush=True,
     )
 
@@ -264,7 +306,7 @@ def _run_policy_loop(env) -> None:
 
             # 이번 step 결과 rich state를 action 발신자(policy_runner)에게 회신
             st = env.unwrapped.get_policy_state()
-            packet = pack_policy_state(seq, st["q"], st["dq"], st["gravity"])
+            packet = pack_policy_state(seq, st["q"], st["dq"], st["gravity"], convention_version=conv_ver)
             send_sock.sendto(packet, (src[0], POLICY_STATE_PORT))
             seq += 1
     finally:

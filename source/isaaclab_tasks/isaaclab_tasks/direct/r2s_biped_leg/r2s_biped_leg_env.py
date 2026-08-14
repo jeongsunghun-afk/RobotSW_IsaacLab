@@ -25,6 +25,7 @@ from .r2s_biped_leg_env_cfg import (
     DEFAULT_KD,
     DEFAULT_KP,
     FIXED_BASE_HEIGHT_M,
+    FOOT_LINK_INERTIA_KGM2,
     JOINT_NAME_PATTERNS,
     NUM_JOINTS,
     V_MAX_RAD,
@@ -85,19 +86,38 @@ class R2SBipedLegEnv(DirectRLEnv):
         self._foot_kp_eff = torch.zeros(self.num_envs, 2, device=self.device)
         self._foot_kd_eff = torch.zeros(self.num_envs, 2, device=self.device)
         # foot 토크 한계 (전치 토크 예측 클램프용) — actuator 그룹에서 수집.
+        # 같은 순회에서 policy 모드용 **액추에이터 열 인덱스**도 캐시한다: policy 경로는 200 Hz
+        # 실시간 배포 경로라 매 물리 스텝 :meth:`_actuator_gains_at` (파이썬 루프 + 텐서 할당)을
+        # 도는 건 낭비다. 열만 알면 ``actuator.stiffness[:, cols]`` 로 바로 읽을 수 있다
+        # (학습 env `hind_leg_env`의 `_foot_act_cols`와 같은 패턴).
         tau_max = torch.full((2,), float("inf"), device=self.device)
+        self._foot_actuator = None
+        self._foot_act_cols: list[int] = []
         for actuator in self.robot.actuators.values():
             ids = actuator.joint_indices
             if isinstance(ids, slice):
                 ids = list(range(self.robot.num_joints))
             ids = [int(i) for i in ids]
+            if all(int(fid) in ids for fid in self._foot_art_ids):
+                self._foot_actuator = actuator
+                self._foot_act_cols = [ids.index(int(fid)) for fid in self._foot_art_ids]
             for k, fid in enumerate(self._foot_art_ids):
                 if int(fid) in ids:
                     tau_max[k] = float(actuator.effort_limit[0, ids.index(int(fid))])
         self._foot_tau_max = tau_max
 
+        # raw 좌표 foot 마찰 (cfg.foot_raw_friction) — foot 관절의 PhysX 마찰을 0으로 눌러 둘 때
+        # 쓰는 인덱스/영텐서를 미리 만들어 둔다 (warp 커널은 int32 인덱스를 요구한다).
+        self._foot_art_ids_i32 = torch.as_tensor(self._foot_art_ids, dtype=torch.int32, device=self.device)
+        self._all_env_ids_i32 = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
+        self._foot_zero_fric = torch.zeros(self.num_envs, len(self._foot_art_ids), device=self.device)
+
         # 스톡 플랜트 물성 캡처 (set_plant_params mode=0 복원용) — cfg 적용 직후의 값 [leg-major].
         # 6.0 data의 default_* 컨테이너는 warp 프론트엔드일 수 있어 .torch 뷰로 접근한다.
+        # ⚠ 이 읽기는 raw 좌표 foot 마찰에도 **load-bearing**이다: ``data.default_joint_*`` 는 최초
+        #   접근 시점의 sim 값을 복제하는 lazy clone이라, _clear_foot_joint_friction()이 sim을 0으로
+        #   만든 뒤에 처음 접근하면 0이 복제돼 b_raw/c_raw가 사라진다. 여기(어떤 zeroing보다 먼저)서
+        #   읽어 캐시를 cfg 값으로 고정해 둔다 — 순서를 바꾸지 말 것.
         jid_long = torch.as_tensor(self._joint_ids, dtype=torch.long, device=self.device)
         self._plant_joint_ids_i32 = torch.as_tensor(self._joint_ids, dtype=torch.int32, device=self.device)
         self._stock_armature = self._data_tensor(self.robot.data.default_joint_armature)[:, jid_long].clone()
@@ -139,23 +159,24 @@ class R2SBipedLegEnv(DirectRLEnv):
     def get_lowstate(self) -> dict:
         """현재 상태 반환 (numpy). num_envs==1 가정 (CONTRACT §5).
 
+        **전 관절 관절(모델) 좌표**로 보고한다 (:data:`CONVENTION_VERSION` = 1). foot도 예외가
+        아니다 — 브리지(``real_runner``)가 raw↔관절 변환을 전담하게 되면서 실기 TELEM도 관절각을
+        보내므로, sim이 foot만 raw로 보고하면 좌표가 어긋난다.
+
+        ⚠ 2026-08-14 이전에는 ``foot_coupling=True`` 일 때 foot q/dq/ddq를 raw각
+        ``q_foot + q_calf`` 로 합산해 보고했다(구 규약 0). 그 합산을 제거했다 — foot 전달기구
+        커플링은 :meth:`_apply_foot_coupling` 안에서 raw를 합성해 재현할 뿐, **밖으로 나가는 값은
+        전부 관절각**이다.
+
         Returns:
-            dict — q, dq, ddq, tau_est (각 길이 8, JOINT 순서). IMU/base 상태는 미노출.
+            dict — q, dq, ddq, tau_est (각 길이 8, JOINT 순서, 관절 좌표). IMU/base 상태는 미노출.
         """
-        out = {
+        return {
             "q": self.robot.data.joint_pos[0, self._joint_ids].cpu().numpy(),
             "dq": self.robot.data.joint_vel[0, self._joint_ids].cpu().numpy(),
             "ddq": self.robot.data.joint_acc[0, self._joint_ids].cpu().numpy(),
             "tau_est": self.robot.data.applied_torque[0, self._joint_ids].cpu().numpy(),
         }
-        if self.cfg.foot_coupling:
-            # foot은 raw각(q_foot+q_calf)으로 보고 — 실기 TELEM(커플링 미해제 모터각)과 의미를 맞춰
-            # GUI 슬라이더 래치/monitor 비교가 같은 좌표가 되게 한다. tau는 관절토크=모터토크라 그대로.
-            for c, f in zip(self._couple_calf_lm, self._couple_foot_lm):
-                out["q"][f] += out["q"][c]
-                out["dq"][f] += out["dq"][c]
-                out["ddq"][f] += out["ddq"][c]
-        return out
 
     def get_joint_ieff(self) -> torch.Tensor:
         """관절별 유효 관성 [kg·m²]을 반환 (leg-major, 길이 8).
@@ -295,9 +316,16 @@ class R2SBipedLegEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         if self.cfg.policy_mode:
             # policy 모드: 외부(policy_runner)가 set_policy_target으로 넣은 articulation 순서 절대
-            # 목표각을 그대로 적용. slew/faithful PD 우회. joint_ids 생략 = 전체 관절 articulation 순서.
+            # **관절** 목표각을 그대로 적용. slew/faithful PD 우회. joint_ids 생략 = 전체 관절 순서.
             del actions
             self.robot.set_joint_position_target(self._policy_target)
+            # 2026-08-14: foot 커플링을 policy 모드에도 적용한다(_apply_action). 이전에는 통째로
+            # 건너뛰어서 **sim 정책 테스트가 학습 env(`hind_leg_env._apply_action`)와 다르게**
+            # 동작했다 — 학습은 커플링을 적용하는데 배포 리허설은 안 하는 상태였다.
+            if self.cfg.foot_coupling and self.cfg.foot_raw_friction:
+                # 관절 좌표 PhysX 마찰 제거는 제어 스텝마다 1회. 빠뜨리면 raw 마찰(feedforward)과
+                # PhysX 관절 마찰이 **이중으로** 걸린다 (b_raw는 default_* 캐시에서 계속 읽히므로).
+                self._clear_foot_joint_friction()
             return
         if self.cfg.sysid:
             # sysid 모드: actions = 절대 목표각 [rad], **articulation 관절 순서**.
@@ -320,12 +348,26 @@ class R2SBipedLegEnv(DirectRLEnv):
                 actions = actions.clone()
                 actions[:, self._foot_art_ids] = raw_t - q_c
                 self.robot.set_joint_velocity_target_index(target=-dq_c, joint_ids=self._foot_art_ids)
-                kp_f, kd_f = self._actuator_gains_at(self._foot_art_ids)
-                tau_pred = kp_f * ((raw_t - q_c) - q[:, self._foot_art_ids]) + kd_f * (
-                    -dq_c - dq[:, self._foot_art_ids]
-                )
-                tau_pred = tau_pred.clamp(-self._foot_tau_max, self._foot_tau_max)
-                self.robot.set_joint_effort_target_index(target=tau_pred, joint_ids=self._calf_art_ids)
+                # calf에 실을 모터축 토크. 전치(PD 구동분)와 raw 마찰은 같은 일률 보존 규칙에서
+                # 나오지만 A/B를 위해 플래그가 따로 있다 — 실기 구성은 둘 다 True다.
+                tau_calf = None
+                if self.cfg.foot_transpose:
+                    kp_f, kd_f = self._actuator_gains_at(self._foot_art_ids)
+                    tau_calf = kp_f * ((raw_t - q_c) - q[:, self._foot_art_ids]) + kd_f * (
+                        -dq_c - dq[:, self._foot_art_ids]
+                    )
+                if self.cfg.foot_raw_friction:
+                    # 관절 좌표 PhysX 마찰을 끄고(매 제어 스텝 = 매 물리 스텝, decimation=1)
+                    # raw 좌표 마찰을 foot·calf 양쪽에 같은 부호로 넣는다.
+                    self._clear_foot_joint_friction()
+                    tau_fric = self._foot_raw_friction_torque()
+                    self.robot.set_joint_effort_target_index(target=tau_fric, joint_ids=self._foot_art_ids)
+                    tau_calf = tau_fric if tau_calf is None else tau_calf + tau_fric
+                if tau_calf is not None:
+                    # 전치분+마찰을 **합쳐서 한 번** 클램프한다 — 따로 자르면 합이 foot 모터 한계의
+                    # 2배까지 커질 수 있다.
+                    tau_calf = tau_calf.clamp(-self._foot_tau_max, self._foot_tau_max)
+                    self.robot.set_joint_effort_target_index(target=tau_calf, joint_ids=self._calf_art_ids)
             self.robot.set_joint_position_target_index(target=actions)
             return
         del actions  # live 모드: setpoint은 self._setpoint에서 직접 주입
@@ -345,6 +387,11 @@ class R2SBipedLegEnv(DirectRLEnv):
             hold_kd = torch.full_like(self._foot_kd_eff, self.cfg.coupling_hold_kd)
             self._foot_kp_eff = torch.where(hold_now, hold_kp, self._kp[:, self._couple_foot_lm])
             self._foot_kd_eff = torch.where(hold_now, hold_kd, self._kd[:, self._couple_foot_lm])
+            if self.cfg.foot_raw_friction:
+                # 관절 좌표 PhysX 마찰 제거는 제어 스텝(50 Hz)마다 1회면 충분하다 — 파라미터는
+                # set_plant_params 호출 때만 바뀐다. 마찰 토크 자체는 _apply_action에서 물리
+                # 스텝(200 Hz)마다 갱신한다.
+                self._clear_foot_joint_friction()
             kp_cmd = self._kp.clone()
             kd_cmd = self._kd.clone()
             kp_cmd[:, self._couple_foot_lm] = self._foot_kp_eff
@@ -382,6 +429,64 @@ class R2SBipedLegEnv(DirectRLEnv):
                     kd[:, k] = actuator.damping[:, j]
         return kp, kd
 
+    def _clear_foot_joint_friction(self) -> None:
+        """foot 관절의 PhysX 마찰(static/dynamic/viscous)을 sim에서 0으로 지운다.
+
+        PhysX 마찰은 관절 속도 ``q̇_f`` 에만 걸리는데 실제 마찰은 모터축 ``θ̇_f = q̇_f + q̇_c`` 에
+        앉아 있다 (`cfg.foot_raw_friction` 주석). 그래서 관절 좌표 마찰은 끄고
+        :meth:`_foot_raw_friction_torque` 가 raw 좌표에서 계산한 토크를 대신 넣는다.
+
+        ⚠ ``data.default_joint_*_friction_coeff`` 캐시는 **건드리지 않는다** — 그 캐시가 b_raw/c_raw의
+        저장소이기 때문이다. PACE ``CMAESOptimizer.update_simulator`` 와 :meth:`set_plant_params` 가
+        후보값을 sim과 캐시 양쪽에 쓰므로, sim 쪽만 매 제어 스텝 0으로 눌러 두면 캐시에는 파라미터가
+        남는다. (파라미터가 언제 바뀌었는지 알려면 GPU→CPU 동기화가 필요해 매번 쓰는 편이 싸다.)
+        """
+        self.robot.write_joint_friction_coefficient_to_sim_index(
+            joint_friction_coeff=self._foot_zero_fric,
+            joint_dynamic_friction_coeff=self._foot_zero_fric,
+            joint_viscous_friction_coeff=self._foot_zero_fric,
+            joint_ids=self._foot_art_ids_i32,
+            env_ids=self._all_env_ids_i32,
+        )
+
+    def _foot_raw_friction_torque(self) -> torch.Tensor:
+        """foot 모터축(raw) 좌표의 감속기·벨트 마찰 토크 [N·m], shape (num_envs, 2), leg 순서.
+
+        모터축 속도가 ``w_raw = q̇_foot + q̇_calf`` 이므로::
+
+            τ_fric = −(b_raw·w_raw + c_raw·tanh(w_raw / eps))
+
+        b_raw/c_raw 는 foot 관절의 viscous/Coulomb 슬롯을 재해석해 읽는다
+        (`cfg.foot_raw_friction` 주석의 파라미터 재해석 항목).
+
+        ``sign`` 대신 ``tanh(w_raw / eps)`` (eps = :attr:`R2SBipedLegEnvCfg.foot_raw_friction_vel_eps`)
+        를 쓴다 — 0 근처에서 부호가 매 스텝 뒤집히는 채터링을 막는다.
+
+        ⚠ **안정성 캡**: PhysX 관절 마찰은 구속 기반이라 무조건 안정하지만, 여기서는 마찰을
+        명시적(explicit) feedforward 토크로 넣으므로 ``b_eff·dt / I > 2`` 면 발산한다. raw 축 관성은
+        ``I ≈ armature_foot + FOOT_LINK_INERTIA_KGM2`` 인데 armature 가 PACE 식별 대상(하한 1e-5)이라
+        I 가 0.0019 까지 내려갈 수 있고, 그러면 안정 한계가 ``2·0.0019/0.005 ≈ 0.76 N·m·s/rad`` 로
+        viscous 상한(5.0)보다 훨씬 작아진다. 그래서 마찰이 한 스텝 안에 축 속도를 **역전시키지
+        못하도록** ``|τ_fric| ≤ I·|w_raw| / dt`` 로 자른다. 이 캡이 없으면 CMA-ES 가 뽑은 큰 b/c
+        후보가 크래시 없이 조용히 발산해 적합이 저-마찰 쪽으로 편향된다.
+
+        ⚠ 위 안정 캡은 armature 가 크면 느슨해진다(실측: armature 0.4 후보에서 캡 ≈3600 N·m). 그래서
+        모터 토크 한계 ``_foot_tau_max`` 로 **한 번 더** 자른다. 이게 없으면 τ_fric 이 foot 한계를
+        넘어(실측 216 N·m vs 100.8) foot 쪽은 DCMotor 의 총토크 클립에, calf 쪽은
+        ``clamp(±_foot_tau_max)`` 에 각각 다르게 잘려 **두 관절이 서로 다른 토크를 받는다** —
+        이 변경이 강제하려는 일률 보존 항등식(τ_foot = τ_calf 기여분) 자체가 깨진다.
+        """
+        dq = self.robot.data.joint_vel
+        w_raw = dq[:, self._foot_art_ids] + dq[:, self._calf_art_ids]
+        b_raw = self._data_tensor(self.robot.data.default_joint_viscous_friction_coeff)[:, self._foot_art_ids]
+        c_raw = self._data_tensor(self.robot.data.default_joint_friction_coeff)[:, self._foot_art_ids]
+        eps = max(float(self.cfg.foot_raw_friction_vel_eps), 1e-6)
+        mag = (b_raw * w_raw + c_raw * torch.tanh(w_raw / eps)).abs()
+        i_raw = self._data_tensor(self.robot.data.default_joint_armature)[:, self._foot_art_ids]
+        tau_cap = (i_raw + FOOT_LINK_INERTIA_KGM2) * w_raw.abs() / self.cfg.sim.dt
+        tau_cap = torch.minimum(tau_cap, self._foot_tau_max)
+        return -torch.sign(w_raw) * torch.minimum(mag, tau_cap)
+
     def _write_pd_gains(self, kp: torch.Tensor, kd: torch.Tensor) -> None:
         """GUI kp/kd를 **실제** PD 게인에 반영한다 (액추에이터 모델별로 경로가 다르다).
 
@@ -417,34 +522,80 @@ class R2SBipedLegEnv(DirectRLEnv):
                 actuator.stiffness[:] = kp[:, order_pos]
                 actuator.damping[:] = kd[:, order_pos]
 
-    def _apply_action(self) -> None:
-        # live 모드 foot↔calf 커플링 — physics step(200Hz)마다 foot 목표를 raw 공간으로 재계산한다.
-        # 나머지 모드/관절은 _pre_physics_step에서 처리 완료.
-        if self.cfg.policy_mode or self.cfg.sysid or not self.cfg.foot_coupling:
-            return
+    def _apply_foot_coupling(self, raw_t: torch.Tensor, kp_f: torch.Tensor, kd_f: torch.Tensor) -> None:
+        """foot 목표를 raw 공간으로 치환하고 전치 토크 + raw 마찰을 싣는다 (live/policy 공통).
+
+        raw 공간 PD를 **관절 목표 치환**으로 구현한다: ``pos_t = raw_t − q_calf``,
+        ``vel_t = −q̇_calf`` 를 주면 actuator PD가 ``kp·(raw_t − (q_f+q_c)) + kd·(−q̇_c − q̇_f)``,
+        즉 raw 공간 오차를 계산한다 — 위치를 강제로 쓰는 kinematic 방식이 아니라 전달기구 강성으로
+        미는 방식이라 접촉/동역학이 깨지지 않는다.
+
+        Args:
+            raw_t: foot 모터축(raw) 목표 ``q_foot_des + q_calf_des`` [rad], shape (num_envs, 2).
+            kp_f: foot 위치 게인 [N·m/rad], shape (num_envs, 2).
+            kd_f: foot 속도 게인 [N·m·s/rad], shape (num_envs, 2).
+        """
         q = self.robot.data.joint_pos
         dq = self.robot.data.joint_vel
         q_c = q[:, self._calf_art_ids]
         dq_c = dq[:, self._calf_art_ids]
         q_f = q[:, self._foot_art_ids]
         dq_f = dq[:, self._foot_art_ids]
-        # foot 명령(CMD/GUI)은 raw 목표(실기 해석과 동일) — hold(relax) 중엔 진입 시 래치한 raw.
-        raw_t = torch.where(self._foot_hold, self._raw_latch, self._live_target[:, self._couple_foot_lm])
-        # raw 공간 PD를 관절 목표 치환으로 구현: pos_t = raw_t − q_calf, vel_t = −q̇_calf 를 주면
-        # actuator PD가 kp·(raw_t − (q_f+q_c)) + kd·(−q̇_c − q̇_f) 를 계산한다 — 위치를 강제로 쓰는
-        # kinematic 방식이 아니라 전달기구 강성으로 미는 방식이라 접촉/동역학이 깨지지 않는다.
         pos_t = raw_t - q_c
         vel_t = -dq_c
         self.robot.set_joint_position_target_index(target=pos_t, joint_ids=self._foot_art_ids)
         self.robot.set_joint_velocity_target_index(target=vel_t, joint_ids=self._foot_art_ids)
-        # 전치 토크: 모터좌표 r = (q_c, q_f+q_c) ⇒ τ_joint = Tᵀ·τ_motor ⇒ τ_calf **+=** τ_foot_motor.
-        # (RL_INTERFACE의 `τ_raw_src −= coef·τ_joint_dst`는 역방향 — 원하는 관절토크에서 모터 명령을
-        # 구할 때의 식이다. sim은 모터토크→관절토크 방향이라 부호가 +다.)
-        # foot 모터 토크 예측치를 calf feedforward로 넣는다. DCMotor의 토크-속도 클립과 정적 한계
-        # 클램프가 완전히 같지는 않아 포화 구간에서만 근사 오차가 있다.
-        tau_pred = self._foot_kp_eff * (pos_t - q_f) + self._foot_kd_eff * (vel_t - dq_f)
-        tau_pred = tau_pred.clamp(-self._foot_tau_max, self._foot_tau_max)
-        self.robot.set_joint_effort_target_index(target=tau_pred, joint_ids=self._calf_art_ids)
+        # calf에 실을 모터축 토크 = 전치(PD 구동분) + raw 좌표 마찰. 둘 다 같은 일률 보존 규칙
+        # (벨트가 무릎을 건넌다)에서 나오지만 A/B를 위해 플래그가 따로 있다 — 실기 구성은 둘 다 True.
+        tau_calf = None
+        if self.cfg.foot_transpose:
+            # 전치 토크: 모터좌표 r = (q_c, q_f+q_c) ⇒ τ_joint = Tᵀ·τ_motor ⇒ τ_calf += τ_foot.
+            # (RL_INTERFACE의 `τ_raw_src −= coef·τ_joint_dst`는 역방향 — 원하는 관절토크에서 모터
+            # 명령을 구할 때의 식이라 부호가 반대다.)
+            # foot 모터 토크 예측치를 calf feedforward로 넣는다. DCMotor의 토크-속도 클립과 정적 한계
+            # 클램프가 완전히 같지는 않아 포화 구간에서만 근사 오차가 있다.
+            tau_calf = kp_f * (pos_t - q_f) + kd_f * (vel_t - dq_f)
+        if self.cfg.foot_raw_friction:
+            # 감속기·벨트 마찰은 모터축(raw)에 앉아 있다 — foot 자체 PD에 feedforward로 더하고,
+            # 같은 값을 calf에도 같은 부호로 싣는다 (PhysX 관절 마찰은 _pre_physics_step에서 제거).
+            tau_fric = self._foot_raw_friction_torque()
+            self.robot.set_joint_effort_target_index(target=tau_fric, joint_ids=self._foot_art_ids)
+            tau_calf = tau_fric if tau_calf is None else tau_calf + tau_fric
+        if tau_calf is None:
+            return
+        # 전치분+마찰을 **합쳐서 한 번** 클램프 — 따로 자르면 합이 foot 모터 한계의 2배까지 커진다.
+        tau_calf = tau_calf.clamp(-self._foot_tau_max, self._foot_tau_max)
+        self.robot.set_joint_effort_target_index(target=tau_calf, joint_ids=self._calf_art_ids)
+
+    def _apply_action(self) -> None:
+        # live/policy 모드 foot↔calf 커플링 — physics step(200Hz)마다 foot 목표를 raw 공간으로
+        # 재계산한다. sysid는 _pre_physics_step에서 자체 처리(raw 규약 유지), 나머지 관절도 거기서 완료.
+        if self.cfg.sysid or not self.cfg.foot_coupling:
+            return
+        if self.cfg.policy_mode:
+            # policy 목표는 **관절 목표**(학습 정책이 관절 공간으로 학습됐다) — raw는 목표값끼리
+            # 합성한다. 학습 env `hind_leg_env._apply_action`의
+            #   raw_t = processed_actions[foot] + processed_actions[calf]
+            # 와 **같은 식**이라야 배포 리허설이 학습과 일치한다.
+            # 게인은 __init__에서 캐시한 액추에이터 열로 읽는다(policy는 200 Hz 실시간 경로 —
+            # _actuator_gains_at의 파이썬 루프를 매 스텝 돌지 않는다). policy 모드는
+            # write_joint_stiffness 경로를 쓰지 않으므로 이 값이 곧 실제 게인이다.
+            raw_t = self._policy_target[:, self._foot_art_ids] + self._policy_target[:, self._calf_art_ids]
+            if self._foot_actuator is None:
+                kp_f, kd_f = self._actuator_gains_at(self._foot_art_ids)
+            else:
+                kp_f = self._foot_actuator.stiffness[:, self._foot_act_cols]
+                kd_f = self._foot_actuator.damping[:, self._foot_act_cols]
+            self._apply_foot_coupling(raw_t, kp_f, kd_f)
+            return
+        # live 모드 — CMD/GUI의 foot 목표는 **관절 목표**다 (CONVENTION_VERSION 1).
+        # 2026-08-14 이전에는 raw 목표로 해석했다(구 규약 0). 이제 raw는 여기서 **목표값끼리**
+        # 합성한다(측정 calf가 아니라 calf 목표를 쓴다 — 학습 env와 동일).
+        # ⚠ hold(relax)의 `_raw_latch`는 여전히 **raw 공간** 래치다: 기어 마찰이 잠그는 것은
+        #   모터축(raw)이지 관절각이 아니므로 그게 물리적으로 맞다. 규약 변경과 무관하다.
+        joint_raw_t = self._live_target[:, self._couple_foot_lm] + self._live_target[:, self._couple_calf_lm]
+        raw_t = torch.where(self._foot_hold, self._raw_latch, joint_raw_t)
+        self._apply_foot_coupling(raw_t, self._foot_kp_eff, self._foot_kd_eff)
 
     def _get_observations(self) -> dict:
         pos = self.robot.data.joint_pos[:, self._joint_ids]

@@ -61,6 +61,21 @@ parser.add_argument(
     default=None,
     help="--fit_joints에서 고정할 파라미터의 출처 — 이전 적합의 mean_*.pt (이미 물리 단위, 33개).",
 )
+parser.add_argument(
+    "--foot_transpose",
+    choices=["on", "off"],
+    default=None,
+    help="전치 토크 τ_calf += τ_foot 강제 on/off (기본 = cfg 값, 2026-08-14 기준 on). "
+    "'벨트가 무릎을 건너가는가'의 A/B 판정용.",
+)
+parser.add_argument(
+    "--foot_raw_friction",
+    choices=["on", "off"],
+    default=None,
+    help="foot 마찰을 raw(모터축) 좌표로 계산할지 on/off (기본 = cfg 값, 2026-08-14 기준 on). "
+    "on이면 foot 관절의 PhysX 마찰을 끄고 viscous/coulomb 슬롯을 b_raw/c_raw로 재해석해 "
+    "w_raw = q̇_foot + q̇_calf 에 걸며, 그 토크를 foot·calf 양쪽에 같은 부호로 싣는다.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -157,6 +172,20 @@ def main():
         sim2real.robot_name = args_cli.robot_name
     if args_cli.max_iteration is not None:
         sim2real.cmaes.max_iteration = args_cli.max_iteration
+    if args_cli.foot_transpose is not None:
+        # env.unwrapped.cfg에 직접 쓴다 — gym.make가 cfg를 복사해도 런타임이 보는 쪽이 여기다.
+        env.unwrapped.cfg.foot_transpose = args_cli.foot_transpose == "on"
+    if args_cli.foot_raw_friction is not None:
+        env.unwrapped.cfg.foot_raw_friction = args_cli.foot_raw_friction == "on"
+    print(f"[INFO]: 전치 토크(τ_calf += τ_foot) = {'ON' if env.unwrapped.cfg.foot_transpose else 'OFF'}")
+    print(
+        "[INFO]: foot 마찰 좌표 = "
+        + (
+            "raw(모터축) — viscous/coulomb[foot] 슬롯은 b_raw/c_raw 재해석"
+            if env.unwrapped.cfg.foot_raw_friction
+            else "관절(PhysX 기본)"
+        )
+    )
     joint_order = sim2real.joint_order
 
     # 부분 적합 (--fit_joints): 선택 관절의 4개 블록(armature/viscous/coulomb/bias)+delay만 탐색.

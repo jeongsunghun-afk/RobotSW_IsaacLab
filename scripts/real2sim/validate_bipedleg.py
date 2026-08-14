@@ -235,6 +235,13 @@ def main():
                 joint_ids=joint_ids,
                 env_ids=env_ids,
             )
+            # ⚠ sim 뿐 아니라 data.default_* 캐시에도 반드시 써야 한다 (PACE update_simulator /
+            # collect_chirp_sim_bipedleg.py와 동일). env의 raw 좌표 foot 마찰(cfg.foot_raw_friction)이
+            # 그 캐시를 b_raw/c_raw의 저장소로 읽기 때문 — 캐시를 안 쓰면 foot 마찰이 통째로 0이 된 채
+            # 검증이 돌아 적합 때와 다른 플랜트를 재는 결과가 된다.
+            articulation.data.default_joint_armature.torch[:, joint_ids] = armature
+            articulation.data.default_joint_friction_coeff.torch[:, joint_ids] = coulomb
+            articulation.data.default_joint_viscous_friction_coeff.torch[:, joint_ids] = viscous
             for actuator in articulation.actuators.values():
                 drive_ids = actuator.joint_indices
                 if isinstance(drive_ids, slice):

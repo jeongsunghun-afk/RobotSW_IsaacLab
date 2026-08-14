@@ -68,19 +68,73 @@ asset=`data/Robots/Hind_Leg_URDF3_SignFix/Hind_Leg_SignFix/Hind_Leg_SignFix.usda
 구동한다 — calf가 +10° 돌면 foot 관절각이 −10° 따라가고(역방향 없음), **무토크에서도** 기어 마찰이
 raw를 잠가 커플링이 유지된다(비가역 전달기구).
 
-sim 재현(live 모드 전용, `_apply_action`에서 physics step 200Hz마다):
+sim 재현(live/policy 모드, `_apply_foot_coupling()`에서 physics step 200Hz마다):
 - foot 위치목표 = `raw_target − q_calf`, 속도목표 = `−q̇_calf` → actuator PD가 raw 공간 오차로 계산
   (위치 강제 쓰기 아님 — 전달기구 강성으로 미는 방식이라 접촉/동역학 무손상)
 - **전치 토크**: `τ_calf += τ_foot_motor` (모터좌표 r=(q_c, q_f+q_c) ⇒ τ_joint=Tᵀτ_motor.
   ⚠RL_INTERFACE의 `τ_raw_src −= …`는 역방향(관절토크→모터명령) 식이라 부호가 반대)
 - relax(foot kp≈0): 진입 순간 raw 래치 + `coupling_hold_kp/kd`(기본 200/2)로 잠금 — 실기의
   비가역 마찰 재현. 해제 시 GUI 게인 복귀.
-- **CMD/ACT의 foot 목표 의미 = raw 목표**(실기 real_runner 해석과 동일), `get_lowstate` foot q/dq도
-  raw 보고(실기 TELEM과 정합). soft limit 클램프는 GUI publisher(`_clamp_target`)와 real_runner가
-  각각 `관절각 한계 + calf`로 평행이동해 적용.
-- policy/sysid 모드 미적용(관절 공간 규약 유지, sysid cfg는 `foot_coupling=False` 명시).
-- 검증: calf sine+foot raw 고정 → `q_foot = raw_t − q_calf` 추종, foot 단독 시 calf 부동,
-  relax에서 calf 강제 이동 시 foot이 raw 래치 유지하며 역추종.
+
+### ★좌표 규약 이관 (2026-08-14, `CONVENTION_VERSION` 0 → 1)
+
+워크스테이션 전체가 **관절(모델) 좌표 하나**로 통일됐다. raw↔관절 변환은 브리지(`real_runner`)가
+전담하므로 실기 TELEM/ACT도 관절각이고, **sim의 env 경계도 전부 관절각**이다.
+
+| 항목 | 구 규약 0 (~08-13) | **현 규약 1** |
+|---|---|---|
+| CMD/ACT의 foot 목표 | raw 목표 `q_f+q_c` | **관절 목표 `q_f`** |
+| `get_lowstate()` foot q/dq/ddq | raw 합산 보고 | **관절각 그대로** |
+| policy 모드 커플링 | **미적용**(학습과 불일치) | **적용** |
+| sysid 모드 | raw (변경 없음) | raw (**이관 대상 아님**) |
+
+- raw는 env 안에서 **목표값끼리** 합성한다: `raw_t = live_target[foot] + live_target[calf]`
+  (측정 calf가 아니다). 학습 env `hind_leg_env._apply_action`의
+  `raw_t = processed_actions[foot] + processed_actions[calf]` 와 **같은 식**이다.
+- 관측 가능한 귀결: foot 관절 목표를 고정해도 **calf 추종오차만큼** foot 관절각이 밀린다
+  (`e_f = q_f − foot_t` 가 `e_c = calf_t − q_c` 를 따라감). 커플링을 끄면 `e_f ≡ 0`.
+- **relax의 `_raw_latch`만 예외로 여전히 raw 공간**이다 — 기어 마찰이 잠그는 것은 모터축이지
+  관절각이 아니므로 그게 물리적으로 맞다. 규약 변경과 무관.
+- ⚠ **sysid는 이관 대상이 아니다.** 엔코더가 raw만 재므로 데이터·재생·채점을 전부 raw로 일관시키는
+  것이 맞다. `R2SBipedLegSysidEnvCfg.foot_coupling`은 **True**다(과거 문서의 "sysid cfg는
+  `foot_coupling=False` 명시"는 2026-08-13 이후 틀린 서술 — 정정).
+- `convention_version`은 `R2SBipedLegEnvCfg` 필드로 노출돼 `sim_runner_bipedleg.py`가 STATE 패킷에
+  싣는다. ⚠ **스위치가 아니라 코드가 말하는 규약의 서술**이다 — 값만 바꿔도 거동은 안 바뀐다.
+- soft limit 클램프는 GUI publisher(`_clamp_target`)와 real_runner 담당(다른 워커 소관).
+- 검증 실측(`fix_base`, calf 1.5 Hz sine + foot 관절목표 고정): live-ON `slope(e_f~e_c)=+0.750
+  corr=+0.946`, **coupling-OFF `slope=+0.000 corr=+0.062 pk-pk(q_f)=0.0000`**,
+  policy-ON은 live-ON과 소수 4자리까지 동일.
+
+### raw 좌표 foot 마찰 (2026-08-14, `cfg.foot_raw_friction=True` 기본)
+
+실기 구조 확인(2026-08-14): calf/foot 모터가 **둘 다 허벅지**에 있고, foot 모터는 **무릎을 건너는
+1:1 벨트**로 발목을 돈다 ⇒ 모터 출력각 `θ_f = q_foot + q_calf`(coef=+1 커플링의 기구적 정체).
+
+foot 쪽 감속기·벨트 마찰은 관절축이 아니라 **모터축**에 앉아 있으므로 좌표를 옮긴다:
+
+```
+w_raw   = q̇_foot + q̇_calf
+τ_fric  = −(b_raw·w_raw + c_raw·tanh(w_raw / eps))      # eps = foot_raw_friction_vel_eps (0.2 rad/s)
+τ_foot += τ_fric,  τ_calf += τ_fric                      # 일률 보존 — 전치와 같은 규칙
+```
+
+- foot 관절의 **PhysX 마찰(static/dynamic/viscous)은 0으로 눌러 둔다**(`_clear_foot_joint_friction`,
+  제어 스텝마다 1회 sim write). hip/thigh/calf는 종전대로 관절 좌표 PhysX 마찰.
+- ★ **파라미터 재해석(개수 불변)**: `b_raw`/`c_raw`는 **foot 관절의 기존 viscous/Coulomb 슬롯**을
+  그대로 읽는다. PACE 33개는 그대로이고 bounds도 그대로. 다만 식별 후 `viscous[*_foot]` /
+  `coulomb[*_foot]`의 **의미가 관절 좌표가 아니라 모터축 좌표**다 — 배포 시 관절 마찰로 되쓰면 안 된다.
+- ⚠ **저장소는 `data.default_joint_*` 캐시**다(sim은 0으로 눌려 있으므로). 이 캐시는 **최초 접근
+  시점에 sim 값을 복제하는 lazy clone**이라 env `__init__`의 stock 캡처가 순서상 load-bearing이다.
+  외부에서 마찰을 sim에만 쓰고 캐시를 안 쓰면 foot 마찰이 통째로 0이 된다
+  (`validate_bipedleg.py`가 이 함정에 있었고 2026-08-14 수정).
+- 안정성 캡: 명시적 feedforward라 `b·dt/I > 2`면 발산 → `|τ_fric| ≤ (armature+0.0019)·|w_raw|/dt`로
+  한 스텝 내 축 속도 역전을 금지한다. 없으면 CMA-ES 후보가 크래시 없이 조용히 발산해 적합이 편향된다.
+- A/B: `fit_bipedleg.py --foot_raw_friction on|off`, `--foot_transpose on|off`.
+- ⚠ live relax(foot kp≈0)의 raw 래치(`coupling_hold_kp/kd` 200/2)는 **같은 기어 마찰을 다른 방식으로**
+  모델링한 것이라 raw 마찰과 중복된다 — 실기 마찰이 식별되면 hold 게인 재검토 필요.
+- 검증(구 규약 0 기준 서술, 참고용): calf sine+foot **raw** 고정 → `q_foot = raw_t − q_calf` 추종,
+  foot 단독 시 calf 부동, relax에서 calf 강제 이동 시 foot이 raw 래치 유지하며 역추종.
+  → 규약 1의 관절 프레임 재작성은 위 "좌표 규약 이관" 절의 검증 실측 참고.
 
 ## 베이스 (fix_base)
 

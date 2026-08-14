@@ -7,6 +7,14 @@
  *   policy_runner ──POLICY_ACT("R2PA", 9887)──▶ real_runner ──SHM──▶ RobotEmbedded ──▶ 모터
  *   policy_runner ◀──POLICY_STATE("R2PS", 9888)── real_runner ◀──SHM── 모터상태 + IMU
  *
+ * ★좌표 규약 (2026-08-14, TELEM convention_version=1):
+ *   UDP seam 양쪽은 **관절(모델) 좌표**만 주고받는다. 채널각↔관절각 변환(감속비 오설정 보정
+ *   `gear` + foot↔calf 커플링 해제)은 **이 브리지가 하드웨어 경계에서 한 번만** 한다.
+ *   ⇒ 워크스테이션(policy_runner·GUI·env)에 raw 좌표가 존재해서는 안 된다.
+ *   변환 지점은 motor_deg_to_joint / motor_dps_to_joint / joint_to_motor_deg 셋뿐이다.
+ *   예외: `tau` 는 드라이버 보고값 그대로다(**채널기준** — 소비자가 ×gear 하면 관절토크.
+ *   calib 의 GAIN_GEAR 블록 참조).
+ *
  * 제어 구조 (RobotTestGait 예제 준수):
  *  - 1 ms 주기 루프. 모터 상태는 IsUpdatedMotorStatus16 → GetUpdatedFlag → GetMotorStatus16.
  *  - 모터 상태 100 회 수신 후에만 명령 전송 enable (RobotEmbedded 기동 확인 게이트).
@@ -65,13 +73,70 @@ double now_sec() {
     return static_cast<double>(ts.tv_sec) + 1e-9 * static_cast<double>(ts.tv_nsec);
 }
 
-// sim 좌표 [rad] → 실기 모터각 [deg]
+// sim 좌표(raw각) [rad] → 실기 채널각 [deg].  RL_INTERFACE.md §1: q_ch = q_raw·sign·gear + offset
+// gear 는 드라이버 감속비 오설정 보정(§4) — offset(zero_deg)은 채널각 단위라 **곱한 뒤** 더한다.
 float sim_to_motor_deg(int m, float q_rad) {
-    return MOTOR_CALIB[m].sign * q_rad * DEF_RAD2DEG + MOTOR_CALIB[m].zero_deg;
+    return MOTOR_CALIB[m].sign * q_rad * DEF_RAD2DEG * MOTOR_CALIB[m].gear + MOTOR_CALIB[m].zero_deg;
 }
-// 실기 모터각 [deg] → sim 좌표 [rad]
+// 실기 채널각 [deg] → sim 좌표(raw각) [rad].  §1: q_raw = (q_ch − offset)/(sign·gear)
+// offset 이 채널각 단위이므로 gear 로 나누기 **전에** 뺀다 (sign 은 ±1 이라 곱=나눗셈).
 float motor_deg_to_sim(int m, float pos_deg) {
-    return MOTOR_CALIB[m].sign * (pos_deg - MOTOR_CALIB[m].zero_deg) * DEF_DEG2RAD;
+    return MOTOR_CALIB[m].sign * (pos_deg - MOTOR_CALIB[m].zero_deg) * DEF_DEG2RAD / MOTOR_CALIB[m].gear;
+}
+// 실기 채널 각속도 [deg/s] → sim raw 각속도 [rad/s]. 위치와 같은 선형관계에서 상수항만 빠진다(§1).
+float motor_dps_to_sim(int m, float vel_dps) {
+    return MOTOR_CALIB[m].sign * vel_dps * DEF_DEG2RAD / MOTOR_CALIB[m].gear;
+}
+
+// ---- 커플링까지 포함한 벡터 변환 (하드웨어 경계에서 딱 한 번) ----
+// 위 스칼라 함수들은 채널↔**raw** 까지만 한다. 아래 두 함수가 foot↔calf 커플링을 마저 풀어
+// **관절(모델) 좌표**로 오간다. 워크스테이션은 관절 좌표만 보므로 이 경계 밖에 커플링 코드가
+// 있어서는 안 된다.
+//
+// ⚠⚠ **커플링 연산은 policy(articulation) 순서 벡터에서만 한다.** 짝이 p-2 인 것은 policy
+//   순서에서만 성립하고(calf 4,5 / foot 6,7), 모터 순서(calf 2,6 / foot 3,7)에서는 규칙이
+//   다르다. calib 의 COUPLED_CALF_POLICY 주석 참조.
+// ⚠ 클램프하지 않는다 — RELAX 휴지 자세가 공칭 soft limit 밖이라(calib 참조) 여기서 자르면
+//   자세가 왜곡된다. 클램프는 TRACK 목표 생성부에서만 한다.
+
+// 채널각 [deg, **모터 순서**] → 관절각 [rad, **policy 순서**]
+void motor_deg_to_joint(const float ch_deg[NUM_MOTORS], float q_joint[R2S_NUM_JOINTS]) {
+    float q_raw[R2S_NUM_JOINTS];
+    for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+        int m = POLICY_TO_MOTOR[p];
+        q_raw[p] = motor_deg_to_sim(m, ch_deg[m]);
+    }
+    for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+        int pc = COUPLED_CALF_POLICY[p];
+        // calf 는 커플링이 없어 q_raw[pc] == q_joint[pc] 다 — 그래서 raw 배열에서 바로 뺄 수 있다.
+        q_joint[p] = (pc < 0) ? q_raw[p] : q_raw[p] - FOOT_CALF_COEF * q_raw[pc];
+    }
+}
+
+// 채널 각속도 [deg/s, **모터 순서**] → 관절 각속도 [rad/s, **policy 순서**] (위와 같은 선형관계)
+void motor_dps_to_joint(const float ch_dps[NUM_MOTORS], float dq_joint[R2S_NUM_JOINTS]) {
+    float dq_raw[R2S_NUM_JOINTS];
+    for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+        int m = POLICY_TO_MOTOR[p];
+        dq_raw[p] = motor_dps_to_sim(m, ch_dps[m]);
+    }
+    for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+        int pc = COUPLED_CALF_POLICY[p];
+        dq_joint[p] = (pc < 0) ? dq_raw[p] : dq_raw[p] - FOOT_CALF_COEF * dq_raw[pc];
+    }
+}
+
+// 관절각 [rad, **policy 순서**] → 채널각 [deg, **모터 순서**]
+// ⚠ 커플링 되먹임은 **목표값끼리** 합성한다(측정 calf 가 아니다) — 학습 env 가 그렇게 한다:
+//   hind_leg_env.py:267 `raw_t = processed[foot_ids] + processed[calf_ids]`.
+//   측정값을 쓰면 추종 오차·지연만큼 sim 과 실기의 raw 목표가 갈린다.
+void joint_to_motor_deg(const float q_joint[R2S_NUM_JOINTS], float ch_deg[NUM_MOTORS]) {
+    for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+        int m = POLICY_TO_MOTOR[p];
+        int pc = COUPLED_CALF_POLICY[p];
+        float q_raw = (pc < 0) ? q_joint[p] : q_joint[p] + FOOT_CALF_COEF * q_joint[pc];
+        ch_deg[m] = sim_to_motor_deg(m, q_raw);
+    }
 }
 
 float clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -249,13 +314,19 @@ int main(int argc, char** argv) {
                     // 중에는 재트리거하지 않는다.
                     if (mode == Mode::kBridge && state != State::kRelax && state != State::kRelaxRamp
                         && state != State::kRelaxFade && state != State::kWaitStatus) {
+                        // RELAX_REST_POSE_SIM 은 **관절각**(policy 순서)이므로 커플링 되먹임까지
+                        // 하는 joint_to_motor_deg 로 변환한다. 클램프는 거치지 않는다 — 휴지
+                        // 자세가 공칭 soft limit 밖이라 자르면 왜곡된다(calib 주석 참조).
+                        for (int m = 0; m < NUM_MOTORS; m++) {
+                            relax_start_deg[m] = static_cast<float>(motor_stt[m].fPosition);
+                        }
+                        joint_to_motor_deg(RELAX_REST_POSE_SIM, relax_rest_deg);
+                        // 램프 길이는 **관절 좌표**에서 잰다 — 목표도 현재자세도 같은 프레임이어야 한다.
+                        float cur_joint[R2S_NUM_JOINTS];
+                        motor_deg_to_joint(relax_start_deg, cur_joint);
                         float max_delta_rad = 0.0f;
                         for (int p = 0; p < R2S_NUM_JOINTS; p++) {
-                            int m = POLICY_TO_MOTOR[p];
-                            relax_start_deg[m] = static_cast<float>(motor_stt[m].fPosition);
-                            relax_rest_deg[m] = sim_to_motor_deg(m, RELAX_REST_POSE_SIM[p]);
-                            float cur_sim = motor_deg_to_sim(m, relax_start_deg[m]);
-                            float d = std::fabs(RELAX_REST_POSE_SIM[p] - cur_sim);
+                            float d = std::fabs(RELAX_REST_POSE_SIM[p] - cur_joint[p]);
                             if (d > max_delta_rad) max_delta_rad = d;
                         }
                         relax_ramp_sec = max_delta_rad / RELAX_RAMP_RADPS;
@@ -344,24 +415,17 @@ int main(int argc, char** argv) {
                     cmd_deg[m] = latched_deg[m];
                 }
             } else {
-                // TRACK 목표: sim rad → 모터 deg (soft limit 은 sim 좌표에서 클램프)
+                // TRACK 목표: 정책이 주는 **관절각**을 그대로 클램프한 뒤 채널각으로 변환한다.
+                // 커플링 되먹임(raw = foot + calf)은 joint_to_motor_deg 가 **목표값끼리** 한다.
+                // ⇒ 예전의 `lo += qc`(측정 calf 만큼 한계를 평행이동) 는 필요 없어졌다: 목표가
+                //   이제 관절각이므로 MOTOR_CALIB 의 min/max 가 그대로 맞는 한계다.
                 float track_deg[NUM_MOTORS];
+                float q_cmd[R2S_NUM_JOINTS];
                 for (int p = 0; p < R2S_NUM_JOINTS; p++) {
                     int m = POLICY_TO_MOTOR[p];
-                    float lo = MOTOR_CALIB[m].min_rad;
-                    float hi = MOTOR_CALIB[m].max_rad;
-                    // foot(p=6,7)↔calf(p=4,5) 전달기구 커플링(coef=+1): foot 목표는 관절각이 아니라
-                    // raw각(q_foot+q_calf)이다. calib의 min/max는 foot **관절각** 한계이므로,
-                    // raw 목표의 허용범위는 같은 다리 calf 실측만큼 평행이동한다.
-                    if (p >= 6) {
-                        int mc = POLICY_TO_MOTOR[p - 2];
-                        float qc = motor_deg_to_sim(mc, static_cast<float>(motor_stt[mc].fPosition));
-                        lo += qc;
-                        hi += qc;
-                    }
-                    float q = clamp(target_pol[p], lo, hi);
-                    track_deg[m] = sim_to_motor_deg(m, q);
+                    q_cmd[p] = clamp(target_pol[p], MOTOR_CALIB[m].min_rad, MOTOR_CALIB[m].max_rad);
                 }
+                joint_to_motor_deg(q_cmd, track_deg);
                 if (state == State::kEngage) {
                     float a = static_cast<float>(clamp(static_cast<float>((t - engage_t0) / engage_sec), 0.0f, 1.0f));
                     for (int m = 0; m < NUM_MOTORS; m++) {
@@ -382,8 +446,11 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // 선택적 slew 제한 (기본 off — 학습 plant 와 일치시키려면 끈 상태로 검증). relax 중엔
-            // 목표가 현재 자세라 제한이 무의미하고, 처지는 속도를 따라가지 못하면 오히려 유해 → 스킵.
+            // 선택적 slew 제한 (기본 off — 학습 plant 와 일치시키려면 끈 상태로 검증).
+            // relax 중엔 목표가 현재 자세라 제한이 무의미하고, 처지는 속도를 따라가지 못하면
+            // 오히려 유해 → 스킵.
+            // ⚠ slew_dps 는 **채널** deg/s 라 gear 가 곱해진 축에선 관절 기준으로 더 빡세다
+            // (calf 180 dps → 관절 120 dps · foot 180 → 150). 기본 0(off)이라 현재 영향 없음.
             if (slew_dps > 0.0f && have_prev_cmd && !relax_now) {
                 float max_step = slew_dps * static_cast<float>(kLoopDtSec);
                 for (int m = 0; m < NUM_MOTORS; m++) {
@@ -431,11 +498,18 @@ int main(int argc, char** argv) {
                 PolicyStatePacket st;
                 st.magic = POLICY_STATE_MAGIC;
                 st.seq = last_act_seq;
-                for (int p = 0; p < R2S_NUM_JOINTS; p++) {
-                    int m = POLICY_TO_MOTOR[p];
-                    st.q[p] = motor_deg_to_sim(m, static_cast<float>(motor_stt[m].fPosition));
-                    float vel = static_cast<float>(motor_stt[m].fVelocity);  // [deg/s] (Data Format 문서)
-                    st.dq[p] = MOTOR_CALIB[m].sign * vel * DEF_DEG2RAD;
+                st.convention_version = R2S_CONVENTION_VERSION;  // 브리지가 자기 규약을 알린다
+                // 관절 좌표로 보고 (gear 해제 + foot 커플링 해제). all_stt 게이트 안이라 8축 전부
+                // 유효함이 보장돼 foot 이 참조하는 calf 도 항상 있다.
+                {
+                    float ch_deg[NUM_MOTORS];
+                    float ch_dps[NUM_MOTORS];
+                    for (int m = 0; m < NUM_MOTORS; m++) {
+                        ch_deg[m] = static_cast<float>(motor_stt[m].fPosition);
+                        ch_dps[m] = static_cast<float>(motor_stt[m].fVelocity);  // [deg/s] (Data Format 문서)
+                    }
+                    motor_deg_to_joint(ch_deg, st.q);
+                    motor_dps_to_joint(ch_dps, st.dq);
                 }
                 // IMU RPY → projected gravity (ZYX, yaw 는 중력에 무영향)
                 float roll = imu_buf[IDX_OF_IMU_ARPY + 0];
@@ -462,14 +536,39 @@ int main(int argc, char** argv) {
             std::memset(&tm, 0, sizeof(tm));
             tm.magic = POLICY_TELEM_MAGIC;
             tm.seq = last_act_seq;
-            for (int p = 0; p < R2S_NUM_JOINTS; p++) {
-                int m = POLICY_TO_MOTOR[p];
-                if (stt_valid[m]) {
+            tm.convention_version = R2S_CONVENTION_VERSION;  // 브리지가 자기 규약을 알린다
+            {
+                // 관절 좌표 변환은 8축 전부 채워 한 번에 한다. 무효 축의 fPosition 은 0 이지만,
+                // 아래에서 valid_mask 를 내려 그 값을 쓰지 말라고 알린다.
+                float ch_deg[NUM_MOTORS];
+                float ch_dps[NUM_MOTORS];
+                for (int m = 0; m < NUM_MOTORS; m++) {
+                    ch_deg[m] = static_cast<float>(motor_stt[m].fPosition);
+                    ch_dps[m] = static_cast<float>(motor_stt[m].fVelocity);
+                }
+                float q_joint[R2S_NUM_JOINTS];
+                float dq_joint[R2S_NUM_JOINTS];
+                motor_deg_to_joint(ch_deg, q_joint);
+                motor_dps_to_joint(ch_dps, dq_joint);
+                for (int p = 0; p < R2S_NUM_JOINTS; p++) {
+                    int m = POLICY_TO_MOTOR[p];
+                    int pc = COUPLED_CALF_POLICY[p];
+                    // ⚠ foot 관절각은 같은 다리 calf 없이는 **정의되지 않는다** — calf 가 무효면
+                    // foot 도 무효로 내린다. raw 값을 관절각인 척 내보내지 않기 위한 것.
+                    bool ok = stt_valid[m] && (pc < 0 || stt_valid[POLICY_TO_MOTOR[pc]]);
+                    if (!ok) {
+                        continue;  // q/dq/tau 는 memset 으로 0, valid_mask 비트도 0 유지
+                    }
                     tm.valid_mask |= (1u << p);
-                    tm.q[p] = motor_deg_to_sim(m, static_cast<float>(motor_stt[m].fPosition));
-                    float vel = static_cast<float>(motor_stt[m].fVelocity);
-                    tm.dq[p] = MOTOR_CALIB[m].sign * vel * DEF_DEG2RAD;
-                    tm.tau[p] = MOTOR_CALIB[m].sign * static_cast<float>(motor_stt[m].fTorque);  // [N·m]
+                    tm.q[p] = q_joint[p];
+                    tm.dq[p] = dq_joint[p];
+                    // ⚠ tau 는 드라이버 보고값을 **그대로 통과**시킨다 — gear·커플링 둘 다 미적용.
+                    // 단위는 **채널기준으로 실측 확정**됐다(2026-08-14, calib 의 GAIN_GEAR 블록):
+                    // 소비자가 `× gear` 하면 관절토크다(calf 1.5 · foot 1.2). 여기서 변환하지 않는
+                    // 이유는 규약 버전을 올리지 않고 기존 소비자를 깨지 않기 위해서다 — 브리지가
+                    // 변환하게 되면 convention_version 을 2 로 올린다.
+                    // 커플링 전치(τ_raw_calf −= coef·τ_foot, §1)는 fTorque=0 이라 불필요.
+                    tm.tau[p] = MOTOR_CALIB[m].sign * static_cast<float>(motor_stt[m].fTorque);  // [N·m, 채널기준]
                 }
             }
             if (imu_seen) {
@@ -494,10 +593,21 @@ int main(int argc, char** argv) {
                                 : state == State::kRelaxFade ? "RELAX_FADE"
                                 : state == State::kRelax     ? "RELAX"
                                                              : "TRACK";
-            std::printf("[%s] q_sim[rad]:", sname);
+            // ★출력은 **관절각**이다(policy 순서). RELAX_REST_POSE_SIM 의 출처가 바로 이 줄이라
+            // 프레임이 어긋나면 다음 재캡처 때 버그가 되살아난다 — 반드시 같은 프레임을 유지할 것.
+            // 라벨도 q_sim → q_joint 로 바꿨다(로그만 떼어 봐도 프레임을 알 수 있게).
+            float ch_deg_dbg[NUM_MOTORS];
+            float q_joint_dbg[R2S_NUM_JOINTS];
+            for (int m = 0; m < NUM_MOTORS; m++) {
+                ch_deg_dbg[m] = static_cast<float>(motor_stt[m].fPosition);
+            }
+            motor_deg_to_joint(ch_deg_dbg, q_joint_dbg);
+            std::printf("[%s] q_joint[rad]:", sname);
             for (int p = 0; p < R2S_NUM_JOINTS; p++) {
                 int m = POLICY_TO_MOTOR[p];
-                std::printf(" %+.3f", stt_valid[m] ? motor_deg_to_sim(m, (float)motor_stt[m].fPosition) : 0.0f);
+                int pc = COUPLED_CALF_POLICY[p];
+                bool ok = stt_valid[m] && (pc < 0 || stt_valid[POLICY_TO_MOTOR[pc]]);
+                std::printf(" %+.3f", ok ? q_joint_dbg[p] : 0.0f);
             }
             std::printf("  rpy:[%+.1f %+.1f %+.1f]%s  peer:%s\n", imu_buf[IDX_OF_IMU_ARPY + 0],
                         imu_buf[IDX_OF_IMU_ARPY + 1], imu_buf[IDX_OF_IMU_ARPY + 2], imu_seen ? "" : "(IMU 미수신!)",

@@ -3,11 +3,15 @@
  *
  * ⚠ 이 파일은 scripts/real2sim/r2s_biped_leg/r2s_udp.py 가 단일 진실이다.
  *   _POLICY_ACT_FMT  = "<II8f"        (40 B)  policy_runner → real (REAL_ACT 9887)
- *   _POLICY_STATE_FMT= "<II8f8f3f"    (84 B)  real → policy_runner (REAL_STATE 9888)
- *   _POLICY_TELEM_FMT= "<III8f8f8f3f" (120 B) real → gui monitor (REAL_TELEM 9889, valid_mask 포함)
+ *   _POLICY_STATE_FMT= "<II8f8f3fB"   (85 B)  real → policy_runner (REAL_STATE 9888, 규약버전)
+ *   _POLICY_TELEM_FMT= "<III8f8f8f3fB" (121 B) real → gui monitor (REAL_TELEM 9889, valid_mask + 규약버전)
  *   _POLICY_PING_FMT = "<II"          (8 B)   monitor → real (REAL_ACT 9887, peer 등록만)
  *   _POLICY_GAIN_FMT = "<II8f8f"      (72 B)  policy_runner → real (REAL_ACT 9887, kp/kd 갱신)
  * 값을 바꾸면 양쪽을 함께 바꿔야 한다. little-endian 호스트(aarch64/x86-64) 가정.
+ *
+ * ⚠ 2026-08-14: STATE 84→85 B · TELEM 120→121 B 로 늘리며 **이 미러를 먼저 고쳤다**(위 "단일 진실"
+ *   규약과 반대 방향). r2s_udp.py 반영 전까지 잠정 상태이고, 그 전에는 policy_runner 와 GUI 가
+ *   크기 불일치로 패킷을 **거부한다** — 조용히 오독하는 것보다 낫다고 판단한 의도적 선택이다.
  */
 #ifndef __R2S_PACKETS_HPP__
 #define __R2S_PACKETS_HPP__
@@ -16,6 +20,24 @@
 #include <cstring>
 
 constexpr int R2S_NUM_JOINTS = 8;
+
+/**
+ * ★규약 버전 — 브리지가 **자기 좌표·단위 규약을 스스로 알린다**.
+ * STATE(offset 84) 와 TELEM(offset 120) 둘 다 `convention_version` 으로 실어 보낸다.
+ *
+ * 이전에는 GUI 가 상수로 `gear_applied=False` 를 npz 에 찍었는데, 그건 "브리지 소스가 고쳐졌나"가
+ * 아니라 "**캡처 당시 파이에서 돌던 바이너리**가 뭘 했나"를 뜻해야 하는 값이라 사람이 두 곳을
+ * 동기화해야 했다. 브리지가 실어 보내면 도장이 자기유지된다 — GUI 는 **받은 값을 그대로 기록**할 것.
+ *
+ *   0 = (구) gear 미적용 + foot **raw**각(q_foot+q_calf) 보고/수신.
+ *       이 값을 명시적으로 보내는 브리지는 없다 — 필드가 없는 84 B STATE / 120 B TELEM 이 곧 버전 0.
+ *   1 = gear 적용(위치·속도) + foot **관절**각 보고/수신. (2026-08-14)
+ *       ⚠ `tau` 만은 브리지가 **변환하지 않고 그대로 통과**시킨다. 단위는 미판정이 아니라
+ *       **채널기준으로 실측 확정**됐다(2026-08-14, calib 의 GAIN_GEAR 블록 참조) — 소비자가
+ *       `× gear` 하면 관절토크다(calf 1.5 · foot 1.2). 브리지가 그 변환까지 하게 되면 버전 2.
+ *       ⇒ 버전은 "무엇이 판정됐나"가 아니라 **"브리지가 무엇을 하는가"** 를 가리킨다.
+ */
+constexpr uint8_t R2S_CONVENTION_VERSION = 1;
 
 constexpr uint32_t POLICY_ACT_MAGIC = 0x52325041u;    // "R2PA"
 constexpr uint32_t POLICY_STATE_MAGIC = 0x52325053u;  // "R2PS"
@@ -38,19 +60,29 @@ struct PolicyActPacket {
 struct PolicyStatePacket {
     uint32_t magic;
     uint32_t seq;
-    float q[R2S_NUM_JOINTS];   // [rad], articulation 순서
-    float dq[R2S_NUM_JOINTS];  // [rad/s], articulation 순서
+    float q[R2S_NUM_JOINTS];   // [rad], articulation 순서. 버전 1: **관절각**
+    float dq[R2S_NUM_JOINTS];  // [rad/s], articulation 순서. 버전 1: **관절 각속도**
     float gravity[3];          // projected gravity (base frame 단위벡터)
+    // ★정책 **입력** 경로라 프레임이 조용히 어긋나면 가장 위험하다 — TELEM 과 같은 이유로 버전을
+    //   싣는다. 버전 정의는 R2S_CONVENTION_VERSION 참조. offset 84, 패킷 85 B.
+    uint8_t convention_version;
 };
 
 struct PolicyTelemPacket {
     uint32_t magic;
     uint32_t seq;
-    uint32_t valid_mask;        // bit p(0~7)=관절 p 상태 유효(articulation), bit 8=IMU 수신됨
-    float q[R2S_NUM_JOINTS];    // [rad], articulation 순서 (무효 관절은 0)
-    float dq[R2S_NUM_JOINTS];   // [rad/s], articulation 순서
-    float tau[R2S_NUM_JOINTS];  // [N·m], articulation 순서 (fTorque 에 sign 적용)
+    // bit p(0~7)=관절 p 상태 유효(articulation), bit 8=IMU 수신됨.
+    // ⚠ 버전 1 부터 **foot(p=6,7) 비트의 의미가 달라졌다**: foot 을 관절각으로 내보내려면 같은 다리
+    //   calf(p-2) 값이 필요하므로, calf 가 무효면 foot 관절각은 **정의되지 않는다**. 그래서
+    //   foot 비트는 "foot **과 그 calf 가 둘 다** 유효"를 뜻한다. raw 값을 관절각인 척 내보내지
+    //   않기 위한 것 — 이 프로젝트에서 반복된 조용한 프레임 불일치 사고를 막는다.
+    uint32_t valid_mask;
+    float q[R2S_NUM_JOINTS];    // [rad], articulation 순서 (무효 관절은 0). 버전 1: **관절각**
+    float dq[R2S_NUM_JOINTS];   // [rad/s], articulation 순서. 버전 1: **관절 각속도**
+    float tau[R2S_NUM_JOINTS];  // [N·m], articulation 순서 (fTorque 에 sign 적용). **채널기준** —
+                                // 소비자가 × gear 하면 관절토크 (calf 1.5 · foot 1.2)
     float rpy[3];               // IMU roll/pitch/yaw 원값 [deg]
+    uint8_t convention_version;  // = R2S_CONVENTION_VERSION. 위 정의 참조. offset 120, 패킷 121 B
 };
 
 struct PolicyPingPacket {
@@ -67,8 +99,12 @@ struct PolicyGainPacket {
 #pragma pack(pop)
 
 static_assert(sizeof(PolicyActPacket) == 40, "r2s_udp.py POLICY_ACT_SIZE(40) mismatch");
-static_assert(sizeof(PolicyStatePacket) == 84, "r2s_udp.py POLICY_STATE_SIZE(84) mismatch");
-static_assert(sizeof(PolicyTelemPacket) == 120, "r2s_udp.py POLICY_TELEM_SIZE(120) mismatch");
+// ⚠ 84 → 85 B (convention_version 추가, offset 0~83 은 불변). r2s_udp.py 를 같이 고쳐야 하며,
+//   그 전까지 policy_runner 는 크기 불일치로 STATE 를 **거부**한다(조용한 오독보다 낫다 — 의도).
+static_assert(sizeof(PolicyStatePacket) == 85, "r2s_udp.py POLICY_STATE_SIZE(85) mismatch");
+// ⚠ 120 → 121 B (convention_version 추가, offset 0~119 는 불변). r2s_udp.py 를 같이 고쳐야 하며,
+//   그 전까지 GUI/comm_check 는 크기 불일치로 TELEM 을 **거부**한다(조용한 오독보다 낫다 — 의도).
+static_assert(sizeof(PolicyTelemPacket) == 121, "r2s_udp.py POLICY_TELEM_SIZE(121) mismatch");
 static_assert(sizeof(PolicyPingPacket) == 8, "r2s_udp.py POLICY_PING_SIZE(8) mismatch");
 static_assert(sizeof(PolicyGainPacket) == 72, "r2s_udp.py POLICY_GAIN_SIZE(72) mismatch");
 

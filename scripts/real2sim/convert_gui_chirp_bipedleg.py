@@ -11,13 +11,31 @@ Isaac Sim은 띄우지 않는다 (torch만 필요).
 
 하는 일 (``convert_capture_to_pt.py``(go2)의 biped_leg 판):
 
+0. **좌표 규약 판별 + 채널→관절 각도 보정** — 드라이버 감속비 오설정(전 축 7:1 가정)으로 **규약 0**
+   캡처는 calf·foot 각도가 각각 1.5·1.2배 부풀려져 있다. 그런 캡처만 ``GEAR_K``로 나눠 관절 단위로
+   옮긴다. 다른 모든 단계보다 먼저 온다 — 커플링 coef 가 감속비 이후 공간의 계수라서다.
+
+   도장은 세 세대이고 **새 것부터** 읽는다 (자세한 건 :func:`convert` 안 주석):
+   ``convention_version`` (브리지가 TELEM 으로 신고한 값을 GUI 가 그대로 기록) →
+   ``gear_applied`` (구 불리언) → 도장 없음(= 규약 0, 구 캡처).
+   ⚠ **규약 ≥1 캡처는 변환하지 않고 중단한다.** 규약 1 은 gear 뿐 아니라 **foot 프레임까지**
+   다르다(foot 이 raw 가 아니라 관절각) — 아래 2번의 raw 전제가 깨지므로 그대로 태우면 조용히
+   틀린 데이터가 나온다. 그 분기는 sysid env 규약을 함께 정한 뒤 구현할 것.
+   ⚠ ``convention_version = -1`` (캡처 중 TELEM 미수신)도 중단 — 프레임을 추측하게 되기 때문.
 1. **균일 그리드 정렬** — 명령(50 Hz 발행시각)과 실기 TELEM(≈50 Hz 도착시각)이 비동기이므로,
    물리 그리드(기본 200 Hz)에 명령은 ZOH(브리지가 마지막 ACT를 유지, slew 기본 0), 실측은 선형보간으로 얹는다.
-2. **foot↔calf 커플링 해제** — 캡처의 foot 항은 raw각(q_foot+q_calf)이다(명령·실측 모두).
-   sysid env(``foot_coupling=False``)는 관절각 공간이므로 관절각으로 변환한다:
+2. **foot 좌표** — 캡처의 foot 항은 raw각(q_foot+q_calf)이다(명령·실측 모두).
+   ★**기본은 raw 유지**(``--keep_raw_foot``)다. 현재 sysid env 는 ``foot_coupling=True``
+   (``r2s_biped_leg_sysid_cfg.py:221``)로 **데이터도 재생도 채점도 전부 raw** 규약이며, 그게 옳다 —
+   엔코더가 raw 만 재므로 관절각으로 바꾸면 calf 의 측정 잡음이 foot 채널에 섞이고 커플링 계수
+   가정이 데이터에 구워진다.
+   ``--keep_raw_foot`` 를 끄면(구 규약) 관절각으로 변환한다:
    ``q_foot_joint = q_raw − q_calf(실측)``, ``des_foot_joint = raw_cmd − q_calf(실측)``.
-   ⚠ 남는 모델 갭(1차 적합에서 감수): 실기 foot PD의 kd는 (q̇_f+q̇_c)에 걸리는데 재생은 q̇_f만
-   보고, foot 모터 토크의 calf 전치(τ_c += τ_f)도 재생에 없다 — calf·foot 식별에 오차 유입 가능.
+   ⚠ 그 경로의 모델 갭: 실기 foot PD 의 kd 는 (q̇_f+q̇_c)에 걸리는데 재생은 q̇_f 만 보고,
+   foot 모터 토크의 calf 전치(τ_c += τ_f)도 재생에 없다 — calf·foot 식별에 오차가 들어간다.
+   ⚠⚠ **이 절은 2026-08-14 까지 ``foot_coupling=False`` 라고 적혀 있었다**(같은 파일 코드 주석은
+   ``True`` 로 최신이라 한 파일 안에서 서로 반대였다). 실제로 이 docstring 을 읽은 사람이 sysid
+   규약을 정반대로 파악하는 사고가 있었다. 규약을 바꿀 때 **docstring 과 코드 주석을 함께** 고칠 것.
 3. **명령/상태 시간축 지연 판정** — go2에서 104 ms 어긋남이 관성·점성을 ~100× 오염시킨 전례
    (``convert_capture_to_pt.py`` 참조). PD 법칙 ``tau = kp(des−q) − kd·q̇``이 tau_real과 가장 잘
    맞는 시간이동으로 잰다(커플링 오염이 없는 hip/thigh 4관절만 사용). ``--cmd_lag_ms auto``로
@@ -44,6 +62,37 @@ import torch
 GRID_HZ = 200.0  # 기본 = 학습 플랜트 물리 그리드(200 Hz). sysid env SYSID_RATE_HZ와 일치 필수.
 # leg-major (calf, foot) 커플링 쌍 — gui_controller._COUPLED_CALF_FOOT와 동일.
 COUPLED_CALF_FOOT = ((2, 3), (6, 7))
+# 드라이버 감속비 오설정 보정 (RL_INTERFACE.md §4). 드라이버가 전 축을 7:1 로 가정해 각도를
+# 주고받으므로, 드라이버가 보고/수신하는 "채널각"은 참 관절각의 gear_k = 실제감속비/7 배다
+# (실제 감속비 hip 7 · thigh 7 · calf 10.5 · foot 8.4). 파이 브리지
+# (real_runner_bipedleg.cpp:73 motor_deg_to_sim / :69 sim_to_motor_deg)가 양방향 모두 이 k 를
+# 적용하지 않으므로, 캡처의 각도·각속도는 명령·실측 둘 다 채널 단위다 → 여기서 나눠 관절 단위로 옮긴다.
+# 커플링 coef 는 감속비 **이후** 공간의 계수이므로(§2-a) 반드시 커플링 해제보다 먼저 적용해야 한다.
+GEAR_K = np.array([1.0, 1.0, 1.5, 1.2, 1.0, 1.0, 1.5, 1.2])  # leg-major
+# 게인의 gear 지수 — **k² 채택 (2026-08-14)**. `--gain_gear_scale` 로 A/B 가능.
+#
+# ⚠ **"확정"이 아니라 "채택"이다.** 지수 2 는 아래 ①(실측)과 ②(유도)의 곱이고 등급이 다르다.
+#   ② 는 재지 않았다 — 두 가설(c=1 / c=k)이 **같은 값을 보고**하므로 보고토크로는 원리적으로
+#   구분되지 않는다(그 값이 PD 의 에코라는 것 자체가 이유다). 실측이 배제한 건 "펌웨어가 보고 전에
+#   k 를 한 번 더 곱한다"는 세 번째 가능성뿐이고, {지수 1, 지수 2} 는 둘 다 살아 있다.
+#   이 프로젝트는 유도·부분측정을 확정으로 기록했다가 두 번 되돌렸다(전치 번복, gear_k 무효화).
+#   판정 방법: reports/_comparisons/pace_bipedleg_foot_coupling_probe/NEXT_CAPTURES.md
+#
+# 두 단계가 곱해져 k² 가 된다 (RL_INTERFACE.md §4):
+#   ① 드라이버 PD 가 **채널각 오차**에 kp 를 곱한다 → 채널오차 = k × 관절오차
+#      [실측 확인] 준정적 구간에서 |τ_보고| / |kp·e_관절 − kd·q̇_관절| = 1.5008 (calf, k=1.5;
+#      k 대비 오차 0.06%, k² 대비 −33%). hip/thigh(k=1)는 1.0006~1.0029 로 대조군 통과.
+#      → reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/tau_echo_check.py
+#   ② 실제 관절토크 = 보고토크 × k (펌웨어가 토크 상수에도 7:1 을 가정하므로)
+#   ⇒ 실효 관절강성 = kp·k²  — calf 50→112.5, foot 30→43.2. 감쇠비도 ζ×k 로 바뀐다
+#     (calf 0.76→1.13 과감쇠 · foot 0.82→0.97). 같은 지수가 kp·kd 에 공통으로 걸린다.
+#
+# ⚠ 중력으로 판정하려던 시도는 **판정 불능**이었다 — calf/foot 중력토크(전 범위 0.94/0.20 N·m)가
+#   마찰 바닥(0.27~0.86 N·m)보다 작아 SNR 0.31/0.35 다. 위 ①이 훨씬 강한 신호(오차 0.06%)라
+#   그쪽을 근거로 삼는다. → logs/torque_scale_gravity.py
+# ⚠ 드라이버 gear 버그가 고쳐지면 calf·foot 강성이 갑자기 k² 만큼 약해진다 → **정책 재학습 필요**.
+GAIN_GEAR_SCALE_DEFAULT: float = 2.0
+GAIN_GEAR_SCALE: float = GAIN_GEAR_SCALE_DEFAULT
 # 지연 판정에 쓰는 관절 (커플링 전치 오염이 없는 hip/thigh)
 LAG_JOINTS = (0, 1, 4, 5)
 JOINT_ORDER_FULL = [
@@ -116,6 +165,48 @@ def convert(
     kp = d["kp"].astype(np.float64)
     kd = d["kd"].astype(np.float64)
 
+    # 감속비 오설정 소급 보정 — 채널 단위 → 관절 단위 (GEAR_K 주석 참조).
+    #
+    # 도장은 세 세대가 있다. **새 것부터** 읽는다:
+    #   1) ``convention_version`` (2026-08-14~) — 브리지가 TELEM 으로 신고한 값을 GUI 가 그대로 기록.
+    #      0 = gear 미적용 + foot raw / 1 = gear 적용 + foot **관절**각 / -1 = TELEM 미수신(규약 미상).
+    #   2) ``gear_applied`` (구) — 불리언. 규약 ≥1 과 같은 뜻이지만 foot 프레임 정보가 없다.
+    #   3) 도장 없음 — 구 캡처. 미보정(채널 단위 + foot raw)으로 간주한다.
+    if "convention_version" in d.files:
+        conv = int(d["convention_version"])
+    elif "gear_applied" in d.files:
+        conv = 1 if bool(d["gear_applied"]) else 0
+    else:
+        conv = 0
+    if conv < 0:
+        raise SystemExit(
+            f"[{path.name}] convention_version=-1 — 캡처 중 TELEM 을 받지 못해 좌표 규약이 미상이다.\n"
+            "  실기 스트림 없이 저장된 캡처이거나 브리지가 죽어 있었다. 변환하면 프레임을 추측하는 셈이라 중단한다."
+        )
+    if conv >= 1:
+        # ⚠ 규약 1 은 gear 뿐 아니라 **foot 프레임까지** 다르다 — foot 이 raw 가 아니라 관절각으로
+        #   들어온다. 아래 커플링 처리(keep_raw_foot 양쪽 분기)는 foot 이 raw 라는 전제로 짜여 있어
+        #   그대로 태우면 조용히 틀린 데이터가 나온다(관절각을 raw 라 이름 붙이거나, 이미 관절각인
+        #   값에서 q_calf 를 또 뺀다). 그래서 여기서 **명시적으로 중단**한다 — 이 프로젝트에서
+        #   반복된 사고가 정확히 '그럴듯해 보이는 프레임 불일치'다.
+        raise SystemExit(
+            f"[{path.name}] convention_version={conv} 캡처는 아직 이 컨버터가 다루지 못한다.\n"
+            "  규약 1 = gear 적용 + foot **관절각**. 이 스크립트의 커플링 처리(COUPLED_CALF_FOOT,\n"
+            "  --keep_raw_foot)는 foot 이 **raw각**이라는 전제라 그대로 쓰면 프레임이 어긋난다.\n"
+            "  sysid env 쪽 규약을 함께 정한 뒤 이 분기를 구현할 것."
+        )
+    # 여기 오면 규약 0 — 채널 단위 + foot raw 다. 소급 보정을 적용한다.
+    gear_applied_in_capture = False
+    q_cmd /= GEAR_K
+    q_real /= GEAR_K
+    dq_real /= GEAR_K
+    kp = kp * GEAR_K**GAIN_GEAR_SCALE
+    kd = kd * GEAR_K**GAIN_GEAR_SCALE
+    print(
+        f"[{path.name}] gear: 채널→관절 보정 적용 (규약 0, q/dq ÷ k, k={GEAR_K.tolist()}), "
+        f"게인 배율 k^{GAIN_GEAR_SCALE:g}, tau 미스케일"
+    )
+
     # 겹치는 구간만 (real 스트림은 램프 구간을 포함하므로 cmd(스윕 전용) 창으로 잘린다)
     t0 = max(t_cmd[0], t_real[0])
     t1 = min(t_cmd[-1], t_real[-1])
@@ -174,6 +265,10 @@ def convert(
             "time": torch.arange(n, dtype=torch.float32) / rate,
             "dof_pos": torch.from_numpy(q_joint).float(),
             "des_dof_pos": torch.from_numpy(des_joint).float(),
+            # 드라이버 보고토크 (그리드 정렬, **미스케일**). 지연 판정에만 쓰고 버리던 값을 보존한다 —
+            # "드라이버 토크가 실측인가 지령 에코인가" 판정에 필요하고, 관절/모터 기준 여부가
+            # 확정되면 여기서 GEAR_K 로 환산할 수 있다.
+            "tau_meas": torch.from_numpy(tau_meas).float(),
             "kp": torch.from_numpy(kp).float(),
             "kd": torch.from_numpy(kd).float(),
             "joint_order": JOINT_ORDER_FULL,
@@ -188,6 +283,10 @@ def convert(
                 "cmd_lag_applied_ms": applied,
                 "cmd_lag_estimated_ms": lag_ms,
                 "coupling_converted": not keep_raw_foot,
+                # True = 이 파일에서 채널→관절 보정을 했다(구 캡처). False = 캡처가 이미 관절 단위.
+                "capture_convention_version": conv,
+                "gear_k_applied": not gear_applied_in_capture,
+                "gain_gear_scale": GAIN_GEAR_SCALE,
             },
         },
         out,
@@ -201,6 +300,13 @@ def main() -> None:
     parser.add_argument("--out_dir", default=None, help="저장 디렉토리. 생략 시 판정만")
     parser.add_argument("--cmd_lag_ms", default="0.0", help="명령 시간축 보정 [ms]. 'auto'=추정값 적용")
     parser.add_argument(
+        "--gain_gear_scale",
+        type=float,
+        default=GAIN_GEAR_SCALE_DEFAULT,
+        help="게인에 곱할 gear 지수 k^n (기본 2.0 = RL_INTERFACE §4 확정값). "
+        "1.0/0.0 은 A/B 대조용 — 근거는 GAIN_GEAR_SCALE 주석 참조.",
+    )
+    parser.add_argument(
         "--rate", type=float, default=GRID_HZ, help="출력 그리드 [Hz] — sysid env SYSID_RATE_HZ와 일치 필수"
     )
     parser.add_argument(
@@ -212,6 +318,9 @@ def main() -> None:
     if not files:
         raise SystemExit(f"매칭되는 캡처가 없다: {args.captures}")
     out_dir = Path(args.out_dir) if args.out_dir else None
+    # 모듈 상수를 CLI 값으로 덮어쓴다 — convert()와 meta 기록이 같은 값을 보게 하기 위함.
+    global GAIN_GEAR_SCALE
+    GAIN_GEAR_SCALE = args.gain_gear_scale
     for f in files:
         convert(Path(f), out_dir, args.cmd_lag_ms, rate=args.rate, keep_raw_foot=args.keep_raw_foot)
 

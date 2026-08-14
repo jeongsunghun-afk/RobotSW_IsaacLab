@@ -166,6 +166,15 @@ class BipedLegPaceCfg(PaceCfg):
     holdout: list[str] = ["bipedleg_sim/chirp_g100.pt"]  # gain_scale=1.0(미관측), 진폭 80%
 
     # 33 = armature(8) + viscous(8) + coulomb(8) + bias(8) + delay(1)
+    #
+    # ★ foot 슬롯(leg-major idx 3, 7)의 viscous/coulomb 재해석 (2026-08-14, `foot_raw_friction=True`)
+    #   foot 쪽 감속기·벨트 마찰은 관절축이 아니라 **모터축**에 앉아 있다. 벨트가 무릎을 건너므로
+    #   모터축 속도는 θ̇_f = q̇_foot + q̇_calf 이고, 마찰 토크는 일률 보존에 의해 foot·calf 양쪽에
+    #   같은 부호로 실린다. 그래서 env(`R2SBipedLegEnv._foot_raw_friction_torque`)는 foot 관절의
+    #   PhysX 마찰을 0으로 끄고, **이 두 슬롯을 raw 좌표 계수 b_raw/c_raw로 읽어** 직접 토크를 넣는다.
+    #   → 파라미터 **개수는 그대로 33개**이고 bounds도 그대로 쓴다. 다만 식별 후
+    #     `viscous[HL/HR_foot]`·`coulomb[HL/HR_foot]`의 **의미가 관절 좌표가 아니라 모터축 좌표**다.
+    #     배포/이식 시 이 두 값을 관절 마찰로 되쓰면 안 된다 (hip/thigh/calf는 종전대로 관절 좌표).
     bounds_params: torch.Tensor = torch.zeros((4 * NUM_JOINTS + 1, 2))
 
     def __post_init__(self):

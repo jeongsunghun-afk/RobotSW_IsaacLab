@@ -300,12 +300,31 @@ def unpack_policy_cmd(data: bytes) -> dict | None:
 # policy mode: rich state (sim_runner/real -> policy_runner)
 # ---------------------------------------------------------------------------
 
-# magic(I) seq(I) + q(8f) + dq(8f) + gravity(3f)  — **articulation 순서** (재매핑 없음)
-_POLICY_STATE_FMT: str = "<II" + "f" * NUM_JOINTS + "f" * NUM_JOINTS + "3f"
+# ---------------------------------------------------------------------------
+# ★좌표 규약 버전 — 송신자가 **자기 규약을 스스로 알린다** (C++ 원본: real_runner/r2s_packets.hpp:40)
+# ---------------------------------------------------------------------------
+#
+#   0 = (구) gear 미적용 + foot **raw**각(q_foot + q_calf) 보고/수신.
+#       이 값을 명시적으로 보내는 송신자는 없다 — 필드가 없는 84 B STATE / 120 B TELEM 이 곧 버전 0.
+#   1 = gear 적용(위치·속도) + foot **관절**각 보고/수신. (2026-08-14)
+#       ⚠ TELEM 의 ``tau`` 만은 변환 없이 통과한다 — **채널기준**이라 소비자가 ``× gear`` 하면
+#       관절토크다(calf 1.5 · foot 1.2). 브리지가 그 변환까지 하게 되면 버전 2.
+#
+# 즉 버전은 "무엇이 판정됐나"가 아니라 **"송신자가 무엇을 하는가"** 를 가리킨다.
+# ⚠ 이 상수는 C++ ``R2S_CONVENTION_VERSION`` 과 값 일치 필수 (다른 언어라 중복 정의).
+R2S_CONVENTION_VERSION: int = 1
+
+# magic(I) seq(I) + q(8f) + dq(8f) + gravity(3f) + convention_version(B)
+#   — **articulation 순서** (재매핑 없음). 84 → 85 B, offset 0~83 은 불변.
+# ⚠ STATE 에는 **legacy(84 B) 분기를 두지 않는다** — 하드 컷오버다. TELEM 과 다르게 가는 이유:
+#   TELEM 은 관측 전용이라 구버전을 읽어도 사람이 눈으로 보고 끝이지만, STATE 는 **정책 입력**이라
+#   규약 미상 패킷이 조용히 흘러들면 프레임 불일치가 그대로 로봇 명령이 된다. 84 B 를 살려두면
+#   "규약을 모르는 상태"가 계속 유지되므로, 크기 불일치로 **거부**해 문제를 즉시 드러낸다.
+_POLICY_STATE_FMT: str = "<II" + "f" * NUM_JOINTS + "f" * NUM_JOINTS + "3f" + "B"
 POLICY_STATE_SIZE: int = struct.calcsize(_POLICY_STATE_FMT)
 
 
-def pack_policy_state(seq: int, q, dq, gravity) -> bytes:
+def pack_policy_state(seq: int, q, dq, gravity, convention_version: int = R2S_CONVENTION_VERSION) -> bytes:
     """policy_runner용 rich state 직렬화 (articulation 순서).
 
     Args:
@@ -313,6 +332,8 @@ def pack_policy_state(seq: int, q, dq, gravity) -> bytes:
         q: 관절각 [rad], 길이 8, articulation 순서.
         dq: 관절각속도 [rad/s], 길이 8, articulation 순서.
         gravity: projected_gravity_b (base frame 중력 단위벡터), 길이 3.
+        convention_version: 송신자가 신고하는 좌표 규약 (:data:`R2S_CONVENTION_VERSION` 참조).
+            **자기가 실제로 하는 일**을 실을 것 — 기본값을 그대로 쓰면 거짓 신고가 될 수 있다.
 
     Returns:
         POLICY_STATE_SIZE 바이트 패킷.
@@ -320,14 +341,18 @@ def pack_policy_state(seq: int, q, dq, gravity) -> bytes:
     vals = [float(q[i]) for i in range(NUM_JOINTS)]
     vals += [float(dq[i]) for i in range(NUM_JOINTS)]
     vals += [float(gravity[i]) for i in range(3)]
-    return struct.pack(_POLICY_STATE_FMT, POLICY_STATE_MAGIC, seq & 0xFFFFFFFF, *vals)
+    return struct.pack(_POLICY_STATE_FMT, POLICY_STATE_MAGIC, seq & 0xFFFFFFFF, *vals, int(convention_version) & 0xFF)
 
 
 def unpack_policy_state(data: bytes) -> dict | None:
     """policy rich state 역직렬화. magic 불일치/크기 오류 시 None.
 
+    ⚠ **legacy(84 B) 분기 없음** — 구버전 STATE 는 크기 불일치로 ``None`` 이 된다(의도).
+    사유는 :data:`R2S_CONVENTION_VERSION` 위 주석 참조.
+
     Returns:
-        키: ``seq``, ``q`` (8), ``dq`` (8), ``gravity`` (3). 전부 articulation 순서.
+        키: ``seq``, ``q`` (8), ``dq`` (8), ``gravity`` (3), ``convention_version``.
+        각도/속도는 전부 articulation 순서.
     """
     if len(data) != POLICY_STATE_SIZE:
         return None
@@ -339,7 +364,7 @@ def unpack_policy_state(data: bytes) -> dict | None:
     q = list(body[:NUM_JOINTS])
     dq = list(body[NUM_JOINTS : 2 * NUM_JOINTS])
     gravity = list(body[2 * NUM_JOINTS : 2 * NUM_JOINTS + 3])
-    return {"seq": seq, "q": q, "dq": dq, "gravity": gravity}
+    return {"seq": seq, "q": q, "dq": dq, "gravity": gravity, "convention_version": int(body[-1])}
 
 
 # ---------------------------------------------------------------------------
@@ -386,9 +411,14 @@ def unpack_policy_act(data: bytes) -> dict | None:
 
 # magic(I) seq(I) valid_mask(I) + q(8f) + dq(8f) + tau(8f) + rpy(3f)  — **articulation 순서**, sim 좌표
 # valid_mask: bit p(0~7)=관절 p 상태 유효, bit 8=IMU 수신됨. warmup 전에도 송신되므로 mask 로 구분.
-_POLICY_TELEM_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f"
+_POLICY_TELEM_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f" + "B"
 POLICY_TELEM_SIZE: int = struct.calcsize(_POLICY_TELEM_FMT)
-# v1(2026-08-10, mask 없음 116 B) 하위호환 — unpack 은 양쪽 다 받는다.
+# legacy 하위호환 — TELEM 은 **관측 전용**이라 구버전을 읽어도 사람이 눈으로 보고 끝이므로
+# 살려 둔다(STATE 와 다르게 가는 이유는 R2S_CONVENTION_VERSION 위 주석 참조). 둘 다 규약 버전 0.
+#   v2(2026-08-13, mask 있음 120 B)
+_POLICY_TELEM_V2_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f"
+_POLICY_TELEM_V2_SIZE: int = struct.calcsize(_POLICY_TELEM_V2_FMT)
+#   v1(2026-08-10, mask 없음 116 B)
 _POLICY_TELEM_V1_FMT: str = "<II" + "f" * NUM_JOINTS * 3 + "3f"
 _POLICY_TELEM_V1_SIZE: int = struct.calcsize(_POLICY_TELEM_V1_FMT)
 
@@ -397,7 +427,9 @@ _POLICY_PING_FMT: str = "<II"
 POLICY_PING_SIZE: int = struct.calcsize(_POLICY_PING_FMT)
 
 
-def pack_policy_telem(seq: int, q, dq, tau, rpy, valid_mask: int = 0x1FF) -> bytes:
+def pack_policy_telem(
+    seq: int, q, dq, tau, rpy, valid_mask: int = 0x1FF, convention_version: int = R2S_CONVENTION_VERSION
+) -> bytes:
     """real 엔드포인트 -> gui monitor 텔레메트리 직렬화 (articulation 순서).
 
     Args:
@@ -407,6 +439,9 @@ def pack_policy_telem(seq: int, q, dq, tau, rpy, valid_mask: int = 0x1FF) -> byt
         tau: 관절 토크 [N·m], 길이 8 (모터 fTorque에 sign 적용).
         rpy: IMU roll/pitch/yaw 원값 [deg], 길이 3.
         valid_mask: bit p(0~7)=관절 p 유효, bit 8=IMU 수신 (기본 전부 유효).
+            ⚠ 버전 1부터 foot(p=6,7) 비트는 "foot **과 그 calf 가 둘 다** 유효"를 뜻한다 —
+            foot 관절각을 내려면 같은 다리 calf 가 필요하므로.
+        convention_version: 송신자가 신고하는 좌표 규약 (:data:`R2S_CONVENTION_VERSION` 참조).
 
     Returns:
         POLICY_TELEM_SIZE 바이트 패킷.
@@ -415,24 +450,42 @@ def pack_policy_telem(seq: int, q, dq, tau, rpy, valid_mask: int = 0x1FF) -> byt
     vals += [float(dq[i]) for i in range(NUM_JOINTS)]
     vals += [float(tau[i]) for i in range(NUM_JOINTS)]
     vals += [float(rpy[i]) for i in range(3)]
-    return struct.pack(_POLICY_TELEM_FMT, POLICY_TELEM_MAGIC, seq & 0xFFFFFFFF, valid_mask & 0xFFFFFFFF, *vals)
+    return struct.pack(
+        _POLICY_TELEM_FMT,
+        POLICY_TELEM_MAGIC,
+        seq & 0xFFFFFFFF,
+        valid_mask & 0xFFFFFFFF,
+        *vals,
+        int(convention_version) & 0xFF,
+    )
 
 
 def unpack_policy_telem(data: bytes) -> dict | None:
-    """텔레메트리 역직렬화. magic 불일치/크기 오류 시 None. v1(116 B, mask 없음)도 수용.
+    """텔레메트리 역직렬화. magic 불일치/크기 오류 시 None.
+
+    legacy 도 수용한다 — v2(120 B, 규약 필드 없음) · v1(116 B, mask 도 없음). 둘 다 **규약 버전 0**
+    으로 채워진다: 그 시절 브리지는 gear 미적용 + foot raw 였고, 필드가 없다는 것 자체가 버전 0 의
+    서명이다.
 
     Returns:
-        키: ``seq``, ``valid_mask``, ``q`` (8), ``dq`` (8), ``tau`` (8), ``rpy`` (3).
-        v1 패킷은 ``valid_mask=0x1FF`` (전부 유효 가정)로 채워진다.
+        키: ``seq``, ``valid_mask``, ``q`` (8), ``dq`` (8), ``tau`` (8), ``rpy`` (3),
+        ``convention_version``. v1 패킷은 ``valid_mask=0x1FF`` (전부 유효 가정)로 채워진다.
     """
     if len(data) == POLICY_TELEM_SIZE:
         fields = struct.unpack(_POLICY_TELEM_FMT, data)
         mask = fields[2]
+        body = fields[3:-1]
+        version = int(fields[-1])
+    elif len(data) == _POLICY_TELEM_V2_SIZE:
+        fields = struct.unpack(_POLICY_TELEM_V2_FMT, data)
+        mask = fields[2]
         body = fields[3:]
+        version = 0
     elif len(data) == _POLICY_TELEM_V1_SIZE:
         fields = struct.unpack(_POLICY_TELEM_V1_FMT, data)
         mask = 0x1FF
         body = fields[2:]
+        version = 0
     else:
         return None
     if fields[0] != POLICY_TELEM_MAGIC:
@@ -444,6 +497,7 @@ def unpack_policy_telem(data: bytes) -> dict | None:
         "dq": list(body[NUM_JOINTS : 2 * NUM_JOINTS]),
         "tau": list(body[2 * NUM_JOINTS : 3 * NUM_JOINTS]),
         "rpy": list(body[3 * NUM_JOINTS : 3 * NUM_JOINTS + 3]),
+        "convention_version": version,
     }
 
 
@@ -588,9 +642,18 @@ if __name__ == "__main__":
     assert dpc["mode"] == 1 and dpc["source"] == 0 and abs(dpc["x_vel"] - 1.5) < 1e-6 and abs(dpc["yaw"] + 0.3) < 1e-6
     g = [0.0, 0.0, -1.0]
     ps = pack_policy_state(5, z, z, g)
-    assert len(ps) == POLICY_STATE_SIZE, (len(ps), POLICY_STATE_SIZE)
+    assert len(ps) == POLICY_STATE_SIZE == 85, (len(ps), POLICY_STATE_SIZE)
     dps = unpack_policy_state(ps)
     assert len(dps["q"]) == NUM_JOINTS and len(dps["gravity"]) == 3 and abs(dps["gravity"][2] + 1.0) < 1e-6
+    # 규약 버전 왕복 — 기본값과 명시값 양쪽.
+    assert dps["convention_version"] == R2S_CONVENTION_VERSION == 1
+    assert unpack_policy_state(pack_policy_state(5, z, z, g, convention_version=0))["convention_version"] == 0
+    # ★STATE 는 legacy(84 B) 분기가 **없다** — 하드 컷오버(위 주석 참조). 구버전은 거부돼야 한다.
+    _legacy_state = struct.pack(
+        "<II" + "f" * NUM_JOINTS * 2 + "3f", POLICY_STATE_MAGIC, 5, *([0.0] * (2 * NUM_JOINTS + 3))
+    )
+    assert len(_legacy_state) == 84
+    assert unpack_policy_state(_legacy_state) is None, "84 B STATE 는 거부돼야 한다"
     pa = pack_policy_act(6, [0.2] * NUM_JOINTS)
     assert len(pa) == POLICY_ACT_SIZE, (len(pa), POLICY_ACT_SIZE)
     assert abs(unpack_policy_act(pa)["target_q"][0] - 0.2) < 1e-6
@@ -600,16 +663,47 @@ if __name__ == "__main__":
 
     # telemetry/ping 왕복.
     pt = pack_policy_telem(7, z, z, [1.5] * NUM_JOINTS, [0.5, -0.2, 10.0], valid_mask=0x103)
-    assert len(pt) == POLICY_TELEM_SIZE, (len(pt), POLICY_TELEM_SIZE)
+    assert len(pt) == POLICY_TELEM_SIZE == 121, (len(pt), POLICY_TELEM_SIZE)
     dpt = unpack_policy_telem(pt)
     assert abs(dpt["tau"][0] - 1.5) < 1e-6 and abs(dpt["rpy"][2] - 10.0) < 1e-6 and len(dpt["q"]) == NUM_JOINTS
     assert dpt["valid_mask"] == 0x103
-    # v1(116B, mask 없음) 하위호환 — 전부 유효로 채워진다.
+    assert dpt["convention_version"] == R2S_CONVENTION_VERSION == 1
+    # legacy v2(120B, 규약 필드 없음) — **버전 0** 으로 채워진다(필드 부재가 곧 버전 0).
+    v2 = struct.pack(_POLICY_TELEM_V2_FMT, POLICY_TELEM_MAGIC, 9, 0x1FF, *([0.25] * (3 * NUM_JOINTS)), 0.0, 0.0, 0.0)
+    assert len(v2) == 120
+    dv2 = unpack_policy_telem(v2)
+    assert dv2 is not None and dv2["convention_version"] == 0 and abs(dv2["q"][0] - 0.25) < 1e-6
+    # legacy v1(116B, mask 도 없음) — 전부 유효 + 버전 0.
     v1 = struct.pack(_POLICY_TELEM_V1_FMT, POLICY_TELEM_MAGIC, 9, *([0.25] * (3 * NUM_JOINTS)), 0.0, 0.0, 0.0)
     dv1 = unpack_policy_telem(v1)
-    assert dv1 is not None and dv1["valid_mask"] == 0x1FF and abs(dv1["q"][0] - 0.25) < 1e-6
-    # STATE(84B)/ACT(40B)와 크기가 달라 크기 단계에서 갈리고, magic으로도 거부.
+    assert dv1 is not None and dv1["valid_mask"] == 0x1FF and dv1["convention_version"] == 0
+    # STATE(85B)/ACT(40B)와 크기가 달라 크기 단계에서 갈리고, magic으로도 거부.
     assert unpack_policy_state(pt) is None and unpack_policy_telem(ps) is None
+    # ★크기 충돌 금지 — 이 파서들은 길이로 분기하므로 두 패킷이 같은 크기면 조용히 오파싱된다.
+    #   (84→85, 120→121 로 옮겼으니 새로 겹친 게 없는지 매번 확인한다.)
+    _sizes = {
+        "CMD": CMD_SIZE,
+        "STATE": STATE_SIZE,
+        "MON": MON_SIZE,
+        "IEFF": IEFF_SIZE,
+        "PLANT": PLANT_SIZE,
+        "POLICY_CMD": POLICY_CMD_SIZE,
+        "POLICY_STATE": POLICY_STATE_SIZE,
+        "POLICY_ACT": POLICY_ACT_SIZE,
+        "POLICY_TELEM": POLICY_TELEM_SIZE,
+        "POLICY_PING": POLICY_PING_SIZE,
+        "POLICY_GAIN": POLICY_GAIN_SIZE,
+        "TELEM_v2(legacy)": _POLICY_TELEM_V2_SIZE,
+        "TELEM_v1(legacy)": _POLICY_TELEM_V1_SIZE,
+    }
+    # IEFF(40)와 POLICY_ACT(40)는 **의도된** 동일 크기 — magic + 포트로 갈린다(위에서 확인함).
+    _dupes = [
+        (a, b)
+        for i, (a, sa) in enumerate(_sizes.items())
+        for b, sb in list(_sizes.items())[i + 1 :]
+        if sa == sb and {a, b} != {"IEFF", "POLICY_ACT"}
+    ]
+    assert not _dupes, f"패킷 크기 충돌: {_dupes} — 길이 분기가 오파싱된다"
     pg = pack_policy_ping(8)
     assert len(pg) == POLICY_PING_SIZE == 8
     assert unpack_policy_ping(pg)["seq"] == 8

@@ -28,7 +28,45 @@ policy_runner ──POLICY_ACT("R2PA",9887)──▶ real_runner ──SHM──
 
 관절 매핑: 정책 UDP는 articulation(type-major) `[HL_hip, HR_hip, HL_thigh, HR_thigh, HL_calf,
 HR_calf, HL_foot, HR_foot]`, 실기 모터는 leg-major `[LtR, LtP, LkP, LaP, RtR, RtP, RkP, RaP]`
-(0~7; SHM 채널 8/9=waist 미사용). 변환은 `calib_bipedleg.hpp` `POLICY_TO_MOTOR` + sign/zero_deg.
+(0~7; SHM 채널 8/9=waist 미사용). 변환은 `calib_bipedleg.hpp` `POLICY_TO_MOTOR` + sign/zero_deg/**gear**.
+
+⚠ **gear** (2026-08-14 추가) — 드라이버가 전 축을 7:1 감속비로 가정해 각도를 보고/수신하므로
+채널각 = 관절각 × `gear`(실제감속비/7 = hip 1.0 · thigh 1.0 · calf **1.5** · foot **1.2**).
+`RL_INTERFACE.md` §4. **위치·속도에만** 적용했다. 게인(kp/kd)과 `tau` 는 드라이버 보고값 그대로다.
+
+⚠ **게인·토크의 gear 관계는 2026-08-14 실측으로 확정됐다** (`calib_bipedleg.hpp` 의 `GAIN_GEAR`
+블록). 준정적 구간에서 `|τ_보고| / |kp·e_관절 − kd·q̇_관절|` = **1.5008** (calf, gear 1.5 대비 오차
+0.06%; hip/thigh 대조군 1.0006~1.0029) → 드라이버 PD 가 **채널각 오차**에 게인을 곱한다. §4 의
+"실제토크 = 보고토크 × gear" 와 결합하면 **실효 관절강성 = kp·gear²**(calf 50→112.5 · foot
+30→43.2), 감쇠비는 ζ×gear(calf 0.76→1.13 과감쇠). 목표 관절강성을 내려면 `kp_ch = kp_joint/gear²`.
+- `tau` 는 **채널기준**이다 — 소비자가 `× gear` 하면 관절토크(calf 1.5 · foot 1.2). 토크 트립
+  임계 15 Nm 도 채널기준이라 calf 는 실제 22.5 Nm다.
+- **게인 변환 코드는 넣지 않았다.** 현재 kp/kd 는 실기팀이 실기에서 직접 고른 **채널 게인**이라
+  변환해 넣을 sim 게인 원본이 없다. 변환은 정책 배포 시점에 "목표 관절강성 → 채널 게인"
+  방향으로 정할 문제다. ⇒ 드라이버가 고쳐져 gear=1 이 되면 calf·foot 이 2.25·1.44배 약해진다.
+
+⚠ **foot↔calf 커플링** (2026-08-14 추가) — 발목이 링키지로 무릎에 물려 있어 채널각은 관절각이
+아니라 raw각(`q_raw_foot = q_foot + 1.0·q_calf`, `RL_INTERFACE.md` §2)이다. 브리지가 이것도
+해제하므로 **UDP seam 양쪽은 관절(모델) 좌표만 주고받는다** — 워크스테이션에 raw 좌표가 남아
+있으면 안 된다. 명령의 커플링 되먹임은 **목표값끼리** 합성한다(측정 calf 가 아니다 —
+학습 env `hind_leg_env.py:267` 과 동일). 커플링 연산은 **policy(articulation) 순서**에서만
+성립한다(calf p=4,5 / foot p=6,7 → 짝이 `p-2`); 모터 순서에서는 짝 규칙이 다르다.
+
+⚠ **`convention_version`** — 브리지가 자기 좌표·단위 규약을 **STATE·TELEM 양쪽에** 실어 보낸다
+(현재 **1** = gear 적용 + foot 관절 좌표). GUI 는 이 값을 **그대로** npz 에 기록할 것 — 예전처럼
+GUI 가 상수로 찍으면 배포와 도장이 어긋난다. 버전은 "무엇이 판정됐나"가 아니라 **"브리지가
+무엇을 하는가"** 를 가리킨다(그래서 tau 단위가 확정돼도 브리지가 변환을 안 하는 한 1 이다).
+
+| 패킷 | 크기 | 버전 필드 offset |
+|---|---|---|
+| STATE (9888) | 84 → **85 B** | 84 |
+| TELEM (9889) | 120 → **121 B** | 120 |
+
+기존 offset 은 둘 다 **불변**이라 `r2s_udp.py` 는 포맷 끝에 `B` 만 붙이면 된다. 반영 전까지
+**policy_runner·GUI·`comm_check.py` 가 크기 불일치로 패킷을 거부한다** — 조용한 오독보다 낫다는
+판단으로 일부러 크기를 바꿨다.
+연산 순서는 `q_ch = q_raw·sign·gear + zero_deg` / `q_raw = (q_ch − zero_deg)/(sign·gear)` —
+`zero_deg` 는 **채널각 단위**라 gear 로 나누기 전에 뺀다.
 
 ## 파이에서 빌드·실행
 

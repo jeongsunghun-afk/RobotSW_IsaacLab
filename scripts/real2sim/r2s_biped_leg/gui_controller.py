@@ -156,6 +156,9 @@ PUBLISH_HZ: float = 50.0
 PUBLISH_PERIOD_S: float = 1.0 / PUBLISH_HZ
 SEQUENCE_DURATION_S: float = 1.5
 HOST: str = "127.0.0.1"
+# 이 GUI 가 받아들이는 좌표 규약 (r2s_udp.R2S_CONVENTION_VERSION). 워크스테이션은 관절 좌표
+# 하나로 말하고 raw↔관절 변환은 브리지(real_runner)가 전담하므로, 관절 좌표 신고만 받는다.
+_REQUIRED_CONVENTION_VERSION: int = r2s_udp.R2S_CONVENTION_VERSION
 GAIN_RESEND_PERIOD_S: float = 1.0  # 실기 GAIN(R2PK) 주기 재송신 간격 — UDP 유실/real_runner 재시작 대비
 
 # 게인 슬라이더 상한 — 이 리그의 실측 게인은 kp 12~65 / kd 1.0~6.0 으로, R_Skeleton 5-DOF 리그
@@ -427,6 +430,15 @@ class PolicyInferenceThread(QThread):
                     send_action(default_np)  # 응답 없음 → 재시동
                     seq += 1
                     continue
+                # 좌표 규약 검사 — 정책은 관절 좌표만 안다. 변환은 브리지가 전담하므로 여기서
+                # 맞춰주지 않고 멈춘다(policy_runner_bipedleg.py와 같은 규칙).
+                # 구버전(84 B) STATE는 크기 불일치로 위 None 분기에서 이미 걸러진다.
+                if state["convention_version"] != _REQUIRED_CONVENTION_VERSION:
+                    self.failed.emit(
+                        f"coordinate convention mismatch: got v{state['convention_version']}, "
+                        f"need v{_REQUIRED_CONVENTION_VERSION} (env not migrated yet)"
+                    )
+                    return
 
                 # 추론 → 다음 action (articulation 순서). deployable jit 는 estimator/history_encoder 내장이라
                 # 호출은 model(proprio, history) 뿐 (priv_explicit 불필요).
@@ -509,6 +521,7 @@ class RealMonitorThread(QThread):
         # chirp 기록: start_recording() 후 수신하는 모든 TELEM을 (t, q, dq, tau) leg-major로 쌓는다.
         # telem 시그널은 10Hz 최신값만 방출하므로 풀레이트 기록은 이 리스트가 유일한 경로다.
         self._rec: list[tuple[float, list[float], list[float], list[float]]] | None = None
+        self._rec_convention: int | None = None  # 기록 구간에서 브리지가 신고한 좌표 규약 버전
 
     def request_stop(self) -> None:
         self._stop = True
@@ -516,12 +529,21 @@ class RealMonitorThread(QThread):
     def start_recording(self) -> None:
         """TELEM 풀레이트 기록 시작 (리스트 교체 — rx 루프와는 GIL append로만 경합)."""
         self._rec = []
+        self._rec_convention = None  # 기록 구간에서 실제로 받은 좌표 규약 버전
 
     def stop_recording(self) -> list[tuple[float, list[float], list[float], list[float]]]:
         """기록을 멈추고 지금까지 쌓인 (t, q, dq, tau) 행을 반환한다 (leg-major)."""
         rows = self._rec
         self._rec = None
         return rows if rows is not None else []
+
+    def recorded_convention_version(self) -> int | None:
+        """기록 구간에서 브리지가 신고한 좌표 규약 버전. TELEM 미수신이면 None.
+
+        캡처 도장은 **받은 값을 그대로** 남긴다 — 상수로 찍으면 "소스가 고쳐졌나"를 뜻하게 되지만
+        필요한 건 "**캡처 당시 파이에서 돌던 바이너리**가 뭘 했나"이기 때문이다(도장 자기유지).
+        """
+        return self._rec_convention
 
     def run(self) -> None:
         rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -571,6 +593,8 @@ class RealMonitorThread(QThread):
                         rec = self._rec  # 로컬 참조 — stop_recording()의 None 교체와의 경합 회피
                         if rec is not None:
                             rec.append((now, q_lm, dq_lm, tau_lm))
+                            # 브리지가 신고한 규약을 그대로 물고 간다 (npz 도장용).
+                            self._rec_convention = t["convention_version"]
                 if rx_stamps and now - rx_stamps[0] > 1.0:
                     rx_stamps = [s for s in rx_stamps if now - s <= 1.0]
                 if now - last_emit >= 0.1:
@@ -587,19 +611,21 @@ class RealMonitorThread(QThread):
             tx.close()
 
 
-# foot↔calf 전달기구 커플링 (RL_INTERFACE coef=+1, 2026-08-12 실기 실측): CMD/ACT의 foot 목표는
-# 관절각이 아니라 **raw각(q_foot+q_calf)** 의미다(sim env·실기 동일 해석). 따라서 foot의 soft limit
-# 클램프는 관절각 예측(raw − 같은 다리 calf 목표) 기준으로 해야 한다. leg-major에서 foot = calf+1.
-_COUPLED_CALF_FOOT: tuple[tuple[int, int], ...] = ((2, 3), (6, 7))
+# ★좌표 규약 (2026-08-14 이관): 워크스테이션은 **관절 좌표 하나**로 말한다.
+# foot↔calf 전달기구 커플링(coef=+1)의 raw↔관절 변환은 브리지(real_runner)가 전담한다 —
+# 브리지가 자기 규약을 convention_version=1 로 신고한다(r2s_udp.R2S_CONVENTION_VERSION).
+# 그래서 여기 있던 커플링 코드(발행 직전 foot += calf, 클램프 범위 평행이동)는 전부 삭제됐다.
+# GUI 는 설계도 관절, 발행도 관절, 표시도 관절이다.
 
 
 def _clamp_target(pose: list[float]) -> list[float]:
-    """soft limit 클램프 — foot은 calf 목표만큼 이동한 raw 범위로 클램프한다."""
-    out = motions.clamp_to_soft(pose)
-    for c, f in _COUPLED_CALF_FOOT:
-        lo, hi = motions.SOFT_LIMITS_RAD[f]
-        out[f] = min(hi + out[c], max(lo + out[c], pose[f]))
-    return out
+    """soft limit 클램프 — 전 관절 관절각 한계로 그대로 클램프한다.
+
+    이전에는 foot 만 calf 목표만큼 평행이동한 raw 범위로 클램프했다. 이제 발행값이 관절각이므로
+    ``motions.SOFT_LIMITS_RAD``(관절각 한계)를 그대로 쓰는 것이 맞다 — 브리지의
+    ``MOTOR_CALIB.min/max`` 도 같은 값이라 양 끝 해석이 일치한다.
+    """
+    return motions.clamp_to_soft(pose)
 
 
 def _compute_target(
@@ -681,20 +707,16 @@ def _compute_target(
             # chirp.py(순수 stdlib, sim/실기 공유 정의)와 같은 위상식. 마스크된 관절만 여기하고
             # 나머지는 시작 자세를 유지한다. 램프 → 스윕 → 중심 홀드(DONE=1) 3단계.
             #
-            # ★파형은 **관절각 공간**에서 설계하고 발행 직전에 foot만 raw로 변환한다(아래 커플링 블록).
-            # foot 명령 의미가 raw(q_foot+q_calf)라서, raw 공간에 직접 파형을 쓰면 calf·foot이 같은
-            # 위상으로 여기될 때 foot 관절각 = (raw 파형)−(calf 파형)이 상쇄돼 거의 안 움직인다
-            # (진폭 0.76−0.75 — 2026-08-12 실측). start_q의 foot 항도 raw라 관절각으로 먼저 환산한다.
+            # ★파형은 **관절각 공간**에서 설계하고 관절각 그대로 발행한다 (2026-08-14 좌표 이관).
+            # 이전에는 발행 직전 foot을 raw(q_foot+q_calf)로 변환했으나, 이제 그 변환은 브리지가
+            # 전담한다. start_q도 관절각이라 환산이 필요 없다.
             start = shared[_SM_START_TIME]
             f0 = shared[_SM_CHIRP_F0]
             f1 = shared[_SM_CHIRP_F1]
             dur = shared[_SM_CHIRP_DUR]
             ascale = shared[_SM_CHIRP_AMP]
             mask = int(shared[_SM_CHIRP_MASK])
-            start_q = [shared[_SM_CHIRP_START_Q + i] for i in range(NUM_JOINTS)]
-            start_j = list(start_q)
-            for c, f in _COUPLED_CALF_FOOT:
-                start_j[f] = start_q[f] - start_q[c]
+            start_j = [shared[_SM_CHIRP_START_Q + i] for i in range(NUM_JOINTS)]
             t = now - start
             if t < CHIRP_RAMP_S:
                 # 현재 자세 → chirp 중심 선형 램프 (마스크 관절만 이동)
@@ -717,10 +739,7 @@ def _compute_target(
                 # 스윕 종료 — 중심에서 홀드하고 UI에 알린다 (UI가 npz 저장 후 HOLD로 전환).
                 pose = [chirp.CHIRP_CENTER[i] if (mask >> i) & 1 else start_j[i] for i in range(NUM_JOINTS)]
                 shared[_SM_CHIRP_DONE] = 1.0
-            # 커플링 변환: 관절각 설계 파형 → raw 발행값. calf가 어떤 파형이든 foot **관절**이
-            # 설계 파형대로 움직인다 (비마스크 foot은 관절각 홀드 = foot 모터가 calf를 보상).
-            for c, f in _COUPLED_CALF_FOOT:
-                pose[f] = pose[f] + pose[c]
+            # (커플링 변환 삭제 — 발행값이 관절각이다. 브리지가 raw로 옮긴다.)
         else:  # _MODE_HOLD
             pose = list(base)
     # soft limit 최종 클램프 — sine이 base+amp로 한계를 넘거나 base 자체(실측 latch)가
@@ -2096,8 +2115,10 @@ class MainWindow(QMainWindow):
     def _chirp_save(self) -> None:
         self._drain_rec_queue()
         telem_rows: list = []
+        conv_ver: int | None = None
         if self._rm_thread is not None:
             telem_rows = self._rm_thread.stop_recording()
+            conv_ver = self._rm_thread.recorded_convention_version()
         if not self._chirp_cmd_rows:
             self._status_label.setText("Chirp: no samples recorded - nothing saved (stopped during ramp?)")
             return
@@ -2130,6 +2151,15 @@ class MainWindow(QMainWindow):
             "joint_group": np.asarray(m["group"]),
             "joint_mask": np.int64(m["mask"]),
             "aborted": np.bool_(m.get("aborted", False)),
+            # ★좌표 규약 도장 — **브리지가 TELEM으로 신고한 값을 그대로** 기록한다(상수 아님).
+            # 상수로 찍으면 "우리 소스가 고쳐졌나"를 뜻하게 되는데, 필요한 건 "**캡처 당시 파이에서
+            # 돌던 바이너리**가 뭘 했나"다 — 받은 값을 적으면 도장이 자기유지된다.
+            #   0 = gear 미적용 + foot raw각 / 1 = gear 적용 + foot 관절각
+            #   -1 = TELEM 미수신(sim 단독 캡처 등) — 규약 미상이므로 소비자가 판단할 것
+            "convention_version": np.int8(-1 if conv_ver is None else conv_ver),
+            # 구 도구 호환 — convert_gui_chirp_bipedleg.py의 옛 분기가 읽는 불리언.
+            # 규약 ≥1 이면 gear가 이미 적용된 상태다. 신규 소비자는 convention_version을 볼 것.
+            "gear_applied": np.bool_(conv_ver is not None and conv_ver >= 1),
         }
         if telem_rows:
             arrays["t_real"] = np.asarray([r[0] for r in telem_rows], dtype=np.float64)
@@ -2263,6 +2293,20 @@ def main() -> None:
     model_path = os.path.normpath(args.model) if args.model else None
     if model_path and not os.path.isfile(model_path):
         print(f"[gui_controller] 경고: 모델 파일 없음 → Policy mode 비활성: {model_path}", flush=True)
+
+    # ★2026-08-14 좌표 이관 — GUI 는 이제 **관절 좌표**로 명령한다(브리지가 raw 로 옮긴다).
+    #   실기 경로는 정합하지만 **sim 경로는 아직 아니다**: r2s_biped_leg env 의 live(position) 모드가
+    #   CMD(9881) 의 foot 을 raw 목표로 해석하고 get_lowstate 도 foot 을 raw 로 보고한다
+    #   (r2s_biped_leg_env.py get_lowstate / _apply_action, worker-3 이관 대기).
+    #   ⇒ position 모드로 **sim** 을 몰면 foot 이 q_calf 만큼 어긋난다(명령·표시 양방향).
+    #   숨기지 않고 기동 시 알린다 — 조용한 프레임 불일치가 이 프로젝트의 반복 사고다.
+    print(
+        f"[gui_controller] coordinate convention v{r2s_udp.R2S_CONVENTION_VERSION} (joint frame; "
+        "bridge does raw conversion)\n"
+        "                 WARNING: position mode against **sim** is off by q_calf on foot "
+        "(r2s env not migrated yet). Real path is correct.",
+        flush=True,
+    )
 
     # 공유 메모리 + publisher 프로세스 — QApplication 생성 **전에** fork 한다 (Qt 상태를 자식이
     # 물려받지 않도록, r2s_go2 gui와 동일한 기동 순서).

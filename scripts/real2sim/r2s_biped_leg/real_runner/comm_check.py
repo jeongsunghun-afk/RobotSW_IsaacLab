@@ -234,7 +234,14 @@ def main() -> int:
         if n_valid < 8:
             print("  ⚠ 모터 상태 미유효 — RobotEmbedded 기동/EtherCAT/모터 전원 확인 (링크는 정상)")
     else:
-        print("TELEM(9889): 수신 없음 — 구버전 real_runner(재빌드 전)이거나 gui monitor가 포트 점유 중")
+        # 2026-08-14: 의미가 뒤집혔다. r2s_udp.unpack_policy_telem 은 legacy TELEM(120 B·116 B)도
+        # 받으므로 **구버전 러너는 여전히 파싱된다**(규약 버전 0 으로). 이제 크기 불일치로 수신이
+        # 끊기는 쪽은 러너가 r2s_udp.py 보다 **최신**일 때다 — 러너가 121 B 를 보내는데 이 워크스테이션의
+        # r2s_udp.py 가 아직 120 B 만 알면 전부 거부된다.
+        print(
+            "TELEM(9889): 수신 없음 — real_runner 미기동/네트워크 두절이거나, gui monitor가 포트 점유 중,\n"
+            "  또는 real_runner가 이 워크스테이션의 r2s_udp.py보다 최신(패킷 크기 불일치) — 워크스테이션 쪽을 갱신할 것"
+        )
 
     ok_pacing = 18.0 <= mean_dt <= 23.0
     ok_rx = rx_cnt >= 0.9 * expected_rx

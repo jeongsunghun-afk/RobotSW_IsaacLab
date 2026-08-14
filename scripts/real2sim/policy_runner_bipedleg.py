@@ -72,6 +72,9 @@ X_VEL_RANGE = (-0.5, 2.0)
 YAW_RANGE = (-0.5, 0.5)
 
 HOST = "127.0.0.1"
+# 이 러너가 받아들이는 좌표 규약 (r2s_udp.R2S_CONVENTION_VERSION). 정책 obs/action 은 **관절 좌표**
+# 이고 raw↔관절 변환은 브리지(real_runner)가 전담하므로, 관절 좌표를 신고하는 버전만 받는다.
+_REQUIRED_CONVENTION_VERSION: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +240,7 @@ def main() -> None:
 
     mode = 0  # 0=idle, 1=run
     source = 0  # 0=sim, 1=real
+    no_state = 0  # 연속 state 무응답 횟수 (구버전 STATE 거부를 조용히 넘기지 않기 위한 카운터)
     x_vel = 0.0
     yaw = 0.0
     seq = 0
@@ -303,9 +307,34 @@ def main() -> None:
             src_sock = real_state_sock if source == 1 else sim_state_sock
             state = recv_state_blocking(src_sock)
             if state is None:
+                # ⚠ 구버전(84 B) STATE 도 여기로 온다 — unpack이 크기 불일치로 None을 주기 때문.
+                #   그대로 두면 조용한 무한 재시동 루프가 되므로 일정 횟수마다 원인을 알린다.
+                no_state += 1
+                if no_state % 50 == 0:
+                    print(
+                        f"[policy_runner] ⚠ state 무응답 {no_state}회 — 송신자가 죽었거나, **구버전 84 B "
+                        f"STATE**를 보내고 있다(규약 필드 없음 → 크기 불일치로 거부). "
+                        f"src={'real' if source == 1 else 'sim'}",
+                        flush=True,
+                    )
                 send_action(ps.default.cpu().numpy())  # 응답 없음 → 재시동
                 seq += 1
                 continue
+            no_state = 0
+
+            # 3) 좌표 규약 검사 — 불일치면 **즉시 종료**한다.
+            #    변환은 브리지(real_runner)가 전담하고 여기서는 하지 않는다(2026-08-14 결정):
+            #    정책 러너를 gui_controller에 통합할 계획이라, 여기에 변환을 두면 GUI 안에
+            #    raw/관절 두 규약이 공존하게 된다. 그래서 "맞춰주기"가 아니라 "거부"가 맞다.
+            ver = state.get("convention_version")
+            if ver != _REQUIRED_CONVENTION_VERSION:
+                raise SystemExit(
+                    f"[policy_runner] 좌표 규약 불일치 — env 좌표 이관 전.\n"
+                    f"  받은 convention_version={ver}, 필요={_REQUIRED_CONVENTION_VERSION} "
+                    f"(source={'real' if source == 1 else 'sim'})\n"
+                    f"  0 = gear 미적용 + foot raw각 / 1 = gear 적용 + foot 관절각.\n"
+                    f"  정책은 관절 좌표만 안다 — 이 러너는 변환하지 않는다(변환은 real_runner 담당)."
+                )
 
             # 3) 추론 → 다음 action (articulation 순서)
             q = torch.tensor(state["q"], device=device)
