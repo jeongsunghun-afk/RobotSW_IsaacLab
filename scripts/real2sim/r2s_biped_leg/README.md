@@ -181,11 +181,17 @@ r2s_bl_gui
 GUI **Monitor** 버튼 → 선택 관절의 3개 plot:
 
 - **q**: action(점선=명령) / sim(엔코더)
-- **tau_est**: sim
-- **dq**: sim
+- **Joint torque**: sim / real
+- **dq**: sim / real
 
 별도 프로세스로 렌더를 GUI의 50Hz UDP 발행에서 격리한다(in-process matplotlib은 발행을 굶긴다).
 robot 시리즈는 ROS2 실로봇 연동 시 추가된다.
+
+> ⚠ **토크 축은 실기 값을 관절 좌표로 올려서 그린다.** 실기가 보고하는 토크는 **채널기준**이고
+> sim 은 **관절기준**이라 그대로 겹치면 calf 1.5배 · foot 1.2배 어긋난다(hip/thigh는 k=1이라
+> 맞아떨어져서 오래 안 보였다). 환산은 감속비 + 커플링 전치 두 조각이고, 감속비 배율은 아직
+> **미판정인 게인 지수 n**에 달려 있어 축 라벨에 `n=2`로 표시된다.
+> 수식·근거·순서 함정은 **[`TORQUE_COORDINATES.md`](TORQUE_COORDINATES.md)** 참고.
 
 ---
 
