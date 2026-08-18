@@ -625,3 +625,82 @@ trot 으로 내려니 몸통이 낮아지고 상하로 튄다.
    discriminator 가 그 대역을 거의 못 배운다.
 2. `cmd 4.0` 을 학습 명령 범위에서 빼고 3.5 까지만 두면(참조가 있는 대역) 회귀가 사라지는지.
 3. 보행 종류를 램프 정규 지표로 승격 — 지금까지 `base_h` 만 보다가 이걸 놓쳤다.
+
+## 13. ★★★ (2026-08-18) MimicKit 은 **같은 데이터 · 같은 50/50 혼합**으로 4 m/s 를 낸다
+
+"MimicKit 은 다른 데이터 없이 그 데이터셋만으로 됐다는 거냐"는 질문에 확인한 결과 — **그렇다.**
+그리고 이것이 §11~12 의 해석을 바꾼다.
+
+### 13-a. 데이터셋: 동일하다
+
+`/home/lgb/MimicKit/data/datasets/dataset_go2_locomotion_smr_mirror3.yaml`
+
+| 그룹 | weight | 우리 `smr_mirror_pkl` |
+|---|---|---|
+| pace ×6 | **0.0** (비활성) | 파일 자체가 없음 |
+| run0/1/2 (+mirror) ×6 | 1.0 | 있음 |
+| trot0/1 (+mirror) ×4 | 1.0 | 있음 |
+| walk/walk1/walk2/walk_turn (+mirror) ×8 | 1.0 | 있음 |
+
+**실사용 클립 18 개가 우리와 완전히 같다.** 2.70~3.96 m/s 공백도, `run2` 가 71 프레임뿐인 것도
+MimicKit 쪽 사정도 똑같다. → **데이터 공백은 우리만의 문제가 아니다.**
+
+### 13-b. style 혼합: **0.5 / 0.5** — 우리 baseline 과 같은 값
+
+```yaml
+task_reward_weight: 0.5
+disc_reward_weight: 0.5
+```
+`mimickit/learning/amp_agent.py:124` → `r = w_task · task_r + w_disc · disc_r`
+우리 `on_policy_runner_amp.py:174` 의 `task_reward_lerp = 0.5` 와 **같은 식·같은 값**이다.
+
+그리고 `lin_x_vel_max: 4.0` 으로 명령 범위도 같은데, `results/.../velocity_comparison.png` 는
+계단 명령 0→4 m/s 를 **끝까지 추종**한다.
+
+★★ **즉 우리가 `lerp` 를 0.8 로 올려서 얻은 것은 MimicKit 의 레시피가 아니라 우회로다.**
+같은 조건(0.5)에서 우리 baseline 은 `cmd 4.0` 에서 0.03 m/s · 0% 다.
+
+### 13-c. 그러면 무엇이 다른가 — 보상 **스케일**과 외란
+
+속도 추종 보상 **식은 완전히 동일**하다 (`exp(-scale · err²)`,
+`task_tracking_mixin.py:153-178` vs `go2_imitation_tracking_env.py:415-426`). 값이 다르다:
+
+| | 우리 | MimicKit | 효과 |
+|---|---:|---:|---|
+| `vel_err_scale` | **0.5** | **1.0** | 1 m/s 오차에 0.61 vs **0.37** — 우리가 2 배 관대 |
+| `yaw_vel_err_scale` | 0.5 | 0.5 | 동일 |
+| lin : yaw 가중치 | 0.7 : 0.3 | 0.5 : 0.5 | 우리가 lin 을 더 봄 (불리 아님) |
+| `push_robot` | **1 m/s 킥 / 5 s** | **없음** | 램프 각 stage 가 거의 매번 외란을 맞음 |
+| episode | 20 s | 10 s | |
+| action std | 학습 (≈0.15) | **FIXED 0.1** + `action_bound_weight 10` | |
+
+`exp(-scale·err²)` 에서 오차 2 m/s 면 우리 0.135 vs MimicKit 0.018 — **고속 오차를 줄일 압력이
+7 배 차이**난다. 우리 정책이 `cmd 4.0` 에서 1.4 m/s 로 만족하고 마는 것과 방향이 맞는다.
+
+### 13-d. ⚠ §5 정정 — MimicKit 은 pose imitation reward 를 쓰지 않는다
+
+§5 에 "MimicKit = AMP disc + imitation reward 직접(pose 0.5, vel 0.1, root_pose 0.15, ...)"
+이라고 적었는데 **틀렸다.** `env_config.yaml` 에 `reward_pose_w` 등이 있는 것은 사실이지만,
+`TaskTrackingMixin._update_reward` 가 `self._reward_buf[:]` 를 **속도 추종 보상으로 통째로
+덮어쓴다**(`super()` 호출 없음). 상속된 DeepMimic 설정이 남아 있을 뿐 이 env 는 읽지 않는다.
+→ **보상 구조는 우리와 같은 모양이다**(task 속도추종 + AMP style, 50/50).
+
+### 13-e. MimicKit 의 4 m/s 도 곱진 않다
+
+같은 결과 폴더의 그림을 보면 `cmd 4.0` 부근에서 roll rate ±1.5~2.5 rad/s, pitch rate
+±3~4 rad/s, vz ±0.5 m/s 로 몸통이 크게 흔들리고, `joints.png` 의 thigh 토크는 ±20~25 N·m
+(캡 23.7)로 포화, thigh `|q̇|` 는 ~20 rad/s 다. **우리 lerp 0.8 과 같은 대역이다.**
+MimicKit 쪽 보행 **종류**는 원자료(joint 시계열)가 없어 §12 와 같은 위상 판정을 못 했다.
+
+⚠ §6 에 적어 둔 단서가 그대로 유효하다 — 이 PNG 를 만든 평가 실행의 엔진 설정은 기록이 없다.
+"같은 엔진에서 4 m/s"는 **학습 기준으로만** 확인된 것이다.
+
+### 13-f. 다음 실험 (권장 순서)
+
+1. **`vel_err_scale` 0.5 → 1.0, `lerp` 는 0.5 유지** — MimicKit 의 정확한 설정. 이것만으로
+   baseline 이 열리면 §11 의 "style 가중치가 천장"이라는 진단 자체가 바뀐다.
+2. `push_robot=False` 추가 (MimicKit 에 없는 외란).
+3. 둘 다 켠 조합.
+
+★ 1 번이 열리면 **lerp 0.8/0.6 세대는 전부 우회로였던 것**이 되고, §12 에서 본
+`cmd 4.0` trot 회귀도 "약해진 style 로 고속을 짜낸 부작용"으로 설명된다.
