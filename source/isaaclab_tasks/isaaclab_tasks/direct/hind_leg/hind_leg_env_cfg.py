@@ -329,6 +329,13 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     # 벨트**로 발목을 돈다 ⇒ 모터 출력각 θ_f = q_foot + q_calf. 기구 구속이므로 일률 보존에서
     # Q_calf += τ_θf 가 강제된다 — 위치 커플링을 넣으면 이 항도 넣어야 한다.
     # (이전에는 hind_leg_env._apply_action에 플래그 없이 하드코딩돼 있었다. 기본값 True = 종전 동작.)
+    # ★ 2026-08-18: 전치 토크는 foot 게인 재계산이 아니라 foot 액추에이터가 실제로 낸 직전 스텝
+    #   토크(`data.applied_torque`)를 쓴다. 옛 식은 정적 effort_limit(100.8 N·m)로 클램프해
+    #   DCMotor 속도 곡선 밖의 토크를 calf 에 실을 수 있었다.
+    #   ⚠ 다만 **현 게인(kp_foot=20)에서는 학습 플랜트가 바뀌지 않는다** — foot 이 교차점
+    #     q̇ ≈ 4.92 rad/s 에 자유 스윙으로 도달조차 못 하기 때문(실측 최대 4.87)이라 기존 run 과
+    #     비교 가능하다. 보행 접촉이 발목을 그보다 빨리 미는 경우는 **미측정**.
+    #     근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
     foot_transpose: bool = True
 
     # foot 마찰을 raw(모터축) 좌표로 — r2s_biped_leg `foot_raw_friction`과 같은 스위치(기본 True).

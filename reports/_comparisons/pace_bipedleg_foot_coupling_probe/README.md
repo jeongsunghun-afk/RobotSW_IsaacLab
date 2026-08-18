@@ -386,9 +386,49 @@ sim 은 벨트를 강체가 아니라 **목표 치환 + PD 강성**으로 흉내
 | 자유 calf 거동이 실기와 같은가 | `backdrive_probe.py` | 실기 필요 |
 | 전치가 실제로 무릎에 도달하는가 | τ_foot 10~12 N·m 캡처 (§9) | 실기 필요 |
 
+## 11. 전치 토크의 출처를 `applied_torque` 로 바꿨다 — **현 게인에서는 무영향** (2026-08-18)
+
+전치항은 foot 모터 토크를 calf 에 싣는데, 그 값을 얻는 방식이 둘이었다.
+
+* **구식** — foot 게인으로 재계산 후 정적 한계로 클램프: `clamp(kp·e + kd·ė, ±100.8)`
+* **신식** — foot 액추에이터가 **실제로 낸** 직전 스텝 토크: `data.applied_torque[foot]`
+
+DCMotor 는 정적 한계가 아니라 **4사분면 부호 곡선**으로 자른다. 진행 방향으로 더 가속하는 쪽만
+속도에 눌리고 제동 쪽은 `effort_limit` 까지 허용된다. 두 식은 곡선이 `effort_limit` 를 넘는
+**|q̇| ≲ 4.92 rad/s** 구간에서 완전히 일치한다.
+
+### 실측 — 게인을 올려야만 차이가 난다
+
+`fix_base`, 무중력, `foot_raw_friction=False`, foot 목표 6 Hz × ±0.8 rad, 4800 샘플.
+
+| `kp_foot` | foot \|q̇\| 최대 | 교차점 초과 | 구식이 곡선 밖 | 초과분 중앙 | 신식이 곡선 밖 |
+|---|---:|---:|---:|---:|---:|
+| **20** (학습·배포 게인) | 4.87 | 0.0% | **0.0%** | — | 0 |
+| 200 (`coupling_hold_kp`) | 23.56 | 84.1% | 17.2% | 8.69 N·m | 0 |
+| 600 (가상) | 24.06 | 88.7% | 40.0% | 40.04 N·m | 0 |
+
+* **신식은 세 조건 모두 곡선 안(위반 0)** — 구현이 맞다는 직접 증거.
+* **`kp_foot = 20` 에서는 foot 이 자유 스윙으로 교차점(4.92)에 **도달조차 못 한다**
+  (최대 4.87). 즉 현행 학습 플랜트에서 이 변경은 **no-op** 이고, **기존 학습·적합은 무효화되지
+  않는다.**
+* 차이가 나는 곳은 게인이 높은 경로다 — live relax/hold(`coupling_hold_kp = 200`)에서 17.2%.
+
+> ⚠ **판정 조건 두 가지를 처음에 틀렸다.** ① 상한을 크기(`|q̇|`)로 잡아 정상 제동을 위반으로
+> 오판했다 — DCMotor 는 부호 곡선이다. ② `applied_torque` 는 **직전** 속도로 잘린 값인데 현재
+> 속도의 곡선으로 재서 신식이 719 스텝 위반한 것처럼 보였다. 둘 다 고치니 신식 위반이 0 이 됐다.
+
+### 남은 caveat
+
+프로브는 `fix_base` + 무중력이라 **foot 을 그 자신의 PD 로만** 몰았다. 보행 중에는 지면 반력과
+몸통 운동이 발목을 밀므로 `kp_foot = 20` 에서도 q̇ 가 4.92 를 넘을 수 있다 — **미측정**이다.
+그 경우에만 이 변경이 학습 거동에 영향을 준다.
+
 ## 재현
 
 ```bash
+python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_uses_applied_torque.py \
+    --headless --kp_foot 200 --kd_foot 2.0 --freq_hz 6 --amp_rad 0.8
+# → §11 — 구식/신식을 같은 스텝에서 비교. **kp_foot 를 올리지 않으면 교차점을 못 넘어 INCONCLUSIVE**
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/verify_coupling_constraint.py --headless
 # → metrics/verify_coupling_constraint.json  (§10 — 구속 재현 + 구속 강성)
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_from_chirp.py
