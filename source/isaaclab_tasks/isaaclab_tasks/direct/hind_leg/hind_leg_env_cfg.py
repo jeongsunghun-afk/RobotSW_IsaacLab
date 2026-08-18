@@ -348,6 +348,23 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     foot_raw_friction: bool = True
     foot_raw_friction_vel_eps: float = 0.2  # sign(w_raw) 완화 폭 [rad/s] (tanh(w/eps), 채터링 방지)
 
+    # 반사관성 off-diagonal — **기본 True** (2026-08-18).
+    #
+    # 벨트가 무릎을 건너므로 foot 로터는 θ_f = N_f·(q_f + q_c) 로 돈다. 그래서 반사관성이 대각
+    # 행렬이 아니다:
+    #     M_refl = I_r·[[N_c² + N_f²,  N_f²],   =  [[0.1338,  0.0522],
+    #                   [N_f²,         N_f²]]       [0.0522,  0.0522]]
+    # 대각은 `rga.py` armature 로 암묵적(무조건 안정)으로 들어가지만, PhysX armature 는 관절별
+    # 스칼라라 **off-diagonal 을 구조적으로 표현할 수 없다**. 그래서 명시적 보정토크로 넣는다:
+    #     τ_calf += −I_off·q̈_foot,   τ_foot += −I_off·q̈_calf     (I_off = foot armature)
+    #
+    # ⚠ 유효 **음의 관성**이라 발산이 의심됐다(비 0.965, DR 켜면 1.86 > 1). 실측 결과 발산하지
+    #   않는다 — 보정을 effort target 에 더하므로 각 모터의 토크-속도 곡선이 다시 잘라 준다.
+    #   1.95M 표본에서 NaN 0, |q̇| 24.54→24.96 (DR off) / 32.04 (DR on, baseline 24.70 대비 +30%).
+    #   미측정: 밑바닥부터 학습하는 초기 거친 구간.
+    #   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §12
+    foot_reflected_inertia: bool = True
+
     # 학습 신호 클리핑 — 희귀 물리 폭주 이벤트의 극단 obs/reward가 GAE bootstrap을 타고
     # value loss 지수 발산을 일으키는 것을 차단 (2026-08-12 signfix_coupled v1/v2 파국).
     # 정상 신호 범위(|joint_vel|≲30, |reward|≲1/step) 밖에서만 작동.

@@ -101,6 +101,9 @@ class R2SBipedLegEnv(DirectRLEnv):
 
         # raw 좌표 foot 마찰 (cfg.foot_raw_friction) — foot 관절의 PhysX 마찰을 0으로 눌러 둘 때
         # 쓰는 인덱스/영텐서를 미리 만들어 둔다 (warp 커널은 int32 인덱스를 요구한다).
+        # 직전 스텝에 foot 에 실은 반사관성 보정 — 전치가 `applied_torque` 에서 이 값을 빼야
+        # 관성항이 벨트를 타고 calf 에 이중으로 들어가지 않는다 (_apply_foot_coupling 참고).
+        self._mrefl_foot_prev = torch.zeros(self.num_envs, len(self._foot_art_ids), device=self.device)
         self._foot_art_ids_i32 = torch.as_tensor(self._foot_art_ids, dtype=torch.int32, device=self.device)
         self._all_env_ids_i32 = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
         self._foot_zero_fric = torch.zeros(self.num_envs, len(self._foot_art_ids), device=self.device)
@@ -343,13 +346,25 @@ class R2SBipedLegEnv(DirectRLEnv):
                 self.robot.set_joint_velocity_target_index(target=-dq_c, joint_ids=self._foot_art_ids)
                 # calf에 실을 모터축 토크. 전치(foot 모터 실토크)와 raw 마찰은 같은 일률 보존
                 # 규칙에서 나오지만 A/B를 위해 플래그가 따로 있다 — 실기 구성은 둘 다 True다.
+                # 반사관성 off-diagonal — live 경로와 **같은 플랜트**여야 한다. 여기만 빠지면
+                # PACE 가 학습 env 와 다른 플랜트에 적합된다(조용한 divergence).
+                corr_calf = corr_foot = None
+                if self.cfg.foot_reflected_inertia:
+                    acc = self.robot.data.joint_acc
+                    i_off = self._data_tensor(self.robot.data.joint_armature)[:, self._foot_art_ids]
+                    corr_calf = -i_off * acc[:, self._foot_art_ids]
+                    corr_foot = -i_off * acc[:, self._calf_art_ids]
                 tau_fric = None
                 if self.cfg.foot_raw_friction:
                     # 관절 좌표 PhysX 마찰을 끄고(매 제어 스텝 = 매 물리 스텝, decimation=1)
                     # raw 좌표 마찰을 foot 에 feedforward 로 넣는다.
                     self._clear_foot_joint_friction()
                     tau_fric = self._foot_raw_friction_torque()
-                    self.robot.set_joint_effort_target_index(target=tau_fric, joint_ids=self._foot_art_ids)
+                tau_foot_ff = tau_fric
+                if corr_foot is not None:
+                    tau_foot_ff = corr_foot if tau_foot_ff is None else tau_foot_ff + corr_foot
+                if tau_foot_ff is not None:
+                    self.robot.set_joint_effort_target_index(target=tau_foot_ff, joint_ids=self._foot_art_ids)
                 tau_calf = None
                 if self.cfg.foot_transpose:
                     # live 경로(:meth:`_apply_foot_coupling`)와 같은 규약 — foot 모터가 실제로 낸
@@ -364,9 +379,17 @@ class R2SBipedLegEnv(DirectRLEnv):
                     #   (`collect_chirp_sim_bipedleg.py`, 10 Hz 스윕)는 foot 이 속도 클립 24.70 까지
                     #   가서 5.42% 의 스텝이 달라진다 — 그걸로 적합/검증하면 안 된다.
                     #   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
-                    tau_calf = self.robot.data.applied_torque[:, self._foot_art_ids]
+                    # ⚠ 직전 스텝에 foot 에 넣은 반사관성 보정은 모터 토크가 아니므로 빼 준다
+                    #   (안 빼면 off-diagonal 이 전치를 타고 calf 에 이중으로 들어간다).
+                    tau_calf = self.robot.data.applied_torque[:, self._foot_art_ids] - self._mrefl_foot_prev
                 elif tau_fric is not None:
                     tau_calf = tau_fric
+                if corr_calf is not None:
+                    tau_calf = corr_calf if tau_calf is None else tau_calf + corr_calf
+                if corr_foot is not None:
+                    self._mrefl_foot_prev.copy_(corr_foot)
+                elif self.cfg.foot_transpose:
+                    self._mrefl_foot_prev.zero_()
                 if tau_calf is not None:
                     # calf 자신의 액추에이터가 자기 토크-속도 곡선으로 다시 자른다 — 여기서 foot
                     # 한계로 미리 자르지 않는다.
@@ -553,11 +576,25 @@ class R2SBipedLegEnv(DirectRLEnv):
         self.robot.set_joint_velocity_target_index(target=vel_t, joint_ids=self._foot_art_ids)
         # calf에 실을 모터축 토크 = 전치(foot 모터 실토크) + raw 좌표 마찰. 둘 다 같은 일률 보존
         # 규칙(벨트가 무릎을 건넌다)에서 나오지만 A/B를 위해 플래그가 따로 있다 — 실기 구성은 둘 다 True.
+        # ── 반사관성 off-diagonal (cfg.foot_reflected_inertia) ────────────────────────────
+        # 대각은 armature 로 들어가 있고, PhysX 가 못 쓰는 off-diagonal 만 명시적 토크로 넣는다.
+        # I_off = I_r·N_f² 는 **foot 대각 armature 와 같은 양**이라 그대로 읽는다(DR 자동 일관).
+        corr_calf = corr_foot = None
+        if self.cfg.foot_reflected_inertia:
+            acc = self.robot.data.joint_acc
+            i_off = self._data_tensor(self.robot.data.joint_armature)[:, self._foot_art_ids]
+            corr_calf = -i_off * acc[:, self._foot_art_ids]
+            corr_foot = -i_off * acc[:, self._calf_art_ids]
+        tau_fric = None
         if self.cfg.foot_raw_friction:
             # 감속기·벨트 마찰은 모터축(raw)에 앉아 있다 — foot 자체 PD에 feedforward로 더한다
             # (PhysX 관절 마찰은 _pre_physics_step에서 제거).
             tau_fric = self._foot_raw_friction_torque()
-            self.robot.set_joint_effort_target_index(target=tau_fric, joint_ids=self._foot_art_ids)
+        tau_foot_ff = tau_fric
+        if corr_foot is not None:
+            tau_foot_ff = corr_foot if tau_foot_ff is None else tau_foot_ff + corr_foot
+        if tau_foot_ff is not None:
+            self.robot.set_joint_effort_target_index(target=tau_foot_ff, joint_ids=self._foot_art_ids)
         if self.cfg.foot_transpose:
             # 전치 토크: 모터좌표 r = (q_c, q_f+q_c) ⇒ τ_joint = Tᵀ·τ_motor ⇒ τ_calf += τ_foot.
             # (RL_INTERFACE의 `τ_raw_src −= coef·τ_joint_dst`는 역방향 — 원하는 관절토크에서 모터
@@ -572,11 +609,23 @@ class R2SBipedLegEnv(DirectRLEnv):
             #   ⚠ 실측: 배포 게인(kp_foot=20)에서는 foot 이 교차점 q̇ ≈ 4.92 rad/s 에 도달조차 못 해
             #     두 식이 **같다**. 차이는 live hold(`coupling_hold_kp` 200)처럼 게인이 높은 경로에서만
             #     난다(스텝의 17.2%). 근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe §11
-            tau_calf = self.robot.data.applied_torque[:, self._foot_art_ids]
-        elif self.cfg.foot_raw_friction:
+            # ⚠ `applied_torque` 에는 직전 스텝에 foot 에 넣은 **반사관성 보정도 섞여 있다**. 그건
+            #   모터 토크가 아니라 관성항이라 벨트로 전달되면 안 된다(그대로 두면 off-diagonal 이
+            #   전치를 타고 calf 에 한 번 더 들어간다). 같은 1스텝 지연으로 캐시해 뺀다.
+            tau_calf = self.robot.data.applied_torque[:, self._foot_art_ids] - self._mrefl_foot_prev
+        elif tau_fric is not None:
             # 전치를 끈 A/B: 마찰만 calf에 같은 부호로 싣는다.
             tau_calf = tau_fric
         else:
+            tau_calf = None
+        if corr_calf is not None:
+            tau_calf = corr_calf if tau_calf is None else tau_calf + corr_calf
+        # 다음 스텝의 전치 보정용으로 이번에 foot 에 실은 반사관성 항을 기억한다.
+        if corr_foot is not None:
+            self._mrefl_foot_prev.copy_(corr_foot)
+        elif self.cfg.foot_transpose:
+            self._mrefl_foot_prev.zero_()
+        if tau_calf is None:
             return
         # calf 자신의 액추에이터가 이 feedforward를 포함해 자기 토크-속도 곡선으로 다시 자른다 —
         # 여기서 foot 한계로 미리 자르면 한계를 이중으로 거는 셈이라 클램프하지 않는다.
@@ -639,3 +688,5 @@ class R2SBipedLegEnv(DirectRLEnv):
         )
         self._foot_kp_eff[env_ids] = self._kp[env_ids][:, self._couple_foot_lm]
         self._foot_kd_eff[env_ids] = self._kd[env_ids][:, self._couple_foot_lm]
+        # 리셋 직후에 직전 스텝의 반사관성 보정이 남아 있으면 전치가 그만큼 잘못 뺀다.
+        self._mrefl_foot_prev[env_ids] = 0.0

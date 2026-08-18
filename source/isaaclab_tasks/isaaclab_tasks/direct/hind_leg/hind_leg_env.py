@@ -124,6 +124,8 @@ class HindLegEnv(DirectRLEnv):
         # 둘 다 의미가 없으므로 False로 접는다(속성은 항상 존재해야 _pre_physics_step이 안전하다).
         self._foot_transpose = self._foot_coupling and bool(getattr(self.cfg, "foot_transpose", True))
         self._foot_raw_friction = self._foot_coupling and bool(getattr(self.cfg, "foot_raw_friction", True))
+        # 반사관성 off-diagonal — 벨트가 만드는 항이므로 커플링이 꺼지면 같이 꺼진다.
+        self._foot_reflected_inertia = self._foot_coupling and bool(getattr(self.cfg, "foot_reflected_inertia", True))
         if self._foot_coupling:
             self._calf_ids, _ = self._robot.find_joints(["HL_calf_joint", "HR_calf_joint"], preserve_order=True)
             self._foot_ids, _ = self._robot.find_joints(["HL_foot_joint", "HR_foot_joint"], preserve_order=True)
@@ -140,6 +142,9 @@ class HindLegEnv(DirectRLEnv):
             self._foot_ids_i32 = torch.as_tensor(self._foot_ids, dtype=torch.int32, device=self.device)
             self._all_env_ids_i32 = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
             self._foot_zero_fric = torch.zeros(self.num_envs, len(self._foot_ids), device=self.device)
+            # 직전 스텝에 foot 에 실은 반사관성 보정 — 전치가 `applied_torque` 에서 이 값을 빼야
+            # 관성항이 벨트를 타고 calf 에 이중으로 들어가지 않는다 (_apply_action 참고).
+            self._mrefl_foot_prev = torch.zeros(self.num_envs, len(self._foot_ids), device=self.device)
             # ⚠ ``data.default_joint_*`` 는 **최초 접근 시점의 sim 값을 복제**하는 lazy clone이다.
             # _clear_foot_joint_friction()이 foot 관절 마찰을 0으로 만든 뒤에 처음 접근하면 0이 복제돼
             # b_raw/c_raw가 통째로 사라진다(실측: 스모크에서 b_raw=c_raw=0). 여기서 먼저 한 번 읽어
@@ -275,11 +280,27 @@ class HindLegEnv(DirectRLEnv):
         # calf에 실을 모터축 토크 = 전치(foot 모터 실토크) + raw 좌표 마찰. 둘 다 "벨트가 무릎을
         # 건넌다"는 같은 기구 구속에서 나오지만, A/B와 되돌림을 위해 플래그가 따로 있다
         # (실기 구성은 둘 다 True).
+        # ── 반사관성 off-diagonal (cfg.foot_reflected_inertia) ────────────────────────────
+        # M_refl 의 대각은 armature 로 이미 들어가 있고, PhysX 가 못 쓰는 off-diagonal 만 여기서
+        # 명시적 토크로 넣는다: τ_calf += −I_off·q̈_foot, τ_foot += −I_off·q̈_calf.
+        # I_off = I_r·N_f² 는 **foot 대각 armature 와 같은 양**이라 그대로 읽는다 — DR 이 걸려도
+        # 자동으로 같은 배수를 받는다(별도 상수로 두면 DR 에서 조용히 어긋난다).
+        corr_calf = corr_foot = None
+        if self._foot_reflected_inertia:
+            acc = self._robot.data.joint_acc
+            i_off = self._data_tensor(self._robot.data.joint_armature)[:, self._foot_ids]
+            corr_calf = -i_off * acc[:, self._foot_ids]
+            corr_foot = -i_off * acc[:, self._calf_ids]
+        tau_fric = None
         if self._foot_raw_friction:
             # 감속기·벨트 마찰은 모터축(raw)에 앉아 있다 — foot PD에 feedforward로 더한다
             # (PhysX 관절 마찰은 _pre_physics_step에서 제거).
             tau_fric = self._foot_raw_friction_torque()
-            self._robot.set_joint_effort_target_index(target=tau_fric, joint_ids=self._foot_ids)
+        tau_foot_ff = tau_fric
+        if corr_foot is not None:
+            tau_foot_ff = corr_foot if tau_foot_ff is None else tau_foot_ff + corr_foot
+        if tau_foot_ff is not None:
+            self._robot.set_joint_effort_target_index(target=tau_foot_ff, joint_ids=self._foot_ids)
         if self._foot_transpose:
             # 전치 토크: 모터좌표 r=(q_c, q_f+q_c) ⇒ τ_joint = Tᵀ·τ_motor ⇒ τ_calf += τ_foot_motor.
             # ★ 2026-08-18: foot 모터가 **실제로 낸** 토크를 쓴다 — 직전 physics step의
@@ -296,11 +317,23 @@ class HindLegEnv(DirectRLEnv):
             #     **0.012%** 로 드물지만 그때 최대 **101 N·m** 를 calf 에 실었다 — 평균은 같아도
             #     희귀 폭주 이벤트가 사라지는 것이 이 변경의 실질이다.
             #     근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
-            tau_calf = self._robot.data.applied_torque[:, self._foot_ids]
-        elif self._foot_raw_friction:
+            # ⚠ `applied_torque` 에는 직전 스텝에 우리가 foot 에 넣은 **반사관성 보정도 섞여 있다**.
+            #   그건 모터 토크가 아니라 관성항이라 벨트로 전달되면 안 된다(넣으면 off-diagonal 이
+            #   전치를 타고 calf 에 한 번 더 들어가 이중계상). 같은 1스텝 지연으로 캐시해 뺀다.
+            tau_calf = self._robot.data.applied_torque[:, self._foot_ids] - self._mrefl_foot_prev
+        elif tau_fric is not None:
             # 전치를 끈 A/B: 마찰만 calf에 같은 부호로 싣는다.
             tau_calf = tau_fric
         else:
+            tau_calf = None
+        if corr_calf is not None:
+            tau_calf = corr_calf if tau_calf is None else tau_calf + corr_calf
+        # 다음 스텝의 전치 보정용으로 이번에 foot 에 실은 반사관성 항을 기억한다.
+        if corr_foot is not None:
+            self._mrefl_foot_prev.copy_(corr_foot)
+        elif self._foot_transpose:
+            self._mrefl_foot_prev.zero_()
+        if tau_calf is None:
             return
         # calf 자신의 DCMotor가 이 feedforward를 포함해 자기 토크-속도 곡선으로 다시 자른다 —
         # 여기서 foot 한계로 미리 자르면 calf 모터 한계를 이중으로 거는 셈이라 클램프하지 않는다.
@@ -555,6 +588,9 @@ class HindLegEnv(DirectRLEnv):
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
+        if self._foot_coupling:
+            # 리셋 직후에는 직전 스텝의 반사관성 보정이 남아 있으면 안 된다 (전치가 그만큼 잘못 뺀다).
+            self._mrefl_foot_prev[env_ids] = 0.0
         # Randomize gait phase for reset envs to decorrelate episodes across parallel envs.
         self._gait_phase[env_ids] = torch.rand(len(env_ids), device=self.device)
         if self.cfg.history_observation:

@@ -436,8 +436,10 @@ R_SKELETON_HIND_LEG_CFG = ArticulationCfg(
 HIND_LEG_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         # usd_path="/home/lgb/IsaacLab-6.0/source/isaaclab_assets/data/Robots/Hind_Leg/hind_leg.usd",
-        # usd_path=".../data/Robots/Hind_Leg_RLCal/Hind_Leg_RLCAL_260810/Hind_Leg_RLCAL_260810.usda",  # 구 CAD+RL_INTERFACE 한계 이식본(08-10)
-        # usd_path=".../data/Robots/Hind_Leg_URDF2/Hind_Leg/Hind_Leg.usda",  # 2026-08-11: URDF2(신규 CAD 리비전, 08-11 이전 채택)
+        # usd_path=".../data/Robots/Hind_Leg_RLCal/Hind_Leg_RLCAL_260810/Hind_Leg_RLCAL_260810.usda"
+        #   — 구 CAD+RL_INTERFACE 한계 이식본(08-10)
+        # usd_path=".../data/Robots/Hind_Leg_URDF2/Hind_Leg/Hind_Leg.usda"
+        #   — 2026-08-11: URDF2(신규 CAD 리비전, 08-11 이전 채택)
         #   원본 URDF: /home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF2/urdf/Hind_Leg.urdf
         #   링크 프레임/축(+Y)이 biped MJCF 모델각 규약과 동일(좌우 미러 아님) — sim q ≈ 모델각.
         #   effort 84/84/126/100.8·velocity는 URDF에 이미 실기값. 관절한계는 URDF2 자체값
@@ -454,7 +456,28 @@ HIND_LEG_CFG = ArticulationCfg(
         #   USD 변환 시 physx.usda의 physxJoint:maxJointVelocity가 14.8 rad/s(847.97754 deg/s)로
         #   baked-in되므로 임포트 후 **수동으로 URDF2 생성본 값(1415.2058 deg/s = 24.7 rad/s)에 맞춰
         #   패치**했다. asset 재생성 시 재적용 필요 — 아래 Newton fix와 함께 CLAUDE.md에 기록.
-        usd_path="/home/lgb/IsaacLab-6.0/source/isaaclab_assets/data/Robots/Hind_Leg_URDF3/Hind_Leg/Hind_Leg.usda",
+        # 2026-08-12: URDF3_SignFix로 교체 — 실기 통신 실측에서 같은 목표에 **반대로 도는 관절**
+        #   (HL_hip/HL_calf/HL_foot/HR_hip/HR_thigh)이 확인돼, sim을 실기에 맞추기 위해 URDF3에서
+        #   이 5개 관절의 axis 부호와 limit([lo,hi]→[-hi,-lo])을 반전한 파생 자산.
+        #   원본 URDF: /home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF3/urdf/Hind_Leg_SignFix.urdf
+        #   (저장소 사본: data/Robots/Hind_Leg_URDF3_SignFix/urdf/Hind_Leg.urdf — 동일 내용)
+        #   결과적으로 thigh/calf/foot은 좌우 미러 규약이 됐다(soft limit 좌우 다름 — motions.py 참고).
+        #   ⚠ 재생성 시 URDF3와 동일한 2개 패치 필요(Newton API 제거 + foot maxJointVelocity 1415.2058)
+        #   — 이 파일 위 주석과 task CLAUDE.md 참고. ⚠ 구(舊)규약으로 학습된 정책/수집 데이터는
+        #   반전 관절의 부호가 달라 호환되지 않는다.
+        # 2026-08-13: SignFix_Col 로 교체 — 충돌 형상을 전용 메시로 분리한 파생본.
+        #   기존 SignFix 는 visual 과 collision 이 같은 정밀 메시(링크당 5만~26만 삼각형)를 가리켜
+        #   충돌체가 "정밀 메시의 convex hull" 이었고, 실측 부피의 2.2~4.9배로 부풀어 있었다.
+        #   구 리그 URDF(04_Hind_Leg_URDF/urdf/03_Leg_UFDF_260617_02.urdf)의 "visual 은 정밀 /
+        #   collision 은 단순 볼록 덩어리" 구조를 현재 CAD 에 맞춰 재현했다.
+        #   - visual: 정밀 메시 유지 / collision: meshes/collision_simple/ 의 볼록 조각 59개
+        #   - 지면에 닿는 발 계열만 조각을 늘려 타이트하게(발 2.20→1.48, 발바닥 1.65→1.46),
+        #     base/hip/thigh 는 단일 hull 이라 물리는 종전과 동일(극점 z 오차 0.000 mm)
+        #   - 충돌 메시 총량 50 MB(104만 삼각형) → 1.2 MB(2.2만) 로 축소
+        #   생성: _workspace/make_hindleg_collision_meshes.py + make_hindleg_collision_urdf.py
+        #   원본 URDF: /home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF3/urdf/Hind_Leg_SignFix_Col.urdf
+        #   ⚠ 재생성 시 URDF3 계열과 동일한 2개 패치 필요(Newton API 제거 + foot maxJointVelocity 1415.2058)
+        usd_path="/home/lgb/IsaacLab-6.0/source/isaaclab_assets/data/Robots/Hind_Leg_URDF3_SignFix_Col/Hind_Leg_SignFix_Col/Hind_Leg_SignFix_Col.usda",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -519,8 +542,17 @@ HIND_LEG_CFG = ArticulationCfg(
             armature={
                 ".*_hip_joint": 0.0363,
                 ".*_thigh_joint": 0.0363,
-                ".*_calf_joint": 0.0816,
-                ".*_foot_joint": 0.0522,
+                # ★ 2026-08-18: calf 0.0816 → 0.1338. 옛 값은 `I_r·N_c²` — **calf 로터만** 센 것이다.
+                #   벨트가 무릎을 건너므로 무릎이 돌면 foot 로터도 돈다(θ_f = N_f·(q_f + q_c)) ⇒
+                #   calf 관절은 foot 로터 관성도 짊어진다:
+                #       M_refl = I_r·[[N_c² + N_f²,  N_f²],   =  [[0.1338,  0.0522],
+                #                     [N_f²,         N_f²]]       [0.0522,  0.0522]]
+                #   대각 두 개가 여기 armature 고, off-diagonal 은 PhysX 가 표현할 수 없어
+                #   env 의 `foot_reflected_inertia` 항이 명시적 보정토크로 넣는다.
+                #   ⚠ **foot 대각과 off-diagonal 은 같은 양**(둘 다 `I_r·N_f²`)이라, env 는 I_off 를
+                #     별도 상수가 아니라 foot armature 에서 읽는다 — DR 이 걸려도 자동으로 일관된다.
+                ".*_calf_joint": 0.1338,  # I_r·(N_c² + N_f²) = 7.4e-4 × (10.5² + 8.4²)
+                ".*_foot_joint": 0.0522,  # I_r·N_f² = 7.4e-4 × 8.4²  (= off-diagonal 과 동일)
             },
             # 실측 관절 마찰/감쇠 (hip 2축 실측, 타축 외삽 — RL_INTERFACE.md §6-a).
             # Isaac ≥5.0에서 friction/dynamic_friction은 계수가 아니라 effort [N·m]다.
@@ -531,22 +563,34 @@ HIND_LEG_CFG = ArticulationCfg(
             friction={".*": 0.38},
             dynamic_friction={".*": 0.38},
             viscous_friction={".*": 0.09},
-            # PD gains: inertia-scaled (ω_n=20 rad/s, ζ=0.9) from measured per-joint
-            # effective inertia I_eff (hip 0.163 / thigh 0.133 / calf 0.030 / foot 0.0019 kg·m²).
-            # Previous uniform Kp=25/Kd=0.5 (= Go2 quadruped default) left hip/thigh at ζ≈0.12
-            # (under-damped) and foot at ω_n≈113 (over-stiff). foot=20 sized for contact authority
-            # (env=HindLegHistoryEnvCfg, 200Hz physics). See _workspace/hind_leg_kp_kd_tuning_guide.md
+            # PD gains — **실기 드라이버 게인의 관절 공간 환산** (2026-08-18).
+            #
+            # 이전 값(65/53/12/20 + 6/4.8/1.1/1.0)은 구 모델 I_eff 기반 **설계값**이었고 실기와
+            # 맞춘 적이 없다. `scripts/real2sim/r2s_biped_leg/motions.py:32-37` 이 그 값을 **폐기**로
+            # 표시하고 실기팀 지정값을 기록해 뒀는데, GUI 쪽만 갱신되고 sim 플랜트가 안 따라가
+            # 2026-08-12 이후로 어긋난 채였다.
+            #
+            # 실기 드라이버 게인(**채널** 좌표, `motions.DEFAULT_KP/KD`):
+            #     hip(TR) 100/5,  thigh(TP) 50/5,  calf(KP) 50/5,  foot(AP) 20/5
+            # GUI 가 이 값을 그대로 발행하고 real_runner 가 변환 없이 드라이버에 넣는다
+            # (`real_runner_bipedleg.cpp:481`). 관절 공간 환산은 `kp_ch · gear_k^n`
+            # (`convert_gui_chirp_bipedleg.py:203`), gear_k = hip·thigh 1.0 / calf 1.5 / foot 1.2.
+            #
+            # ⚠ **n = 2 는 채택이지 확정이 아니다** (`GAIN_GEAR_SCALE`/`DEFAULT_GAIN_EXPONENT` 와
+            #   같은 베팅, 재적합에서 "약한 지지"). n 이 뒤집히면 calf 112.5→75, foot 28.8→24 다.
+            #   calf 는 **어느 n 이든 옛 값 12 보다 4.2~9.4 배 단단하다** — 격차 자체는 n 과 무관.
+            #   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §13
             stiffness={
-                ".*_hip_joint": 65.0,
-                ".*_thigh_joint": 53.0,
-                ".*_calf_joint": 12.0,
-                ".*_foot_joint": 20.0,
+                ".*_hip_joint": 100.0,  # 100 × 1.0²
+                ".*_thigh_joint": 50.0,  # 50 × 1.0²
+                ".*_calf_joint": 112.5,  # 50 × 1.5²
+                ".*_foot_joint": 28.8,  # 20 × 1.2²
             },
             damping={
-                ".*_hip_joint": 6.0,
-                ".*_thigh_joint": 4.8,
-                ".*_calf_joint": 1.1,
-                ".*_foot_joint": 1.0,
+                ".*_hip_joint": 5.0,  # 5 × 1.0²
+                ".*_thigh_joint": 5.0,  # 5 × 1.0²
+                ".*_calf_joint": 11.25,  # 5 × 1.5²
+                ".*_foot_joint": 7.2,  # 5 × 1.2²
             },
         ),
     },

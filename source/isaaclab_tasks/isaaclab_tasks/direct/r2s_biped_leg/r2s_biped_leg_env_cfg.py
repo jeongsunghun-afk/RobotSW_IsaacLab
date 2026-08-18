@@ -63,11 +63,20 @@ JOINT_LABELS: list[str] = [
     "HR_foot",
 ]
 
-# 관절별 PD 게인 — HIND_LEG_CFG(rga.py)의 legs 액추에이터 실측값과 일치.
-# GUI가 이 값을 기본으로 발행하고, faithful_pd=True면 슬라이더로 런타임 변경 가능.
-# ⚠ r2s_hind_leg(300/5)보다 훨씬 낮다(12~65) — GUI 슬라이더 상한도 여기에 맞춰야 조작 가능.
-DEFAULT_KP: list[float] = [65.0, 53.0, 12.0, 20.0, 65.0, 53.0, 12.0, 20.0]
-DEFAULT_KD: list[float] = [6.0, 4.8, 1.1, 1.0, 6.0, 4.8, 1.1, 1.0]
+# 관절별 PD 게인 — HIND_LEG_CFG(rga.py)의 legs 액추에이터와 일치. **관절(모델) 좌표**다.
+# 2026-08-18: 실기 드라이버 게인의 관절 공간 환산(채널값 × gear_k², 실기팀 2026-08-12 지정)으로
+# 갱신. 구값 65/53/12/20 + 6/4.8/1.1/1.0 은 구 모델 I_eff 기반 설계값이라 실기와 무관했다.
+#
+# ⚠⚠ **게인 경로에 좌표 seam 이 남아 있다 (미해결).**
+#   `motions.DEFAULT_KP = [100, 50, 50, 20]` 은 **채널** 게인이고, GUI 가 그 값을 그대로
+#   ① 실기 드라이버(`real_runner_bipedleg.cpp:481`, 변환 없음)와 ② sim(`set_setpoint` →
+#   faithful_pd → 관절 게인) **양쪽에 같은 숫자로** 보낸다. 두 좌표가 k^n 만큼 다르므로 한쪽은
+#   반드시 틀린다 — 토크 모니터에서 찾았던 것과 **같은 종류의 버그**다(README §8).
+#   여기 값은 sim 플랜트 기준(관절)이라 맞지만, GUI 가 이 값을 실기로 보내면 calf 가 2.25 배
+#   과도해진다. GUI/real_runner 중 한쪽에 변환을 넣어야 한다.
+#   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §13
+DEFAULT_KP: list[float] = [100.0, 50.0, 112.5, 28.8, 100.0, 50.0, 112.5, 28.8]
+DEFAULT_KD: list[float] = [5.0, 5.0, 11.25, 7.2, 5.0, 5.0, 11.25, 7.2]
 
 # 관절 최대 속도 [rad/s] — slew rate limiter용 (실기 무부하 한계, RL_INTERFACE.md §6-c).
 V_MAX_RAD: list[float] = [29.6, 29.6, 19.7, 24.6, 29.6, 29.6, 19.7, 24.6]
@@ -206,6 +215,14 @@ class R2SBipedLegEnvCfg(DirectRLEnvCfg):
     #   (짝: `r2s_biped_leg_sysid_cfg.BipedLegPaceCfg` bounds 주석)
     #
     # False면 기존(관절 좌표 PhysX 마찰) 동작 그대로 — 되돌릴 수 있다.
+    # 반사관성 off-diagonal — 학습 env `hind_leg_env_cfg.foot_reflected_inertia` 와 같은 스위치.
+    # 벨트가 무릎을 건너 foot 로터가 θ_f = N_f·(q_f + q_c) 로 돌기 때문에 반사관성이 대각이 아니다:
+    #     M_refl = I_r·[[N_c² + N_f²,  N_f²],  =  [[0.1338, 0.0522], [0.0522, 0.0522]]
+    # 대각은 `rga.py` armature 로 들어가고, PhysX 가 표현 못 하는 off-diagonal 만 명시적 토크로:
+    #     τ_calf += −I_off·q̈_foot,  τ_foot += −I_off·q̈_calf   (I_off = foot armature, DR 자동 일관)
+    # 실측상 발산하지 않는다(§12) — 보정을 effort target 에 더해 모터 곡선이 다시 자르기 때문.
+    foot_reflected_inertia: bool = True
+
     foot_raw_friction: bool = True
 
     # sign(w_raw) 완화 폭 [rad/s]. 0 근처에서 부호가 매 스텝 뒤집히는 채터링을 막기 위해
