@@ -92,7 +92,9 @@ def verify(path: Path, exponent: float) -> tuple[bool, bool]:
     des0 = np.asarray(d["des_dof_pos"])
     tau = np.asarray(d["tau_meas"])
     t = np.asarray(d["time"])
-    dq = np.gradient(q, t, axis=0)
+    # 브리지가 보고한 각속도를 쓴다. 없으면(구 데이터셋) 위치 미분으로 대체하는데, 그쪽은
+    # 50 Hz 원본을 200 Hz 그리드에 얹은 뒤 미분하는 셈이라 잡음이 커져 `kd·q̇` 항이 오염된다.
+    dq = np.asarray(d["dq_meas"]) if "dq_meas" in d else np.gradient(q, t, axis=0)
     meta = d["meta"]
     lag = _best_lag(q, des0, tau, dq)
     des = np.roll(des0, lag, axis=0)

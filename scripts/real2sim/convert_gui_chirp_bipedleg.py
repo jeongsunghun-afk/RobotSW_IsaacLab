@@ -18,13 +18,21 @@ Isaac Sim은 띄우지 않는다 (torch만 필요).
    도장은 세 세대이고 **새 것부터** 읽는다 (자세한 건 :func:`convert` 안 주석):
    ``convention_version`` (브리지가 TELEM 으로 신고한 값을 GUI 가 그대로 기록) →
    ``gear_applied`` (구 불리언) → 도장 없음(= 규약 0, 구 캡처).
-   ⚠ **규약 ≥1 캡처는 변환하지 않고 중단한다.** 규약 1 은 gear 뿐 아니라 **foot 프레임까지**
-   다르다(foot 이 raw 가 아니라 관절각) — 아래 2번의 raw 전제가 깨지므로 그대로 태우면 조용히
-   틀린 데이터가 나온다. 그 분기는 sysid env 규약을 함께 정한 뒤 구현할 것.
-   ⚠ ``convention_version = -1`` (캡처 중 TELEM 미수신)도 중단 — 프레임을 추측하게 되기 때문.
+   두 규약을 **공통 내부 프레임(관절 단위 + foot raw)** 으로 정규화한 뒤 나머지 단계를 태운다:
+
+   * **규약 0** (구 캡처, 채널 단위 + foot raw) — ``GEAR_K`` 로 나눈다. foot 은 이미 raw.
+   * **규약 1** (2026-08-14~, gear 적용 + foot **관절각**) — 나눗셈은 **생략**하고(두 번 나누면
+     calf 가 1.5 배 작아진다) foot 을 raw 로 **합성**한다: ``raw = 관절 + coef·calf``.
+     명령은 명령끼리, 실측은 실측끼리 합성한다 — 브리지 ``joint_to_motor_deg`` / ``motor_deg_to_joint``
+     와 같은 규칙이다. 섞으면 calf 추종오차가 foot 채널에 가짜 신호로 들어간다.
+
+   게인은 두 규약 모두 **채널 게인**으로 기록되므로(브리지가 변환 없이 통과 —
+   ``calib_bipedleg.hpp`` GAIN_GEAR 주석) 관절 환산 ``k^n`` 은 공통이다.
+   ⚠ ``convention_version = -1`` (캡처 중 TELEM 미수신)은 중단 — 프레임을 추측하게 되기 때문.
+   ⚠ 모르는 규약(≥2)도 중단한다.
 1. **균일 그리드 정렬** — 명령(50 Hz 발행시각)과 실기 TELEM(≈50 Hz 도착시각)이 비동기이므로,
    물리 그리드(기본 200 Hz)에 명령은 ZOH(브리지가 마지막 ACT를 유지, slew 기본 0), 실측은 선형보간으로 얹는다.
-2. **foot 좌표** — 캡처의 foot 항은 raw각(q_foot+q_calf)이다(명령·실측 모두).
+2. **foot 좌표** — 0번 정규화를 거치면 foot 항은 **항상 raw각**(q_foot+q_calf)이다(명령·실측 모두).
    ★**기본은 raw 유지**(``--keep_raw_foot``)다. 현재 sysid env 는 ``foot_coupling=True``
    (``r2s_biped_leg_sysid_cfg.py:221``)로 **데이터도 재생도 채점도 전부 raw** 규약이며, 그게 옳다 —
    엔코더가 raw 만 재므로 관절각으로 바꾸면 calf 의 측정 잡음이 foot 채널에 섞이고 커플링 계수
@@ -62,6 +70,9 @@ import torch
 GRID_HZ = 200.0  # 기본 = 학습 플랜트 물리 그리드(200 Hz). sysid env SYSID_RATE_HZ와 일치 필수.
 # leg-major (calf, foot) 커플링 쌍 — gui_controller._COUPLED_CALF_FOOT와 동일.
 COUPLED_CALF_FOOT = ((2, 3), (6, 7))
+# foot↔calf 커플링 계수 — 벨트가 무릎을 건너므로 raw = q_foot + coef·q_calf 다.
+# 브리지 `calib_bipedleg.hpp FOOT_CALF_COEF` 와 값 일치 필수 (RL_INTERFACE.md §1, 실기 실측 +1).
+FOOT_CALF_COEF = 1.0
 # 드라이버 감속비 오설정 보정 (RL_INTERFACE.md §4). 드라이버가 전 축을 7:1 로 가정해 각도를
 # 주고받으므로, 드라이버가 보고/수신하는 "채널각"은 참 관절각의 gear_k = 실제감속비/7 배다
 # (실제 감속비 hip 7 · thigh 7 · calf 10.5 · foot 8.4). 파이 브리지
@@ -183,29 +194,47 @@ def convert(
             f"[{path.name}] convention_version=-1 — 캡처 중 TELEM 을 받지 못해 좌표 규약이 미상이다.\n"
             "  실기 스트림 없이 저장된 캡처이거나 브리지가 죽어 있었다. 변환하면 프레임을 추측하는 셈이라 중단한다."
         )
-    if conv >= 1:
-        # ⚠ 규약 1 은 gear 뿐 아니라 **foot 프레임까지** 다르다 — foot 이 raw 가 아니라 관절각으로
-        #   들어온다. 아래 커플링 처리(keep_raw_foot 양쪽 분기)는 foot 이 raw 라는 전제로 짜여 있어
-        #   그대로 태우면 조용히 틀린 데이터가 나온다(관절각을 raw 라 이름 붙이거나, 이미 관절각인
-        #   값에서 q_calf 를 또 뺀다). 그래서 여기서 **명시적으로 중단**한다 — 이 프로젝트에서
-        #   반복된 사고가 정확히 '그럴듯해 보이는 프레임 불일치'다.
+    if conv >= 2:
         raise SystemExit(
-            f"[{path.name}] convention_version={conv} 캡처는 아직 이 컨버터가 다루지 못한다.\n"
-            "  규약 1 = gear 적용 + foot **관절각**. 이 스크립트의 커플링 처리(COUPLED_CALF_FOOT,\n"
-            "  --keep_raw_foot)는 foot 이 **raw각**이라는 전제라 그대로 쓰면 프레임이 어긋난다.\n"
-            "  sysid env 쪽 규약을 함께 정한 뒤 이 분기를 구현할 것."
+            f"[{path.name}] convention_version={conv} 는 이 컨버터가 모르는 규약이다.\n"
+            "  프레임을 추측하느니 중단한다 — 규약 정의를 확인하고 분기를 추가할 것."
         )
-    # 여기 오면 규약 0 — 채널 단위 + foot raw 다. 소급 보정을 적용한다.
-    gear_applied_in_capture = False
-    q_cmd /= GEAR_K
-    q_real /= GEAR_K
-    dq_real /= GEAR_K
-    kp = kp * GEAR_K**GAIN_GEAR_SCALE
-    kd = kd * GEAR_K**GAIN_GEAR_SCALE
-    print(
-        f"[{path.name}] gear: 채널→관절 보정 적용 (규약 0, q/dq ÷ k, k={GEAR_K.tolist()}), "
-        f"게인 배율 k^{GAIN_GEAR_SCALE:g}, tau 미스케일"
-    )
+    # ---- 두 규약을 **공통 내부 프레임**으로 정규화한다: 관절(모델) 단위 + foot **raw** ----
+    # 그 프레임이 sysid env 가 기대하는 것이다 (`foot_coupling=True` — 데이터·재생·채점 전부 raw,
+    # 엔코더가 raw 만 재므로 그게 옳다). 아래 keep_raw_foot 분기는 이 정규화 뒤에 붙는다.
+    if conv == 1:
+        # 규약 1 — 브리지가 gear 를 **이미** 나눴고 foot 은 **관절각**이다.
+        #   ① gear 나눗셈을 하지 않는다. 또 나누면 calf 가 1.5 배, foot 이 1.2 배 작아진다.
+        #   ② foot 을 raw 로 **합성**한다: raw = 관절 + coef·calf (coef=1, calib FOOT_CALF_COEF).
+        #      명령은 명령끼리, 실측은 실측끼리 합성한다 — 브리지 `joint_to_motor_deg` 가 목표값끼리
+        #      합성하고 `motor_deg_to_joint` 가 실측끼리 분해하는 것과 같은 규칙이다. 섞으면
+        #      calf 추종오차가 foot 채널에 가짜 신호로 들어간다.
+        #   calf 자체는 커플링이 없어 관절 = raw 이므로 건드리지 않는다.
+        gear_applied_in_capture = True
+        for c, f in COUPLED_CALF_FOOT:
+            q_cmd[:, f] = q_cmd[:, f] + FOOT_CALF_COEF * q_cmd[:, c]
+            q_real[:, f] = q_real[:, f] + FOOT_CALF_COEF * q_real[:, c]
+            dq_real[:, f] = dq_real[:, f] + FOOT_CALF_COEF * dq_real[:, c]
+        # 게인은 규약과 무관하게 **채널 게인**으로 기록된다(브리지가 변환 없이 통과시킨다 —
+        # calib_bipedleg.hpp GAIN_GEAR 주석). 관절 공간 환산은 두 규약 모두 같다.
+        kp = kp * GEAR_K**GAIN_GEAR_SCALE
+        kd = kd * GEAR_K**GAIN_GEAR_SCALE
+        print(
+            f"[{path.name}] gear: 캡처가 이미 관절 단위 (규약 1) — 나눗셈 생략. "
+            f"foot 을 raw 로 합성(coef={FOOT_CALF_COEF:g}), 게인 배율 k^{GAIN_GEAR_SCALE:g}, tau 미스케일"
+        )
+    else:
+        # 규약 0 — 채널 단위 + foot raw. 소급 보정을 적용한다.
+        gear_applied_in_capture = False
+        q_cmd /= GEAR_K
+        q_real /= GEAR_K
+        dq_real /= GEAR_K
+        kp = kp * GEAR_K**GAIN_GEAR_SCALE
+        kd = kd * GEAR_K**GAIN_GEAR_SCALE
+        print(
+            f"[{path.name}] gear: 채널→관절 보정 적용 (규약 0, q/dq ÷ k, k={GEAR_K.tolist()}), "
+            f"게인 배율 k^{GAIN_GEAR_SCALE:g}, tau 미스케일"
+        )
 
     # 겹치는 구간만 (real 스트림은 램프 구간을 포함하므로 cmd(스윕 전용) 창으로 잘린다)
     t0 = max(t_cmd[0], t_real[0])
@@ -238,12 +267,15 @@ def convert(
     if keep_raw_foot:
         q_joint = q_meas.copy()
         des_joint = des.copy()
+        dq_joint = dq_meas.copy()
     else:
         q_joint = q_meas.copy()
         des_joint = des.copy()
+        dq_joint = dq_meas.copy()
         for c, f in COUPLED_CALF_FOOT:
             des_joint[:, f] = des[:, f] - q_meas[:, c]
             q_joint[:, f] = q_meas[:, f] - q_meas[:, c]
+            dq_joint[:, f] = dq_meas[:, f] - dq_meas[:, c]
 
     track_rms = np.sqrt(np.mean((des_joint - q_joint) ** 2, axis=0))
     pp = q_joint.max(axis=0) - q_joint.min(axis=0)
@@ -265,6 +297,10 @@ def convert(
             "time": torch.arange(n, dtype=torch.float32) / rate,
             "dof_pos": torch.from_numpy(q_joint).float(),
             "des_dof_pos": torch.from_numpy(des_joint).float(),
+            # 브리지가 보고한 각속도 (그리드 정렬, dof_pos 와 같은 프레임). 종전엔 버렸는데,
+            # 소비자가 위치를 다시 미분하면 50 Hz 원본을 200 Hz 로 얹은 그리드에서 잡음이 커져
+            # `kd·q̇` 항이 오염된다 — 실제로 verify_chirp_capture.py 가 오탐을 냈다.
+            "dq_meas": torch.from_numpy(dq_joint).float(),
             # 드라이버 보고토크 (그리드 정렬, **미스케일**). 지연 판정에만 쓰고 버리던 값을 보존한다 —
             # "드라이버 토크가 실측인가 지령 에코인가" 판정에 필요하고, 관절/모터 기준 여부가
             # 확정되면 여기서 GEAR_K 로 환산할 수 있다.
@@ -286,6 +322,9 @@ def convert(
                 # True = 이 파일에서 채널→관절 보정을 했다(구 캡처). False = 캡처가 이미 관절 단위.
                 "capture_convention_version": conv,
                 "gear_k_applied": not gear_applied_in_capture,
+                # True = 캡처가 foot 을 **관절각**으로 줘서 여기서 raw 로 합성했다(규약 1).
+                # False = 캡처의 foot 이 이미 raw 였다(규약 0). 어느 쪽이든 출력은 raw 규약이다.
+                "foot_raw_synthesized": conv == 1,
                 "gain_gear_scale": GAIN_GEAR_SCALE,
             },
         },
