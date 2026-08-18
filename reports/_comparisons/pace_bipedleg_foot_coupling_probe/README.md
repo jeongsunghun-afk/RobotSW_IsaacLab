@@ -417,18 +417,69 @@ DCMotor 는 정적 한계가 아니라 **4사분면 부호 곡선**으로 자른
 > 오판했다 — DCMotor 는 부호 곡선이다. ② `applied_torque` 는 **직전** 속도로 잘린 값인데 현재
 > 속도의 곡선으로 재서 신식이 719 스텝 위반한 것처럼 보였다. 둘 다 고치니 신식 위반이 0 이 됐다.
 
-### 남은 caveat
+### ★ 학습 env 에서 재보니 결론이 뒤집힌다 — 플랜트는 **바뀐다** (희귀하게)
 
-프로브는 `fix_base` + 무중력이라 **foot 을 그 자신의 PD 로만** 몰았다. 보행 중에는 지면 반력과
-몸통 운동이 발목을 밀므로 `kp_foot = 20` 에서도 q̇ 가 4.92 를 넘을 수 있다 — **미측정**이다.
-그 경우에만 이 변경이 학습 거동에 영향을 준다.
+위 표는 `fix_base` + 무중력 + `foot_raw_friction=False` 라 foot 을 **자기 PD 로만** 몰았다.
+학습 중에는 두 가지가 더 붙는다: ① 지면 반력·몸통 운동이 발목을 민다 ② `τ_fric` 이 PD 항에
+더해지고, 구식은 그 **합**을 ±100.8 로 잘랐다.
+
+`HindLeg-Direct-v0` 에 완주 정책(`2026-08-13_12-04-06_colmesh_v2_gpu2 / model_50399`)을 resume 해
+DR·접촉·마찰을 전부 켠 채 계측(`transpose_in_training_env.py`, 표본 194.6만 = physics step × 256 env × foot 2):
+
+| 항목 | 값 |
+|---|---:|
+| foot \|q̇\| 최대 | **24.70 rad/s** |
+| 교차점 4.92 초과 | **19.67%** |
+| 구식 \|τ\| 최대 | 100.80 N·m (정적 클램프에 실제로 물렸다) |
+| **구식이 곡선 밖** | **0.012%** |
+| 초과분 최대 / 평균 | **101.31** / 16.98 N·m |
+
+* 자유 스윙에서 4.87 이던 foot 속도가 접촉이 붙자 **24.70** 까지 간다 — 교차점은 일상적으로
+  넘는다. "닿지 못한다"는 §11 앞부분 결론은 `fix_base` 조건에서만 참이다.
+* 그래도 구식이 실제로 곡선을 벗어나는 건 **8,500 스텝에 1 번꼴**이다. 대부분의 시간에는
+  kd 감쇠가 요구 토크를 곡선과 같은 방향으로 눌러 줘서 둘이 일치한다.
+* 다만 **벗어날 때의 크기가 크다** — 최대 101 N·m 를 calf 에 실었다. 이건 정확히
+  `obs_clip` 을 넣게 만든 종류의 희귀 폭주 이벤트다(2026-08-12 signfix_coupled 파국).
+
+> **결론**: 이 변경은 학습 플랜트를 바꾼다. 기존 `hind_leg` run 과 **완전히 동일한 플랜트가 아니다**.
+> 영향받는 스텝이 0.012% 라 평균 거동은 사실상 같겠지만, "비교 가능"이라고 단정하면 안 된다.
+
+### sysid(PACE) 는 어떤가 — **적합은 비교 가능하다** (근거가 처음 생각과 다르다)
+
+처음엔 "chirp 의 foot 토크가 5.5 N·m 라 곡선 한참 안쪽"이라고 봤다. **그 근거는 틀렸다.**
+합성 chirp(`collect_chirp_sim_bipedleg.py`, 0.1→10 Hz 스윕)를 계측하면:
+
+| | 값 |
+|---|---:|
+| foot \|q̇\| 최대 | 24.70 rad/s (USD 속도 클립) |
+| 교차점 초과 | **94.67%** |
+| 구식이 곡선 밖 | **5.42%** (초과분 최대 17.34 / 평균 6.96 N·m) |
+
+토크가 작아서가 아니라 **속도가 클립까지 가서 곡선 상한이 한 자리로 내려가기 때문**이다.
+
+하지만 **적합에 실제로 쓰는 것은 합성 chirp 가 아니라 실기 chirp** 다. `data/bipedleg_g2/` 의
+18개 데이터셋 전부를 재보면:
+
+```
+foot |q̇| 최대 = 4.15 rad/s,  교차점(4.92) 초과 = 0.00%  (18/18 데이터셋)
+```
+
+교차점 **아래**에서 끝난다. 구식과 신식이 그 영역에서는 항등이므로 **PACE 적합값은 과거와
+직접 비교 가능하고, `foot_coupling=False` 재적합을 그대로 진행해도 된다.**
+
+> ⚠ 단 **합성 chirp 로 적합/검증하면 안 된다** — 그쪽은 5.4% 가 달라진다. 새 캡처를 뜰 때
+> foot q̇ 가 4.92 를 넘으면 그 데이터는 구·신 플랜트에서 다른 응답을 낸다.
 
 ## 재현
 
 ```bash
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_uses_applied_torque.py \
     --headless --kp_foot 200 --kd_foot 2.0 --freq_hz 6 --amp_rad 0.8
-# → §11 — 구식/신식을 같은 스텝에서 비교. **kp_foot 를 올리지 않으면 교차점을 못 넘어 INCONCLUSIVE**
+# → §11 — 구식/신식을 같은 스텝에서 비교(고정베이스·무중력). **kp_foot 를 올리지 않으면 INCONCLUSIVE**
+python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_in_training_env.py \
+    --num_envs 256 --max_iterations 40 \
+    --resume --load_run 2026-08-13_12-04-06_colmesh_v2_gpu2 --checkpoint model_50399.pt
+# → §11 후반 — **학습 env**(접촉+중력+마찰+DR)에서의 판정. 이쪽이 플랜트 변경 여부의 정본이다.
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/verify_coupling_constraint.py --headless
 # → metrics/verify_coupling_constraint.json  (§10 — 구속 재현 + 구속 강성)
 python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_from_chirp.py

@@ -358,6 +358,12 @@ class R2SBipedLegEnv(DirectRLEnv):
                     #   super() 결과를 지연시킨 뒤 반환하므로). 옛 식도 지연 앞 예측치였으니 회귀는
                     #   아니지만, 기계 전달은 지연된 실토크를 따르는 것이 더 맞다 — chirp ≤2.5 Hz,
                     #   지연 ~10 ms 라 위상 오차는 미미하다.
+                    # ⚠ **적합 데이터에서는 구·신이 항등이다**: `data/bipedleg_g2/` 실기 chirp 18개
+                    #   전부 foot |q̇| ≤ 4.15 rad/s 로 교차점 4.92 아래다(교차점 초과 0.00%).
+                    #   과거 PACE 적합값과 직접 비교 가능하다. 반면 **합성 chirp**
+                    #   (`collect_chirp_sim_bipedleg.py`, 10 Hz 스윕)는 foot 이 속도 클립 24.70 까지
+                    #   가서 5.42% 의 스텝이 달라진다 — 그걸로 적합/검증하면 안 된다.
+                    #   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
                     tau_calf = self.robot.data.applied_torque[:, self._foot_art_ids]
                 elif tau_fric is not None:
                     tau_calf = tau_fric

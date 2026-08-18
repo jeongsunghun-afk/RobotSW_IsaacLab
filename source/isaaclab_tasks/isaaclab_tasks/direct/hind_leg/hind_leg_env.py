@@ -291,9 +291,10 @@ class HindLegEnv(DirectRLEnv):
             #   마찰을 다시 더하거나 다시 클램프하면 이중계상이다.
             #   지연은 1 physics step(200 Hz = 5 ms) — actuator 모델이 `_apply_action` 뒤의
             #   `write_data_to_sim`에서 돌기 때문이다.
-            #   ⚠ **현 게인(kp_foot=20)에서는 두 식이 같다**: 곡선이 effort_limit 아래로 내려가는
-            #     q̇ ≈ 4.92 rad/s 에 foot 이 자유 스윙으로 도달조차 못 한다(실측 최대 4.87). 차이는
-            #     게인이 높은 경로에서만 난다 — live hold(kp 200)에서 스텝의 17.2%.
+            #   ⚠ 학습 env 실측(표본 194.6만, 완주 정책 resume): 접촉이 붙으면 foot q̇ 가 24.70
+            #     rad/s 까지 가고 19.67% 가 교차점 4.92 를 넘는다. 구식이 곡선을 실제로 벗어난 건
+            #     **0.012%** 로 드물지만 그때 최대 **101 N·m** 를 calf 에 실었다 — 평균은 같아도
+            #     희귀 폭주 이벤트가 사라지는 것이 이 변경의 실질이다.
             #     근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
             tau_calf = self._robot.data.applied_torque[:, self._foot_ids]
         elif self._foot_raw_friction:

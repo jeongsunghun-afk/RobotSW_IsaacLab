@@ -332,9 +332,11 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     # ★ 2026-08-18: 전치 토크는 foot 게인 재계산이 아니라 foot 액추에이터가 실제로 낸 직전 스텝
     #   토크(`data.applied_torque`)를 쓴다. 옛 식은 정적 effort_limit(100.8 N·m)로 클램프해
     #   DCMotor 속도 곡선 밖의 토크를 calf 에 실을 수 있었다.
-    #   ⚠ 다만 **현 게인(kp_foot=20)에서는 학습 플랜트가 바뀌지 않는다** — foot 이 교차점
-    #     q̇ ≈ 4.92 rad/s 에 자유 스윙으로 도달조차 못 하기 때문(실측 최대 4.87)이라 기존 run 과
-    #     비교 가능하다. 보행 접촉이 발목을 그보다 빨리 미는 경우는 **미측정**.
+    #   ⚠ **학습 플랜트가 바뀐다 — 기존 run 과 완전히 같은 플랜트가 아니다.** 완주 정책으로 학습
+    #     env 를 계측한 실측(표본 194.6만): 접촉이 붙으면 foot q̇ 가 **24.70 rad/s** 까지 가고
+    #     19.67% 의 스텝이 교차점을 넘는다. 구식이 실제로 곡선을 벗어난 건 **0.012%** 로 드물지만,
+    #     벗어날 때 최대 **101 N·m** 를 calf 에 실었다 — `obs_clip` 을 넣게 만든 종류의 희귀
+    #     폭주 이벤트다. 평균 거동은 사실상 같겠지만 동일 플랜트로 취급하면 안 된다.
     #     근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
     foot_transpose: bool = True
 
