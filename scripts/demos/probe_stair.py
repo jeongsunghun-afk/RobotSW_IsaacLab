@@ -22,14 +22,19 @@ of the four methods (height_scan / clearance / voxel / lidar) loads correctly.
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+
+# local imports — reuse the RSL-RL CLI arg helpers from the play/train scripts.
+import os as _os_boot
 import sys
 
 from isaaclab.app import AppLauncher
 
-# local imports — reuse the RSL-RL CLI arg helpers from the play/train scripts.
-import os as _os_boot
-
-sys.path.insert(0, _os_boot.path.join(_os_boot.path.dirname(_os_boot.path.abspath(__file__)), "..", "reinforcement_learning", "rsl_rl"))
+sys.path.insert(
+    0,
+    _os_boot.path.join(
+        _os_boot.path.dirname(_os_boot.path.abspath(__file__)), "..", "reinforcement_learning", "rsl_rl"
+    ),
+)
 import cli_args  # isort: skip  # noqa: E402
 
 # add argparse arguments
@@ -85,7 +90,12 @@ import os
 
 import gymnasium as gym
 import torch
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner, OnPolicyRunnerParkour
+from rsl_rl.runners import (
+    DistillationRunner,
+    OnPolicyRunner,
+    OnPolicyRunnerParkour,
+    OnPolicyRunnerParkourDistill,
+)
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP, OnPolicyRunnerAMPBase
 from rsl_rl.runners.on_policy_runner_parkour_amp import (
     OnPolicyRunnerParkourAMP,
@@ -267,7 +277,9 @@ def _draw_sensor_overlay(env_unwrapped, sensor: str, view_idx: int, hs_vis, lida
         valid = torch.isfinite(hits).all(dim=-1)
         if hasattr(mid.data, "distances"):
             mid_cfg = getattr(env_unwrapped.cfg, "mid360_lidar", None)
-            max_range = float(getattr(mid_cfg, "max_distance", None) or getattr(env_unwrapped.cfg, "lidar_max_range", 20.0))
+            max_range = float(
+                getattr(mid_cfg, "max_distance", None) or getattr(env_unwrapped.cfg, "lidar_max_range", 20.0)
+            )
             valid = valid & (mid.data.distances[view_idx] < max_range - 0.1)
         pts = hits[valid]
         if pts.shape[0] > max_lidar_pts:
@@ -275,6 +287,40 @@ def _draw_sensor_overlay(env_unwrapped, sensor: str, view_idx: int, hs_vis, lida
         if pts.shape[0] > 0:
             lidar_vis.set_visibility(True)
             lidar_vis.visualize(translations=pts)
+
+
+def _build_runner(agent_cfg: RslRlBaseRunnerCfg, env, cfg_dict: dict):
+    """Instantiate the runner named by ``agent_cfg.class_name``.
+
+    Mirrors play.py's switch so every perception arm (height_scan / clearance / voxel / lidar)
+    loads with the runner it was trained under. Lives outside ``main`` only to keep that function
+    under the complexity limit.
+
+    Two runners take the UNFILTERED cfg. ``DistillationRunner`` and ``OnPolicyRunnerParkourDistill``
+    read their algorithm settings with ``.get()`` defaults instead of forwarding them to
+    ``PPOParkour``, so the signature filter applied for the other runners would strip fields they
+    still need. Constructing the latter also rebuilds the frozen voxel teacher, which this probe
+    never uses.
+    """
+    name = agent_cfg.class_name
+    filtered = {
+        "OnPolicyRunnerParkour": OnPolicyRunnerParkour,
+        "OnPolicyRunnerAMP": OnPolicyRunnerAMP,
+        "OnPolicyRunnerAMPBase": OnPolicyRunnerAMPBase,
+        "OnPolicyRunnerParkourAMP": OnPolicyRunnerParkourAMP,
+        "OnPolicyRunnerParkourAMPVoxel": OnPolicyRunnerParkourAMPVoxel,
+        "OnPolicyRunnerParkourAMPLidar": OnPolicyRunnerParkourAMPLidar,
+    }
+    unfiltered = {
+        "OnPolicyRunner": OnPolicyRunner,
+        "DistillationRunner": DistillationRunner,
+        "OnPolicyRunnerParkourDistill": OnPolicyRunnerParkourDistill,
+    }
+    if name in filtered:
+        return filtered[name](env, cfg_dict, log_dir=None, device=agent_cfg.device)
+    if name in unfiltered:
+        return unfiltered[name](env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    raise ValueError(f"Unsupported runner class: {name}")
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -364,15 +410,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"(flat_class={flat_class}), terrain_level={tracked_level}, terrain='{args_cli.terrain}'"
     )
 
-    # ── perception-sensor overlay markers (goal markers already OFF) ───────────
-    # height_scan / lidar need custom point-cloud markers; clearance / voxel use the env's
-    # own lazily-created marker sets inside _draw_clearance_rays / _draw_voxel_occupied.
-    hs_vis = lidar_vis = None
-    if args_cli.sensor == "height_scan":
-        hs_vis = _make_point_markers("/Visuals/Viz/height_scan", (1.0, 0.85, 0.0), radius=0.03)  # yellow
-    elif args_cli.sensor == "lidar":
-        lidar_vis = _make_point_markers("/Visuals/Viz/lidar", (0.7, 0.1, 0.9), radius=0.02)  # purple
-    print(f"[per-terrain] sensor overlay = '{args_cli.sensor}'")
+    # ``--sensor`` is accepted so this probe takes the same command line as play_per_terrain.py,
+    # but no overlay is drawn: nothing is rendered here, only episode statistics are collected.
+    # The marker helpers (_make_point_markers / _draw_sensor_overlay) stay for that shared lineage.
+    print(f"[per-terrain] sensor overlay = '{args_cli.sensor}' (ignored — this probe records no video)")
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
@@ -394,28 +435,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     _accepted = set(_inspect.signature(_VendoredPPOParkour.__init__).parameters.keys()) - {"self"}
     _cfg_dict = agent_cfg.to_dict()
-    _cfg_dict["algorithm"] = {
-        k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted or k == "class_name"
-    }
+    _cfg_dict["algorithm"] = {k: v for k, v in _cfg_dict["algorithm"].items() if k in _accepted or k == "class_name"}
 
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkour":
-        runner = OnPolicyRunnerParkour(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerAMP":
-        runner = OnPolicyRunnerAMP(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerAMPBase":
-        runner = OnPolicyRunnerAMPBase(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMP":
-        runner = OnPolicyRunnerParkourAMP(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPVoxel":
-        runner = OnPolicyRunnerParkourAMPVoxel(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunnerParkourAMPLidar":
-        runner = OnPolicyRunnerParkourAMPLidar(env, _cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    runner = _build_runner(agent_cfg, env, _cfg_dict)
     runner.load(resume_path)
 
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -452,6 +474,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     u._reset_idx(torch.arange(u.num_envs, device=u.device))
     print(f"[probe] pinned {u.num_envs} envs to terrain='{args_cli.terrain}' level={level} (rows={num_rows})")
 
+    def _assert_level_held(where: str) -> None:
+        bad = int((u._terrain_levels != level).sum())
+        assert bad == 0, f"terrain level drifted on {bad}/{u.num_envs} envs {where} (expected all == {level})"
+
+    _assert_level_held("right after pinning")
+
     obs = env.get_observations()
 
     # ── accumulate episode outcomes ────────────────────────────────────────────
@@ -475,6 +503,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     for _ in range(args_cli.steps):
         if not simulation_app.is_running():
             break
+        # Re-arm the curriculum bypass every step. `_skip_curriculum` is ONE-SHOT: `_reset_idx`
+        # clears it unconditionally (parkour_env.py:1790) before excluding those envs from the
+        # curriculum, so pinning once above only survives each env's first reset. Without this the
+        # level drifts, and it drifts by performance — move_up on travelling far, move_down on
+        # travelling little — so a strong policy climbs and a weak one sinks, biasing exactly the
+        # policy comparison this probe exists to make.
+        u._skip_curriculum[:] = True
         with torch.inference_mode():
             actions = policy(obs)
             obs, _, dones, extras = env.step(actions)
@@ -504,8 +539,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if hit:
                     rew_n += 1
 
+    # Fail loudly rather than silently reporting numbers for a level the run never held.
+    _assert_level_held("at end of rollout")
+
     mean_fwd_vel = fwd_vel_sum / max(fwd_vel_count, 1)
-    total_ep = sum(counts.values())
+    # The `time_out` counter IS the episode count, not a separate outcome. The env returns
+    # `time_out = reset_all` (parkour_env.py:1699) and `terminated = zeros`, so every reset --
+    # including goal_reached and tilt -- sets the time-out flag. Summing the counters therefore
+    # double counts: an episode that reached the goal is tallied under BOTH `cause_goal_reached`
+    # and `time_out`. Using that sum as the denominator understated completion by ~1.6x
+    # (0.355 reported vs 0.564 actual on the SL-Grid symmetry probe set).
+    total_ep = counts["Episode_Termination/time_out"]
+    # Episodes that ended without any cause flag set: ran the full clock without reaching the
+    # last goal and without tripping a failure check.
+    unresolved = total_ep - sum(counts[k] for k in TERM_KEYS if k != "Episode_Termination/time_out")
     stats = {
         "task": args_cli.task,
         "checkpoint": resume_path,
@@ -516,9 +563,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "episodes": total_ep,
         "mean_forward_vel": mean_fwd_vel,
         "mean_goal_idx": goal_idx_sum / max(goal_idx_n, 1),
-        "terminations": {k.split("/")[-1]: counts[k] for k in TERM_KEYS},
+        "terminations": {**{k.split("/")[-1]: counts[k] for k in TERM_KEYS}, "unresolved": unresolved},
+        # `time_out` is omitted here: it equals the denominator, so its fraction is always 1.0.
         "termination_frac": {
-            k.split("/")[-1]: (counts[k] / total_ep if total_ep else 0.0) for k in TERM_KEYS
+            **{
+                k.split("/")[-1]: (counts[k] / total_ep if total_ep else 0.0)
+                for k in TERM_KEYS
+                if k != "Episode_Termination/time_out"
+            },
+            "unresolved": (unresolved / total_ep if total_ep else 0.0),
         },
         "rewards": {k.split("/")[-1]: (rew_sum[k] / max(rew_n, 1)) for k in REW_KEYS},
     }
