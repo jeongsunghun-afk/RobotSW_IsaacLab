@@ -65,8 +65,14 @@ SYSID_RATE_HZ: float = 200.0
 # ⚠ go2(`r2s_go2_sysid_cfg.SYSID_KP/KD`)는 12관절 공통 **스칼라**였지만, 이 다리는 관절별로
 # 게인이 다르므로 **길이 8의 관절별 리스트**다 (HIND_LEG_CFG legs 액추에이터 실측값과 동일).
 # 데이터셋의 ``gain_scale``은 이 벡터 전체에 곱해지는 배율이다.
-NOMINAL_KP: list[float] = [65.0, 53.0, 12.0, 20.0, 65.0, 53.0, 12.0, 20.0]
-NOMINAL_KD: list[float] = [6.0, 4.8, 1.1, 1.0, 6.0, 4.8, 1.1, 1.0]
+#
+# ⚠ 2026-08-18: 구값 [65, 53, 12, 20] / [6, 4.8, 1.1, 1.0] 은 **폐기**다 — 구 모델 I_eff 기반
+#   설계값이라 실기와 무관했다. 현 값은 실기 드라이버 채널 게인(hip 100 / thigh 50 / calf 50 /
+#   foot 20, kd 5)의 관절 공간 환산 `kp_ch · gear_k²` 이며 `rga.py HIND_LEG_CFG` 와 같다.
+#   ⓘ 실제 적합은 **데이터셋에 실린 kp/kd** 를 매 롤아웃 적용하므로(`fit_bipedleg.py:295`
+#   `apply_gains`) 이 상수는 초기치이자 문서값이다 — 그래도 어긋나 있으면 읽는 사람을 오도한다.
+NOMINAL_KP: list[float] = [100.0, 50.0, 112.5, 28.8, 100.0, 50.0, 112.5, 28.8]
+NOMINAL_KD: list[float] = [5.0, 5.0, 11.25, 7.2, 5.0, 5.0, 11.25, 7.2]
 
 # ---------------------------------------------------------------------------
 # PACE 액추에이터 (HIND_LEG_CFG legs 물성 계승 + 바이어스/지연)
@@ -117,10 +123,13 @@ BIPEDLEG_PACE_ACTUATOR_CFG = PaceDCMotorCfg(
     damping=dict(zip(JOINT_NAME_PATTERNS, NOMINAL_KD)),
     # 아래 5종은 CMA-ES가 매 세대 덮어쓴다 (여기 값은 초기치일 뿐).
     # armature 초기치 = 실측 ROTOR_I 7.4e-4 × 감속비² (RL_INTERFACE.md §6-a, rga.py와 동일).
+    # ⚠ 2026-08-18: calf 0.0816 → 0.1338. 벨트가 무릎을 건너 foot 로터도 무릎을 따라 돌므로
+    #   calf 는 `I_r·(N_c² + N_f²)` 를 짊어진다 (rga.py 주석 참고). 여기 값은 CMA-ES 가 매 세대
+    #   덮어쓰는 **초기치**라 적합 결과에는 영향이 없지만, rga.py 와 값이 어긋나면 안 된다.
     armature={
         ".*_hip_joint": 0.0363,
         ".*_thigh_joint": 0.0363,
-        ".*_calf_joint": 0.0816,
+        ".*_calf_joint": 0.1338,
         ".*_foot_joint": 0.0522,
     },
     friction={".*": 0.0},
