@@ -38,6 +38,33 @@ JOINT_NAMES = ["HL_hip", "HR_hip", "HL_thigh", "HR_thigh", "HL_calf", "HR_calf",
 TELEM_EXPECT_HZ: float = 200.0
 
 
+def report_telem_echo(ticks: "Sequence[int | None]", clamp_seen: int, last: dict) -> None:
+    """TELEM 의 시간축·명령 에코를 판정한다 (2026-08-19 확장 필드).
+
+    캡처 품질의 핵심이라 여기서 명시적으로 본다:
+
+    * ``telem_tick`` 이 없으면 파이가 **구 빌드**다 — 시간축이 도착시각(파이썬 스케줄 지터 포함)
+      으로만 남아 5 ms 급 현상을 분해할 수 없다.
+    * tick 이 건너뛰면 그만큼 **UDP 유실**이다. 지금까지는 유실을 모른 채 선형보간했다.
+    * ``clamp_mask`` 가 서면 목표가 soft limit 에 잘린 것 — §18 류 오염을 캡처가 자진신고한다.
+    """
+    if last.get("telem_tick") is None:
+        print("  ⚠ telem_tick 없음 — 파이 real_runner 가 구 빌드(≤121 B). 시간축 에코가 없다 (re-scp + rebuild)")
+        return
+    seen = [t for t in ticks if t is not None]
+    span = seen[-1] - seen[0] + 1 if seen else 0
+    missing = span - len(seen)
+    print(
+        f"  tick {seen[0]}~{seen[-1]}  span {span}  수신 {len(seen)}"
+        f"  유실 {missing} ({100 * missing / max(span, 1):.2f}%)"
+    )
+    if last.get("cmd_q") is None:
+        print("  ⚠ cmd_q 무효 — 브리지가 아직 명령을 전송하지 않음(warmup/HOLD). bridge 모드 + ACT 필요")
+    if clamp_seen:
+        joints = [JOINT_NAMES[j] for j in range(8) if clamp_seen & (1 << j)]
+        print(f"  ⚠ 목표가 soft limit 에 클램프됨: {', '.join(joints)} — 이 상태의 캡처는 명령이 오염된다")
+
+
 def warn_telem_rate(hz: float) -> None:
     """TELEM 실측 레이트가 기대치에 못 미치면 경고한다.
 
@@ -125,6 +152,8 @@ def main() -> int:
     telem_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     telem_cnt = 0
     telem_last: dict | None = None
+    telem_ticks: list[int | None] = []  # 브리지 틱 — 유실은 번호가 건너뛰는 것으로 드러난다
+    telem_clamp = 0  # 구간 내내 OR — 한 번이라도 목표가 잘렸으면 그 캡처는 오염이다
     try:
         telem_sock.bind(("", r2s_udp.REAL_TELEM_PORT))
         telem_sock.setblocking(False)
@@ -177,6 +206,9 @@ def main() -> int:
                 if t_pkt is not None:
                     telem_cnt += 1
                     telem_last = t_pkt
+                    # 분기 없이 담고 판정은 report_telem_echo 가 한다 (구 브리지면 None 이 섞인다).
+                    telem_ticks.append(t_pkt["telem_tick"])
+                    telem_clamp |= t_pkt["clamp_mask"]
         timeout = max(0.0, min(next_send - time.monotonic(), 0.005))
         readable, _, _ = select.select([rx_sock], [], [], timeout)
         if not readable:
@@ -253,6 +285,7 @@ def main() -> int:
             + f"  rpy: [{rpy[0]:+.1f} {rpy[1]:+.1f} {rpy[2]:+.1f}]"
         )
         warn_telem_rate(telem_hz)
+        report_telem_echo(telem_ticks, telem_clamp, telem_last)
         if n_valid < 8:
             print("  ⚠ 모터 상태 미유효 — RobotEmbedded 기동/EtherCAT/모터 전원 확인 (링크는 정상)")
     else:

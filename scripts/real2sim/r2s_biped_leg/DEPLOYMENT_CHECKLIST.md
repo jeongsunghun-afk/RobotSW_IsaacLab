@@ -22,7 +22,8 @@
 ### 0-1. ★★패킷 크기는 **파이와 워크스테이션이 동시에** 바뀌어야 한다
 
 **무엇을** — 파이 바이너리와 워크스테이션 `r2s_udp.py` 가 같은 패킷 크기를 쓰는가.
-현재 규약: **STATE 85 B** (offset 84 에 `convention_version`) · **TELEM 121 B** (offset 120).
+현재 규약: **STATE 85 B** (offset 84 에 `convention_version`) · **TELEM 157 B**
+(offset 120 `convention_version` · 124 `telem_tick` · 128~156 `cmd_q`, 2026-08-19 확장).
 바뀌지 않은 것: ACT 40 · PING 8 · GAIN 72.
 
 **왜** — 크기가 다르면 **값이 틀리게 오는 게 아니라 패킷이 통째로 버려진다**
@@ -101,7 +102,9 @@ stub 설정을 물고 있다. 파이에서는 `build/` 를 새로 만들거나 `
 **배포 이전 캡처는 전부 구 규약**이므로 소급 보정이 여전히 필요하다.
 
 **상태 (2026-08-14 확인)** — 워크스테이션 쪽은 이미 착지했다:
-- `r2s_udp.py` 가 STATE 85 B · TELEM 121 B 로 갱신됨 (C++ `static_assert` 와 5종 전부 일치 확인)
+- `r2s_udp.py` 가 STATE 85 B · TELEM **157 B** 로 갱신됨 (C++ `static_assert` 와 5종 전부 일치 확인)
+- ⚠ 파이 재배포 필수 — 구 빌드(121 B)면 워크스테이션이 크기 불일치로 TELEM 을 **거부**한다
+  (조용한 오독보다 낫다는 의도적 선택). `comm_check.py` 가 `telem_tick 없음` 으로 잡아준다
 - `gui_controller.py` 가 TELEM 의 `convention_version` 을 npz 에 **그대로 기록**한다
   (`:2159`). TELEM 미수신이면 **`-1`**(규약 미상) 을 찍는다. `gear_applied` 는 파생값으로 유지.
 

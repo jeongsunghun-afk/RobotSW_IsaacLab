@@ -229,6 +229,13 @@ int main(int argc, char** argv) {
     float cmd_deg[NUM_MOTORS] = {0};          // 이번 틱 전송 명령 [deg]
     float prev_cmd_deg[NUM_MOTORS] = {0};
     bool have_prev_cmd = false;
+    // TELEM 명령 에코용 (2026-08-19). cmd_deg 는 1 kHz 로 갱신되고 TELEM 은 200 Hz 로 읽는다.
+    uint32_t telem_tick = 0;        // 송신 틱 카운터 — 소비자가 시간축을 구조적으로 복원한다
+    uint32_t cmd_clamp_bits = 0;    // bit p = 관절 p 목표가 soft limit 으로 잘렸다 (직전 틱 기준)
+    bool cmd_sent = false;          // 직전 틱에 실제로 명령을 전송했는가 (cmd_q 유효성)
+    // ★**float16 로 잘린 뒤**의 값을 담는다 — 드라이버가 실제로 받은 그 수다. cmd_deg 를 그대로
+    //   에코하면 float16 양자화(60 deg 부근 ULP 0.0625 deg ≈ 1.1 mrad)를 놓친다.
+    float applied_ch_deg[NUM_MOTORS] = {0};
 
     State state = State::kWaitStatus;
     double engage_t0 = 0.0;
@@ -432,9 +439,14 @@ int main(int argc, char** argv) {
                 //   이제 관절각이므로 MOTOR_CALIB 의 min/max 가 그대로 맞는 한계다.
                 float track_deg[NUM_MOTORS];
                 float q_cmd[R2S_NUM_JOINTS];
+                cmd_clamp_bits = 0;
                 for (int p = 0; p < R2S_NUM_JOINTS; p++) {
                     int m = POLICY_TO_MOTOR[p];
                     q_cmd[p] = clamp(target_pol[p], MOTOR_CALIB[m].min_rad, MOTOR_CALIB[m].max_rad);
+                    // 잘렸으면 TELEM 으로 신고한다 — 캡처가 "명령이 조용히 잘린" 사고를 스스로 드러내게.
+                    if (q_cmd[p] != target_pol[p]) {
+                        cmd_clamp_bits |= (1u << p);
+                    }
                 }
                 joint_to_motor_deg(q_cmd, track_deg);
                 if (state == State::kEngage) {
@@ -494,8 +506,11 @@ int main(int argc, char** argv) {
                     cmd.fGainKi = static_cast<float16>(0.0f);
                     RobotMemGait_SetMotorCommand16(reinterpret_cast<MotorParam16_t*>(&cmd), m);
                     prev_cmd_deg[m] = cmd_deg[m];
+                    // TELEM 에코용 — 전송한 float16 을 되읽어 담는다(양자화 포함).
+                    applied_ch_deg[m] = static_cast<float>(cmd.fPosition);
                 }
                 have_prev_cmd = true;
+                cmd_sent = true;
             }
         }
 
@@ -607,6 +622,15 @@ int main(int argc, char** argv) {
             }
             for (int k = 0; k < 3; k++) {
                 tm.rpy[k] = imu_buf[IDX_OF_IMU_ARPY + k];  // 원값 [deg 추정] — 해석은 수신측
+            }
+            // ── 시간축·명령 에코 (2026-08-19) ────────────────────────────────────────────
+            tm.telem_tick = telem_tick++;
+            tm.valid_mask |= (cmd_clamp_bits & 0xFFu) << 16;  // bit16+p = 목표가 잘렸다
+            if (cmd_sent) {
+                tm.valid_mask |= (1u << 24);  // cmd_q 유효
+                // 실제 전송값(float16 반영)을 q 와 **같은 변환**으로 관절 좌표에 올린다 —
+                // 소비자가 아무 변환 없이 cmd_q − q 를 추종오차로 쓸 수 있게.
+                motor_deg_to_joint(applied_ch_deg, tm.cmd_q);
             }
             reply.sin_port = htons(static_cast<uint16_t>(REAL_TELEM_PORT));
             sendto(sock, &tm, sizeof(tm), 0, reinterpret_cast<sockaddr*>(&reply), sizeof(reply));

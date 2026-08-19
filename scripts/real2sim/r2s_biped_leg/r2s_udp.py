@@ -464,10 +464,22 @@ def unpack_policy_act(data: bytes) -> dict | None:
 
 # magic(I) seq(I) valid_mask(I) + q(8f) + dq(8f) + tau(8f) + rpy(3f)  — **articulation 순서**, sim 좌표
 # valid_mask: bit p(0~7)=관절 p 상태 유효, bit 8=IMU 수신됨. warmup 전에도 송신되므로 mask 로 구분.
-_POLICY_TELEM_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f" + "B"
+# ★2026-08-19 확장 (121 → 157 B): `telem_tick` + `cmd_q`. **규약 버전은 1 그대로** — 기존 필드의
+# 의미가 하나도 안 바뀌었고 새 필드는 **크기**로 구분한다(아래 legacy 분기와 같은 방식).
+#   telem_tick : 송신 틱 카운터(5 ms 간격). 소비자가 t = t0 + tick·5ms 로 시간축을 구조적으로
+#                복원한다 — 도착시각 스탬프의 지터(실측 std 0.50 ms = 간격의 10 %)를 제거한다.
+#   cmd_q      : 이 틱에 **실제로 드라이버에 실린** 목표각 [rad], articulation, 관절 좌표.
+#                soft-limit 클램프·ENGAGE 램프·slew·float16 양자화가 모두 반영된 값이라,
+#                "GUI 가 발행한 값"이 아니라 "드라이버가 받은 값"을 캡처가 갖게 된다.
+#   valid_mask : bit16+p = 관절 p 목표가 클램프됨, bit24 = cmd_q 유효.
+_POLICY_TELEM_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f" + "B" + "I" + "f" * NUM_JOINTS
 POLICY_TELEM_SIZE: int = struct.calcsize(_POLICY_TELEM_FMT)
 # legacy 하위호환 — TELEM 은 **관측 전용**이라 구버전을 읽어도 사람이 눈으로 보고 끝이므로
-# 살려 둔다(STATE 와 다르게 가는 이유는 R2S_CONVENTION_VERSION 위 주석 참조). 둘 다 규약 버전 0.
+# 살려 둔다(STATE 와 다르게 가는 이유는 R2S_CONVENTION_VERSION 위 주석 참조).
+#   v3(2026-08-14, 규약버전 있음 121 B) — 규약 버전은 패킷이 신고한 값을 그대로 쓴다.
+_POLICY_TELEM_V3_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f" + "B"
+_POLICY_TELEM_V3_SIZE: int = struct.calcsize(_POLICY_TELEM_V3_FMT)
+#   아래 둘은 규약 버전 0.
 #   v2(2026-08-13, mask 있음 120 B)
 _POLICY_TELEM_V2_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f"
 _POLICY_TELEM_V2_SIZE: int = struct.calcsize(_POLICY_TELEM_V2_FMT)
@@ -481,7 +493,15 @@ POLICY_PING_SIZE: int = struct.calcsize(_POLICY_PING_FMT)
 
 
 def pack_policy_telem(
-    seq: int, q, dq, tau, rpy, valid_mask: int = 0x1FF, convention_version: int = R2S_CONVENTION_VERSION
+    seq: int,
+    q,
+    dq,
+    tau,
+    rpy,
+    valid_mask: int = 0x1FF,
+    convention_version: int = R2S_CONVENTION_VERSION,
+    telem_tick: int = 0,
+    cmd_q=None,
 ) -> bytes:
     """real 엔드포인트 -> gui monitor 텔레메트리 직렬화 (articulation 순서).
 
@@ -495,6 +515,9 @@ def pack_policy_telem(
             ⚠ 버전 1부터 foot(p=6,7) 비트는 "foot **과 그 calf 가 둘 다** 유효"를 뜻한다 —
             foot 관절각을 내려면 같은 다리 calf 가 필요하므로.
         convention_version: 송신자가 신고하는 좌표 규약 (:data:`R2S_CONVENTION_VERSION` 참조).
+        telem_tick: 송신 틱 카운터 (5 ms 간격). 소비자의 시간축 복원용.
+        cmd_q: 이 틱에 드라이버에 실린 목표각 [rad], 길이 8. ``None`` 이면 0 으로 채우고
+            ``valid_mask`` bit24 도 세우지 않는다 (전송 전 상태).
 
     Returns:
         POLICY_TELEM_SIZE 바이트 패킷.
@@ -503,6 +526,7 @@ def pack_policy_telem(
     vals += [float(dq[i]) for i in range(NUM_JOINTS)]
     vals += [float(tau[i]) for i in range(NUM_JOINTS)]
     vals += [float(rpy[i]) for i in range(3)]
+    cmd_vals = [0.0] * NUM_JOINTS if cmd_q is None else [float(cmd_q[i]) for i in range(NUM_JOINTS)]
     return struct.pack(
         _POLICY_TELEM_FMT,
         POLICY_TELEM_MAGIC,
@@ -510,6 +534,8 @@ def pack_policy_telem(
         valid_mask & 0xFFFFFFFF,
         *vals,
         int(convention_version) & 0xFF,
+        int(telem_tick) & 0xFFFFFFFF,
+        *cmd_vals,
     )
 
 
@@ -522,10 +548,23 @@ def unpack_policy_telem(data: bytes) -> dict | None:
 
     Returns:
         키: ``seq``, ``valid_mask``, ``q`` (8), ``dq`` (8), ``tau`` (8), ``rpy`` (3),
-        ``convention_version``. v1 패킷은 ``valid_mask=0x1FF`` (전부 유효 가정)로 채워진다.
+        ``convention_version``, ``telem_tick``, ``cmd_q`` (8), ``clamp_mask``.
+        v1 패킷은 ``valid_mask=0x1FF`` (전부 유효 가정)로 채워진다.
+        구 패킷(≤121 B)은 ``telem_tick=None``, ``cmd_q=None`` — 소비자는 **None 을 보고
+        "이 캡처엔 시간축·명령 에코가 없다"를 판정**할 것 (0 으로 채우면 조용히 오독된다).
     """
+    tick: int | None = None
+    cmd_q: list[float] | None = None
     if len(data) == POLICY_TELEM_SIZE:
         fields = struct.unpack(_POLICY_TELEM_FMT, data)
+        mask = fields[2]
+        n_body = NUM_JOINTS * 3 + 3
+        body = fields[3 : 3 + n_body]
+        version = int(fields[3 + n_body])
+        tick = int(fields[4 + n_body])
+        cmd_q = list(fields[5 + n_body : 5 + n_body + NUM_JOINTS])
+    elif len(data) == _POLICY_TELEM_V3_SIZE:
+        fields = struct.unpack(_POLICY_TELEM_V3_FMT, data)
         mask = fields[2]
         body = fields[3:-1]
         version = int(fields[-1])
@@ -551,6 +590,11 @@ def unpack_policy_telem(data: bytes) -> dict | None:
         "tau": list(body[2 * NUM_JOINTS : 3 * NUM_JOINTS]),
         "rpy": list(body[3 * NUM_JOINTS : 3 * NUM_JOINTS + 3]),
         "convention_version": version,
+        "telem_tick": tick,
+        # bit24 가 서 있을 때만 유효하다. 안 서 있으면 브리지가 아직 명령을 안 보낸 것(warmup 등).
+        "cmd_q": cmd_q if (cmd_q is not None and (mask & (1 << 24))) else None,
+        # bit16+p — 관절 p 의 목표가 soft limit 으로 잘렸다. 0 이 아니면 그 캡처는 명령이 오염됐다.
+        "clamp_mask": (mask >> 16) & 0xFF,
     }
 
 
@@ -733,11 +777,33 @@ if __name__ == "__main__":
 
     # telemetry/ping 왕복.
     pt = pack_policy_telem(7, z, z, [1.5] * NUM_JOINTS, [0.5, -0.2, 10.0], valid_mask=0x103)
-    assert len(pt) == POLICY_TELEM_SIZE == 121, (len(pt), POLICY_TELEM_SIZE)
+    assert len(pt) == POLICY_TELEM_SIZE == 157, (len(pt), POLICY_TELEM_SIZE)
     dpt = unpack_policy_telem(pt)
     assert abs(dpt["tau"][0] - 1.5) < 1e-6 and abs(dpt["rpy"][2] - 10.0) < 1e-6 and len(dpt["q"]) == NUM_JOINTS
     assert dpt["valid_mask"] == 0x103
     assert dpt["convention_version"] == R2S_CONVENTION_VERSION == 1
+    # cmd_q 는 bit24 가 서야 유효하다 — 안 세우면 None (0 으로 오독되면 안 된다).
+    assert dpt["cmd_q"] is None and dpt["telem_tick"] == 0 and dpt["clamp_mask"] == 0
+    # 틱·명령 에코·클램프 신고 왕복 (2026-08-19 확장).
+    pt2 = pack_policy_telem(
+        7,
+        z,
+        z,
+        z,
+        [0.0] * 3,
+        valid_mask=0x1FF | (0b101 << 16) | (1 << 24),
+        telem_tick=1234,
+        cmd_q=[0.5] * NUM_JOINTS,
+    )
+    d2 = unpack_policy_telem(pt2)
+    assert d2["telem_tick"] == 1234 and d2["clamp_mask"] == 0b101
+    assert d2["cmd_q"] is not None and abs(d2["cmd_q"][0] - 0.5) < 1e-6
+    # legacy v3(121B, 틱·명령 없음) — 규약 버전은 살아 있지만 시간축 에코는 없다.
+    v3 = struct.pack(_POLICY_TELEM_V3_FMT, POLICY_TELEM_MAGIC, 9, 0x1FF, *([0.25] * (3 * NUM_JOINTS)), 0.0, 0.0, 0.0, 1)
+    assert len(v3) == 121
+    dv3 = unpack_policy_telem(v3)
+    assert dv3 is not None and dv3["convention_version"] == 1
+    assert dv3["telem_tick"] is None and dv3["cmd_q"] is None  # ★구 캡처는 None 으로 드러나야 한다
     # legacy v2(120B, 규약 필드 없음) — **버전 0** 으로 채워진다(필드 부재가 곧 버전 0).
     v2 = struct.pack(_POLICY_TELEM_V2_FMT, POLICY_TELEM_MAGIC, 9, 0x1FF, *([0.25] * (3 * NUM_JOINTS)), 0.0, 0.0, 0.0)
     assert len(v2) == 120

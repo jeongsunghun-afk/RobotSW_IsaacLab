@@ -4,7 +4,8 @@
  * ⚠ 이 파일은 scripts/real2sim/r2s_biped_leg/r2s_udp.py 가 단일 진실이다.
  *   _POLICY_ACT_FMT  = "<II8f"        (40 B)  policy_runner → real (REAL_ACT 9887)
  *   _POLICY_STATE_FMT= "<II8f8f3fB"   (85 B)  real → policy_runner (REAL_STATE 9888, 규약버전)
- *   _POLICY_TELEM_FMT= "<III8f8f8f3fB" (121 B) real → gui monitor (REAL_TELEM 9889, valid_mask + 규약버전)
+ *   _POLICY_TELEM_FMT= "<III8f8f8f3fBI8f" (157 B) real → gui monitor (REAL_TELEM 9889,
+ *                       valid_mask + 규약버전 + **telem_tick + cmd_q**, 2026-08-19)
  *   _POLICY_PING_FMT = "<II"          (8 B)   monitor → real (REAL_ACT 9887, peer 등록만)
  *   _POLICY_GAIN_FMT = "<II8f8f"      (72 B)  policy_runner → real (REAL_ACT 9887, kp/kd 갱신)
  * 값을 바꾸면 양쪽을 함께 바꿔야 한다. little-endian 호스트(aarch64/x86-64) 가정.
@@ -72,6 +73,9 @@ struct PolicyTelemPacket {
     uint32_t magic;
     uint32_t seq;
     // bit p(0~7)=관절 p 상태 유효(articulation), bit 8=IMU 수신됨.
+    // bit 16+p(16~23)=관절 p 의 목표가 이번 틱에 **soft limit 으로 클램프됐다**(2026-08-19).
+    //   → §18 류의 "명령이 조용히 잘려 기록엔 안 남는" 사고를 캡처가 스스로 신고하게 만든다.
+    // bit 24 = `cmd_q` 가 유효하다(= 이번 틱에 실제로 명령을 전송했다). 0 이면 cmd_q 는 0 이다.
     // ⚠ 버전 1 부터 **foot(p=6,7) 비트의 의미가 달라졌다**: foot 을 관절각으로 내보내려면 같은 다리
     //   calf(p-2) 값이 필요하므로, calf 가 무효면 foot 관절각은 **정의되지 않는다**. 그래서
     //   foot 비트는 "foot **과 그 calf 가 둘 다** 유효"를 뜻한다. raw 값을 관절각인 척 내보내지
@@ -82,7 +86,36 @@ struct PolicyTelemPacket {
     float tau[R2S_NUM_JOINTS];  // [N·m], articulation 순서 (fTorque 에 sign 적용). **채널기준** —
                                 // 소비자가 × gear 하면 관절토크 (calf 1.5 · foot 1.2)
     float rpy[3];               // IMU roll/pitch/yaw 원값 [deg]
-    uint8_t convention_version;  // = R2S_CONVENTION_VERSION. 위 정의 참조. offset 120, 패킷 121 B
+    uint8_t convention_version;  // = R2S_CONVENTION_VERSION. 위 정의 참조. offset 120
+
+    // ── 2026-08-19 확장 (121 → 157 B). 규약 버전은 **1 그대로**다 — 기존 필드의 의미가 하나도
+    //    안 바뀌었고, 새 필드는 **패킷 크기**로 구분한다(legacy 116/120/121 B 와 같은 방식).
+    //    버전 2 는 여전히 "브리지가 tau 까지 변환한다"에 예약돼 있다.
+
+    /** TELEM 송신 틱 카운터. 매 송신마다 +1, `kTelemDtSec`(5 ms) 간격.
+     *
+     * ★있는 이유: 소비자(gui)가 찍는 도착 시각은 "파이썬이 알아챈 시각"이라 GIL·Qt·네트워크
+     *   지터가 그대로 섞인다(실측 std 0.50 ms — 5 ms 간격의 10 %). 틱을 실어 보내면
+     *   `t = t0 + tick × 5 ms` 로 **간격이 구조적으로 정확**해지고, 미지수는 t0 하나만 남는다.
+     *   그 하나는 PACE 의 delay 파라미터와 재생 shift 가 이미 흡수하는 값이다.
+     *   유실도 tick 이 건너뛰는 것으로 드러나 "빠진 걸 모른 채 보간"하는 사고를 막는다.
+     */
+    uint32_t telem_tick;
+
+    /** 이 틱에 **실제로 드라이버에 실린** 목표각 [rad], articulation 순서, 관절 좌표.
+     *
+     * ★있는 이유: 지금까지 캡처는 GUI 가 **발행한** 값만 담아서, 드라이버가 실제로 무엇을
+     *   받았는지 알 수 없었다. 그 사이에 soft-limit 클램프 · ENGAGE 램프 · slew 제한 ·
+     *   float16 양자화가 끼어든다. 그래서 "sim 이 느린 것"과 "명령 기록이 어긋난 것"을
+     *   가를 수 없었다(§18 오염 사고의 근본 원인이기도 하다).
+     *
+     * 값은 실제 전송값 `float16(cmd_deg)` 를 **되돌려** `motor_deg_to_joint` 로 환산한 것이라
+     * float16 양자화까지 포함한다. `q` 와 **같은 프레임·같은 변환**이므로 소비자는 아무 변환
+     * 없이 `cmd_q − q` 를 추종오차로 바로 쓸 수 있다.
+     *
+     * 전송 중이 아닐 때(warmup·HOLD 전·relax 무토크)는 0 이고, `valid_mask` bit 24 로 알린다.
+     */
+    float cmd_q[R2S_NUM_JOINTS];
 };
 
 struct PolicyPingPacket {
@@ -102,9 +135,10 @@ static_assert(sizeof(PolicyActPacket) == 40, "r2s_udp.py POLICY_ACT_SIZE(40) mis
 // ⚠ 84 → 85 B (convention_version 추가, offset 0~83 은 불변). r2s_udp.py 를 같이 고쳐야 하며,
 //   그 전까지 policy_runner 는 크기 불일치로 STATE 를 **거부**한다(조용한 오독보다 낫다 — 의도).
 static_assert(sizeof(PolicyStatePacket) == 85, "r2s_udp.py POLICY_STATE_SIZE(85) mismatch");
-// ⚠ 120 → 121 B (convention_version 추가, offset 0~119 는 불변). r2s_udp.py 를 같이 고쳐야 하며,
+// ⚠ 121 → 157 B (telem_tick + cmd_q 추가, offset 0~120 은 불변). r2s_udp.py 를 같이 고쳐야 하며,
 //   그 전까지 GUI/comm_check 는 크기 불일치로 TELEM 을 **거부**한다(조용한 오독보다 낫다 — 의도).
-static_assert(sizeof(PolicyTelemPacket) == 121, "r2s_udp.py POLICY_TELEM_SIZE(121) mismatch");
+//   (그 이전: 120 → 121 B convention_version 추가.)
+static_assert(sizeof(PolicyTelemPacket) == 157, "r2s_udp.py POLICY_TELEM_SIZE(157) mismatch");
 static_assert(sizeof(PolicyPingPacket) == 8, "r2s_udp.py POLICY_PING_SIZE(8) mismatch");
 static_assert(sizeof(PolicyGainPacket) == 72, "r2s_udp.py POLICY_GAIN_SIZE(72) mismatch");
 

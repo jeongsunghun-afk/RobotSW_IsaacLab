@@ -80,6 +80,11 @@ FOOT_CALF_COEF = 1.0
 # 적용하지 않으므로, 캡처의 각도·각속도는 명령·실측 둘 다 채널 단위다 → 여기서 나눠 관절 단위로 옮긴다.
 # 커플링 coef 는 감속비 **이후** 공간의 계수이므로(§2-a) 반드시 커플링 해제보다 먼저 적용해야 한다.
 GEAR_K = np.array([1.0, 1.0, 1.5, 1.2, 1.0, 1.0, 1.5, 1.2])  # leg-major
+
+# 브리지 TELEM 송신 레이트 — `real_runner_bipedleg.cpp` 의 `kTelemDtSec`(5 ms) 와 짝.
+# `telem_tick` 을 시간으로 되돌릴 때 쓴다. 한쪽만 바꾸면 시간축이 조용히 늘어난다.
+TELEM_HZ: float = 200.0
+JOINT_LABELS = ["HL_hip", "HL_thigh", "HL_calf", "HL_foot", "HR_hip", "HR_thigh", "HR_calf", "HR_foot"]
 # 게인의 gear 지수 — **k² 채택 (2026-08-14)**. `--gain_gear_scale` 로 A/B 가능.
 #
 # ⚠ **"확정"이 아니라 "채택"이다.** 지수 2 는 아래 ①(실측)과 ②(유도)의 곱이고 등급이 다르다.
@@ -176,6 +181,35 @@ def convert(
     kp = d["kp"].astype(np.float64)
     kd = d["kd"].astype(np.float64)
 
+    # ── 브리지 에코 (2026-08-19, TELEM 157 B). 없으면 구 캡처다. ──────────────────────────
+    # ① telem_tick — 파이의 5 ms 격자. `t_real`(파이썬 도착시각)은 GIL·Qt·네트워크 지터를
+    #    안고 있어 5 ms 급 현상을 분해할 수 없다(실측 std 0.50 ms = 간격의 10 %). 틱이 있으면
+    #    시간축을 **구조적으로** 재구성하고, 원점만 첫 도착시각에 맞춘다(원점 오차는 상수라
+    #    PACE delay·재생 shift 가 흡수한다).
+    if "telem_tick" in d.files:
+        tick = d["telem_tick"].astype(np.float64)
+        t_real = t_real[0] + (tick - tick[0]) / TELEM_HZ
+        gap = int(np.sum(np.diff(d["telem_tick"].astype(np.int64)) - 1))
+        print(f"    시간축: telem_tick 사용 ({TELEM_HZ:g} Hz 격자, 유실 {gap} 틱)")
+    else:
+        print("    ⚠ 시간축: telem_tick 없음 — 도착시각을 쓴다(지터 포함). 구 브리지 캡처다.")
+    # ② q_cmd_real — 드라이버가 **실제로 받은** 목표각. `q_cmd`(GUI 발행값)와 달리 클램프·
+    #    ENGAGE 램프·slew·float16 양자화가 전부 반영돼 있고, 무엇보다 **측정과 같은 틱**에
+    #    실려 온다 → 명령·측정을 서로 다른 클록에서 맞출 필요가 사라진다(§18 오염의 근원).
+    q_cmd_applied = None
+    if "q_cmd_real" in d.files:
+        cand = d["q_cmd_real"].astype(np.float64)
+        if np.isnan(cand).all(axis=1).any():
+            print("    ⚠ q_cmd_real 에 무효(NaN) 샘플 있음 — 전송 전 구간 포함. 발행값으로 대체한다.")
+        else:
+            q_cmd_applied = cand
+    # ③ clamp_mask_real — 목표가 soft limit 에 잘린 샘플. §18 오염을 캡처가 자진신고한다.
+    if "clamp_mask_real" in d.files:
+        clamped = int(np.bitwise_or.reduce(d["clamp_mask_real"].astype(np.uint8)))
+        if clamped:
+            names = [JOINT_LABELS[j] for j in range(8) if clamped & (1 << j)]
+            print(f"    ⚠ 명령이 soft limit 에 클램프된 구간 있음: {', '.join(names)} — 적합 전에 확인할 것")
+
     # 감속비 오설정 소급 보정 — 채널 단위 → 관절 단위 (GEAR_K 주석 참조).
     #
     # 도장은 세 세대가 있다. **새 것부터** 읽는다:
@@ -215,6 +249,10 @@ def convert(
             q_cmd[:, f] = q_cmd[:, f] + FOOT_CALF_COEF * q_cmd[:, c]
             q_real[:, f] = q_real[:, f] + FOOT_CALF_COEF * q_real[:, c]
             dq_real[:, f] = dq_real[:, f] + FOOT_CALF_COEF * dq_real[:, c]
+            # ★에코 명령은 TELEM 출신이라 `q_real` 과 **같은** 프레임이다 — 같은 규칙을 적용한다.
+            #   `q_cmd`(GUI 발행값) 규칙을 쓰면 안 된다. 출처가 다르면 규칙도 다르다.
+            if q_cmd_applied is not None:
+                q_cmd_applied[:, f] = q_cmd_applied[:, f] + FOOT_CALF_COEF * q_cmd_applied[:, c]
         # 게인은 규약과 무관하게 **채널 게인**으로 기록된다(브리지가 변환 없이 통과시킨다 —
         # calib_bipedleg.hpp GAIN_GEAR 주석). 관절 공간 환산은 두 규약 모두 같다.
         kp = kp * GEAR_K**GAIN_GEAR_SCALE
@@ -229,6 +267,8 @@ def convert(
         q_cmd /= GEAR_K
         q_real /= GEAR_K
         dq_real /= GEAR_K
+        if q_cmd_applied is not None:
+            q_cmd_applied /= GEAR_K  # 에코 명령도 실측과 같은 규칙 (둘 다 TELEM 출신)
         kp = kp * GEAR_K**GAIN_GEAR_SCALE
         kd = kd * GEAR_K**GAIN_GEAR_SCALE
         print(
@@ -258,7 +298,13 @@ def convert(
         applied = lag_ms
     elif float(cmd_lag_ms) != 0.0:
         applied = float(cmd_lag_ms)
-    des = zoh(t_cmd + applied * 1e-3, q_cmd, t_grid)
+    if q_cmd_applied is not None:
+        # ★브리지 에코를 쓴다 — 명령과 측정이 **같은 틱**에 실려 오므로 시간축 정렬이 불필요하다.
+        #   `applied`(추정 지연 보정)도 적용하지 않는다: 보정할 어긋남이 애초에 없다.
+        des = zoh(t_real, q_cmd_applied, t_grid)
+        print("    명령: q_cmd_real(브리지 에코) 사용 — 클램프·램프·float16 반영, 시간정렬 불필요")
+    else:
+        des = zoh(t_cmd + applied * 1e-3, q_cmd, t_grid)
 
     # foot 좌표 처리 — 두 규약:
     #  keep_raw_foot=True (커플링 재생 적합용, 권장): foot 명령·실측을 raw(엔코더) 그대로 둔다.

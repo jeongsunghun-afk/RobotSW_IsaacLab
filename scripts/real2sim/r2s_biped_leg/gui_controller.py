@@ -502,6 +502,11 @@ def _rad_to_slider(joint_idx: int, rad: float) -> int:
     return int(round(min(1.0, max(0.0, frac)) * _SLIDER_STEPS))
 
 
+# TELEM 기록 한 행 — (도착시각, q, dq, tau, telem_tick, cmd_q, clamp_mask), 전부 leg-major.
+# tick/cmd_q 가 None 이면 파이가 구 빌드라 시간축·명령 에코가 없다는 뜻이다.
+_RecRow = tuple[float, list[float], list[float], list[float], int | None, list[float] | None, int]
+
+
 class RealMonitorThread(QThread):
     """real_runner TELEM(9889) 수신 스레드 — **관측 전용**, 로봇 명령에 관여하지 않는다.
 
@@ -518,9 +523,12 @@ class RealMonitorThread(QThread):
         super().__init__(parent)
         self._host = host
         self._stop = False
-        # chirp 기록: start_recording() 후 수신하는 모든 TELEM을 (t, q, dq, tau) leg-major로 쌓는다.
+        # chirp 기록: start_recording() 후 수신하는 모든 TELEM을 leg-major로 쌓는다.
+        # 행 = (t_arrival, q, dq, tau, telem_tick, cmd_q, clamp_mask)
+        #   telem_tick / cmd_q 는 구 브리지(≤121 B)면 None — 그 None 이 npz 까지 전달돼
+        #   "이 캡처엔 시간축·명령 에코가 없다"가 드러나야 한다 (0 으로 채우면 조용히 오독).
         # telem 시그널은 10Hz 최신값만 방출하므로 풀레이트 기록은 이 리스트가 유일한 경로다.
-        self._rec: list[tuple[float, list[float], list[float], list[float]]] | None = None
+        self._rec: list[_RecRow] | None = None
         self._rec_convention: int | None = None  # 기록 구간에서 브리지가 신고한 좌표 규약 버전
 
     def request_stop(self) -> None:
@@ -531,8 +539,8 @@ class RealMonitorThread(QThread):
         self._rec = []
         self._rec_convention = None  # 기록 구간에서 실제로 받은 좌표 규약 버전
 
-    def stop_recording(self) -> list[tuple[float, list[float], list[float], list[float]]]:
-        """기록을 멈추고 지금까지 쌓인 (t, q, dq, tau) 행을 반환한다 (leg-major)."""
+    def stop_recording(self) -> list[_RecRow]:
+        """기록을 멈추고 쌓인 (t, q, dq, tau, tick, cmd_q, clamp) 행을 반환한다 (leg-major)."""
         rows = self._rec
         self._rec = None
         return rows if rows is not None else []
@@ -599,7 +607,14 @@ class RealMonitorThread(QThread):
                             tx.sendto(r2s_udp.pack_monitor(mon_seq, [0.0] * NUM_JOINTS, q_lm, dq_lm, tau_lm), mon_addr)
                         rec = self._rec  # 로컬 참조 — stop_recording()의 None 교체와의 경합 회피
                         if rec is not None:
-                            rec.append((now, q_lm, dq_lm, tau_lm))
+                            # ★브리지가 실어 보낸 틱·명령을 **그대로** 담는다 (2026-08-19).
+                            #   now(도착시각)는 파이썬 스케줄 지터를 안고 있지만 tick 은 파이의
+                            #   5 ms 격자라 정확하다 — 소비자가 t = t0 + tick·5ms 로 복원한다.
+                            #   구 브리지(≤121 B)면 tick/cmd_q 가 None 이고, 그 None 이 npz 까지
+                            #   전달돼 "이 캡처엔 에코가 없다"가 드러나야 한다.
+                            cq = t["cmd_q"]
+                            cq_lm = [cq[a] for a in _ART_FOR_LEGMAJOR] if cq is not None else None
+                            rec.append((now, q_lm, dq_lm, tau_lm, t["telem_tick"], cq_lm, t["clamp_mask"]))
                             # 브리지가 신고한 규약을 그대로 물고 간다 (npz 도장용).
                             self._rec_convention = t["convention_version"]
                 if rx_stamps and now - rx_stamps[0] > 1.0:
@@ -2173,6 +2188,20 @@ class MainWindow(QMainWindow):
             arrays["q_real"] = np.asarray([r[1] for r in telem_rows], dtype=np.float32)
             arrays["dq_real"] = np.asarray([r[2] for r in telem_rows], dtype=np.float32)
             arrays["tau_real"] = np.asarray([r[3] for r in telem_rows], dtype=np.float32)
+            # ★2026-08-19 — 브리지가 실어 보낸 시간축·명령 에코. 구 브리지면 통째로 빠진다
+            #   (0 으로 채우지 않는다 — 없는 걸 있는 척하면 조용히 오독된다).
+            if len(telem_rows[0]) >= 7 and telem_rows[0][4] is not None:
+                # t_real 은 도착시각이라 지터가 섞인다. tick 은 파이의 5 ms 격자라 정확하고,
+                # 유실도 번호가 건너뛰는 것으로 드러난다 → 소비자는 tick 을 시간축으로 쓸 것.
+                arrays["telem_tick"] = np.asarray([r[4] for r in telem_rows], dtype=np.int64)
+                # 드라이버가 **실제로 받은** 목표각 [rad], leg-major, 관절 좌표.
+                # 클램프·ENGAGE 램프·slew·float16 양자화가 전부 반영돼 있다. 전송 전 샘플은 NaN.
+                nan8 = [float("nan")] * NUM_JOINTS
+                arrays["q_cmd_real"] = np.asarray(
+                    [(r[5] if r[5] is not None else nan8) for r in telem_rows], dtype=np.float32
+                )
+                # bit p = 관절 p 목표가 soft limit 으로 잘린 샘플. 0 이 아니면 그 캡처는 명령이 오염됐다.
+                arrays["clamp_mask_real"] = np.asarray([r[6] for r in telem_rows], dtype=np.uint8)
         np.savez(out_path, **arrays)
         msg = (
             f"Chirp saved: {out_path} (cmd {len(self._chirp_cmd_rows)}, "

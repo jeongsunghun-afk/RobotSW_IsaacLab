@@ -89,11 +89,13 @@ GUI 가 상수로 찍으면 배포와 도장이 어긋난다. 버전은 "무엇�
 | 패킷 | 크기 | 버전 필드 offset |
 |---|---|---|
 | STATE (9888) | 84 → **85 B** | 84 |
-| TELEM (9889) | 120 → **121 B** | 120 |
+| TELEM (9889) | 121 → **157 B** | 120(규약)·124(tick)·128~156(cmd_q) |
 
-기존 offset 은 둘 다 **불변**이라 `r2s_udp.py` 는 포맷 끝에 `B` 만 붙이면 된다. 반영 전까지
-**policy_runner·GUI·`comm_check.py` 가 크기 불일치로 패킷을 거부한다** — 조용한 오독보다 낫다는
-판단으로 일부러 크기를 바꿨다.
+기존 offset 은 매번 **불변**이라 `r2s_udp.py` 는 포맷 **끝에만** 필드를 붙이면 된다
+(STATE 는 `B`, TELEM 은 `B` → `BI8f`). 반영 전까지 **policy_runner·GUI·`comm_check.py` 가 크기
+불일치로 패킷을 거부한다** — 조용한 오독보다 낫다는 판단으로 일부러 크기를 바꿨다.
+`unpack_policy_telem` 은 구 크기(121/120/116 B)도 계속 읽되 `telem_tick`·`cmd_q` 를 **None** 으로
+돌려준다 — 0 으로 채우면 "에코가 없다"가 "에코가 0이다"로 조용히 둔갑한다.
 연산 순서는 `q_ch = q_raw·sign·gear + zero_deg` / `q_raw = (q_ch − zero_deg)/(sign·gear)` —
 `zero_deg` 는 **채널각 단위**라 gear 로 나누기 전에 뺀다.
 
