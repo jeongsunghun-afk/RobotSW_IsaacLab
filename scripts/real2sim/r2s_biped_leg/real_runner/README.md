@@ -55,6 +55,56 @@ STATE 488 개 = 48.8 Hz(간격 mean 20.53 ms) — 즉 정책 클록 불변.
 > ⚠ GUI 의 monitor.py **plot 중계는 50 Hz 로 솎는다**(`mon_relay_dt`). 기록(`_rec`)만 풀레이트다 —
 > 그래프에 200 Hz 는 필요 없고 monitor.py 에 4 배 트래픽을 보낼 이유도 없다.
 
+### ★서버 두 대가 한 로봇을 쓰는 법 (2026-08-19)
+
+**브리지를 두 개 띄우면 안 된다.** `bind: Address already in use` 는 고쳐야 할 버그가 아니라
+**안전장치**다 — 인스턴스가 둘이면 SHM writer 가 둘이 되어 같은 모터에 명령이 충돌한다.
+(`SO_REUSEADDR` 를 일부러 걸지 않았다.)
+
+대신 **한 인스턴스가 여러 워크스테이션에 TELEM 을 뿌린다**:
+
+| | 대상 | 개수 | 등록 조건 |
+|---|---|---|---|
+| **STATE** (9888) | 명령 peer | **반드시 1** | **ACT 를 보낸 쪽**만 |
+| **TELEM** (9889) | 관측 peer | 최대 `kMaxTelemPeers`=4 | 아무 패킷이나 보내면 등록 (IP 기준) |
+
+즉 **관측은 여러 대가 동시에, 명령은 한 대만**이다. 관측 peer 는 `kPeerTimeoutSec`(10 s) 동안
+아무 패킷도 없으면 내려간다. GUI 는 1 Hz 로 PING 하므로 살아 있는 한 만료되지 않는다.
+
+> ⚠ 이 분리는 **잠재 버그도 함께 고쳤다**. 예전엔 peer 슬롯이 하나여서 모니터가 PING 만 보내도
+> STATE 목적지가 그쪽으로 넘어갔다 — 정책 입력이 모니터로 새는 구조였는데, policy_runner 가
+> 50 Hz 로 ACT 를 쏴서 즉시 되찾는 바람에 드러나지 않았을 뿐이다.
+
+루프백 실측(소스 IP 127.0.0.1 / 127.0.0.2 동시): **양쪽 다 200.2 Hz** 수신.
+
+`bind` 오류가 났다면 먼저 좀비를 의심할 것:
+
+```bash
+sudo ss -ulpn | grep 9887
+ps -ef | grep real_runner
+```
+
+정말로 **로봇이 두 대**라면 그때는 인스턴스도 둘이 맞고, `--act_port` 로 분리하면 된다.
+
+### probe 출력 — `zero_deg` 캘리브레이션용 채널각 (2026-08-19)
+
+`--probe` 는 관절각 아래에 **채널각 원값**을 함께 찍는다:
+
+```
+[HOLD] q_joint[rad]: +0.031 -0.512 ...              ← 관절각, policy 순서
+        ch_deg(모터순서, zero_deg 에 그대로 복사): +1.78 -29.33 ...
+                                               HL_hip HL_thigh HL_calf HL_foot ...
+```
+
+`zero_deg` 는 **채널 deg · 모터 순서**로 정의되는데 위 `q_joint` 줄은 관절각 · policy 순서라
+그대로 옮길 수 없다. 손으로 환산하려면 gear 를 곱하고 foot 은 calf 를 다시 더해야 하는데
+(raw = foot + calf), 그게 이 프로젝트에서 반복해 사고를 낸 변환이다. 그래서 드라이버 보고값을
+**변환 없이** 찍는다.
+
+절차: 로봇을 sim 중립자세(전 관절 q=0)에 물리적으로 정렬 → `ch_deg` 줄을 `MOTOR_CALIB` 의
+`zero_deg` 에 순서대로 복사 → 재빌드 → probe 재실행 → **`q_joint` 줄이 전부 0 근처인지 확인**.
+이 마지막 확인 없이 넘어가지 말 것.
+
 관절 매핑: 정책 UDP는 articulation(type-major) `[HL_hip, HR_hip, HL_thigh, HR_thigh, HL_calf,
 HR_calf, HL_foot, HR_foot]`, 실기 모터는 leg-major `[LtR, LtP, LkP, LaP, RtR, RtP, RkP, RaP]`
 (0~7; SHM 채널 8/9=waist 미사용). 변환은 `calib_bipedleg.hpp` `POLICY_TO_MOTOR` + sign/zero_deg/**gear**.

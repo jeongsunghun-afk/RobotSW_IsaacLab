@@ -71,6 +71,11 @@ constexpr double kStepDtSec = 0.020;      // STATE 회신 페이싱 = 학습 STE
 // ★이 값을 kStepDtSec 과 엮지 말 것 — STATE 는 policy_runner 가 lockstep 이라 20 ms 가
 //   50 Hz 정책 클록을 소유한다. 빠르게 만들면 gait clock 이 자유질주한다.
 constexpr double kTelemDtSec = 0.005;     // TELEM 송신 페이싱 = 200 Hz (관측 전용, lockstep 무관)
+// TELEM 을 동시에 받을 수 있는 워크스테이션 수. 서버 두 대가 한 로봇을 같이 보는 구성을 위한 것.
+constexpr int kMaxTelemPeers = 4;
+// 이 시간 동안 아무 패킷도 안 오면 관측 peer 에서 내린다. GUI 는 1 Hz 로 PING 하므로 살아 있으면
+// 만료되지 않는다. ⚠ 짧게 잡으면 GUI 가 "만료 → TELEM 끊김 → 다시 PING" 을 반복해 깜빡인다.
+constexpr double kPeerTimeoutSec = 10.0;
 constexpr double kActTimeoutSec = 0.5;    // TRACK 중 ACT 두절 → 마지막 목표로 hold
 constexpr unsigned kStatusWarmupCnt = 100;  // RobotTestGait 게이트와 동일
 
@@ -250,8 +255,49 @@ int main(int argc, char** argv) {
     double last_telem_time = -1.0;  // TELEM 은 STATE 와 별도 페이싱 (kTelemDtSec)
     double last_print_time = 0.0;
     uint32_t last_act_seq = 0;
+    // ── peer 관리 (2026-08-19) ────────────────────────────────────────────────────────────
+    // 둘을 **분리한다**. 예전엔 하나였고, 그래서 모니터가 PING 만 보내도 STATE 목적지가
+    // 그쪽으로 넘어가는 잠재 버그가 있었다(정책이 50 Hz 로 ACT 를 쏴서 즉시 되찾는 바람에
+    // 드러나지 않았을 뿐이다).
+    //
+    //   peer_addr  = **명령 peer** — STATE(정책 입력)를 받는 단 하나. ACT 를 보낸 쪽만 된다.
+    //                lockstep 상대라 반드시 하나여야 한다.
+    //   peers[]    = **관측 peer** — TELEM 을 받는 목록. 아무 패킷이나 보내면 등록된다.
+    //
+    // ★이래야 서버 두 대가 한 로봇을 **동시에 볼 수** 있다. 브리지를 두 개 띄우는 건 답이
+    //   아니다 — SHM writer 가 둘이 되어 모터 명령이 충돌한다. bind 실패는 그걸 막는
+    //   안전장치이지 고쳐야 할 버그가 아니다.
     sockaddr_in peer_addr{};
-    bool have_peer = false;
+    bool have_peer = false;  // 명령 peer 가 정해졌는가 (STATE 송신 조건)
+
+    struct PeerSlot {
+        in_addr_t ip;
+        double last_seen;
+    };
+    PeerSlot peers[kMaxTelemPeers] = {};
+    // ⚠ 식별은 **IP 만**으로 한다 — 회신 포트는 어차피 REAL_TELEM_PORT 로 덮어쓰므로
+    //   송신 포트는 peer 정체성이 아니다.
+    auto register_peer = [&peers](const sockaddr_in& from, double now) {
+        int free_i = -1;
+        int oldest_i = 0;
+        for (int i = 0; i < kMaxTelemPeers; i++) {
+            if (peers[i].last_seen > 0.0 && peers[i].ip == from.sin_addr.s_addr) {
+                peers[i].last_seen = now;
+                return;
+            }
+            if (peers[i].last_seen <= 0.0 && free_i < 0) {
+                free_i = i;
+            }
+            if (peers[i].last_seen < peers[oldest_i].last_seen) {
+                oldest_i = i;
+            }
+        }
+        const int slot = (free_i >= 0) ? free_i : oldest_i;  // 자리가 없으면 가장 오래된 것을 밀어낸다
+        peers[slot].ip = from.sin_addr.s_addr;
+        peers[slot].last_seen = now;
+        std::printf("[real_runner] TELEM peer 등록: %s (슬롯 %d/%d)\n", inet_ntoa(from.sin_addr), slot,
+                    kMaxTelemPeers);
+    };
 
     timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
@@ -302,8 +348,9 @@ int main(int argc, char** argv) {
                     std::memcpy(target_pol, act.target_q, sizeof(target_pol));
                     last_act_seq = act.seq;
                     last_act_time = now_sec();
-                    peer_addr = from;
+                    peer_addr = from;  // ★명령 peer 는 ACT 를 보낸 쪽만 — STATE 가 여기로 간다
                     have_peer = true;
+                    register_peer(from, last_act_time);
                     if ((state == State::kHold || state == State::kRelax || state == State::kRelaxRamp
                          || state == State::kRelaxFade)
                         && mode == Mode::kBridge) {
@@ -318,14 +365,14 @@ int main(int argc, char** argv) {
                         std::printf("[real_runner] ACT 수신(seq=%u) → ENGAGE %.0f ms\n", act.seq, engage_sec * 1e3);
                     }
                 } else if (unpack_policy_ping(rx, static_cast<size_t>(n), ping)) {
-                    // 모니터 keepalive: peer 만 등록. 목표/상태머신 불변 — bridge TRACK 중에도 무해.
-                    peer_addr = from;
-                    have_peer = true;
+                    // 모니터 keepalive: **관측 peer 만** 등록. 목표/상태머신 불변.
+                    // ★STATE 목적지(peer_addr)는 건드리지 않는다 — 예전엔 건드려서, 모니터가
+                    //   PING 하는 순간 정책 입력이 모니터로 새는 구조였다.
+                    register_peer(from, now_sec());
                 } else if (unpack_policy_relax(rx, static_cast<size_t>(n), ping)) {
                     // 무토크(limp) 요청 — bridge 모드에서만. kp=kd=tau=0 을 능동 송신한다(명령 중단이
                     // 아님 — 드라이버가 마지막 명령을 유지할 수 있으므로 zero-torque 를 계속 보낸다).
-                    peer_addr = from;
-                    have_peer = true;
+                    register_peer(from, now_sec());  // 관측 peer 만 — STATE 목적지는 불변
                     // staged relax (2026-08-12): 즉시 무토크가 아니라 실측 휴지(droop) 자세로
                     // RELAX_RAMP_RADPS 속도로 이동한 뒤 무토크로 전환한다 — 높은 자세에서 바로
                     // 풀면 낙하 충격이 있기 때문. RELAX 패킷은 50Hz로 반복 수신되므로 램프/무토크
@@ -357,8 +404,7 @@ int main(int argc, char** argv) {
                 } else if (unpack_policy_gain(rx, static_cast<size_t>(n), gain)) {
                     // kp/kd 런타임 갱신 — articulation 순서로 받아 모터 순서로 매핑, 드라이버 상한 클램프.
                     // 다음 틱부터 kp_cmd/kd_cmd 로 반영된다(relax 중엔 여전히 0 강제). 목표/상태머신 불변.
-                    peer_addr = from;
-                    have_peer = true;
+                    register_peer(from, now_sec());  // 관측 peer 만 — STATE 목적지는 불변
                     bool changed = false;
                     for (int p = 0; p < R2S_NUM_JOINTS; p++) {
                         int m = POLICY_TO_MOTOR[p];
@@ -566,7 +612,14 @@ int main(int argc, char** argv) {
         // warmup 전에도 송신하고 무효 관절은 valid_mask 로 표시 → 워크스테이션에서
         // "링크 죽음 vs 모터데이터 없음" 구분. STATE(6a)와 포트·페이싱 모두 분리돼 있어
         // policy lockstep 과 간섭하지 않는다.
-        if (have_peer && (t - last_telem_time) >= kTelemDtSec) {
+        bool any_telem_peer = false;
+        for (int i = 0; i < kMaxTelemPeers; i++) {
+            if (peers[i].last_seen > 0.0 && (t - peers[i].last_seen) <= kPeerTimeoutSec) {
+                any_telem_peer = true;
+                break;
+            }
+        }
+        if (any_telem_peer && (t - last_telem_time) >= kTelemDtSec) {
             // ★위상 누적(`+= dt`)이지 리셋(`= t`)이 아니다. 1 kHz 루프에서 `>= dt` 를 검사하면
             // 매번 평균 반 틱(0.5 ms)씩 늦게 걸리는데, `= t` 로 리셋하면 그 지연이 **매 주기
             // 누적**돼 실측 레이트가 목표보다 낮아진다. 실제로 그게 구 50 Hz TELEM 이 캡처에서
@@ -577,7 +630,6 @@ int main(int argc, char** argv) {
             if (t - last_telem_time > kTelemDtSec) {
                 last_telem_time = t;
             }
-            sockaddr_in reply = peer_addr;
             PolicyTelemPacket tm;
             std::memset(&tm, 0, sizeof(tm));
             tm.magic = POLICY_TELEM_MAGIC;
@@ -632,8 +684,18 @@ int main(int argc, char** argv) {
                 // 소비자가 아무 변환 없이 cmd_q − q 를 추종오차로 쓸 수 있게.
                 motor_deg_to_joint(applied_ch_deg, tm.cmd_q);
             }
-            reply.sin_port = htons(static_cast<uint16_t>(REAL_TELEM_PORT));
-            sendto(sock, &tm, sizeof(tm), 0, reinterpret_cast<sockaddr*>(&reply), sizeof(reply));
+            // ★살아 있는 관측 peer **전부**에게 보낸다 — 서버 두 대가 한 로봇을 동시에 볼 수 있다.
+            //   브리지를 두 개 띄우는 게 아니라 이쪽이 정답이다(SHM writer 는 하나여야 한다).
+            sockaddr_in tm_to{};
+            tm_to.sin_family = AF_INET;
+            tm_to.sin_port = htons(static_cast<uint16_t>(REAL_TELEM_PORT));
+            for (int i = 0; i < kMaxTelemPeers; i++) {
+                if (peers[i].last_seen <= 0.0 || (t - peers[i].last_seen) > kPeerTimeoutSec) {
+                    continue;
+                }
+                tm_to.sin_addr.s_addr = peers[i].ip;
+                sendto(sock, &tm, sizeof(tm), 0, reinterpret_cast<sockaddr*>(&tm_to), sizeof(tm_to));
+            }
         }
 
         // ---- 7) 주기 로그 (probe 0.5 s / 그 외 2 s) ----
@@ -666,6 +728,31 @@ int main(int argc, char** argv) {
             std::printf("  rpy:[%+.1f %+.1f %+.1f]%s  peer:%s\n", imu_buf[IDX_OF_IMU_ARPY + 0],
                         imu_buf[IDX_OF_IMU_ARPY + 1], imu_buf[IDX_OF_IMU_ARPY + 2], imu_seen ? "" : "(IMU 미수신!)",
                         have_peer ? inet_ntoa(peer_addr.sin_addr) : "-");
+
+            // ---- probe 전용: **채널각 원값** (zero_deg 캘리브레이션용) ----------------------
+            // ★`zero_deg` 는 **채널 deg**·**모터 순서**로 정의된다. 위 q_joint 줄은 관절각·policy
+            //   순서라 그대로 옮겨 적을 수 없고, 손으로 환산하려면 gear 를 곱하고 foot 은 calf 를
+            //   다시 더해야 한다(raw = foot + calf) — 이 프로젝트에서 반복해 사고를 낸 그 변환이다.
+            //   그래서 드라이버가 보고한 값을 **변환 없이** 그대로 찍는다.
+            //
+            // 사용법: 로봇을 sim 중립자세(전 관절 q=0)에 물리적으로 정렬한 뒤, 아래 줄의 숫자를
+            //   `calib_bipedleg.hpp` MOTOR_CALIB 의 `zero_deg` 에 **순서대로 복사**한다.
+            //   그 뒤 재빌드 → probe 재실행 → 위 q_joint 줄이 전부 0 근처인지 확인할 것.
+            if (mode == Mode::kProbe) {
+                std::printf("        ch_deg(모터순서, zero_deg 에 그대로 복사):");
+                for (int m = 0; m < NUM_MOTORS; m++) {
+                    std::printf(" %+.2f", stt_valid[m] ? ch_deg_dbg[m] : 0.0f);
+                }
+                std::printf("\n                                              ");
+                for (int m = 0; m < NUM_MOTORS; m++) {
+                    // 이름이 "HL_hip(LtR)" 형태라 괄호 앞에서 자른다 (열 폭을 값과 맞춘다).
+                    const char* nm = MOTOR_CALIB[m].name;
+                    const char* par = std::strchr(nm, '(');
+                    int len = par ? static_cast<int>(par - nm) : static_cast<int>(std::strlen(nm));
+                    std::printf(" %*.*s", 6, len, nm);
+                }
+                std::printf("\n");
+            }
         }
 
         // ---- 8) 1 ms 절대시각 페이싱 ----

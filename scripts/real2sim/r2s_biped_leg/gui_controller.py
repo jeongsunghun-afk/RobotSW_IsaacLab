@@ -583,7 +583,11 @@ class RealMonitorThread(QThread):
         try:
             while not self._stop:
                 now = time.monotonic()
-                if now - last_rx > 1.0 and now - last_ping > 1.0:
+                # ★2026-08-19: **항상** 1 Hz PING. 예전엔 "TELEM 이 1 초 이상 안 올 때만" 보냈는데,
+                #   브리지가 관측 peer 를 만료(10 s)시키게 되면서 그 조건은 깜빡임을 만든다:
+                #   등록 → TELEM 수신 → PING 중단 → 10 s 뒤 만료 → TELEM 끊김 → 다시 PING.
+                #   PING 은 8 B 이고 브리지 상태머신을 건드리지 않으므로 계속 보내는 게 맞다.
+                if now - last_ping > 1.0:
                     tx.sendto(r2s_udp.pack_policy_ping(seq), ping_addr)
                     seq += 1
                     last_ping = now
