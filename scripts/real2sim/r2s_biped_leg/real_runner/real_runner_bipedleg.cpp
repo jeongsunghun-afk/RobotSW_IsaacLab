@@ -38,6 +38,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -273,6 +274,7 @@ int main(int argc, char** argv) {
     struct PeerSlot {
         in_addr_t ip;
         double last_seen;
+        bool send_failed;  // 이 peer 로의 TELEM 송신 실패를 이미 신고했는가 (1 회만 찍는다)
     };
     PeerSlot peers[kMaxTelemPeers] = {};
     // ⚠ 식별은 **IP 만**으로 한다 — 회신 포트는 어차피 REAL_TELEM_PORT 로 덮어쓰므로
@@ -295,6 +297,7 @@ int main(int argc, char** argv) {
         const int slot = (free_i >= 0) ? free_i : oldest_i;  // 자리가 없으면 가장 오래된 것을 밀어낸다
         peers[slot].ip = from.sin_addr.s_addr;
         peers[slot].last_seen = now;
+        peers[slot].send_failed = false;  // 새 peer — 실패 신고 상태 초기화
         std::printf("[real_runner] TELEM peer 등록: %s (슬롯 %d/%d)\n", inet_ntoa(from.sin_addr), slot,
                     kMaxTelemPeers);
     };
@@ -694,7 +697,18 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 tm_to.sin_addr.s_addr = peers[i].ip;
-                sendto(sock, &tm, sizeof(tm), 0, reinterpret_cast<sockaddr*>(&tm_to), sizeof(tm_to));
+                if (sendto(sock, &tm, sizeof(tm), 0, reinterpret_cast<sockaddr*>(&tm_to), sizeof(tm_to)) < 0) {
+                    // ★조용히 실패하면 증상이 "TELEM 이 안 온다"로만 보여 원인 추적이 어렵다.
+                    //   흔한 원인: peer 가 다른 서브넷인데 파이에 그쪽 주소/라우트가 없다
+                    //   (예: 서버가 192.168.40.1 인데 파이엔 60.x 만 붙어 있음) → ENETUNREACH.
+                    //   200 Hz 로 도니 peer 당 한 번만 찍는다.
+                    if (!peers[i].send_failed) {
+                        peers[i].send_failed = true;
+                        std::printf("[real_runner] ⚠ TELEM 송신 실패 → %s (%s). 파이에 그 대역 주소/라우트가"
+                                    " 있는지 확인: ip -4 addr / ip route\n",
+                                    inet_ntoa(tm_to.sin_addr), std::strerror(errno));
+                    }
+                }
             }
         }
 
