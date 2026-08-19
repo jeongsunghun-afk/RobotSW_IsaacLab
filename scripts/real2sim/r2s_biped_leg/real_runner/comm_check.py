@@ -34,6 +34,25 @@ import r2s_udp  # noqa: E402
 
 JOINT_NAMES = ["HL_hip", "HR_hip", "HL_thigh", "HR_thigh", "HL_calf", "HR_calf", "HL_foot", "HR_foot"]
 
+# real_runner `kTelemDtSec` 와 짝 (2026-08-19: 5 ms). 한쪽만 바꾸면 아래 경고가 오작동한다.
+TELEM_EXPECT_HZ: float = 200.0
+
+
+def warn_telem_rate(hz: float) -> None:
+    """TELEM 실측 레이트가 기대치에 못 미치면 경고한다.
+
+    TELEM 레이트는 **sysid 캡처의 시간 해상도**다 — ``gui_controller`` 의 ``RealMonitorThread``
+    가 수신 즉시 기록하므로 이 값이 그대로 npz 의 ``t_real`` 레이트가 된다. 50 Hz 로 캡처하면
+    chirp 을 5 Hz 로 올렸을 때 선형보간 오차가 진폭의 5.2 % 에 달해 armature 를 식별할 수 없다
+    (reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §23-j).
+    """
+    if hz < TELEM_EXPECT_HZ * 0.9:
+        print(
+            f"  ⚠ TELEM 레이트 {hz:.1f} Hz 가 기대치 {TELEM_EXPECT_HZ:.0f} Hz 의 90 % 미만 —"
+            " 파이 real_runner 가 구 빌드(50 Hz)이거나 손실 발생."
+            " 이 상태로 캡처하면 sysid 해상도가 부족하다 (re-scp + rebuild 확인)"
+        )
+
 
 def parse_gain_arg(text: str) -> list[float]:
     """스칼라 하나면 8관절 전체에 broadcast, 콤마 8개면 관절별. articulation 순서."""
@@ -225,12 +244,15 @@ def main() -> int:
         mask = telem_last["valid_mask"]
         n_valid = sum(1 for j in range(8) if mask & (1 << j))
         imu_ok = bool(mask & (1 << 8))
+        telem_hz = telem_cnt / args.duration if args.duration > 0 else 0.0
         print(
-            f"TELEM(9889): {telem_cnt}개 수신  모터 유효 {n_valid}/8  IMU {'OK' if imu_ok else '미수신'}"
+            f"TELEM(9889): {telem_cnt}개 수신 ({telem_hz:.1f} Hz, 기대 {TELEM_EXPECT_HZ:.0f})"
+            f"  모터 유효 {n_valid}/8  IMU {'OK' if imu_ok else '미수신'}"
             + "  마지막 tau[N·m]: "
             + " ".join(f"{v:+.2f}" for v in tau)
             + f"  rpy: [{rpy[0]:+.1f} {rpy[1]:+.1f} {rpy[2]:+.1f}]"
         )
+        warn_telem_rate(telem_hz)
         if n_valid < 8:
             print("  ⚠ 모터 상태 미유효 — RobotEmbedded 기동/EtherCAT/모터 전원 확인 (링크는 정상)")
     else:

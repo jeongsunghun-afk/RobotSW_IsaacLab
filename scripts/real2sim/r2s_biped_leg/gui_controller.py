@@ -561,8 +561,13 @@ class RealMonitorThread(QThread):
         latest: dict | None = None
         seq = 0
         mon_seq = 0  # MON 중계 전용 단조 카운터 — TELEM의 seq(=last_act_seq)는 ACT 유휴 시
-        # 매 패킷 동일해서, seq 기반 x축(monitor.py)이 중복으로 버린다. TELEM은 브리지가
-        # 20ms 페이싱하므로 수신 1건당 +1이 곧 시간 격자다.
+        # 매 패킷 동일해서, seq 기반 x축(monitor.py)이 중복으로 버린다. 브리지가 TELEM을
+        # 일정 간격으로 보내므로 중계 1건당 +1이 곧 시간 격자다.
+        # ★2026-08-19: TELEM이 50 → 200 Hz로 올라갔다(real_runner `kTelemDtSec`). **기록은
+        #   풀레이트로 두고 plot 중계만 50 Hz로 솎는다** — 사람이 보는 그래프에 200 Hz가 필요
+        #   없고, monitor.py에 4배 트래픽을 보낼 이유도 없다. 캡처 해상도는 아래 `rec`가 쥔다.
+        mon_relay_dt = 1.0 / 50.0
+        last_mon = 0.0
         last_rx = 0.0
         last_ping = 0.0
         last_emit = 0.0
@@ -588,8 +593,10 @@ class RealMonitorThread(QThread):
                         q_lm = [t["q"][a] for a in _ART_FOR_LEGMAJOR]
                         dq_lm = [t["dq"][a] for a in _ART_FOR_LEGMAJOR]
                         tau_lm = [t["tau"][a] for a in _ART_FOR_LEGMAJOR]
-                        mon_seq += 1
-                        tx.sendto(r2s_udp.pack_monitor(mon_seq, [0.0] * NUM_JOINTS, q_lm, dq_lm, tau_lm), mon_addr)
+                        if now - last_mon >= mon_relay_dt:
+                            last_mon = now
+                            mon_seq += 1
+                            tx.sendto(r2s_udp.pack_monitor(mon_seq, [0.0] * NUM_JOINTS, q_lm, dq_lm, tau_lm), mon_addr)
                         rec = self._rec  # 로컬 참조 — stop_recording()의 None 교체와의 경합 회피
                         if rec is not None:
                             rec.append((now, q_lm, dq_lm, tau_lm))

@@ -8,7 +8,7 @@ UDP seam(9887/9888)으로 연결된다.
 [워크스테이션]                                [라즈베리파이 유선 192.168.60.5 / WiFi 192.168.10.19]
 policy_runner ──POLICY_ACT("R2PA",9887)──▶ real_runner ──SHM──▶ RobotEmbedded ──EtherCAT──▶ MCU ──CAN-FD──▶ MD80×8
               ◀─POLICY_STATE("R2PS",9888)──    │        ◀──SHM── 모터 상태(pos/vel) + IMU(RPY)
-                                        1 kHz 루프 / 회신은 20 ms 페이싱
+                                        1 kHz 루프 / STATE 20 ms 페이싱 · TELEM 5 ms(200 Hz)
 ```
 
 ## 핵심 설계 (RobotTestGait 준수 사항)
@@ -21,10 +21,39 @@ policy_runner ──POLICY_ACT("R2PA",9887)──▶ real_runner ──SHM──
 | 명령 형식 | `MotGeneral_t` (ucMode=1, pos[**deg**], kp/kd, float16) → `SetMotorCommand16` | Data Format PDF: pos=deg, vel=deg/s, tau=Nm |
 | 게인 상한 | kp∈[0,500], kd∈[0,**5**] 클램프 | `defineConfigMotor.h` `DEF_MOT_GAIN_*_MAX` |
 | **STATE 회신 페이싱** | **20 ms 간격** | sim seam은 lockstep(시뮬이 시간 소유)이지만 실기는 실시간 → 즉시 회신하면 policy가 kHz로 자유질주해 gait clock이 실시간의 수십 배로 돈다. 브리지가 50 Hz로 묶는다 |
-| **TELEM 송신** | peer 등록 즉시 50 Hz, peer:**9889** | 관측 전용 q/dq/**tau**/rpy + `valid_mask`(bit0~7=관절, bit8=IMU). **모터 warmup 전에도 송신** → 워크스테이션에서 "링크 죽음 vs 모터데이터 없음" 구분 가능. STATE는 반대로 all_stt 게이트 유지(정책 입력에 가짜 0 금지) |
+| **TELEM 송신** | peer 등록 즉시 **200 Hz**(`kTelemDtSec`=5 ms), peer:**9889** | 관측 전용 q/dq/**tau**/rpy + `valid_mask`(bit0~7=관절, bit8=IMU). **모터 warmup 전에도 송신** → 워크스테이션에서 "링크 죽음 vs 모터데이터 없음" 구분 가능. STATE는 반대로 all_stt 게이트 유지(정책 입력에 가짜 0 금지). ★**STATE와 페이싱 완전 분리** — TELEM을 올려도 50 Hz 정책 클록은 불변 |
 | **PING 수신** | 8 B "R2PG" | 모니터 keepalive. **peer 등록만** 하고 목표/상태머신 불변 → bridge TRACK 중에도 무해 |
 | **RELAX 수신** | 8 B "R2PL" | 무토크(limp) 요청 — bridge 모드에서 RELAX 상태로 전환해 **kp=kd=tau=0을 능동 송신**(명령 중단이 아님). 이후 ACT 수신 시 처진 **현재 자세를 재래치**하고 ENGAGE 램프로 복귀. probe/hold에선 무시. GUI 기동 기본 상태 + "Relax (zero torque)" 버튼이 보낸다 |
 | **GAIN 수신** | 72 B "R2PK", peer:**9887**(ACT와 동일) | kp/kd 런타임 갱신 — articulation 순서로 받아 `POLICY_TO_MOTOR`로 모터 순서 매핑 후 드라이버 상한 kp∈[0,500]/kd∈[0,5]로 클램프해 `kp_cmd`/`kd_cmd`에 반영(다음 틱부터 적용). **목표각·상태머신은 불변** — RELAX 중엔 명령 전송부가 `kp_cmd`/`kd_cmd` 대신 0을 강제 송신해 무토크를 유지하므로 GAIN 갱신 자체는 안전. 값이 실제로 바뀔 때만 로그(1 Hz 갱신 송신 대비 콘솔 스팸 방지) |
+
+### ★TELEM 200 Hz (2026-08-19)
+
+TELEM 페이싱이 **sysid 캡처의 시간 해상도를 정한다** — `gui_controller` 의 `RealMonitorThread`
+가 수신하는 족족 기록하므로, `kTelemDtSec` 이 그대로 npz 의 `t_real` 레이트가 된다.
+
+이전에는 TELEM 이 STATE 와 같은 20 ms 게이트 안에 있어 50 Hz 였고, 실제 캡처는 48.1~48.7 Hz 로
+찍혔다. 그 해상도로는 chirp 을 5 Hz 로 올렸을 때 선형보간 오차가 진폭의 **5.2 %** 에 달해
+(관측 잔차 RMS 전체와 맞먹는 크기) armature 를 식별할 수 없다. 200 Hz 면 **0.31 %** 다.
+근거: `reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md` §23-j.
+
+두 가지를 고쳤다:
+
+1. **TELEM 을 STATE 게이트 밖으로 분리** (`kTelemDtSec` = 5 ms). 루프는 원래 1 kHz 라
+   추가 비용이 없고, **20 ms STATE 페이싱은 그대로**다 — 그건 policy_runner 가 lockstep 이라
+   50 Hz 정책 클록을 소유하는 값이므로 절대 건드리면 안 된다.
+2. **페이싱을 위상 누적(`+= dt`)으로** — `= t` 리셋은 1 kHz 틱에서 매번 평균 반 틱씩 늦게
+   걸린 지연이 누적돼 레이트를 떨어뜨린다. 이게 **구 50 Hz TELEM 이 48.5 Hz 로 찍힌 원인**이다.
+   5 ms 목표에서는 −10 %(실측 180 Hz)까지 벌어졌고, 위상 누적으로 **정확히 200.0 Hz** 가 됐다.
+
+stub 루프백 실측(`comm_check.py --duration 10`): TELEM **2000 개/10 s = 200.0 Hz**,
+STATE 488 개 = 48.8 Hz(간격 mean 20.53 ms) — 즉 정책 클록 불변.
+
+> ⚠ **미해결로 남긴 것**: STATE 도 같은 리셋 방식이라 실측 **48.8 Hz**(20.53 ms)로 돈다.
+> sim 의 `STEP_DT = 0.02`(50 Hz) 대비 **2.4 % 느린 정책 클록**이고, 이건 그 자체로 sim2real
+> 갭이다. 여기선 **고치지 않았다** — 보행 타이밍을 바꾸는 변경이라 별도 판단이 필요하다.
+
+> ⚠ GUI 의 monitor.py **plot 중계는 50 Hz 로 솎는다**(`mon_relay_dt`). 기록(`_rec`)만 풀레이트다 —
+> 그래프에 200 Hz 는 필요 없고 monitor.py 에 4 배 트래픽을 보낼 이유도 없다.
 
 관절 매핑: 정책 UDP는 articulation(type-major) `[HL_hip, HR_hip, HL_thigh, HR_thigh, HL_calf,
 HR_calf, HL_foot, HR_foot]`, 실기 모터는 leg-major `[LtR, LtP, LkP, LaP, RtR, RtP, RkP, RaP]`

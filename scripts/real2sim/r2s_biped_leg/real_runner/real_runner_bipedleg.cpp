@@ -61,6 +61,16 @@ namespace {
 
 constexpr double kLoopDtSec = 0.001;      // 1 ms — RobotTestGait 와 동일
 constexpr double kStepDtSec = 0.020;      // STATE 회신 페이싱 = 학습 STEP_DT(50 Hz)
+// TELEM 페이싱 — **STATE 와 독립**. sysid 캡처 해상도를 정하는 값이라 sim 물리 그리드에 맞춘다
+// (`SYSID_RATE_HZ = GRID_HZ = 200 Hz`) → 컨버터의 리샘플링이 사실상 사라진다.
+// ⚠ 2026-08-19 이전에는 TELEM 이 kStepDtSec 게이트 안에 있어 50 Hz 였고, 캡처의 t_real 이
+//   48.1~48.7 Hz 로 기록됐다. 그 해상도로는 chirp 을 5 Hz 로 올렸을 때 선형보간 오차가
+//   진폭의 5.2 % 에 달해(= 현재 잔차 RMS 전체와 맞먹음) armature 를 식별할 수 없다.
+//   200 Hz 면 0.31 % 로 떨어진다. 근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe
+//   README §23-j.
+// ★이 값을 kStepDtSec 과 엮지 말 것 — STATE 는 policy_runner 가 lockstep 이라 20 ms 가
+//   50 Hz 정책 클록을 소유한다. 빠르게 만들면 gait clock 이 자유질주한다.
+constexpr double kTelemDtSec = 0.005;     // TELEM 송신 페이싱 = 200 Hz (관측 전용, lockstep 무관)
 constexpr double kActTimeoutSec = 0.5;    // TRACK 중 ACT 두절 → 마지막 목표로 hold
 constexpr unsigned kStatusWarmupCnt = 100;  // RobotTestGait 게이트와 동일
 
@@ -230,6 +240,7 @@ int main(int argc, char** argv) {
     double relax_fade_t0 = 0.0;  // 게인 페이드 시작 시각
     double last_act_time = -1.0;
     double last_reply_time = -1.0;
+    double last_telem_time = -1.0;  // TELEM 은 STATE 와 별도 페이싱 (kTelemDtSec)
     double last_print_time = 0.0;
     uint32_t last_act_seq = 0;
     sockaddr_in peer_addr{};
@@ -238,8 +249,8 @@ int main(int argc, char** argv) {
     timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
 
-    std::printf("[real_runner] loop start (1 kHz, reply pacing %.0f ms, TELEM:%d PING 지원)\n",
-                kStepDtSec * 1e3, REAL_TELEM_PORT);
+    std::printf("[real_runner] loop start (1 kHz, STATE pacing %.0f ms = %.0f Hz, TELEM:%d @ %.0f Hz, PING 지원)\n",
+                kStepDtSec * 1e3, 1.0 / kStepDtSec, REAL_TELEM_PORT, 1.0 / kTelemDtSec);
 
     while (true) {
         // ---- 1) 모터 상태 읽기 (RobotTestGait 패턴) ----
@@ -488,11 +499,13 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ---- 6) 회신 (20 ms 페이싱 = policy 50 Hz) ----
+        // ---- 6a) STATE 회신 (20 ms 페이싱 = policy 50 Hz) ----
         // STATE 는 정책 입력이므로 all_stt(모터 8개 유효) 게이트 유지 — 가짜 0 자세로 정책이
-        // 돌면 위험. TELEM 은 관측 전용이라 peer 만 있으면 warmup 전에도 보내고, 대신
-        // valid_mask 로 어느 관절이 유효한지 알린다 → 워크스테이션에서 "링크 vs 모터데이터" 구분.
+        // 돌면 위험. ★이 페이싱이 50 Hz 정책 클록을 소유한다(policy_runner 는 회신 즉시 다음
+        // ACT 를 보내는 lockstep) — 빠르게 만들면 gait clock 이 자유질주한다.
+        // TELEM 은 6b 에서 **독립 페이싱**으로 내보낸다.
         if (have_peer && (t - last_reply_time) >= kStepDtSec) {
+            last_reply_time = t;
             sockaddr_in reply = peer_addr;
             if (all_stt) {
                 PolicyStatePacket st;
@@ -530,8 +543,26 @@ int main(int argc, char** argv) {
                 reply.sin_port = htons(static_cast<uint16_t>(REAL_STATE_PORT));
                 sendto(sock, &st, sizeof(st), 0, reinterpret_cast<sockaddr*>(&reply), sizeof(reply));
             }
+        }
 
-            // TELEM (gui monitor 관측 전용) — warmup 전에도 송신, 무효 관절은 mask 로 표시.
+        // ---- 6b) TELEM (관측 전용, kTelemDtSec = 200 Hz) ----
+        // 이 페이싱이 **sysid 캡처의 시간 해상도**를 정한다 — gui_controller 가 수신하는 족족
+        // 기록하므로(`RealMonitorThread._rec`), 여기 레이트가 그대로 npz 의 `t_real` 이 된다.
+        // warmup 전에도 송신하고 무효 관절은 valid_mask 로 표시 → 워크스테이션에서
+        // "링크 죽음 vs 모터데이터 없음" 구분. STATE(6a)와 포트·페이싱 모두 분리돼 있어
+        // policy lockstep 과 간섭하지 않는다.
+        if (have_peer && (t - last_telem_time) >= kTelemDtSec) {
+            // ★위상 누적(`+= dt`)이지 리셋(`= t`)이 아니다. 1 kHz 루프에서 `>= dt` 를 검사하면
+            // 매번 평균 반 틱(0.5 ms)씩 늦게 걸리는데, `= t` 로 리셋하면 그 지연이 **매 주기
+            // 누적**돼 실측 레이트가 목표보다 낮아진다. 실제로 그게 구 50 Hz TELEM 이 캡처에서
+            // `t_real` 48.1~48.7 Hz 로 찍힌 원인이고(README §23-j), 5 ms 목표에서는 −10 % 로
+            // 더 심해진다(실측 180 Hz). 위상을 누적하면 평균 주기가 정확히 kTelemDtSec 이 된다.
+            // 한 주기 넘게 밀렸으면(스톨) 따라잡기 폭주 대신 위상을 재동기한다.
+            last_telem_time += kTelemDtSec;
+            if (t - last_telem_time > kTelemDtSec) {
+                last_telem_time = t;
+            }
+            sockaddr_in reply = peer_addr;
             PolicyTelemPacket tm;
             std::memset(&tm, 0, sizeof(tm));
             tm.magic = POLICY_TELEM_MAGIC;
@@ -579,7 +610,6 @@ int main(int argc, char** argv) {
             }
             reply.sin_port = htons(static_cast<uint16_t>(REAL_TELEM_PORT));
             sendto(sock, &tm, sizeof(tm), 0, reinterpret_cast<sockaddr*>(&reply), sizeof(reply));
-            last_reply_time = t;
         }
 
         // ---- 7) 주기 로그 (probe 0.5 s / 그 외 2 s) ----
