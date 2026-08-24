@@ -48,9 +48,9 @@ import os
 import time
 import torch
 
+from rsl_rl.modules.actor_critic_parkour import ActorCriticRMALidar, ActorCriticRMAVoxel
 from rsl_rl.runners.on_policy_runner_amp import OnPolicyRunnerAMP
 from rsl_rl.runners.on_policy_runner_parkour import _rename_joint_keys
-from rsl_rl.modules.actor_critic_parkour import ActorCriticRMALidar, ActorCriticRMAVoxel
 
 
 class OnPolicyRunnerParkourAMP(OnPolicyRunnerAMP):
@@ -63,10 +63,15 @@ class OnPolicyRunnerParkourAMP(OnPolicyRunnerAMP):
     def __init__(self, env, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
         super().__init__(env, train_cfg, log_dir, device)
 
-        # AMP weight for flat-env reward gating (additive fusion).
-        # Read from train_cfg["amp"]["amp_weight"]; falls back to env cfg if set there.
+        # AMP reward fusion. Two modes:
+        #   "additive" (default): total = task + amp_weight * flat_mask * disc_reward   (parkour 기본)
+        #   "lerp":                total = lerp * task + (1-lerp) * flat_mask * disc_reward
+        # lerp 모드는 OnPolicyRunnerAMPBase(비-RMA baseline)의 fusion과 동일한 식이라, RMA 러너로도
+        # baseline 과 fusion 을 일치시킬 수 있다(동일 조건 A/B용). 기본값 additive → 기존 parkour 무영향.
         amp_cfg = train_cfg.get("amp", {})
         self.amp_weight: float = float(amp_cfg.get("amp_weight", 0.3))
+        self.amp_fusion: str = str(amp_cfg.get("fusion", "additive"))
+        self.task_reward_lerp: float = float(amp_cfg.get("task_reward_lerp", 0.5))
 
     # ──────────────────────────────────────────────────────────────────────────
     # learn() — full override with additive+masked fusion & spawn callback
@@ -136,9 +141,8 @@ class OnPolicyRunnerParkourAMP(OnPolicyRunnerAMP):
                         if flat_mask.any():
                             amp_obs_buffer.append(corrected_amp_obs[flat_mask].detach())
 
-                        # ── Reward fusion: additive + flat-env mask ──────────
+                        # ── Reward fusion: additive or lerp (both flat-env masked) ──
                         disc_reward = self.alg.discriminator.compute_amp_reward(corrected_amp_obs).detach()
-                        amp_contribution = self.amp_weight * flat_mask.float() * disc_reward
 
                         # Logging: raw disc_reward over all envs (unmasked) so the
                         # diagnostic visibility of non-flat disc behaviour is preserved.
@@ -147,7 +151,13 @@ class OnPolicyRunnerParkourAMP(OnPolicyRunnerAMP):
                         # disc_reward below with (disc_reward * flat_mask.float()).
                         self.amp_reward_sums += disc_reward
 
-                        total_reward = rewards + amp_contribution
+                        if self.amp_fusion == "lerp":
+                            # baseline(OnPolicyRunnerAMPBase)과 동일: lerp*task + (1-lerp)*amp.
+                            # flat_mask 는 leg(전 env 평지)에서 all-True 라 baseline 식과 정확히 일치.
+                            lerp = self.task_reward_lerp
+                            total_reward = lerp * rewards + (1.0 - lerp) * flat_mask.float() * disc_reward
+                        else:
+                            total_reward = rewards + self.amp_weight * flat_mask.float() * disc_reward
                     else:
                         total_reward = rewards
 

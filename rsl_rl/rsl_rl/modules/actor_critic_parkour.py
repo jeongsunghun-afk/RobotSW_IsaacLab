@@ -208,15 +208,25 @@ class ActorCriticRMA(nn.Module):
                 torch.nn.init.constant_(
                     self.actor[-2].bias[num_actions:], torch.log(torch.tensor(init_noise_std + 1e-7))
                 )
+            elif self.noise_std_type == "fixed":
+                raise ValueError("noise_std_type='fixed' 는 state_dependent_std 와 함께 쓸 수 없다.")
             else:
                 raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
         else:
             if self.noise_std_type == "scalar":
                 self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+            elif self.noise_std_type == "fixed":
+                # 학습하지 않는 std. `nn.Parameter` 가 아니라 buffer 라서 optimizer 가 건드리지 않고,
+                # state_dict 에는 남아 resume 시 값이 그대로 복원된다.
+                # MimicKit 의 `actor_std_type: "FIXED"` + `action_std: 0.1` 에 대응한다 — 학습 std 는
+                # 스스로 탐색량을 줄여 trot 국소해에 갇히는 것으로 관측됐다(비교 보고서 §14).
+                self.register_buffer("std", init_noise_std * torch.ones(num_actions))
             elif self.noise_std_type == "log":
                 self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
             else:
-                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+                raise ValueError(
+                    f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar', 'fixed' or 'log'"
+                )
 
         # Action distribution
         # Note: Populated in update_distribution
@@ -259,7 +269,7 @@ class ActorCriticRMA(nn.Module):
             # Compute mean
             mean = self.actor(obs)
             # Compute standard deviation
-            if self.noise_std_type == "scalar":
+            if self.noise_std_type in ("scalar", "fixed"):
                 std = self.std.expand_as(mean)
             elif self.noise_std_type == "log":
                 # nan_to_num guards against NaN log_std caused by NaN gradients in early training
@@ -398,7 +408,7 @@ class ActorCriticRMA(nn.Module):
                 raise ValueError(f"Unknown std type: {self.noise_std_type}")
         else:
             mean = self.actor(actor_input)
-            if self.noise_std_type == "scalar":
+            if self.noise_std_type in ("scalar", "fixed"):
                 std = self.std.expand_as(mean)
             elif self.noise_std_type == "log":
                 std = torch.exp(self.log_std).clamp(min=1e-6).expand_as(mean)
@@ -560,9 +570,7 @@ class ActorCriticRMAVoxel(ActorCriticRMA):
         # then take the no-terrain path, which is why act/act_inference/get_actor_input are overridden below.
         self.scandot_encoder = None
 
-        print(
-            f"ActorCriticRMAVoxel: voxel grid {voxel_grid_shape} (flat {num_voxel_obs}) -> latent {voxel_latent_dim}"
-        )
+        print(f"ActorCriticRMAVoxel: voxel grid {voxel_grid_shape} (flat {num_voxel_obs}) -> latent {voxel_latent_dim}")
         print(f"Voxel Encoder: {self.voxel_encoder}")
 
     def get_voxel_obs(self, obs: TensorDict) -> torch.Tensor:
@@ -705,7 +713,11 @@ class ActorCriticRMALidar(ActorCriticRMA):
         scan_encoder_dims   list  default [128, 64, 32]   (last entry = lidar latent dim)
         lidar_image_shape   tuple default (24, 96)         (H, W)
         lidar_num_channels  int   default 2                (C: ch0=range_norm, ch1=hit_mask)
-        lidar_frame_stack   int   default 3                (K: temporal frames stacked)
+        lidar_frame_stack   int   default None             (K: inferred from the obs width)
+
+    ``lidar_frame_stack`` defaults to ``None``, meaning K is inferred from
+    ``obs["lidar"]``'s width.  The env cfg's ``lidar_frame_stack`` is therefore the single
+    source of truth and no runner-side plumbing is needed to change K.
     """
 
     is_recurrent: bool = False
@@ -718,7 +730,7 @@ class ActorCriticRMALidar(ActorCriticRMA):
         scan_encoder_dims: tuple[int] | list[int] = [128, 64, 32],
         lidar_image_shape: tuple[int, int] = (24, 96),
         lidar_num_channels: int = 2,
-        lidar_frame_stack: int = 3,
+        lidar_frame_stack: int | None = None,
         **kwargs: Any,
     ) -> None:
         # Parent builds the scandot MLP + actor sized with scan_latent_dim = scan_encoder_dims[-1].
@@ -734,13 +746,30 @@ class ActorCriticRMALidar(ActorCriticRMA):
         )
 
         H, W = lidar_image_shape
-        in_channels = lidar_num_channels * lidar_frame_stack  # K*C
         num_lidar_obs = sum(obs[g].shape[-1] for g in obs_groups["lidar"])
-        assert num_lidar_obs == in_channels * H * W, (
-            f"lidar obs dim {num_lidar_obs} != in_channels*H*W "
-            f"{in_channels}*{H}*{W}={in_channels * H * W} "
-            f"(lidar_num_channels={lidar_num_channels}, lidar_frame_stack={lidar_frame_stack})."
+
+        # K is inferred from the observation width by default.  The env cfg's
+        # ``lidar_frame_stack`` and this policy kwarg are independent settings, so a
+        # hard-coded default here silently disagrees with the env whenever K changes —
+        # the disagreement used to surface only as the assert below.  Inferring removes
+        # the coupling entirely: changing the env cfg is sufficient.  Pass an explicit
+        # int only to assert an expected K.
+        frames_per_obs, remainder = divmod(num_lidar_obs, lidar_num_channels * H * W)
+        assert remainder == 0 and frames_per_obs > 0, (
+            f"lidar obs dim {num_lidar_obs} is not a positive multiple of "
+            f"lidar_num_channels*H*W = {lidar_num_channels}*{H}*{W}={lidar_num_channels * H * W}. "
+            "Check lidar_image_h / lidar_image_w / lidar_num_channels against the env cfg."
         )
+        if lidar_frame_stack is None:
+            lidar_frame_stack = frames_per_obs
+        else:
+            assert lidar_frame_stack == frames_per_obs, (
+                f"lidar_frame_stack={lidar_frame_stack} was requested but the observation width "
+                f"{num_lidar_obs} implies K={frames_per_obs} "
+                f"(lidar_num_channels={lidar_num_channels}, H={H}, W={W}). "
+                "The env cfg's lidar_frame_stack is the source of truth."
+            )
+        in_channels = lidar_num_channels * lidar_frame_stack  # K*C
 
         lidar_latent_dim = scan_encoder_dims[-1]
         activation: str = kwargs.get("activation", "elu")

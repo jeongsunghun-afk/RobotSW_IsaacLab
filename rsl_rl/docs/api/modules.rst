@@ -39,4 +39,3 @@ Distribution
 .. automodule:: rsl_rl.modules.distribution
    :members:
    :undoc-members:
-

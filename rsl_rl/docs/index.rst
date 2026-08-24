@@ -5,7 +5,7 @@ RSL-RL Documentation
    :maxdepth: 1
    :hidden:
    :caption: Guide
-   
+
    guide/overview
    guide/installation
    guide/configuration
@@ -15,7 +15,7 @@ RSL-RL Documentation
    :maxdepth: 1
    :hidden:
    :caption: API Reference
-   
+
    api/algorithms
    api/env
    api/extensions
@@ -33,9 +33,9 @@ RSL-RL Documentation
    GitHub Repository <https://github.com/leggedrobotics/rsl_rl>
    PyPI Package <https://pypi.org/project/rsl-rl-lib/>
 
-**RSL-RL** is a GPU-accelerated, lightweight learning library for robotics research. It's compact design allows 
-researchers to prototype and test new ideas without the overhead of modifying large, complex libraries. RSL-RL can also 
-be used out-of-the-box by installing it via `PyPI <https://pypi.org/project/rsl-rl-lib/>`_, supports multi-GPU training 
+**RSL-RL** is a GPU-accelerated, lightweight learning library for robotics research. It's compact design allows
+researchers to prototype and test new ideas without the overhead of modifying large, complex libraries. RSL-RL can also
+be used out-of-the-box by installing it via `PyPI <https://pypi.org/project/rsl-rl-lib/>`_, supports multi-GPU training
 and features common algorithms for robot learning.
 
 Key Features
@@ -69,4 +69,3 @@ If you use RSL-RL in your research, please cite the `paper <https://arxiv.org/ab
      journal={arXiv preprint arXiv:2509.10771},
      year={2025}
    }
-

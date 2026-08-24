@@ -234,3 +234,20 @@ video/showcase 둘 다 적용된다고 하므로 `_showcase_eye()` 를 추가해
 **완료** (2026-08-03 15:53 ~ 2026-08-04, GPU 3, 20000 iteration, `model_19999.pt`).
 6종 평가 완료, 영상 4종 렌더 완료. 대조군은
 [`_comparisons/hipscale_2x2/`](../_comparisons/hipscale_2x2/).
+
+### videos
+
+<!-- report-video:videos -->
+| 파일 | 체크포인트 | 태그 | 렌더 시각 |
+|---|---|---|---|
+| [`model_19999__pediS1nodr__20260819-113019.mp4`](videos/model_19999__pediS1nodr__20260819-113019.mp4) | `model_19999.pt` | `pediS1nodr` | 2026-08-19 11:31:15 |
+| [`model_19999__pediS2nodr__20260819-113115.mp4`](videos/model_19999__pediS2nodr__20260819-113115.mp4) | `model_19999.pt` | `pediS2nodr` | 2026-08-19 11:32:12 |
+| [`model_19999__pediS1pushdr__20260819-113212.mp4`](videos/model_19999__pediS1pushdr__20260819-113212.mp4) | `model_19999.pt` | `pediS1pushdr` | 2026-08-19 11:33:09 |
+| [`model_19999__peditest__20260819-114023.mp4`](videos/model_19999__peditest__20260819-114023.mp4) | `model_19999.pt` | `peditest` | 2026-08-19 11:40:53 |
+| [`model_19999__peditest2__20260819-114608.mp4`](videos/model_19999__peditest2__20260819-114608.mp4) | `model_19999.pt` | `peditest2` | 2026-08-19 11:46:39 |
+| [`model_19999__circlefast__20260819-115509.mp4`](videos/model_19999__circlefast__20260819-115509.mp4) | `model_19999.pt` | `circlefast` | 2026-08-19 11:55:55 |
+| [`model_19999__camtestS1__20260822-182331.mp4`](videos/model_19999__camtestS1__20260822-182331.mp4) | `model_19999.pt` | `camtestS1` | 2026-08-22 18:23:53 |
+| [`model_19999__pediS1C__20260822-182702.mp4`](videos/model_19999__pediS1C__20260822-182702.mp4) | `model_19999.pt` | `pediS1C` | 2026-08-22 18:27:45 |
+| [`model_19999__pediS2C__20260822-182745.mp4`](videos/model_19999__pediS2C__20260822-182745.mp4) | `model_19999.pt` | `pediS2C` | 2026-08-22 18:28:27 |
+| [`model_19999__pediPdC__20260822-182828.mp4`](videos/model_19999__pediPdC__20260822-182828.mp4) | `model_19999.pt` | `pediPdC` | 2026-08-22 18:29:10 |
+<!-- /report-video:videos -->

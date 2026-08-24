@@ -57,4 +57,7 @@
 | [`model_16000__implicit_stock_16k__20260810-170343.mp4`](videos/model_16000__implicit_stock_16k__20260810-170343.mp4) | `model_16000.pt` | `implicit_stock_16k` | 2026-08-10 17:04:37 |
 | [`model_48000__implicit_stock_48k_best__20260811-090503.mp4`](videos/model_48000__implicit_stock_48k_best__20260811-090503.mp4) | `model_48000.pt` | `implicit_stock_48k_best` | 2026-08-11 09:05:58 |
 | [`model_59999__implicit_stock_ramp_0to4ms__20260814.mp4`](videos/model_59999__implicit_stock_ramp_0to4ms__20260814.mp4) | `model_59999.pt` | `ramp_0to4ms` (체이스캠, 0→4 m/s) | 2026-08-14 |
+| [`model_48000__followcmd40__20260819-104650.mp4`](videos/model_48000__followcmd40__20260819-104650.mp4) | `model_48000.pt` | `followcmd40` | 2026-08-19 10:47:46 |
+| [`model_48000__ndcmd40__20260819-112045.mp4`](videos/model_48000__ndcmd40__20260819-112045.mp4) | `model_48000.pt` | `ndcmd40` | 2026-08-19 11:21:40 |
+| [`model_48000__c2cmd40__20260824-085818.mp4`](videos/model_48000__c2cmd40__20260824-085818.mp4) | `model_48000.pt` | `c2cmd40` | 2026-08-24 08:59:00 |
 <!-- /report-video:videos -->

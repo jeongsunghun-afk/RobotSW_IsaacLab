@@ -2,8 +2,8 @@ Overview
 ========
 
 This guide provides an overview of the features and structure of RSL-RL. After introducing the currently available
-:ref:`features <library-features>`, we explain the :ref:`core components <core-components>` and 
-:ref:`additional components <additional-components>` of the library. Finally, we provide a 
+:ref:`features <library-features>`, we explain the :ref:`core components <core-components>` and
+:ref:`additional components <additional-components>` of the library. Finally, we provide a
 :ref:`minimal example <example-integration>` of how to integrate RSL-RL into a project.
 
 .. _library-features:
@@ -25,7 +25,7 @@ Algorithms
 
 :class:`~rsl_rl.algorithms.distillation.Distillation`
    Distillation is a student-teacher behavior cloning algorithm. During data collection, the student acts while the
-   teacher provides supervision targets. The student is then optimized with a configurable behavior loss, making this 
+   teacher provides supervision targets. The student is then optimized with a configurable behavior loss, making this
    algorithm useful for transferring policies from training-time privileged observation sets to observations available
    during real-world deployment.
 
@@ -38,13 +38,13 @@ Models
    action distribution.
 
 :class:`~rsl_rl.models.rnn_model.RNNModel`
-   A recurrent extension of the :class:`~rsl_rl.models.mlp_model.MLPModel` for partially observable settings. The 
+   A recurrent extension of the :class:`~rsl_rl.models.mlp_model.MLPModel` for partially observable settings. The
    recurrent network can be either a Long Short-Term Memory (LSTM) or a Gated Recurrent Unit (GRU). Its output is passed
    through the MLP to produce the final output.
 
 :class:`~rsl_rl.models.cnn_model.CNNModel`
-   A model for mixed 1D + 2D observations. It combines an MLP pathway for 1D observations with one or more CNN encoders 
-   for 2D observations. Each 2D observation group is encoded with a separate CNN encoder that can be configured 
+   A model for mixed 1D + 2D observations. It combines an MLP pathway for 1D observations with one or more CNN encoders
+   for 2D observations. Each 2D observation group is encoded with a separate CNN encoder that can be configured
    independently. When used in conjunction with :class:`~rsl_rl.algorithms.ppo.PPO`, the encoders may be shared between
    actor and critic to save memory.
 
@@ -53,11 +53,11 @@ Distributions
 
 :class:`~rsl_rl.modules.distribution.GaussianDistribution`
    A diagonal Gaussian distribution with state-independent standard deviation parameters. The mean is produced by the
-   model's MLP network output, while the standard deviation is learned globally and can use either a scalar or a 
+   model's MLP network output, while the standard deviation is learned globally and can use either a scalar or a
    log-scale.
 
 :class:`~rsl_rl.modules.distribution.HeteroscedasticGaussianDistribution`
-   A diagonal Gaussian distribution with state-dependent standard deviation. The model's MLP network predicts both mean 
+   A diagonal Gaussian distribution with state-dependent standard deviation. The model's MLP network predicts both mean
    and standard-deviation terms per sample, allowing uncertainty to vary with the observation. As with the standard
    Gaussian variant, both scalar and log-scale parameterizations are supported.
 
@@ -72,7 +72,7 @@ Extensions
    algorithm. For more details, please check `this paper <https://proceedings.mlr.press/v229/schwarke23a.html>`_.
 
 Symmetry
-   Symmetry augments the collected environment interaction data with mirrored data using a user-provided symmetry 
+   Symmetry augments the collected environment interaction data with mirrored data using a user-provided symmetry
    function that defines how observations and actions are transformed. This can improve sample efficiency and promote
    symmetric behaviors for robots with structured morphology. Additionally, a mirror-loss regularization term can be
    added to the loss function to actively encourage symmetry in the policy. This extension is compatible with the
@@ -100,7 +100,7 @@ Core Components
 ---------------
 
 RSL-RL consists of four core components: :doc:`Runners <../api/runners>`, :doc:`Algorithms <../api/algorithms>`,
-:doc:`Models <../api/models>`, and :doc:`Modules <../api/modules>`, implementing the learning loop, algorithmic logic, 
+:doc:`Models <../api/models>`, and :doc:`Modules <../api/modules>`, implementing the learning loop, algorithmic logic,
 and neural network architectures. In conjunction with the library's additional components:
 :doc:`Environment <../api/env>`, :doc:`Storage <../api/storage>`, :doc:`Extensions <../api/extensions>`, and
 :doc:`Utils <../api/utils>`, described in the next section, they form a complete learning pipeline.
@@ -170,7 +170,7 @@ managed by the **Model**.
 Additional Components
 ---------------------
 
-Additional Components support the core components by either defining interfaces, adding optional functionality, or 
+Additional Components support the core components by either defining interfaces, adding optional functionality, or
 providing utilities, such as data storage or logging.
 
 Environment
@@ -187,7 +187,7 @@ for example in mini-batches.
 
 Extensions
 ^^^^^^^^^^
-An **Extension** implements an augmentation to a specific **Algorithm** to modify its behavior. Currently, RSL-RL does 
+An **Extension** implements an augmentation to a specific **Algorithm** to modify its behavior. Currently, RSL-RL does
 not constrain the way an **Extension** may be implemented, allowing for arbitrary modifications to the learning process.
 
 Utils

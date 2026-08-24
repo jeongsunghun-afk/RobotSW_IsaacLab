@@ -159,7 +159,19 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
 
                         # Reward fusion
                         task_reward_lerp = self.alg.amp_task_reward_lerp
-                        total_reward = task_reward_lerp * rewards + (1.0 - task_reward_lerp) * amp_reward
+                        # env 가 style 을 구간별로 끄고 다른 보상으로 대체할 수 있다(선택).
+                        # `style_weight` 가 없으면 1.0 / `style_substitute` 가 없으면 0 이므로
+                        # 기존 AMP task(parkour/leg 등)의 거동은 **완전히 동일**하다.
+                        #   style_term = w*amp + (1-w)*substitute  (같은 (1-lerp) 예산 안에서 교체)
+                        style_term = amp_reward
+                        if "style_weight" in extras:
+                            style_w = extras["style_weight"].to(self.device)
+                            substitute = extras.get("style_substitute")
+                            substitute = (
+                                torch.zeros_like(amp_reward) if substitute is None else substitute.to(self.device)
+                            )
+                            style_term = style_w * amp_reward + (1.0 - style_w) * substitute
+                        total_reward = task_reward_lerp * rewards + (1.0 - task_reward_lerp) * style_term
                     else:
                         total_reward = rewards
 
@@ -259,7 +271,9 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             "infos": infos,
         }
         # estimator가 빌드된 경우(parkour-imitation 경로) 가중치와 optimizer 저장
-        if hasattr(self.alg, "estimator") and self.alg.estimator is not None:  # 6.0-migration: PPOAMPBase has no estimator attr
+        if (
+            hasattr(self.alg, "estimator") and self.alg.estimator is not None
+        ):  # 6.0-migration: PPOAMPBase has no estimator attr
             saved_dict["estimator_state_dict"] = self.alg.estimator.state_dict()
             saved_dict["estimator_optimizer_state_dict"] = self.alg.estimator_optimizer.state_dict()
         torch.save(saved_dict, path)
@@ -275,12 +289,18 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
         if non_normalizer_missing:
             print(f"[WARNING] discriminator load: unexpected missing keys: {non_normalizer_missing}")
         # estimator가 빌드된 경우 저장된 가중치 복원 (키 없으면 무시 — 기존 체크포인트 호환)
-        if hasattr(self.alg, "estimator") and self.alg.estimator is not None and "estimator_state_dict" in loaded_dict:  # 6.0-migration: PPOAMPBase has no estimator attr
+        if (
+            hasattr(self.alg, "estimator") and self.alg.estimator is not None and "estimator_state_dict" in loaded_dict
+        ):  # 6.0-migration: PPOAMPBase has no estimator attr
             self.alg.estimator.load_state_dict(loaded_dict["estimator_state_dict"])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
             self.alg.disc_optimizer.load_state_dict(loaded_dict["disc_optimizer_state_dict"])
-            if hasattr(self.alg, "estimator_optimizer") and self.alg.estimator_optimizer is not None and "estimator_optimizer_state_dict" in loaded_dict:  # 6.0-migration: PPOAMPBase has no estimator attr
+            if (
+                hasattr(self.alg, "estimator_optimizer")
+                and self.alg.estimator_optimizer is not None
+                and "estimator_optimizer_state_dict" in loaded_dict
+            ):  # 6.0-migration: PPOAMPBase has no estimator attr
                 self.alg.estimator_optimizer.load_state_dict(loaded_dict["estimator_optimizer_state_dict"])
         self.current_learning_iteration = loaded_dict.get("iter", 0)
         return loaded_dict.get("infos", {})
@@ -385,7 +405,19 @@ class OnPolicyRunnerAMPBase(OnPolicyRunnerAMP):
                         self.amp_reward_sums += amp_reward
 
                         task_reward_lerp = self.alg.amp_task_reward_lerp
-                        total_reward = task_reward_lerp * rewards + (1.0 - task_reward_lerp) * amp_reward
+                        # env 가 style 을 구간별로 끄고 다른 보상으로 대체할 수 있다(선택).
+                        # `style_weight` 가 없으면 1.0 / `style_substitute` 가 없으면 0 이므로
+                        # 기존 AMP task(parkour/leg 등)의 거동은 **완전히 동일**하다.
+                        #   style_term = w*amp + (1-w)*substitute  (같은 (1-lerp) 예산 안에서 교체)
+                        style_term = amp_reward
+                        if "style_weight" in extras:
+                            style_w = extras["style_weight"].to(self.device)
+                            substitute = extras.get("style_substitute")
+                            substitute = (
+                                torch.zeros_like(amp_reward) if substitute is None else substitute.to(self.device)
+                            )
+                            style_term = style_w * amp_reward + (1.0 - style_w) * substitute
+                        total_reward = task_reward_lerp * rewards + (1.0 - task_reward_lerp) * style_term
                     else:
                         total_reward = rewards
 

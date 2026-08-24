@@ -1,13 +1,13 @@
 Contribution
 ============
 
-We welcome contributions from the community. For new features, we recommend first opening an issue to discuss the 
+We welcome contributions from the community. For new features, we recommend first opening an issue to discuss the
 proposed contribution before opening a pull request.
 
 Code Style
 ----------
 - Follow the `PEP 8 <https://peps.python.org/pep-0008/>`_ style guide for code.
-- Follow the `Google Style Guide <https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html>`_ for 
+- Follow the `Google Style Guide <https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html>`_ for
   docstrings.
 - Use the `ruff <https://github.com/astral-sh/ruff>`_ linter and formatter to maintain code quality.
 

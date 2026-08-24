@@ -44,6 +44,8 @@ class PPOParkour:
         use_clipped_value_loss: bool = True,
         schedule: str = "adaptive",
         desired_kl: float = 0.01,
+        learning_rate_min: float = 1.0e-5,
+        learning_rate_max: float = 1.0e-2,
         normalize_advantage_per_mini_batch: bool = False,
         device: str = "cpu",
         # RND parameters
@@ -93,10 +95,17 @@ class PPOParkour:
             self.estimator = estimator.to(self.device)
             self.estimator_optimizer = optim.Adam(self.estimator.parameters(), lr=estimator_cfg["learning_rate"])
             self.train_with_estimated_states = estimator_cfg["train_with_estimated_states"]
+            # Optional per-block diagnostic split of the estimator MSE, e.g.
+            # ``{"lin": [0, 3], "ang": [3, 6]}``. The estimator target is a single
+            # concatenated vector, so one scalar loss cannot tell whether a block is
+            # actually being fitted or is just numerically negligible next to another.
+            # Purely diagnostic — the optimized loss is unchanged.
+            self.estimator_loss_blocks = estimator_cfg.get("loss_blocks", None)
         else:
             self.estimator = None
             self.estimator_optimizer = None
             self.train_with_estimated_states = False
+            self.estimator_loss_blocks = None
 
         # Symmetry components
         if symmetry_cfg is not None:
@@ -150,6 +159,10 @@ class PPOParkour:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        # adaptive schedule 의 LR 하한/상한. 하한이 binding 이면 KL 초과를 감지해도 LR 을 더 낮출
+        # 수 없어 정책이 계속 크게 움직인다. 기본값은 기존 하드코딩과 동일하게 유지한다.
+        self.learning_rate_min = learning_rate_min
+        self.learning_rate_max = learning_rate_max
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
         # SPO parameters
@@ -242,10 +255,19 @@ class PPOParkour:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_entropy = 0
+        # adaptive schedule 이 관측한 KL. LR 이 하한에 정박했을 때 그 하한이 실제로 binding 인지
+        # (KL 이 desired_kl 를 근소하게 넘는지, 자릿수로 넘는지) 판별하려면 이 값이 필요하다.
+        mean_kl = 0.0 if (self.desired_kl is not None and self.schedule == "adaptive") else None
         # RND loss
         mean_rnd_loss = 0 if self.rnd else None
         # Estimator loss
         mean_estimator_loss = 0 if self.estimator else None
+        # getattr: 구 체크포인트에서 되살아난 인스턴스나 __init__을 체인하지 않는 서브클래스도
+        # 이 진단 필드 없이 동작해야 한다.
+        estimator_loss_blocks = getattr(self, "estimator_loss_blocks", None)
+        mean_estimator_block_losses = (
+            {name: 0.0 for name in estimator_loss_blocks} if (self.estimator and estimator_loss_blocks) else None
+        )
         # Symmetry loss
         mean_symmetry_loss = 0 if self.symmetry else None
         # LCP gradient penalty loss
@@ -332,6 +354,8 @@ class PPOParkour:
                         axis=-1,
                     )
                     kl_mean = torch.mean(kl)
+                    if mean_kl is not None:
+                        mean_kl += kl_mean.item()
 
                     # Reduce the KL divergence across all GPUs
                     if self.is_multi_gpu:
@@ -343,9 +367,9 @@ class PPOParkour:
                     #       then the learning rate should be the same across all GPUs.
                     if self.gpu_global_rank == 0:
                         if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                            self.learning_rate = max(self.learning_rate_min, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                            self.learning_rate = min(self.learning_rate_max, self.learning_rate * 1.5)
 
                     # Update the learning rate for all GPUs
                     if self.is_multi_gpu:
@@ -504,7 +528,11 @@ class PPOParkour:
             if self.estimator is not None:
                 obs_orig = obs_batch[:original_batch_size]
                 priv_explicit_pred = self.estimator(obs_orig["policy"])
-                estimator_loss = (priv_explicit_pred - obs_orig["priv_explicit"]).pow(2).mean()
+                estimator_sq_err = (priv_explicit_pred - obs_orig["priv_explicit"]).pow(2)
+                estimator_loss = estimator_sq_err.mean()
+                if mean_estimator_block_losses is not None:
+                    for name, (lo, hi) in estimator_loss_blocks.items():
+                        mean_estimator_block_losses[name] += estimator_sq_err[:, lo:hi].mean().item()
                 self.estimator_optimizer.zero_grad()
                 estimator_loss.backward()
                 nn.utils.clip_grad_norm_(self.estimator.parameters(), self.max_grad_norm)
@@ -533,10 +561,15 @@ class PPOParkour:
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_entropy /= num_updates
+        if mean_kl is not None:
+            mean_kl /= num_updates
         if mean_rnd_loss is not None:
             mean_rnd_loss /= num_updates
         if mean_estimator_loss is not None:
             mean_estimator_loss /= num_updates
+        if mean_estimator_block_losses is not None:
+            for name in mean_estimator_block_losses:
+                mean_estimator_block_losses[name] /= num_updates
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
         if mean_lcp_loss is not None:
@@ -554,10 +587,15 @@ class PPOParkour:
             "entropy": mean_entropy,
             "priv_reg_loss": mean_priv_reg_loss,
         }
+        if mean_kl is not None:
+            loss_dict["kl"] = mean_kl
         if self.rnd:
             loss_dict["rnd"] = mean_rnd_loss
         if self.estimator:
             loss_dict["estimator"] = mean_estimator_loss
+            if mean_estimator_block_losses is not None:
+                for name, value in mean_estimator_block_losses.items():
+                    loss_dict[f"estimator_{name}"] = value
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
         if self.lcp_lambda_gp is not None:

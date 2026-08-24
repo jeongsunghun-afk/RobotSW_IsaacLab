@@ -15,4 +15,3 @@ Symmetry
 .. automodule:: rsl_rl.extensions.symmetry
    :members:
    :undoc-members:
-

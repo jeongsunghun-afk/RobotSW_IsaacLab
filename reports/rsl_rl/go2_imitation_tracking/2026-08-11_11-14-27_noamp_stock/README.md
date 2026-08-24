@@ -130,4 +130,7 @@ off 는 순수 task 라 정의가 다른 값이다.
 | 파일 | 체크포인트 | 태그 | 렌더 시각 |
 |---|---|---|---|
 | [`model_24000__noamp_stock_24k_collapse__20260813-110939.mp4`](videos/model_24000__noamp_stock_24k_collapse__20260813-110939.mp4) | `model_24000.pt` | `noamp_stock_24k_collapse` | 2026-08-13 11:16:14 |
+| [`model_29600__followstyle0__20260819-104747.mp4`](videos/model_29600__followstyle0__20260819-104747.mp4) | `model_29600.pt` | `followstyle0` | 2026-08-19 10:48:43 |
+| [`model_29600__ndstyle0__20260819-112140.mp4`](videos/model_29600__ndstyle0__20260819-112140.mp4) | `model_29600.pt` | `ndstyle0` | 2026-08-19 11:22:36 |
+| [`model_29600__c2style0__20260824-085900.mp4`](videos/model_29600__c2style0__20260824-085900.mp4) | `model_29600.pt` | `c2style0` | 2026-08-24 08:59:42 |
 <!-- /report-video:videos -->

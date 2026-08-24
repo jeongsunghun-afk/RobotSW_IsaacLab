@@ -15,4 +15,3 @@ Distillation
 .. automodule:: rsl_rl.algorithms.distillation
    :members:
    :undoc-members:
-
