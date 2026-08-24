@@ -62,6 +62,15 @@ parser.add_argument(
     help="--fit_joints에서 고정할 파라미터의 출처 — 이전 적합의 mean_*.pt (이미 물리 단위, 33개).",
 )
 parser.add_argument(
+    "--freeze_armature",
+    default=None,
+    help="armature 8개를 고정하고 나머지 25개(viscous/coulomb/bias/delay)만 탐색한다. 값은 "
+    "'derived'(rga.py 파생 I_r·N²) 또는 mean_*.pt 경로. --fit_joints와 반대 방향의 절단으로, "
+    "관절이 아니라 **블록**을 접는다. "
+    "'파생 armature로도 마찰·지연이 벌충해 같은 score에 도달하는가'를 재는 용도 — 도달하면 "
+    "armature 초과분은 식별 아티팩트이고, 못 하면 진짜 관성이다 (README §25).",
+)
+parser.add_argument(
     "--foot_transpose",
     choices=["on", "off"],
     default=None,
@@ -153,6 +162,35 @@ def gain_summary(kp: torch.Tensor, kd: torch.Tensor) -> str:
     return f"kp=[{kp_s}] kd=[{kd_s}]"
 
 
+def freeze_armature_bounds(bounds: torch.Tensor, num_joints: int, source: str) -> None:
+    """armature 블록의 bounds 폭을 0 으로 접어 상수로 만든다 (``--freeze_armature``).
+
+    ``--fit_joints`` 와 같은 수법이지만 접는 방향이 다르다 — 관절이 아니라 **블록**이다.
+    나머지 25개(viscous/coulomb/bias/delay)는 자유롭게 탐색하므로, 파생 armature 의 부족분을
+    마찰·지연이 벌충할 수 있는지가 그대로 score 에 드러난다 (README §25-g).
+
+    Args:
+        bounds: 탐색 범위 [하한, 상한], shape (4*num_joints + 1, 2). 제자리에서 수정된다.
+        num_joints: 관절 수.
+        source: ``"derived"`` 이면 rga.py 파생 반사관성, 아니면 mean_*.pt 경로.
+    """
+    if source == "derived":
+        # rga.py 의 파생 반사관성 대각 — I_r(=7.4e-4)·N², calf 는 I_r(N_c²+N_f²).
+        # ⚠ r2s_biped_leg_sysid_cfg.py 의 armature 초기치와 같은 값이어야 한다.
+        src = torch.tensor([0.0363, 0.0363, 0.1338, 0.0522] * 2, dtype=torch.float32)
+    else:
+        src = torch.load(source, map_location="cpu").to(torch.float32).reshape(-1)[:num_joints]
+    if src.numel() != num_joints:
+        raise RuntimeError(f"--freeze_armature 값 개수 불일치: {src.numel()} != {num_joints}")
+    bounds[0:num_joints, 0] = src
+    bounds[0:num_joints, 1] = src
+    print(
+        f"[INFO]: armature 고정 ({source}) — {[round(float(x), 4) for x in src]}, "
+        f"나머지 {bounds.shape[0] - num_joints}개만 탐색",
+        flush=True,
+    )
+
+
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -221,6 +259,9 @@ def main():
             f"[INFO]: 부분 적합 — 탐색 {len(free)}개(관절 {sorted(lm_sel)} × 4블록 + delay), "
             f"나머지 {sim2real.bounds_params.shape[0] - len(free)}개는 {args_cli.freeze_from} 값으로 고정"
         )
+
+    if args_cli.freeze_armature is not None:
+        freeze_armature_bounds(sim2real.bounds_params, len(joint_order), args_cli.freeze_armature)
 
     # warp 커널은 관절 인덱스를 int32로 요구한다. 텐서 인덱싱에는 long 버전을 쓴다.
     joint_ids = torch.tensor(
