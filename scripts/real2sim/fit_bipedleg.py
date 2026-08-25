@@ -62,6 +62,22 @@ parser.add_argument(
     help="--fit_joints에서 고정할 파라미터의 출처 — 이전 적합의 mean_*.pt (이미 물리 단위, 33개).",
 )
 parser.add_argument(
+    "--freeze_bias",
+    default=None,
+    help="encoder bias 8개를 고정하고 나머지 25개만 탐색한다. 값은 'zero'(전부 0) 또는 mean_*.pt 경로. "
+    "bias 가 잉여인지 재는 용도 — hold-out 이 거의 안 나빠지면 33→25 차원으로 줄일 수 있고, "
+    "그만큼 나머지 파라미터의 조건수가 좋아진다 (README §29-e).",
+)
+parser.add_argument(
+    "--bias_bound",
+    type=float,
+    default=None,
+    help="encoder bias 탐색 범위를 ±이 값으로 덮어쓴다 [rad] (기본 0.1). "
+    "현재 4개(HL/HR hip·foot)가 ±0.1 레일에 붙어 있어, 넓히면 어디서 멈추는지 보인다. "
+    "hip 이 6~8°(0.105~0.14 rad)에서 멈추면 그게 참값이고, 새 레일까지 달리면 bias 가 "
+    "영점이 아닌 다른 것을 흡수하고 있다는 뜻이다 (README §26-e).",
+)
+parser.add_argument(
     "--freeze_armature",
     default=None,
     help="armature 8개를 고정하고 나머지 25개(viscous/coulomb/bias/delay)만 탐색한다. 값은 "
@@ -191,6 +207,47 @@ def freeze_armature_bounds(bounds: torch.Tensor, num_joints: int, source: str) -
     )
 
 
+def freeze_bias_bounds(bounds: torch.Tensor, num_joints: int, source: str) -> None:
+    """encoder bias 블록의 bounds 폭을 0 으로 접어 상수로 만든다 (``--freeze_bias``).
+
+    :func:`freeze_armature_bounds` 와 같은 수법이고 블록 위치만 다르다
+    (bias 는 3*num_joints ~ 4*num_joints).
+
+    Args:
+        bounds: 탐색 범위 [하한, 상한], shape (4*num_joints + 1, 2). 제자리에서 수정된다.
+        num_joints: 관절 수.
+        source: ``"zero"`` 이면 전부 0, 아니면 mean_*.pt 경로.
+    """
+    lo, hi = 3 * num_joints, 4 * num_joints
+    if source == "zero":
+        src = torch.zeros(num_joints, dtype=torch.float32)
+    else:
+        src = torch.load(source, map_location="cpu").to(torch.float32).reshape(-1)[lo:hi]
+    if src.numel() != num_joints:
+        raise RuntimeError(f"--freeze_bias 값 개수 불일치: {src.numel()} != {num_joints}")
+    bounds[lo:hi, 0] = src
+    bounds[lo:hi, 1] = src
+    print(
+        f"[INFO]: bias 고정 ({source}) — {[round(float(x), 4) for x in src]}, "
+        f"나머지 {bounds.shape[0] - num_joints}개만 탐색",
+        flush=True,
+    )
+
+
+def widen_bias_bounds(bounds: torch.Tensor, num_joints: int, half_width: float) -> None:
+    """encoder bias 탐색 범위를 ±``half_width`` 로 덮어쓴다 (``--bias_bound``).
+
+    Args:
+        bounds: 탐색 범위, shape (4*num_joints + 1, 2). 제자리에서 수정된다.
+        num_joints: 관절 수.
+        half_width: 새 반폭 [rad].
+    """
+    lo, hi = 3 * num_joints, 4 * num_joints
+    bounds[lo:hi, 0] = -half_width
+    bounds[lo:hi, 1] = half_width
+    print(f"[INFO]: bias bounds = ±{half_width} rad (±{half_width * 57.2958:.1f}°)", flush=True)
+
+
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -262,6 +319,12 @@ def main():
 
     if args_cli.freeze_armature is not None:
         freeze_armature_bounds(sim2real.bounds_params, len(joint_order), args_cli.freeze_armature)
+
+    # ⚠ 순서 주의 — 넓히기를 먼저, 고정을 나중에. 둘 다 주면 고정이 이긴다.
+    if args_cli.bias_bound is not None:
+        widen_bias_bounds(sim2real.bounds_params, len(joint_order), args_cli.bias_bound)
+    if args_cli.freeze_bias is not None:
+        freeze_bias_bounds(sim2real.bounds_params, len(joint_order), args_cli.freeze_bias)
 
     # warp 커널은 관절 인덱스를 int32로 요구한다. 텐서 인덱싱에는 long 버전을 쓴다.
     joint_ids = torch.tensor(

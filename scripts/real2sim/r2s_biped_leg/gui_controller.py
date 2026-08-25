@@ -1202,7 +1202,9 @@ class MainWindow(QMainWindow):
         chirp_layout.addWidget(self._chirp_joint_combo)
         chirp_layout.addWidget(QLabel("Amp scale:"))
         self._chirp_amp_spin = QDoubleSpinBox()
-        self._chirp_amp_spin.setRange(0.05, 1.0)
+        # 하한 0 — amp=0 은 "구동 없이 200 Hz 로 기록만" 이라는 뜻이고, 탭(자유진동) 시험이
+        # 이걸 쓴다(README §29-e-1). 0.05 로 막아 두면 모터를 안 돌리는 캡처를 못 딴다.
+        self._chirp_amp_spin.setRange(0.0, 1.0)
         self._chirp_amp_spin.setSingleStep(0.05)
         self._chirp_amp_spin.setValue(0.5)
         chirp_layout.addWidget(self._chirp_amp_spin)
