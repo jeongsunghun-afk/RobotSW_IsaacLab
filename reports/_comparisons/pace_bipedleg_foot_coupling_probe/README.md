@@ -3129,6 +3129,37 @@ scripts/real2sim/r2s_biped_leg/gui_controller.py:1207
 - 캡처 후 **`clamp_mask_real` 과 `tau_real` 확인** — 조용한 클램프·토크 트립이 있으면 그 캡처는 버린다
 - 게인을 바꾼 캡처는 `meta` 에 `kp`/`kd` 가 들어간다(`:2087-2088`) — 변환기가 그대로 읽는다
 
+### 32-f. ★게인 출처 — `kp` 가 두 좌표계를 가리킨다 (2026-08-25 보강)
+
+게인을 바꿔 가며 캡처를 딸 계획(#1 kd 다양화, #2 hip kp 60)이라, 어느 캡처가 어떤 설정이었는지
+헷갈리면 적합이 조용히 오염된다. 그런데 **같은 이름이 두 양을 가리키고 있었다**:
+
+```
+npz  `kp` = 채널 게인 — GUI 가 드라이버에 그대로 발행한 값     100 / 50 / 50   / 20
+.pt  `kp` = 관절 게인 — 채널 × gear_k^gain_gear_scale        100 / 50 / 112.5 / 28.8
+```
+
+⇒ 변환기가 **채널값을 meta 에 명시 보존**하도록 고쳤다 (`convert_gui_chirp_bipedleg.py`):
+
+```
+meta.kp_channel / meta.kd_channel   ← "실기에 뭘 걸고 땄는가" 의 정본
+meta.gain_gear_scale                 ← 관절 환산에 쓴 지수 n
+```
+
+확인 도구: `logs/inspect_capture_gains.py` (Isaac 불필요)
+
+```
+python reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/inspect_capture_gains.py
+```
+
+- 채널·관절 게인을 나란히 찍고, **공칭(100/50/50/20, kd 5)과 다르면 `★공칭과 다름`** 으로 표시한다
+- `|kp_관절 − kp_채널·k^n|` 자체 검산을 함께 낸다
+- `meta.kp_channel` 이 없는 **구 변환본은 `[역산]`** 으로 표시한다 — 추정을 실측인 척하지 않는다
+  (0819 세트 7 개가 여기 해당. 값은 전부 공칭이라 문제없다)
+
+⚠ 구 캡처를 다시 쓰려면 재변환하면 `[기록]` 이 된다. 재변환 시 다른 meta 도 갱신되므로
+**출력 디렉터리를 따로 주고** 기존 것을 덮어쓰지 말 것.
+
 ### 32-e. Critical-gain 패널 (`f_n`·`ζ` → 게인 자동계산)
 
 `:1293-1308` 에 목표 `f_n` 과 `ζ` 를 넣으면 전 관절 게인을 계산해 적용하는 패널이 있다.

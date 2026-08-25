@@ -180,6 +180,11 @@ def convert(
     tau_real = d["tau_real"].astype(np.float64)
     kp = d["kp"].astype(np.float64)
     kd = d["kd"].astype(np.float64)
+    # ★ 캡처 당시 **실기 드라이버에 실제로 들어간 채널 게인**. 아래에서 kp/kd 는 관절 공간으로
+    #   덮어써지므로(×gear_k^n) 여기서 원본을 떠 둔다. 둘을 구분 못 하면 조용히 오독된다 —
+    #   .pt 의 `kp` 는 **관절값**이고 npz 의 `kp` 는 **채널값**인데 키 이름이 같기 때문이다.
+    #   meta 의 `kp_channel` 이 "실기에 뭘 걸고 땄는가" 의 정본이다 (README §32-f).
+    kp_channel, kd_channel = kp.copy(), kd.copy()
 
     # ── 브리지 에코 (2026-08-19, TELEM 157 B). 없으면 구 캡처다. ──────────────────────────
     # ① telem_tick — 파이의 5 ms 격자. `t_real`(파이썬 도착시각)은 GIL·Qt·네트워크 지터를
@@ -372,6 +377,11 @@ def convert(
                 # False = 캡처의 foot 이 이미 raw 였다(규약 0). 어느 쪽이든 출력은 raw 규약이다.
                 "foot_raw_synthesized": conv == 1,
                 "gain_gear_scale": GAIN_GEAR_SCALE,
+                # ★ 캡처 당시 실기 드라이버 게인 (**채널 좌표**, GUI 가 그대로 발행한 값).
+                #   최상위 `kp`/`kd` 는 관절 좌표(= 채널 × gear_k^gain_gear_scale)다 — 다른 양이다.
+                #   게인을 바꿔 가며 딴 캡처(kd 다양화 등)를 구분하려면 이 둘을 봐야 한다.
+                "kp_channel": kp_channel.tolist(),
+                "kd_channel": kd_channel.tolist(),
             },
         },
         out,

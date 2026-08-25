@@ -1204,7 +1204,12 @@ class MainWindow(QMainWindow):
         self._chirp_amp_spin = QDoubleSpinBox()
         # 하한 0 — amp=0 은 "구동 없이 200 Hz 로 기록만" 이라는 뜻이고, 탭(자유진동) 시험이
         # 이걸 쓴다(README §29-e-1). 0.05 로 막아 두면 모터를 안 돌리는 캡처를 못 딴다.
-        self._chirp_amp_spin.setRange(0.0, 1.0)
+        # 상한 1.5 — hip 은 CHIRP_AMPLITUDE 가 0.14 rad(±8.0°)뿐이라 amp=1.0 으로는 공진대 목표
+        # 물리 p-p 23°(README §31-c)를 못 낸다. amp 1.3 이면 명령 ±10.4°, 공진 증폭 ×1.09 를
+        # 거쳐 물리 ±11.4°, 소프트리밋 ±13.4° 대비 여유 2.0° 다.
+        # ⚠ 사전검사(:_on_chirp_start_clicked)는 `CHIRP_CENTER ± AMP·ascale` 만 보고 **공진 증폭을
+        #   안 본다.** amp > 1.3 은 publisher 의 조용한 클램프에 걸려 여기신호가 왜곡된다(README §32-b).
+        self._chirp_amp_spin.setRange(0.0, 1.5)
         self._chirp_amp_spin.setSingleStep(0.05)
         self._chirp_amp_spin.setValue(0.5)
         chirp_layout.addWidget(self._chirp_amp_spin)
