@@ -92,13 +92,13 @@ JOINT_LABELS = ["HL_hip", "HL_thigh", "HL_calf", "HL_foot", "HR_hip", "HR_thigh"
 #   구분되지 않는다(그 값이 PD 의 에코라는 것 자체가 이유다). 실측이 배제한 건 "펌웨어가 보고 전에
 #   k 를 한 번 더 곱한다"는 세 번째 가능성뿐이고, {지수 1, 지수 2} 는 둘 다 살아 있다.
 #   이 프로젝트는 유도·부분측정을 확정으로 기록했다가 두 번 되돌렸다(전치 번복, gear_k 무효화).
-#   판정 방법: reports/_comparisons/pace_bipedleg_foot_coupling_probe/NEXT_CAPTURES.md
+#   판정 방법: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/NEXT_CAPTURES.md
 #
 # 두 단계가 곱해져 k² 가 된다 (RL_INTERFACE.md §4):
 #   ① 드라이버 PD 가 **채널각 오차**에 kp 를 곱한다 → 채널오차 = k × 관절오차
 #      [실측 확인] 준정적 구간에서 |τ_보고| / |kp·e_관절 − kd·q̇_관절| = 1.5008 (calf, k=1.5;
 #      k 대비 오차 0.06%, k² 대비 −33%). hip/thigh(k=1)는 1.0006~1.0029 로 대조군 통과.
-#      → reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/tau_echo_check.py
+#      → reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/logs/tau_echo_check.py
 #   ② 실제 관절토크 = 보고토크 × k (펌웨어가 토크 상수에도 7:1 을 가정하므로)
 #   ⇒ 실효 관절강성 = kp·k²  — calf 50→112.5, foot 30→43.2. 감쇠비도 ζ×k 로 바뀐다
 #     (calf 0.76→1.13 과감쇠 · foot 0.82→0.97). 같은 지수가 kp·kd 에 공통으로 걸린다.
@@ -382,6 +382,17 @@ def convert(
                 #   게인을 바꿔 가며 딴 캡처(kd 다양화 등)를 구분하려면 이 둘을 봐야 한다.
                 "kp_channel": kp_channel.tolist(),
                 "kd_channel": kd_channel.tolist(),
+                # ★ chirp 진동 중심 [rad, leg-major] 과 출처("default" = chirp.CHIRP_CENTER /
+                #   "slider" = 조작자가 슬라이더로 잡은 임시 영점).
+                #   실기가 중력으로 처지면 고정 중심이 치우쳐 소프트리밋에 일찍 닿으므로,
+                #   조작자가 중심을 옮겨 딸 수 있다. **캡처마다 다를 수 있다.**
+                #   ⚠ GUI 발행값은 항상 **관절각**이므로(publisher 주석) 규약 0/1 어느 쪽이든
+                #     gear 나눗셈을 하지 않는다 — q/dq 와 달리 이 값은 채널 단위였던 적이 없다.
+                #   구 캡처엔 이 키가 없다 → 아래 fallback 이 들어가지만 **가정이다**.
+                "chirp_center": (d["chirp_center"].astype(np.float64).tolist() if "chirp_center" in d.files else None),
+                "chirp_center_source": (
+                    str(d["chirp_center_source"]) if "chirp_center_source" in d.files else "unknown"
+                ),
             },
         },
         out,

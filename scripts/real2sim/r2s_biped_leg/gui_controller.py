@@ -165,7 +165,7 @@ GAIN_RESEND_PERIOD_S: float = 1.0  # 실기 GAIN(R2PK) 주기 재송신 간격 �
 # (kp 300 / kd 5)보다 한 자릿수 낮다. 상한을 1000/100 그대로 두면 기본값이 눈금 바닥에 붙어
 # 사실상 조작이 불가능하므로, 기본값이 대략 중간에 오도록 kp 0~150 / kd 0~15 로 재조정한다.
 # step도 이 스케일에 맞춰 잘게 잡는다(기존 10.0/0.5는 kp=12 관절에서 너무 거칠다).
-KP_RANGE: tuple[float, float] = (0.0, 150.0)
+KP_RANGE: tuple[float, float] = (0.0, 500.0)
 KP_STEP: float = 1.0
 KD_RANGE: tuple[float, float] = (0.0, 15.0)
 KD_STEP: float = 0.1
@@ -230,7 +230,13 @@ _SM_CHIRP_START_Q = 65  # 65..72: 램프 시작 자세 (UI가 chirp 시작 시 �
 _SM_MOTION_LOOP = 73  # 0/1: 모션 클립 반복 재생 여부
 _SM_MOTION_LOOP_START = 74  # 반복 구간 시작 프레임 인덱스 (이 앞은 진입 보간 — 1회만 재생)
 _SM_MOTION_DONE = 75  # publisher→UI: 비반복 재생이 마지막 프레임에 도달 (1.0 = 종료, 홀드 중)
-_SM_FRAMES = 76  # 76..: 시퀀스/모션 프레임 버퍼 (MAX_FRAMES × 8)
+# 76..83: chirp 진동 **중심** (UI가 매 시작마다 기록). 예전엔 publisher가 chirp.CHIRP_CENTER 를
+# 직접 읽었는데, 실기가 중력으로 처져 있으면 그 고정 중심이 이미 한쪽으로 치우쳐 소프트리밋에
+# 일찍 닿는다. UI 가 "슬라이더 자세를 임시 영점으로" 를 켜면 여기에 슬라이더 자세가 들어간다.
+# ⚠ 불리언 플래그가 아니라 **중심 값 자체**를 싣는다 — publisher 에 분기가 없고, 캡처에 기록되는
+#   중심이 실제로 쓰인 값과 항상 일치한다(끄면 CHIRP_CENTER 가 그대로 들어가 종전과 동일).
+_SM_CHIRP_CENTER = 76  # 76..83
+_SM_FRAMES = 84  # 84..: 시퀀스/모션 프레임 버퍼 (MAX_FRAMES × 8)
 # 4096/50 = 81.9s. 모션 클립 재생이 진입 보간(1.5s) + 클립/배속 + 루프 bridge 를 한 버퍼에 담고,
 # 0.25배속이면 클립이 4배로 늘어난다 (trot0 3.48s → 13.9s = 697프레임). 구 512로는 모자란다.
 MAX_FRAMES = 4096
@@ -743,12 +749,16 @@ def _compute_target(
             ascale = shared[_SM_CHIRP_AMP]
             mask = int(shared[_SM_CHIRP_MASK])
             start_j = [shared[_SM_CHIRP_START_Q + i] for i in range(NUM_JOINTS)]
+            # 진동 중심 — UI 가 실었다(_SM_CHIRP_CENTER 주석 참고). 기본은 chirp.CHIRP_CENTER 이고,
+            # "슬라이더 자세를 임시 영점으로" 를 켜면 슬라이더 자세가 들어온다. 여기선 분기 없이 쓴다.
+            center_j = [shared[_SM_CHIRP_CENTER + i] for i in range(NUM_JOINTS)]
             t = now - start
             if t < CHIRP_RAMP_S:
-                # 현재 자세 → chirp 중심 선형 램프 (마스크 관절만 이동)
+                # 현재 자세 → chirp 중심 선형 램프 (마스크 관절만 이동).
+                # 중심이 곧 현재 자세면(슬라이더 영점) 이 구간은 자연히 제자리 유지가 된다.
                 a = t / CHIRP_RAMP_S
                 pose = [
-                    start_j[i] + (chirp.CHIRP_CENTER[i] - start_j[i]) * a if (mask >> i) & 1 else start_j[i]
+                    start_j[i] + (center_j[i] - start_j[i]) * a if (mask >> i) & 1 else start_j[i]
                     for i in range(NUM_JOINTS)
                 ]
             elif t < CHIRP_RAMP_S + dur:
@@ -757,13 +767,11 @@ def _compute_target(
                 pose = list(start_j)
                 for i in range(NUM_JOINTS):
                     if (mask >> i) & 1:
-                        pose[i] = (
-                            chirp.CHIRP_CENTER[i] + chirp.CHIRP_DIRECTION[i] * chirp.CHIRP_AMPLITUDE[i] * ascale * s
-                        )
+                        pose[i] = center_j[i] + chirp.CHIRP_DIRECTION[i] * chirp.CHIRP_AMPLITUDE[i] * ascale * s
                 chirp_t = tc
             else:
                 # 스윕 종료 — 중심에서 홀드하고 UI에 알린다 (UI가 npz 저장 후 HOLD로 전환).
-                pose = [chirp.CHIRP_CENTER[i] if (mask >> i) & 1 else start_j[i] for i in range(NUM_JOINTS)]
+                pose = [center_j[i] if (mask >> i) & 1 else start_j[i] for i in range(NUM_JOINTS)]
                 shared[_SM_CHIRP_DONE] = 1.0
             # (커플링 변환 삭제 — 발행값이 관절각이다. 브리지가 raw로 옮긴다.)
         else:  # _MODE_HOLD
@@ -1233,6 +1241,15 @@ class MainWindow(QMainWindow):
         self._chirp_dur_spin.setSingleStep(5.0)
         self._chirp_dur_spin.setValue(chirp.DEFAULT_DURATION_S)
         chirp_layout.addWidget(self._chirp_dur_spin)
+        # 실기가 중력으로 처져 있으면 고정 CHIRP_CENTER 가 이미 한쪽으로 치우쳐 소프트리밋에
+        # 일찍 닿는다. 켜면 **슬라이더로 잡아 둔 현재 자세를 임시 영점**으로 삼아 그 둘레로 흔든다.
+        # 기본 꺼짐 — 기존 캡처와 같은 규약을 유지한다(켠 캡처는 npz `chirp_center` 로 구분된다).
+        self._chirp_slider_center_check = QCheckBox("Center: slider pose")
+        self._chirp_slider_center_check.setToolTip(
+            "켜면 CHIRP_CENTER 대신 현재 슬라이더 자세를 진동 중심(임시 영점)으로 쓴다.\n"
+            "실기가 처져 있어 고정 중심이 한쪽으로 치우칠 때 사용."
+        )
+        chirp_layout.addWidget(self._chirp_slider_center_check)
         self._chirp_start_btn = QPushButton("Start + Record")
         self._chirp_start_btn.setObjectName("primaryButton")
         self._chirp_start_btn.clicked.connect(self._on_chirp_start_clicked)
@@ -2045,38 +2062,56 @@ class MainWindow(QMainWindow):
             elif row[0] == "state":
                 self._chirp_state_rows.append(row)
 
+    def _chirp_block(self, msg: str) -> None:
+        """chirp 시작 차단 — 상태표시줄과 터미널 양쪽에 남긴다.
+
+        조작자가 상태표시줄을 놓치면 "눌렀는데 반응이 없다" 로만 보인다. 차단은 항상
+        구체적 이유가 있으므로 그 이유가 로그에 남아야 원격에서 진단할 수 있다.
+        """
+        self._status_label.setText(msg)
+        print(f"[chirp] BLOCKED - {msg}", flush=True)
+
     def _on_chirp_start_clicked(self) -> None:
         with self._shared.get_lock():
             relax = int(self._shared[_SM_MODE]) == _MODE_RELAX and self._shared[_SM_CMD_VALID] >= 0.5
         if relax:
-            self._status_label.setText("Chirp blocked: disable RELAX first (press Home or move a slider)")
+            self._chirp_block("Chirp blocked: disable RELAX first (press Home or move a slider)")
             return
         f0 = self._chirp_f0_spin.value()
         f1 = self._chirp_f1_spin.value()
         dur = self._chirp_dur_spin.value()
         ascale = self._chirp_amp_spin.value()
         if f1 <= f0:
-            self._status_label.setText("Chirp blocked: f1 must be greater than f0")
+            self._chirp_block("Chirp blocked: f1 must be greater than f0")
             return
         mask = self._chirp_mask()
         if mask == 0:
-            self._status_label.setText("Chirp blocked: no joints selected")
+            self._chirp_block("Chirp blocked: no joints selected")
             return
+        start_q = self._output_pose()
+        # 진동 중심 — 슬라이더 모드면 현재 자세(임시 영점), 아니면 종전대로 고정 CHIRP_CENTER.
+        # 실기가 중력으로 처져 있으면 고정 중심이 이미 치우쳐 한쪽 소프트리밋에 일찍 닿는다.
+        use_slider = self._chirp_slider_center_check.isChecked()
+        center = list(start_q) if use_slider else list(chirp.CHIRP_CENTER)
         # soft limit 사전 검사 — 테이퍼가 없으므로 극값은 center ± amp·scale (publisher가 매 틱
         # clamp_to_soft로 한 번 더 지키지만, 조용한 클램프는 여기신호를 왜곡하므로 시작 전에 막는다).
+        # ⚠ 이 검사는 **공진 증폭을 안 본다**(README §32-b). hip 공진대에서는 amp ≤ 1.3 으로 운용할 것.
         for i in range(NUM_JOINTS):
             if not (mask >> i) & 1:
                 continue
-            lo = chirp.CHIRP_CENTER[i] - chirp.CHIRP_AMPLITUDE[i] * ascale
-            hi = chirp.CHIRP_CENTER[i] + chirp.CHIRP_AMPLITUDE[i] * ascale
+            lo = center[i] - chirp.CHIRP_AMPLITUDE[i] * ascale
+            hi = center[i] + chirp.CHIRP_AMPLITUDE[i] * ascale
             s_lo, s_hi = motions.SOFT_LIMITS_RAD[i]
             if lo <= s_lo or hi >= s_hi:
-                self._status_label.setText(
+                # 쓸 수 있는 최대 배율을 함께 알려 준다 — 현장에서 되짚어 계산하지 않도록.
+                room = min(center[i] - s_lo, s_hi - center[i])
+                amax = max(0.0, room / chirp.CHIRP_AMPLITUDE[i]) if chirp.CHIRP_AMPLITUDE[i] > 0 else 0.0
+                self._chirp_block(
                     f"Chirp blocked: {motions.JOINT_NAMES[i]} range [{lo:+.3f}, {hi:+.3f}] exceeds "
-                    f"soft limit [{s_lo:+.3f}, {s_hi:+.3f}] - lower amp scale"
+                    f"soft limit [{s_lo:+.3f}, {s_hi:+.3f}] - max amp here is {amax:.2f}"
+                    + (" (center: slider)" if use_slider else " (center: default)")
                 )
                 return
-        start_q = self._output_pose()
         self._sine_deactivate()
         self._chirp_cmd_rows = []
         self._chirp_state_rows = []
@@ -2092,10 +2127,15 @@ class MainWindow(QMainWindow):
             "group": self._chirp_group_label(mask),
             "kp": list(self._kp),
             "kd": list(self._kd),
+            # 실제로 쓰인 진동 중심과 그 출처. 캡처마다 다를 수 있으므로 반드시 남긴다 —
+            # 없으면 분석 쪽에서 중심을 CHIRP_CENTER 로 가정해 오프셋을 bias 로 오독한다.
+            "center": list(center),
+            "center_source": "slider" if use_slider else "default",
         }
         with self._shared.get_lock():
             for i in range(NUM_JOINTS):
                 self._shared[_SM_CHIRP_START_Q + i] = start_q[i]
+                self._shared[_SM_CHIRP_CENTER + i] = center[i]
             self._shared[_SM_CHIRP_F0] = f0
             self._shared[_SM_CHIRP_F1] = f1
             self._shared[_SM_CHIRP_DUR] = dur
@@ -2109,6 +2149,14 @@ class MainWindow(QMainWindow):
         self._chirp_start_btn.setEnabled(False)
         self._chirp_stop_btn.setEnabled(True)
         self._chirp_poll_timer.start(200)
+        # 진단 — "눌렀는데 안 움직인다" 를 터미널에서 가릴 수 있게 매 시작마다 해석된 상태를 찍는다.
+        # (상태표시줄만으로는 조작자가 놓치기 쉽고, 2 회차 이후 문제는 재현이 비싸다.)
+        print(
+            f"[chirp] start mask=0x{mask:02x} amp={ascale:g} f={f0:g}->{f1:g}Hz dur={dur:g}s "
+            f"center={'slider' if use_slider else 'default'} "
+            f"[{', '.join(f'{v:+.3f}' for v in center)}]",
+            flush=True,
+        )
         total = CHIRP_RAMP_S + dur
         self._status_label.setText(
             f"Chirp on {self._chirp_meta['group']}: ramp {CHIRP_RAMP_S:.0f}s + sweep "
@@ -2132,6 +2180,8 @@ class MainWindow(QMainWindow):
     def _chirp_finish(self, aborted: bool, take_hold: bool = True) -> None:
         if not self._chirp_active:
             return
+        # 종료 사유를 남긴다 — 2 회차가 안 도는 경우 여기서 "언제·왜 끝났는지" 가 갈린다.
+        print(f"[chirp] finish aborted={aborted} take_hold={take_hold}", flush=True)
         self._chirp_active = False
         self._chirp_poll_timer.stop()
         self._chirp_start_btn.setEnabled(True)
@@ -2175,6 +2225,10 @@ class MainWindow(QMainWindow):
             "tau_est": np.asarray([r[4] for r in self._chirp_state_rows], dtype=np.float32),
             "kp": np.asarray(m["kp"], dtype=np.float32),
             "kd": np.asarray(m["kd"], dtype=np.float32),
+            # chirp 진동 중심 [rad, leg-major] 과 그 출처("default" | "slider").
+            # 구 캡처엔 없다 — 소비자는 없으면 chirp.CHIRP_CENTER 로 보되 **가정임을 표시**할 것.
+            "chirp_center": np.asarray(m.get("center", chirp.CHIRP_CENTER), dtype=np.float32),
+            "chirp_center_source": str(m.get("center_source", "default")),
             "joint_order": np.asarray(motions.JOINT_NAMES),
             "rate_hz": np.float64(PUBLISH_HZ),
             "f0_hz": np.float64(m["f0"]),
