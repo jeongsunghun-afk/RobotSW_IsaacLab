@@ -2817,6 +2817,76 @@ Hwangbo et al. 2019 정본(입력 = 위치오차·속도 각 3 탭 20 ms 창, �
 ⇒ **재검토 조건**: (a) `tau_meas` 확정 (b) 링크측 각도 계측 수단 확보 (c) PACE 확장으로도 0.36° 를
 못 깬다 — 셋이 다 참이 될 때.
 
+#### 29-c-1. ★교체하면 **env 보정 3종이 조용히 사라진다** (직접 검증함)
+
+`DCMotor` 는 feedforward 를 **더하고**, `ActuatorNetMLP` 는 **읽지도 않고 덮어쓴다**:
+
+```
+actuator_pd.py:193   computed_effort = stiffness*e + damping*ė + control_action.joint_efforts   ← 더함
+actuator_net.py:179  computed_effort = torques * torque_scale                                    ← 무시
+actuator_net.py:185  control_action.joint_efforts = self.applied_effort                          ← 덮어씀
+```
+
+그리고 env 의 보정 3 종(`foot_reflected_inertia` · `foot_raw_friction` · `foot_transpose`)이
+**정확히 그 통로로 들어간다** — `set_joint_effort_target_index` → `data._joint_effort_target`
+(`articulation.py:2613`) → `control_action.joint_efforts`(`:4222`).
+
+⇒ **`DCMotorCfg` → `ActuatorNetMLPCfg` 로 갈아끼우는 순간 벨트 커플링 물리가 통째로 빠진다.**
+예외도 경고도 없다. §11 표의 "보정됨" 두 줄이 무효가 된다.
+
+#### 29-c-2. `ActuatorNetLSTM` 은 쓰지 말 것 (업스트림 결함)
+
+`ActuatorNetLSTM.compute`(`actuator_net.py:77-98`)가 `self._joint_vel` 을 **한 번도 갱신하지 않는다**
+(MLP 는 `:157` 에서 한다). `DCMotor._clip_effort` 가 그 값으로 토크-속도 곡선을 계산하므로,
+LSTM 을 쓰면 **속도 감쇠가 조용히 비활성화된다.** 우리처럼 DC 곡선이 플랜트의 일부인 리그에서는 치명적.
+
+#### 29-c-3. armature 갱신은 actuator net 채택과 **무관하게 유효**
+
+net 이 토크를 내도 **토크맵은 관성을 만들지 못한다** — 외력·역구동성은 질량행렬이 지배하고,
+armature 는 액추에이터 클래스와 무관하게 항상 sim 에 들어간다
+(`isaaclab_physx/.../articulation.py:4135`). ⇒ §28-d ①의 `rga.py` armature 결론은 그대로 산다.
+
+반면 **PACE 마찰이 net 과 중복되는지는 `tau_meas` 의 구성(composition)에 달렸다** — 아래.
+
+#### 29-c-4. ★실기팀 질의에 **세 번째 항목**을 넣어야 한다
+
+§28-f 1 번을 "필터 유무 / `×N` 위치" 두 개로 적었는데 **하나 빠졌다**:
+
+```
+(가) 보고값이 전자기 토크 × N 이면  → 마찰·로터는 라벨 **밖**. PhysX armature·마찰을 그대로 둔다
+(나) 보고값이 관절 전달 토크면      → 마찰·로터가 라벨 **안**. sim 쪽을 0 으로 눌러야 한다
+```
+
+**§28-a 의 DC 증거는 정지평형이라 (가)/(나)를 구분하지 못한다.** 어느 쪽이냐에 따라 중복계상
+여부가 정반대가 되므로, "마찰·로터가 보고값의 **앞이냐 뒤냐**" 를 반드시 함께 물을 것.
+
+#### 29-c-5. 대역 커버율 실측 — 4.4 ~ 24.4 %
+
+`logs/actnet_input_coverage.py` (신규). 7 캡처 33,970 샘플 = 169.8 s
+(⚠ 20 s × 4 + 30 s × 3 이다. 앞서 "1 회 30 초" 로 적은 건 부정확):
+
+| 관절 | `dq` p99 | `velocity_limit` | 커버율 |
+|---|---|---|---|
+| HL_hip | 1.582 | 29.6 | **5.3 %** |
+| HR_hip | 1.304 | 29.6 | 4.4 % |
+| thigh | 4.02 | 29.6 | 13.6 % |
+| calf | 4.78 | 19.7 | 24.2 % |
+| foot | 5.14 | 24.6 | 20.9 % |
+
+이미 `f1=5.0` 상한과 진폭 1.0 을 다 썼으므로 **같은 종류를 더 모아도 이 격차는 안 줄어든다.**
+
+#### 29-c-6. 그래도 판정하고 싶다면 — **추가 수집 0 인 파일럿**
+
+`input_idx=[0]` 로 입력을 6 → 2 차원으로 줄이면 **현재 보유 170 s 만으로 학습·검증이 성립**한다.
+"net 이 PACE 의 0.36° 를 이기는가" 를 **실기 캡처 0 회로** 판정할 수 있다. 못 이기면 거기서 종료.
+이게 actuator net 갈래의 유일한 싼 진입점이다.
+
+병행이 필요해지면 **완전 교체가 아니라 잔차 하이브리드** — `PaceDCMotor` 를 상속해 net 은 잔차만
+학습한다. 게인 가변성과 feedforward 가 유지되고, net 을 0 으로 두면 정확히 현행으로 복귀한다.
+⚠ **구현 함정**: `PaceDCMotor.compute` 가 마지막에 지연 버퍼를 태우므로(`pace_actuator.py:73`)
+잔차를 그 **뒤**에 더하면 전역 delay 가 사라진다 — 33 파라미터 중 하나가 조용히 무효가 된다.
+잔차는 지연 **앞**에 넣을 것.
+
 ### 29-d. ②의 처방 — **모델링보다 측정이 싸다**
 
 `k_s` 표현 방법은 **액추에이터 층에서 모터각 `th_m` 을 파이썬 상태로 적분하고 스프링 토크를
@@ -2847,6 +2917,8 @@ sim 만으로 되는 선행 작업 둘(각 GPU 3 h): **bias 동결 재적합**(�
 2. **①은 PACE 로 풀린다** — 모델이 아니라 **가진 설계** 문제였다. #2 캡처가 답.
 3. **②는 탭 시험 먼저**, 결과에 따라 PACE 33 → 36.
 4. `rga.py` 는 계속 손대지 않는다 — #3 이 `kp` 를 못박으면 절대값이 같이 정해진다.
+5. actuator net 을 **판정만** 하고 싶으면 29-c-6 의 **추가 수집 0 파일럿**이 유일한 싼 입구다.
+6. 실기팀 질의에 **"마찰·로터가 보고값 앞이냐 뒤냐"** 를 반드시 포함할 것 (29-c-4).
 
 ## 재현
 
