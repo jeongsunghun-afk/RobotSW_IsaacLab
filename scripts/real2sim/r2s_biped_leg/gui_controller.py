@@ -2096,22 +2096,29 @@ class MainWindow(QMainWindow):
         # soft limit 사전 검사 — 테이퍼가 없으므로 극값은 center ± amp·scale (publisher가 매 틱
         # clamp_to_soft로 한 번 더 지키지만, 조용한 클램프는 여기신호를 왜곡하므로 시작 전에 막는다).
         # ⚠ 이 검사는 **공진 증폭을 안 본다**(README §32-b). hip 공진대에서는 amp ≤ 1.3 으로 운용할 것.
+        # ⚠ 마스크된 관절을 **전부** 보고 한 번에 판정한다. 첫 위반에서 멈추면 조작자가 amp 를
+        #   내렸다 다시 걸었다를 반복하게 된다 — amp 는 전 관절 공통 배율이라 **가장 빡빡한 관절**이
+        #   전체를 좌우한다. 중심을 옮기면(슬라이더 영점) 그 여유가 관절마다 달라진다.
+        worst_amax, worst_i = None, -1
         for i in range(NUM_JOINTS):
-            if not (mask >> i) & 1:
+            if not (mask >> i) & 1 or chirp.CHIRP_AMPLITUDE[i] <= 0.0:
                 continue
-            lo = center[i] - chirp.CHIRP_AMPLITUDE[i] * ascale
-            hi = center[i] + chirp.CHIRP_AMPLITUDE[i] * ascale
             s_lo, s_hi = motions.SOFT_LIMITS_RAD[i]
-            if lo <= s_lo or hi >= s_hi:
-                # 쓸 수 있는 최대 배율을 함께 알려 준다 — 현장에서 되짚어 계산하지 않도록.
-                room = min(center[i] - s_lo, s_hi - center[i])
-                amax = max(0.0, room / chirp.CHIRP_AMPLITUDE[i]) if chirp.CHIRP_AMPLITUDE[i] > 0 else 0.0
-                self._chirp_block(
-                    f"Chirp blocked: {motions.JOINT_NAMES[i]} range [{lo:+.3f}, {hi:+.3f}] exceeds "
-                    f"soft limit [{s_lo:+.3f}, {s_hi:+.3f}] - max amp here is {amax:.2f}"
-                    + (" (center: slider)" if use_slider else " (center: default)")
-                )
-                return
+            room = min(center[i] - s_lo, s_hi - center[i])  # 대칭 사인이라 좁은 쪽이 지배한다
+            amax = max(0.0, room / chirp.CHIRP_AMPLITUDE[i])
+            if worst_amax is None or amax < worst_amax:
+                worst_amax, worst_i = amax, i
+        if worst_amax is not None and ascale > worst_amax:
+            s_lo, s_hi = motions.SOFT_LIMITS_RAD[worst_i]
+            lo = center[worst_i] - chirp.CHIRP_AMPLITUDE[worst_i] * ascale
+            hi = center[worst_i] + chirp.CHIRP_AMPLITUDE[worst_i] * ascale
+            self._chirp_block(
+                f"Chirp blocked: {motions.JOINT_NAMES[worst_i]} would reach [{lo:+.3f}, {hi:+.3f}] "
+                f"vs soft limit [{s_lo:+.3f}, {s_hi:+.3f}] "
+                f"- set amp <= {worst_amax:.2f} (center: {'slider' if use_slider else 'default'} "
+                f"{center[worst_i]:+.3f}), or move that joint's slider toward the middle"
+            )
+            return
         self._sine_deactivate()
         self._chirp_cmd_rows = []
         self._chirp_state_rows = []
