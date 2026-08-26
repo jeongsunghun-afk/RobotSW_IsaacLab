@@ -884,3 +884,89 @@ MimicKit 은 SGD 상수 LR 이라 이 경로가 없다. **상수 LR 단독 arm �
 원자료: `metrics/ramp_schedfixed/` · `metrics/ramp_fixedstd{,_vel1}/`
 · 요약 `metrics/mimickit_align_summary.md` (생성기 `logs/mimickit_align_summary.py`)
 · 보행 위상 `metrics/gait_phase.md`
+
+---
+
+## 16. (2026-08-26) 관측 입력 대조 — **의미는 같아도 표현이 다르다**
+
+§13~15 는 보상·DR·optimizer 만 비교했고 **관측 구성은 한 번도 대조하지 않았다.** 여기서 잰다.
+
+### 16-a. 검산 — 차원은 전부 체크포인트 가중치로 확인했다
+
+소스만 읽으면 틀리기 쉬워서 두 쪽 다 실제 가중치 shape 으로 닫았다.
+
+| | 우리 (`schedfixed model_59999`) | MimicKit (`amp_adaptation_module_20260512_160750`) |
+|---|---|---|
+| actor 1층 | `(512, 68)` = 42 + 6 + 20 | `(1024, 137)` = 117 + 20 |
+| critic 1층 | `(512, 67)` = 42 + 6 + 19 | `(1024, 1296)` = 117 + 9 + 10×117 |
+| priv_encoder 입력 | **19** (DR 파라미터) | **9** (root_vel 3 + root_ang_vel 3 + mass 1 + friction 2) |
+| history_encoder step 폭 | **42** | **117** |
+| discriminator 입력 | `(1024, 490)` = 10 × **49** | `(1024, 1340)` = 10 × **134** |
+
+네 식이 모두 정확히 닫힌다.
+
+### 16-b. proprio 42 vs 117 — 차이는 **관절 각도 표현**이 대부분이다
+
+| 항목 | 우리 | MimicKit |
+|---|---|---|
+| 몸통 자세 | `projected_gravity_b` **3** | `quat_to_tan_norm(heading⁻¹·root_rot)` **6** |
+| **관절 위치** | `joint_pos − default_joint_pos` **12** (raw rad) | 관절별 quaternion → `quat_to_tan_norm`, 16 × 6 = **96** |
+| 관절 속도 | **12** | **12** |
+| 명령 (vx, vy, yaw) | **3** | **3** |
+| **이전 action** | **12** | **없음** |
+| 합 | **42** | **117** |
+
+96 의 출처: `go2.xml` 은 body 17 개 · `<joint>` 12 개인데 `kin_char_model.dof_to_rot` 는
+`num_joints − 1 = 16` 개의 관절 회전을 낸다(`kin_char_model.py:146`). 16 × 6 = 96.
+
+★ **의미는 같지만 성질이 다르다.** 우리 관절 입력은 기본자세 기준 **raw 라디안 12 개** — 무한
+정의역의 선형값이다. MimicKit 은 관절마다 회전을 tan-norm 으로 펴서 **[−1,1] 유계 · θ 에 대해
+주기적**인 96 개다. 몸통 자세도 3(중력벡터, roll/pitch 만) vs 6(tan-norm) 이다.
+
+### 16-c. priv 는 담는 내용 자체가 다르다
+
+| | 우리 | MimicKit |
+|---|---|---|
+| priv_encoder 입력 | DR 파라미터 19 (마찰·질량·게인·CoM …) | **root 선속도·각속도** + 질량 + 마찰 = 9 |
+| actor 가 직접 받는 것 | proprio 42 + **추정 root 속도 6** + latent 20 | proprio 117 + latent 20 (**속도는 latent 안에만**) |
+| critic 이 보는 것 | 42 + 6 + 19 = 67 (**history 안 봄**) | 117 + 9 + **history 전체 1170** = 1296 |
+
+우리 actor 는 root 선속도를 **6 차원 슬롯으로 직접** 받는다(`train_with_estimated_states: true`
+라 학습·램프 모두 estimator 추정치). MimicKit actor 는 속도를 명시적으로 못 받고 latent 로만 받는다.
+critic 쪽은 반대로 MimicKit 이 압도적으로 많이 본다.
+
+### 16-d. ✅ estimator 오차는 원인이 아니다 (추가 실행 0 으로 확인)
+
+"actor 가 받는 추정 속도가 고속에서 틀려서 못 달리는 것 아닌가"는 램프 npz 에 이미 저장된
+`est_lin`/`gt_lin`(env 0)으로 즉시 확인된다:
+
+```
+             cmd 2.5   cmd 3.0   cmd 3.5   cmd 4.0    (|추정−실제| / 실제)
+baseline        0.03      0.02      0.09      0.29
+schedfixed      0.02      0.03      0.07      0.05
+lerp 0.8        0.02      0.05      0.02      0.01   <- 실제 3.9 m/s 로 달리는 중
+```
+
+절대오차는 어디서도 0.15 m/s 를 넘지 않는다. **실제로 4 m/s 를 내는 arm 에서 오차가 가장 작다**
+(1%). 고속 실패 구간의 큰 상대오차는 속도가 0 근처라 분모가 작아서 나온 값이다.
+→ **estimator 가설 기각.** `--gt_priv` A/B 를 돌릴 근거가 없다.
+
+### 16-e. DR — MimicKit 쪽을 config 로 확정했다
+
+§13-c 에서 목록만 적었던 것을 `engine_config.yaml` 로 확인했다. MimicKit DR 은
+**마찰 · base 질량 · CoM · PD 게인 4 개뿐**이고, **obs noise · action delay · push 는 없다.**
+우리는 여기에 obs noise 와 action delay 가 더 있다(push 는 §14 에서 무효과로 확인).
+
+### 16-f. 판정 — 후보이지 원인이 아니다
+
+지금까지 관측 축은 **한 번도 실험하지 않았다.** 아래는 후보 목록이며, 어느 것도 천장의 원인으로
+확인되지 않았다. §15-d 의 미검증 항목에 이 셋을 더한다.
+
+| 후보 | 왜 후보인가 |
+|---|---|
+| **관절 각도 표현** (12 raw rad vs 96 tan-norm) | 무계 선형 입력은 학습 분포 **가장자리**에서 성질이 나빠진다(정규화 통계 이동·활성 포화). 천장이 정확히 그 가장자리에 있다 |
+| **discriminator 관측 폭** (49 vs 134/step) | §14~15 의 결론이 "style 0.5 는 trot 에 잠근다" 인데, 그 style 신호를 만드는 판별기가 2.7 배 좁게 본다 |
+| **이전 action** (우리 12, 저쪽 0) | 실재하는 차이. 기전은 아직 붙이지 않는다 |
+
+원자료: 두 쪽 체크포인트 가중치 shape · `logs/amp_adaptation_module_20260512_160750/{env,engine,agent}_config.yaml`
+· estimator 오차는 `metrics/ramp_*/[..]/ramp_data.npz` 의 `est_lin`/`gt_lin`
