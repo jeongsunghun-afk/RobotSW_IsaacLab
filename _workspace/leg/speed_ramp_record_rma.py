@@ -25,6 +25,27 @@ parser.add_argument("--ramp_s", type=float, default=2.0, help="단계 사이 명
 parser.add_argument("--out_dir", type=str, default="_workspace/leg/selfcol_ramp_out")
 parser.add_argument("--vx_max", type=float, default=4.0, help="사다리꼴 명령 최고 속도 [m/s] (0.5 단위 램프의 정점)")
 parser.add_argument(
+    "--no_video",
+    action="store_true",
+    help="mp4 녹화를 건너뛴다(npz 만 저장). 렌더가 램프의 지배적 비용이라 수십 배 빨라지므로 "
+    "수치 비교만 필요한 A/B 스윕에 쓴다. 걸음 품질을 눈으로 봐야 하면 지정하지 말 것.",
+)
+parser.add_argument(
+    "--use_estimator",
+    action="store_true",
+    help="actor 의 priv_explicit(base 선/각속도) 입력을 env 의 ground-truth 대신 **estimator 추정값**으로 "
+    "준다. 실기는 base 속도를 못 재므로 이쪽이 배포 조건이다. 기본 경로(act_inference)는 GT 를 그대로 "
+    "쓰므로 낙관 편향이 있고, 두 경로의 차이가 곧 속도 추정 오차의 대가다. 학습 롤아웃은 "
+    "train_with_estimated_states=True 라 이 경로와 같다.",
+)
+parser.add_argument(
+    "--use_priv_latent",
+    action="store_true",
+    help="actor 입력을 history latent 대신 **privileged latent** 로 준다(sim 전용). 학습 롤아웃은 "
+    "dagger 주기(it%%20)를 뺀 95%% 가 priv 경로이므로, 기본 평가(history 경로)와의 차이는 곧 "
+    "distillation 오차다. 두 경로를 비교하면 실패가 정책 탓인지 증류 탓인지 분리된다.",
+)
+parser.add_argument(
     "--run_params",
     type=str,
     default=None,
@@ -36,6 +57,31 @@ parser.add_argument(
     action="store_true",
     help="정지 기립 자세에서 출발(rel_stand_envs=1.0). 지정하지 않으면 학습 설정(기본 10%)대로라 "
     "1-env 램프는 대개 RSI(참조 모션의 움직이는 프레임)에서 시작해 '0 m/s 출발' 전제가 깨진다.",
+)
+parser.add_argument(
+    "--no_dr",
+    action="store_true",
+    help="도메인 랜덤화 이벤트를 전부 끈다(env_cfg.events=None). 마찰/질량/CoM/게인 랜덤화와 "
+    "push 임펄스가 사라져 롤아웃마다 동일한 nominal 플랜트로 측정한다. 학습이 DR-ON 이었다면 "
+    "정책 입장에선 OOD 조건이므로, 런 간 비교가 아니라 변동 원인 분리에만 쓸 것.",
+)
+parser.add_argument(
+    "--cam_view",
+    type=str,
+    default="chase",
+    choices=["chase", "side", "front", "top", "diag"],
+    help="추종 카메라 시점. chase=뒤·위(기본), side=우측면, front=정면, top=상공, diag=뒤측면 3/4.",
+)
+parser.add_argument(
+    "--no_push",
+    action="store_true",
+    help="push 임펄스만 끄고 나머지 DR(마찰/질량/CoM/게인)은 유지. --no_dr 과 조합해 어느 성분이 "
+    "정책을 저속 고착 모드에서 빼내는지 분리할 때 쓴다.",
+)
+parser.add_argument(
+    "--only_push",
+    action="store_true",
+    help="push 임펄스만 남기고 나머지 DR 을 끈다(--no_push 의 반대).",
 )
 parser.add_argument(
     "--heading_hold",
@@ -60,7 +106,7 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 args_cli.headless = True
-args_cli.enable_cameras = True
+args_cli.enable_cameras = not args_cli.no_video
 app = AppLauncher(args_cli).app
 
 import inspect  # noqa: E402
@@ -80,8 +126,12 @@ from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg  # noqa: 
 # RecordVideo 가 캡처하는 perspective 카메라(/OmniverseKit_Persp) prim 을 USD 로 직접 옮긴다.
 # (sim.set_camera_view 는 headless+RecordVideo 에서 _visualizers 가 비어 no-op; isaacsim.core.utils
 #  viewports 헬퍼는 6.0 에서 제거됨 → 버전-무관한 USD 경로 사용.)
-from omni.kit.viewport.utility import get_active_viewport  # noqa: E402
-from omni.kit.viewport.utility.camera_state import ViewportCameraState  # noqa: E402
+# --no_video 로 카메라를 끄면 viewport 확장 자체가 로드되지 않아 이 import 가 실패한다.
+if args_cli.no_video:
+    get_active_viewport = ViewportCameraState = None
+else:
+    from omni.kit.viewport.utility import get_active_viewport  # noqa: E402
+    from omni.kit.viewport.utility.camera_state import ViewportCameraState  # noqa: E402
 from pxr import Gf  # noqa: E402
 
 _PERSP_PATH = "/OmniverseKit_Persp"
@@ -130,6 +180,16 @@ if args_cli.run_params:
                 setattr(env_cfg, _k, _run_cfg[_k])
                 _restored[_k] = (_old, _run_cfg[_k])
 
+if args_cli.no_dr and getattr(env_cfg, "events", None) is not None:
+    env_cfg.events = None  # DirectRLEnv 는 `if self.cfg.events:` 가드라 None 이면 EventManager 자체를 안 만든다.
+
+if getattr(env_cfg, "events", None) is not None and (args_cli.no_push or args_cli.only_push):
+    # EventManager 는 None 항목을 건너뛴다(event_manager.py:357).
+    for _term in [f for f in vars(env_cfg.events) if not f.startswith("_")]:
+        _is_push = _term == "push_robot"
+        if _is_push if args_cli.no_push else not _is_push:
+            setattr(env_cfg.events, _term, None)
+
 if args_cli.force_stand:
     if "stand" not in str(env_cfg.reset_strategy):
         env_cfg.reset_strategy = "random_stand"
@@ -144,8 +204,17 @@ env_cfg.episode_length_s = 1e6
 # /OmniverseKit_Persp 카메라 prim 의 world transform 을 USD 로 직접 써서 추종시킨다.
 # 로봇 진행 방향(+x) 기준 뒤·위에서 따라가는 체이스캠.
 # 로봇이 화면 중앙에 여유있게 들어오도록 뒤로 더 물리고 살짝 높인다.
-CAM_EYE_OFFSET = (-6.0, 0.0, 2.4)  # base 기준 카메라 위치 오프셋 [m]
-CAM_TGT_OFFSET = (0.0, 0.0, 0.3)  # base 기준 주시점 오프셋 [m]
+# `--cam_view` 로 시점 선택. 값은 base 기준 (eye offset, target offset) [m].
+#   chase = 기존 기본값(뒤·위 추종), side = 우측면(보행 자세·발 궤적), front = 정면(좌우 대칭·횡동요),
+#   top = 상공(heading 유지·경로 이탈), diag = 뒤측면 3/4 뷰.
+CAM_VIEWS = {
+    "chase": ((-6.0, 0.0, 2.4), (0.0, 0.0, 0.3)),
+    "side": ((0.0, -5.0, 1.0), (0.0, 0.0, 0.35)),
+    "front": ((7.0, 0.0, 1.6), (0.0, 0.0, 0.35)),
+    "top": ((-1.5, 0.0, 9.0), (0.0, 0.0, 0.0)),
+    "diag": ((-4.5, -4.5, 2.6), (0.0, 0.0, 0.35)),
+}
+CAM_EYE_OFFSET, CAM_TGT_OFFSET = CAM_VIEWS[args_cli.cam_view]
 
 agent_cfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
 
@@ -164,15 +233,16 @@ for _lvl in VX_PROFILE:
 VX_CMD_TRAJ = np.asarray(_cmd_traj, dtype=np.float32)
 total_steps = len(VX_CMD_TRAJ)
 
-env = gym.make(TASK, cfg=env_cfg, render_mode="rgb_array")
-env = gym.wrappers.RecordVideo(
-    env,
-    video_folder=args_cli.out_dir,
-    step_trigger=lambda s: s == 0,
-    video_length=total_steps,
-    name_prefix="speed_ramp",
-    disable_logger=True,
-)
+env = gym.make(TASK, cfg=env_cfg, render_mode=None if args_cli.no_video else "rgb_array")
+if not args_cli.no_video:
+    env = gym.wrappers.RecordVideo(
+        env,
+        video_folder=args_cli.out_dir,
+        step_trigger=lambda s: s == 0,
+        video_length=total_steps,
+        name_prefix="speed_ramp",
+        disable_logger=True,
+    )
 env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
 _accepted = set(inspect.signature(_VendoredPPO.__init__).parameters.keys()) - {"self"}
@@ -181,7 +251,28 @@ _cfg["algorithm"] = {k: v for k, v in _cfg["algorithm"].items() if k in _accepte
 runner = OnPolicyRunnerParkourAMP(env, _cfg, log_dir=None, device=agent_cfg.device)
 runner.load(args_cli.checkpoint)
 policy = runner.get_inference_policy(device=env.unwrapped.device)
+if args_cli.use_priv_latent:
+    runner.eval_mode()
+    runner.alg.policy.to(env.unwrapped.device)
+    policy = runner.alg.policy.act_inference_priv
+if args_cli.use_estimator:
+    # act_inference 는 obs 의 priv_explicit(=env 의 ground-truth base 속도)를 그대로 actor 에 넣는다.
+    # 실기는 그 값을 못 재므로, 학습 롤아웃(train_with_estimated_states=True)과 동일하게
+    # estimator(proprio) 출력으로 덮어써서 배포 조건을 재현한다.
+    _est = getattr(runner.alg, "estimator", None)
+    if _est is None:
+        raise SystemExit("이 체크포인트에는 estimator 가 없다 — --use_estimator 를 쓸 수 없다.")
+    _est.to(env.unwrapped.device).eval()
+    _inner_policy = policy
+
+    def policy(obs, _inner=_inner_policy, _e=_est):  # noqa: F811
+        obs = obs.clone()
+        obs["priv_explicit"] = _e(obs["policy"])
+        return _inner(obs)
+
 print(f">>> checkpoint 로드: {args_cli.checkpoint}")
+print(f">>> priv_explicit 경로: {'estimator 추정 (배포 조건)' if args_cli.use_estimator else 'env ground-truth (특권 정보)'}")
+print(f">>> actor latent 경로: {'priv (학습 롤아웃과 동일)' if args_cli.use_priv_latent else 'history (배포와 동일)'}")
 print(f">>> {len(VX_PROFILE)} 레벨 × (상승 {args_cli.ramp_s}s + 유지 {args_cli.hold_s}s) "
       f"= {total_steps} steps ({total_steps * dt:.1f}s)")
 
@@ -239,7 +330,7 @@ if isinstance(obs, tuple):
 
 # Kit viewport 는 카메라 pose 를 자체 매니퓰레이터 상태로 관리하며 매 프레임 USD 를 덮어쓴다.
 # 따라서 USD xformOp 직접 수정이 아니라 ViewportCameraState API 로 제어해야 렌더에 반영된다.
-_viewport = get_active_viewport()
+_viewport = get_active_viewport() if get_active_viewport is not None else None
 _cam_state = ViewportCameraState(_PERSP_PATH, _viewport) if _viewport is not None else None
 if _cam_state is None:
     print(f"[경고] active viewport 를 찾지 못해 카메라 추종을 건너뜁니다.")
@@ -337,6 +428,12 @@ np.savez(
     yaw_err=np.array(log["yaw_err"]),
     yaw_cmd=np.array(log["yaw_cmd"]),
     heading_hold=bool(args_cli.heading_hold),
+    # priv_explicit 를 estimator 로 줬는지. 이 값이 다르면 서로 다른 조건의 측정이라 같은 표에
+    # 넣으면 안 된다(구 npz 에는 키가 없으므로 False 로 간주).
+    use_estimator=bool(args_cli.use_estimator),
+    no_dr=bool(args_cli.no_dr),
+    no_push=bool(args_cli.no_push),
+    only_push=bool(args_cli.only_push),
     heading_kp=float(args_cli.heading_kp),
     heading_ki=float(args_cli.heading_ki),
     heading_target=float(HEADING_TARGET),
