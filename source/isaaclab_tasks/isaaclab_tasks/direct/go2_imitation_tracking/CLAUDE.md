@@ -40,22 +40,60 @@ go2_imitation_tracking/
 
 ---
 
-## Observation Space (48-dim)
+## Observation (RMA dict obs — 2026-07 개편)
+
+배포 가능성을 위해 단일 48-dim 텐서에서 dict obs로 바뀌었다. `root_lin_vel_b`는 실기
+GO2에서 측정할 수 없으므로 policy obs에서 빠지고 estimator가 추정한다.
+
+**policy (42-dim)** — priv_explicit로 분리한 root 속도 항은 제외. `_apply_obs_dr`로 노이즈가 실린다.
 
 | idx | 성분 | dim |
 |-----|------|-----|
-| 0–2 | `root_lin_vel_b` | 3 |
-| 3–5 | `root_ang_vel_b` | 3 |
-| 6–8 | `projected_gravity_b` | 3 |
-| 9–10 | `lin_vel_cmd` (vx, vy) | 2 |
-| 11 | `yaw_vel_cmd` | 1 |
-| 12–23 | `joint_pos - default` | 12 |
-| 24–35 | `joint_vel` | 12 |
-| 36–47 | `actions` | 12 |
-| **합계** | | **48** |
+| 0–2 | `projected_gravity_b` | 3 |
+| 3–4 | `lin_vel_cmd` (vx, vy) | 2 |
+| 5 | `yaw_vel_cmd` | 1 |
+| 6–17 | `joint_pos - default` | 12 |
+| 18–29 | `joint_vel` | 12 |
+| 30–41 | `actions` | 12 |
+| **합계** | | **42** |
+
+- `actions` 블록(30–41)은 학습 내내 리터럴 0인 dead channel이다. 배포 시에도 0.0 고정할 것.
+- **`joint_pos_tan_norm=True`** 면 관절 블록이 12 → **72**(관절별 회전의 tan-norm 6D)로 늘어
+  policy가 **102**, history가 (10, 102)가 된다. MimicKit actor proprio(117) 중 96이 이 표현이라
+  대조하려고 만든 플래그다(`_comparisons/mimickit_vs_60_actuator_limit/README.md` §16).
+  - `observation_space`는 cfg 상수가 아니라 **env `__init__`이 `super().__init__` 전에** 다시
+    계산한다 — hydra 오버라이드가 확정되는 시점이 거기다.
+  - `_apply_obs_dr`의 인덱스를 **하드코딩하지 말 것.** `self._obs_idx_joint_vel`에서 유도한다.
+  - 관절각 노이즈(`joint_pos_noise`)와 `encoder_bias`는 `_apply_obs_dr`이 아니라
+    **`_get_observations`에서 라디안 공간에** 더한다. tan-norm 출력에 라디안을 더할 수 없다.
+    raw 경로에서는 인코딩이 항등이라 예전 동작과 bit-identical이다.
+  - Go2 축(hip=x, thigh/calf=y) 때문에 72 중 **32가 θ와 무관한 상수**다(실측: 상수 차원
+    raw 13 → tan-norm 45). `EmpiricalNormalization`이 `std + 1e-2`로 나눠 NaN은 아니고 0이 된다.
+    정보량은 관절당 (cos θ, sin θ)뿐이라 **차원 맞춘 대조군은 cos/sin 24**다.
+- **2026-07-30 변경**: `root_ang_vel_b`가 policy obs에서 제거되어 인덱스가 3씩 앞으로 밀렸다.
+  `_apply_obs_dr`의 노이즈 슬라이스도 함께 이동했고, `dr.ang_vel_noise`는 주입할 자리가
+  없어져 **dead config**가 되었다(되살릴 때 인덱스만 밀어 남기면 σ=0.2가 σ=0.05인
+  `projected_gravity_b`에 들어가 4배 증폭되므로 주의).
+
+**priv_explicit (6-dim)** — 노이즈 없는 GT. critic 입력이자 estimator target.
+
+| idx | 성분 | 비고 |
+|-----|------|------|
+| 0–2 | `root_lin_vel_b × priv_explicit_lin_vel_scale` | 실측 불가 |
+| 3–5 | `root_ang_vel_b × priv_explicit_ang_vel_scale` | 설계 일관성을 위해 obs에서 제외 |
+
+- 둘 다 policy obs에 없으므로 estimator 과제는 **미관측 상태 추정**이다(denoising 아님).
+  평균예측 MSE 기준선: lin 0.381 / ang 0.0201 (`s²·Var(target)`, 2026-07-30 실측).
+
+- 두 scale은 actor/critic 입력에선 normalizer를 지나므로, 실질 역할은 estimator MSE에서의
+  **블록 간 상대 gradient 가중치**다. `Loss/estimator_lin` vs `Loss/estimator_ang`로 확인한다.
+
+**priv_latent (19-dim)** — domain-rand 파라미터 (armature/friction/mass/foot_fric/kp/kd/action_delay + encoder_bias 12).
+
+**history (10 × 42)** — policy proprio 링버퍼 (노이즈 포함).
 
 - command 변환(quat_apply) 제거. 버퍼를 그대로 concat.
-- AMP observation (490-dim = 43×10 history) 은 go2_imitation과 동일, 절대 수정 금지.
+- AMP observation (490-dim = 49×10 history) 은 go2_imitation과 동일, 절대 수정 금지.
 
 ---
 

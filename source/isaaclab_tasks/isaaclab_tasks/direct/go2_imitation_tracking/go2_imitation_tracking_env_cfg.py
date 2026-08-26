@@ -42,7 +42,7 @@ MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "smr_mirror_pkl")
 #   hold-out RMSE(0.017)는 세 캡처가 같은 결함을 공유해 이를 **걸러내지 못했다**.
 #   검증: 식별된 마찰이 요구하는 소산 / 모터가 실제로 낸 정미 일 = 구 24.6배 → 신 1.1배.
 #        `tau_est` 독립 회귀와도 coulomb 0.198/0.151/0.670 vs 0.213/0.156/0.655 로 일치.
-#   상세: reports/_comparisons/pace_go2_sysid_excitation_audit/
+#   상세: reports/real2sim/_comparisons/pace_go2_sysid_excitation_audit/
 PACE_ARMATURE: dict[str, float] = {"hip": 0.00101, "thigh": 0.00011, "calf": 0.01610}  # [kg·m²]
 PACE_VISCOUS: dict[str, float] = {"hip": 0.00187, "thigh": 0.01617, "calf": 0.00152}  # [N·m·s/rad]
 PACE_COULOMB: dict[str, float] = {"hip": 0.19832, "thigh": 0.15084, "calf": 0.67005}  # [N·m]
@@ -57,7 +57,7 @@ PACE_COULOMB_LEGACY: dict[str, float] = {"hip": 0.023, "thigh": 0.010, "calf": 0
 # viscous 가 독립 회귀 대비 3.5~10.8배, 에너지 수지 대비 1.6~3.0배로 기각됐다(원인 미상,
 # 리그 오염과는 무상관 확인). r2s sim 에서 **눈으로 비교하기 위한 프리셋**으로만 쓴다.
 # 파라미터는 결합 식별이므로 이 세트의 일부만 떼어 위 `PACE_*` 와 섞지 말 것.
-# 상세: reports/_comparisons/pace_go2_sysid_excitation_audit/ (§신규 캡처 적합 물리 검사)
+# 상세: reports/real2sim/_comparisons/pace_go2_sysid_excitation_audit/ (§신규 캡처 적합 물리 검사)
 PACE_ARMATURE_SET3: dict[str, float] = {"hip": 0.00758, "thigh": 0.00531, "calf": 0.02106}  # [kg·m²]
 PACE_VISCOUS_SET3: dict[str, float] = {"hip": 0.1806, "thigh": 0.1436, "calf": 0.1265}  # [N·m·s/rad]
 PACE_COULOMB_SET3: dict[str, float] = {"hip": 0.1446, "thigh": 0.0997, "calf": 0.5766}  # [N·m]
@@ -106,7 +106,7 @@ class DomainRandCfg:
     # 고주파 운동을 포함하므로 진짜 잡음은 더 작다) 0.5 는 그 5.0 배였다.
     # 램프 실측 관절속도와 비교하면 σ=0.5 는 cmd 0.5 에서 |q̇| 중앙(0.335)의 **149%** 로
     # 신호보다 컸다. 0.15 는 측정 상한의 1.5 배라 실기 대비 여전히 보수적이면서 그 병리를 없앤다.
-    # 근거·재현: `reports/rsl_rl/go2_imitation_tracking/_comparisons/joint_vel_noise_calibration/`
+    # 근거·재현: `reports/go2_imitation/_comparisons/joint_vel_noise_calibration/`
     joint_vel_noise: float = 0.15  # [rad/s]
     # DEAD (2026-07-30): root 선속도가 policy obs 에서 빠져(estimator 가 추정) 주입할 자리가 없다.
     lin_vel_noise: float = 0.1  # [m/s]
@@ -133,6 +133,9 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
                              foot_friction_offset(1) + kp_scale(1) + kd_scale(1) +
                              action_delay_norm(1) + encoder_bias_norm(12)
         history(10, 42)   = policy proprio ring buffer (noised)
+
+    ⚠ :attr:`joint_pos_tan_norm` 이 True 면 관절 블록이 12 → 72(관절별 회전 tan-norm)로 늘어
+    policy 가 **102**, history 가 (10, 102)가 된다 — MimicKit 관측 표현 대조 arm.
 
     **priv_explicit로 분리한 신호는 policy obs에서 제외한다** (2026-07-30 변경). estimator가
     추정하는 대상을 actor에게 직접 보여주면 추정 구조가 무의미하기 때문이다. root_ang_vel_b는
@@ -166,6 +169,10 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     # policy(42) = projected_gravity_b(3) + lin_vel_cmd(2) + yaw_vel_cmd(1)
     #            + joint_pos_offset(12) + joint_vel(12) + actions(12)
     # root_lin_vel_b·root_ang_vel_b는 priv_explicit로 분리되어 여기 없다.
+    #
+    # ⚠ `joint_pos_tan_norm=True` 면 관절 블록이 12 → 72 로 늘어 policy 가 **102** 가 된다.
+    #   이 상수는 env `__init__` 이 hydra 오버라이드 확정 후 다시 계산해 덮어쓴다
+    #   (`Go2ImitationTrackingEnv.__init__` — `super().__init__` 호출 **전**).
     observation_space: int = 3 + 2 + 1 + 12 + 12 + 12  # = 42
     action_space: int = 12
     hip_scale_reduction: bool = True  # hip(abduction) 관절 액션을 0.5배로 축소
@@ -189,6 +196,27 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     # 단, obs에서 각속도를 뺀 뒤로는 pass-through 경로가 없어져 `ang_vel_noise²`(=0.04)
     # 기준선은 **무효**다. 대신 target 자체의 분산(=평균 예측 시 MSE)과 비교할 것.
     priv_explicit_ang_vel_scale: float = 0.25
+
+    #: 관절 각도를 **raw 라디안 12** 대신 **관절별 회전의 tan-norm 72** 로 넣는다 (MimicKit 방식).
+    #:
+    #: 왜: MimicKit 의 actor proprio 는 117 차원인데 그 중 96 이 관절 회전의 tan-norm 이다
+    #: (`kin_char_model.dof_to_rot` → `quat_to_tan_norm`). 우리 12 개는 **무계 선형 라디안**이라
+    #: 학습 분포의 가장자리(= 고속 천장이 있는 바로 그 지점)에서 정규화 통계 이동·활성 포화에
+    #: 취약하다. tan-norm 은 [−1,1] 유계이고 θ 에 대해 주기적이다.
+    #: 근거·검산: `reports/go2_imitation/_comparisons/mimickit_vs_60_actuator_limit/README.md` §16.
+    #:
+    #: 인코딩: 관절 j 의 회전축 a_j 에 대해 `q = angle_axis(a_j, θ_j)` 를 만들고
+    #: `[R(q)·(1,0,0), R(q)·(0,0,1)]` 6 차원을 낸다 (MimicKit `torch_util.quat_to_tan_norm`).
+    #: θ 는 **기본자세 상대**를 쓴다 — 절대각과는 관절마다 고정 회전 하나만큼만 다르고
+    #: (`R(a, θ_rel+θ_def) = R(a,θ_def)·R(a,θ_rel)`) 그 차이는 첫 선형층이 흡수하므로,
+    #: 상대각을 쓰면 DR(`joint_pos_noise`·`encoder_bias`) 의미가 raw 경로와 그대로 같아진다.
+    #:
+    #: ⚠ 정보량은 관절당 (cos θ, sin θ) 2 개뿐이다. Go2 축(hip=x, thigh/calf=y) 때문에 72 중
+    #: **32 차원이 θ 와 무관한 상수**다(정규화 후 정확히 0 이 되며 NaN 은 아니다 —
+    #: `EmpiricalNormalization` 이 `std + eps`, eps=1e-2 로 나눈다). 이 arm 이 성공하면
+    #: 차원을 맞춘 대조군은 또 다른 72 가 아니라 **cos/sin 24** 다.
+    #: ⚠ 42 → 102 는 actor 1 층(68→128)과 history encoder 입력(420→1020)도 같이 키운다 — 교란 요인.
+    joint_pos_tan_norm: bool = False
 
     num_amp_observations: int = 10  # disc hist depth (ablation: 2→10, MimicKit 방향)
     amp_observation_space: int = 49  # per-step disc obs (R4: +6 root_rot_tan_norm)
@@ -222,7 +250,7 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     #   ② cmd 0 에서 정지는 task reward 1.0(최대)이라 들어가는 것만 강화되고,
     #   ③ 명령 U[0,4] 를 4~7s 마다 재샘플하는 10s 에피소드에서 "정지 후 재출발"을 요구받는
     #      경우가 4.6% 뿐이며 그마저 리셋이 대신 해결해 준다.
-    # 아래 세 값이 ①~③ 에 각각 대응한다. 상세: reports/rsl_rl/go2_imitation_tracking/
+    # 아래 세 값이 ①~③ 에 각각 대응한다. 상세: reports/go2_imitation/go2_imitation_tracking/
     # 2026-07-30_10-35-28_obs42_novideo/README.md "읽히는 것 4 → 원인 규명".
     rel_standing_envs: float = 0.1
     """재샘플 시 명령을 **정확히 0** 으로 강제할 env 비율 (②).
@@ -251,7 +279,7 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     # 참조 모션에 "서 있다가 출발" 구간이 아예 없으니 discriminator 를 고칠 방법이 없다.
     # 그래서 정지 명령 구간에서만 style 을 끄고 **default pose 유지 보상으로 대체**한다.
     # 이러면 튜닝 불가능한 신호(disc 출력)가 튜닝 가능한 신호로 바뀐다.
-    # 근거·원자료: reports/rsl_rl/go2_imitation_tracking/2026-07-31_12-27-01_reststand_ft/
+    # 근거·원자료: reports/go2_imitation/go2_imitation_tracking/2026-07-31_12-27-01_reststand_ft/
     # README.md "★★ 보상 분해 측정".
     standing_style_substitute: bool = True
     """정지 명령(:attr:`rel_standing_envs` 로 강제된 env)에서 style reward 를 pose 보상으로 대체.
@@ -332,7 +360,7 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     # 그런데 이 task 가 로드하는 `Go2_noninstanceable/go2.usd` 의 drive `maxForce` 는
     # hip/thigh 23.7, **calf 45.43** 이고, MimicKit 의 go2.usd 는 calf 35.5 다. 실측에서도
     # `|τ|max = 23.50` 이 thigh·calf 여러 관절에 정확히 찍혀 토크가 병목임이 확인됐다
-    # (`reports/rsl_rl/go2_imitation_tracking/_comparisons/mimickit_vs_60_actuator_limit/`).
+    # (`reports/go2_imitation/_comparisons/mimickit_vs_60_actuator_limit/`).
     #
     # `saturation_effort` 는 dict 를 못 받으므로(`actuator_pd_cfg.py:50` 이 float) 그룹을 둘로
     # 나눈다. 한 그룹에 `saturation_effort=35.5` 를 주고 `effort_limit` 만 관절별로 주면

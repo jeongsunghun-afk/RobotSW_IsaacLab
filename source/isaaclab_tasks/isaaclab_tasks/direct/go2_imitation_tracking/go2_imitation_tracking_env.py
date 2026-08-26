@@ -22,6 +22,8 @@ Policy observation dict (실배포 가능 RMA 구조 — estimator가 policy(42)
   policy(42)        = projected_gravity_b(3) +
                        lin_vel_cmd(2) + yaw_vel_cmd(1) +
                        joint_pos - default(12) + joint_vel(12) + actions(12)
+  ⚠ `joint_pos_tan_norm=True` 면 관절 블록이 12 → 72(관절별 회전 tan-norm) 로 늘어
+    policy 가 **102**, history 가 (10, 102) 가 된다. §16 의 MimicKit 대조 arm 이다.
   priv_explicit(6)  = root_lin_vel_b * priv_explicit_lin_vel_scale +
                        root_ang_vel_b * priv_explicit_ang_vel_scale
 
@@ -58,7 +60,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_mul
+from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_from_angle_axis, quat_mul
 
 from .go2_imitation_tracking_env_cfg import (
     PACE_ARMATURE,
@@ -102,10 +104,29 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
     # key body 이름 (발 4개) — motion_lib foot 순서와 일치
     KEY_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
 
+    #: 관절 회전축 — 이름 접미사로 고른다. Go2 는 hip 이 x, thigh/calf 가 y 축이다
+    #: (MimicKit `data/assets/go2/go2.xml` 의 12 개 `<joint axis=...>` 로 확인).
+    #: tan-norm 인코딩에서 축 선택은 **어느 성분이 상수가 되느냐**만 바꾼다 — 정보량은
+    #: 어느 축을 쓰든 (cos θ, sin θ) 로 같고 첫 선형층이 고정 재배치를 흡수한다.
+    JOINT_AXIS_BY_SUFFIX = {"hip": (1.0, 0.0, 0.0), "thigh": (0.0, 1.0, 0.0), "calf": (0.0, 1.0, 0.0)}
+
     def __init__(self, cfg: Go2ImitationTrackingEnvCfg, render_mode: str | None = None, **kwargs):
+        # policy obs 폭은 관절 인코딩에 달려 있다. `super().__init__` 이 `cfg.observation_space` 로
+        # gym space 를 만들므로 **그 전에** 확정해야 하고, hydra 오버라이드는 env 생성 시점엔 이미
+        # cfg 에 반영돼 있으므로 여기가 유일하게 맞는 자리다(cfg `__post_init__` 은 너무 이르다).
+        joint_pos_obs_dim = 12 * 6 if cfg.joint_pos_tan_norm else 12
+        cfg.observation_space = 3 + 2 + 1 + joint_pos_obs_dim + 12 + 12
+
         super().__init__(cfg, render_mode, **kwargs)
 
         self.cfg = cfg
+
+        # ── policy proprio 레이아웃 ──────────────────────────────
+        # `_apply_obs_dr` 는 인덱스를 하드코딩하지 않고 이 값에서 유도한다. 예전에 각속도를
+        # 뺐을 때 슬라이스만 밀린 채 남겨두면 σ 가 4 배로 잘못 주입되는 사고가 있었다.
+        self._joint_pos_obs_dim = joint_pos_obs_dim
+        self._obs_idx_joint_vel = 6 + joint_pos_obs_dim  # joint_vel 블록 시작
+        self._obs_idx_actions = self._obs_idx_joint_vel + 12
 
         # ── 모션 라이브러리 ─────────────────────────────────────
         motion_file = self.cfg.motion_file
@@ -125,6 +146,19 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self._hip_joint_ids = torch.tensor(
             [i for i, n in enumerate(self._robot.data.joint_names) if "hip" in n], dtype=torch.long, device=self.device
         )
+
+        # ── tan-norm 인코딩용 관절 회전축 [12, 3] ────────────────
+        if self.cfg.joint_pos_tan_norm:
+            axes = []
+            for name in self._robot.data.joint_names:
+                match = [ax for suffix, ax in self.JOINT_AXIS_BY_SUFFIX.items() if suffix in name]
+                if len(match) != 1:
+                    raise ValueError(
+                        f"관절 '{name}' 의 회전축을 정할 수 없다 (매칭 {len(match)} 건). "
+                        f"`JOINT_AXIS_BY_SUFFIX` 에 접미사를 추가할 것."
+                    )
+                axes.append(match[0])
+            self._joint_axis = torch.tensor(axes, dtype=torch.float32, device=self.device)  # [12, 3]
 
         # ── motion_lib ↔ IsaacLab joint 순서 매핑 ────────────────
         # IsaacLab joint 순서(알파벳 등)와 PKL DOF_NAMES 순서가 다를 수 있음.
@@ -355,17 +389,27 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # priv_explicit로 분리된 신호는 policy obs에서 **제외**한다 — estimator가 추정하는
         # 대상을 actor에게 직접 보여주면 추정 구조가 무의미해지기 때문이다.
         # root_lin_vel_b(실측 불가)와 root_ang_vel_b(priv_explicit로 이동)가 모두 빠졌다.
+        # 관절각 노이즈(`joint_pos_noise`)와 엔코더 오프셋(`encoder_bias`)은 **라디안 공간에서**
+        # 더한 뒤 인코딩한다. tan-norm 출력에 라디안을 더하면 물리적 의미가 사라지기 때문이다.
+        # raw 경로에서는 인코딩이 항등이라 예전처럼 블록에 더하는 것과 bit-identical 하다.
+        joint_pos_rel = self._robot.data.joint_pos - self._robot.data.default_joint_pos  # [N, 12] rad
+        if self.cfg.domain_rand:
+            if self.cfg.dr.obs_noise:
+                joint_pos_rel = joint_pos_rel + torch.randn_like(joint_pos_rel) * self.cfg.dr.joint_pos_noise
+            if self.cfg.dr.encoder_bias:
+                joint_pos_rel = joint_pos_rel + self._encoder_bias
+
         proprio = torch.cat(
             [
                 self._robot.data.projected_gravity_b,  # 3
                 self._lin_vel_cmd,  # 2 (vx, vy)
                 self._yaw_vel_cmd.unsqueeze(-1),  # 1
-                self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # 12
+                self._encode_joint_pos(joint_pos_rel),  # 12 (raw) 또는 72 (tan-norm)
                 self._robot.data.joint_vel,  # 12
                 self.actions,  # 12
             ],
             dim=-1,
-        )  # total = 42
+        )  # total = 42 (raw) 또는 102 (tan-norm)
         policy_obs = self._apply_obs_dr(proprio)
 
         # ── priv_explicit(6) — GT root 선속도/각속도 (critic/estimator target, 노이즈 없음) ──
@@ -732,18 +776,46 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         vel = torch.cat([lin, ang], dim=-1)  # [n,6]
         self._robot.write_root_com_velocity_to_sim_index(root_velocity=vel, env_ids=env_ids.to(torch.int32))
 
-    def _apply_obs_dr(self, obs: torch.Tensor) -> torch.Tensor:
-        """policy proprio(42-dim) 에만 관측 노이즈 + encoder bias 를 더한다. AMP obs/priv_explicit 는 불변.
+    def _encode_joint_pos(self, joint_pos_rel: torch.Tensor) -> torch.Tensor:
+        """관절각 [N, 12] rad → policy obs 블록. raw 는 항등, tan-norm 은 [N, 72].
 
-        42-dim 레이아웃 — root_lin_vel_b(실측 불가)와 root_ang_vel_b(priv_explicit로 이동)가
-        모두 policy obs에서 빠져 있다. GT priv_explicit는 노이즈 없이 그대로 사용한다:
+        tan-norm 은 MimicKit ``torch_util.quat_to_tan_norm`` 과 같은 식이다: 관절 회전
+        ``q = angle_axis(a_j, θ_j)`` 로 기준 tan(1,0,0)·norm(0,0,1) 을 돌려 6 차원을 만든다.
+
+        Args:
+            joint_pos_rel: 기본자세 상대 관절각 [rad], shape [num_envs, 12].
+
+        Returns:
+            shape [num_envs, 12] (raw) 또는 [num_envs, 72] (tan-norm).
+        """
+        if not self.cfg.joint_pos_tan_norm:
+            return joint_pos_rel
+        n, j = joint_pos_rel.shape
+        axis = self._joint_axis.unsqueeze(0).expand(n, -1, -1).reshape(n * j, 3)
+        quat = quat_from_angle_axis(joint_pos_rel.reshape(n * j), axis)  # [N*12, 4] xyzw
+        tan_ref = torch.zeros(n * j, 3, dtype=joint_pos_rel.dtype, device=joint_pos_rel.device)
+        tan_ref[:, 0] = 1.0  # (1, 0, 0)
+        norm_ref = torch.zeros_like(tan_ref)
+        norm_ref[:, 2] = 1.0  # (0, 0, 1)
+        tan_norm = torch.cat([quat_apply(quat, tan_ref), quat_apply(quat, norm_ref)], dim=-1)  # [N*12, 6]
+        return tan_norm.reshape(n, j * 6)
+
+    def _apply_obs_dr(self, obs: torch.Tensor) -> torch.Tensor:
+        """policy proprio 에 **중력·관절속도** 관측 노이즈를 더한다. AMP obs/priv_explicit 는 불변.
+
+        레이아웃 — root_lin_vel_b(실측 불가)와 root_ang_vel_b(priv_explicit로 이동)가 모두
+        policy obs에서 빠져 있다. GT priv_explicit는 노이즈 없이 그대로 사용한다:
             projected_gravity_b[0:3] +
             lin_vel_cmd[3:5] + yaw_vel_cmd[5:6] +
-            (joint_pos-default)[6:18] + joint_vel[18:30] + actions[30:42]
+            joint_pos 블록[6 : 6+D] + joint_vel[6+D : 18+D] + actions[18+D : 30+D]
+        여기서 D 는 12(raw) 또는 72(tan-norm)다.
 
-        NOTE: ``dr.ang_vel_noise`` 는 여기서 더 이상 쓰이지 않는다(각속도가 obs에 없음).
-        이 라인을 인덱스만 바꿔 남겨두면 σ=0.2 노이즈가 σ=0.05인 projected_gravity_b에
-        주입되어 4배 증폭되므로, re-point 가 아니라 **삭제**가 맞다.
+        ⚠ 관절각 노이즈와 ``encoder_bias`` 는 여기가 아니라 ``_get_observations`` 에서 **라디안
+        공간**에 더한다 — tan-norm 인코딩 후에는 라디안을 더할 수 없기 때문이다.
+
+        ⚠ 인덱스를 하드코딩하지 말 것. 예전에 각속도를 obs 에서 뺐을 때 슬라이스를 밀린 채
+        남겨두면 σ=0.2 노이즈가 σ=0.05 인 projected_gravity_b 에 주입돼 4 배 증폭됐다.
+        ``dr.ang_vel_noise`` 는 주입할 자리가 없어 dead config 다.
         """
         if not self.cfg.domain_rand:
             return obs
@@ -751,11 +823,9 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         noise = torch.zeros_like(obs)
         if dr.obs_noise:
             n = self.num_envs
+            jv = self._obs_idx_joint_vel
             noise[:, 0:3] = torch.randn(n, 3, device=self.device) * dr.gravity_noise  # projected_gravity_b
-            noise[:, 6:18] = torch.randn(n, 12, device=self.device) * dr.joint_pos_noise  # joint_pos - default
-            noise[:, 18:30] = torch.randn(n, 12, device=self.device) * dr.joint_vel_noise  # joint_vel
-        if dr.encoder_bias:
-            noise[:, 6:18] += self._encoder_bias  # per-env 고정 엔코더 오프셋
+            noise[:, jv : jv + 12] = torch.randn(n, 12, device=self.device) * dr.joint_vel_noise  # joint_vel
         return obs + noise
 
     def _get_priv_latent(self) -> torch.Tensor:
