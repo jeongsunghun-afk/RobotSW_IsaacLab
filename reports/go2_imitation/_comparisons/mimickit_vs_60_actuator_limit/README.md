@@ -769,3 +769,118 @@ lerp 0.8 은 `cmd 2.5` 부근에서 **trot → 비대칭 보행으로 전이**�
 
 원자료: `metrics/ramp_velscale1/`, `metrics/ramp_nopush/`, `metrics/ramp_velscale1_nopush/`
 · 보행 위상 `metrics/gait_phase.md`
+
+---
+
+## 15. (2026-08-26) 고정 std · 상수 LR arm — 그리고 **실험 설계 전체 지도**
+
+### 15-a. 결과 요약
+
+두 arm 을 더 돌렸다. 둘 다 `task_reward_lerp` 0.5(baseline 혼합) 고정, 변수 하나씩.
+
+| arm | 변경 | 결말 |
+|---|---|---|
+| `fixedstd_stock` / `fixedstd_vel1_stock` | `noise_std_type=fixed`, `init_noise_std=0.1` | **붕괴** — 48k/51k 에서 중단 |
+| `schedfixed_stock` | `agent.algorithm.schedule=fixed` (상수 LR 2e-4) | 60k 완주, 붕괴 없음 |
+
+**고정 std 붕괴의 원인은 std 가 아니라 스케줄러와의 상호작용이었다.** 고정 σ 에서 KL 은
+`Δμ²/(2σ²)` 라, baseline 이 초기에 0.42 까지 올렸다 0.15 로 내리는 std 를 0.1 로 못 박으면 같은
+평균 변화가 훨씬 큰 KL 로 찍힌다 → 스케줄러가 LR 을 바닥 1e-5 에 고정 → surrogate 발산(0.29).
+MimicKit 은 SGD 상수 LR 이라 이 경로가 없다. **상수 LR 단독 arm 이 멀쩡히 완주한 것으로 이 진단이
+뒷받침된다** — Adam + 상수 2e-4 가 터질 거라던 사전 우려는 빗나갔다.
+
+추가로 **단위도 안 맞았다**: MimicKit `pos` 모드는 action 이 곧 관절 목표각인데(`char_env.py:472`)
+우리는 `action_scale=0.25` 를 곱한다. 그쪽 std 0.1 = 0.1 rad, 우리 std 0.1 = 0.025 rad 로 **4 배 작다.**
+등가값은 0.4. 고정 std 를 다시 하려면 **상수 LR + 0.4** 를 같이 가야 한다.
+
+### 15-b. 상수 LR 은 **속도가 아니라 달성률**을 바꿨다 — 그러나 전이는 없다
+
+학습 지표는 전 구간 baseline 위다(60k: ep_len 996 vs 980, reward 810 vs 750,
+`lin_vel_reward` 33.4 vs 28.9, `amp_reward` 43.3 vs 40.4 — **두 항이 동시에** 올랐다).
+
+램프(40k 이후 4 점, `metrics/mimickit_align_summary.md`):
+
+```
+                       arm |   cmd 2.5    cmd 3.0    cmd 3.5    cmd 4.0
+    baseline (adaptive LR) | 1.598(97)  1.686(58)  0.592( 0)  0.049( 0)
+ const LR (schedule=fixed) | 1.586(95)  1.673(95)  1.626( 9)  0.131( 0)
+```
+
+★ `cmd 3.0` 에서 **median vx 는 1.673 vs 1.686 으로 사실상 동일한데 달성률만 58% → 95%** 다.
+더 빨라진 게 아니라 넘어지거나 멈추던 env 가 안 넘어진다. `cmd 3.5` 도 style 0.5 계열에서 처음으로
+0 이 아닌 값(0.592 → 1.626)이 나왔다. 이것은 §14 의 세 arm(`velscale1`·`nopush`·`vel1+nopush`)과
+**반대 축**이다 — 저쪽은 속도를 올리고 달성률은 58~64% 그대로였다.
+
+★★ 그러나 **위상차로 보면 전 구간 trot 이고 전이가 없다**(`metrics/gait_phase.md`).
+`cmd 3.5` 의 1.626 도 2.67 Hz trot 이다. 같은 표에서 PACE lerp 0.8 은 `cmd 3.0` 부터 bound
+(FL-FR 0.11)로 넘어간다. **결론은 §14 와 같다: style 0.5 는 trot 에 잠근다.** 상수 LR 은 그 trot 을
+더 튼튼하게 만들 뿐이다.
+
+`cmd 4.0` 걸음 품질은 붕괴 모드가 아니다(`base_h` 0.271, flip 8.4 Hz) — 단지 안 달릴 뿐이다.
+
+### 15-c. ★ 실험 설계 지도 — 왜 이 조합들인가
+
+지금까지의 arm 은 **세 축**으로 나뉜다. 축을 섞지 않는 것이 이 시리즈의 설계 원칙이다.
+
+```
+축 A. 플랜트/시뮬          "로봇이 물리적으로 못 내는 속도인가?"
+축 B. AMP style 가중치     "보상 혼합이 고속을 막는가?"
+축 C. MimicKit 레시피 정렬  "같은 데이터·같은 혼합인데 왜 저쪽만 되는가?"
+```
+
+| # | arm | 축 | 변경한 것 하나 | 결말 |
+|---|---|---|---|---|
+| 1 | `implicit_stock` | A | DCMotor → ImplicitActuator (토크-속도 곡선 제거) | baseline. `cmd 3.5` 0% — 곡선은 원인이 아님 |
+| 2 | `depen3_stock` | A | `max_depenetration_velocity` 1.0 → 3.0 | 기각. `cmd 2.5` 손해(4/4 점), 최고점 못 넘김 |
+| 3 | `noamp_stock` | B | `lerp` 1.0 (style 제거) | 3.589 m/s 나오지만 `base_h` 0.18 · 34 Hz 진동 = 실기 불가 |
+| 4 | `lerp08_stock` / `lerp08_pace` | B | `lerp` 0.8 | **`cmd 4.0` 97~98% 달성.** 단 stock 은 고속에서 trot 회귀(§12) |
+| 5 | `lerp06_stock` | B | `lerp` 0.6 | 0.8 과 대등. 임계는 0.5~0.6 사이 |
+| 6 | `lerp08to06_curr` | B | 0.8 → 0.6 커리큘럼 | scratch 0.6 과 동률. 이점은 비용뿐 |
+| 7 | `velscale1_stock` | C | `vel_err_scale` 0.5 → 1.0 | `cmd 2.5` 1.50→1.87 로 오르지만 `cmd 3.5+` 0% |
+| 8 | `nopush_stock` | C | `dr.push_robot` off | 무효과 |
+| 9 | `velscale1_nopush` | C | 7+8 동시 | 7 과 같음. 상호작용 없음 |
+| 10 | `fixedstd_stock` / `_vel1` | C | action std 학습 → 고정 0.1 | **붕괴** (원인은 15-a) |
+| 11 | `schedfixed_stock` | C | adaptive KL → 상수 LR | 완주. 달성률만 개선, 전이 없음 |
+
+**왜 이 순서인가.**
+
+1. **축 A 를 먼저 소거했다.** "액추에이터가 부족해서"라면 보상을 아무리 만져도 안 되므로, 토크-속도
+   곡선을 통째로 제거하는 극단 실험(#1)으로 먼저 끝냈다. 13 개 체크포인트 전부 `cmd 3.5` 0% 라
+   **물리 한계 가설은 반증**됐고, 벽은 평탄한 thigh 23.7 N·m 로 옮겨갔다.
+2. **축 B 로 원인을 찾았다.** `lerp` 하나만 움직여 0.5 / 0.6 / 0.8 / 1.0 을 채웠다(#3~#6). 양 끝이 다
+   나쁘고 중간이 좋은 모양이라, **단조 관계가 아니라 최적점이 있는 축**임을 알려면 끝점을 반드시
+   찍어야 했다. 이 축에서 `cmd 4.0` 이 열렸다.
+3. **축 C 는 §13 이후에 열렸다.** MimicKit 이 **우리와 같은 18 클립 · 같은 50/50 혼합**으로 4 m/s 를
+   낸다는 것이 확인되면서, `lerp 0.8` 은 해법이 아니라 **우회로**가 됐다. 그래서 "50/50 을 고정한 채
+   MimicKit 과 다른 항을 하나씩 되돌린다"가 #7~#11 의 규칙이다. `lerp` 를 같이 움직이면 개선이
+   어느 쪽 덕인지 못 가린다.
+4. **#9 처럼 조합 arm 을 넣는 이유**는 상호작용 때문이다. 두 요인이 따로는 안 되는데 같이 걸면
+   열리는 경우가 이 task 에서 드물지 않아, 단독 두 개가 실패하면 2×2 격자를 한 칸 채워 확인한다.
+
+**판정 규칙(이 시리즈 전체에 적용).**
+
+- ★ **40k 이후 점으로만 판정.** 24k 이하에서 "3 점 연속·두 플랜트·부호 6/6" 으로 낸 판정이 40k 에서
+  뒤집힌 적이 있다(−41 → +6). 점을 더 모으는 게 해법이 아니라 **늦은 점만** 쓰는 것이 해법이다.
+- 재현 산포는 달성률 ±8~15%p / median ±0.02 m/s. 이보다 작은 차이는 차이가 아니다.
+- ★★ **속도와 보행 종류를 같이 본다.** `base_h`·부호반전 Hz·토크 캡은 "무너졌는가"는 잡아도
+  "어떤 걸음인가"는 못 잡는다. §12 의 trot 회귀와 §14~15 의 "전이 없음"은 둘 다 위상차로만 보였다.
+- 램프는 run params 가 아니라 **현재 소스 cfg** 로 env 를 만든다. 세대가 다른 체크포인트를 잴 때
+  `--no_pace` / `--joint_vel_noise` / `--sync_spawn_props` 로 학습 조건을 명시 고정할 것.
+
+### 15-d. 남은 미검증 (축 C)
+
+| 항목 | 우리 | MimicKit | 비고 |
+|---|---|---|---|
+| optimizer | **Adam** | **SGD** | 상수 LR 은 맞췄으나 optimizer 는 아직 |
+| action std | 학습 ≈0.15 | FIXED 0.1 (= 우리 **0.4**) | 상수 LR + 0.4 로 재시도 가능해짐 |
+| `action_bound_weight` | 없음 (하드 클립만) | 10.0 | FIXED std 와 세트로 쓰임 |
+| episode | 20 s | 10 s | |
+| lin : yaw 보상 가중 | 0.7 : 0.3 | 0.5 : 0.5 | |
+| DR | + obs noise · action delay | 없음 | 고속에 불리한 방향 |
+
+축 C 를 다 소거해도 안 열리면, 남는 설명은 **참조 데이터의 2.70~3.96 m/s 공백**(§13-e)이다.
+그 구간을 채우거나 학습 명령 상한을 참조가 존재하는 3.5 로 낮추는 것이 그다음 갈래다.
+
+원자료: `metrics/ramp_schedfixed/` · `metrics/ramp_fixedstd{,_vel1}/`
+· 요약 `metrics/mimickit_align_summary.md` (생성기 `logs/mimickit_align_summary.py`)
+· 보행 위상 `metrics/gait_phase.md`
