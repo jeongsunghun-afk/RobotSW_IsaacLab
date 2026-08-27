@@ -654,7 +654,7 @@ AMP 참조 데이터의 정지·저속 클립 커버리지, 페널티 항 커리
 
 ### 7-5. ★★ A/B 최종 결과 (4 repeat × 2 경로, 완료) — **격차가 남는다**
 
-원자료 `metrics/priv_vs_history_ramp.txt`.
+원자료 `metrics/priv_vs_history_ramp.md`.
 
 ```
              cmd 0.5              cmd 1.0        cmd 2.0        cmd 3.0
