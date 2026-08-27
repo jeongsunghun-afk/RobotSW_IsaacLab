@@ -54,12 +54,12 @@ class MLP(nn.Sequential):
         activation: str = "elu",
         last_activation: str | None = None,
     ):
-        # layers = [Linear(input_dim, hidden_dims[0]), activation, 
+        # layers = [Linear(input_dim, hidden_dims[0]), activation,
         #           Linear(...), activation, ..., Linear(..., output_dim)]
         # last_activation 지정 시 마지막에 적용
 ```
 
-**제약:** 
+**제약:**
 - 순차 구성만 지원 (residual 및 parallel 경로 없음)
 - 정규화 레이어 미내장 (외부에서 별도 추가 필요)
 
@@ -76,7 +76,7 @@ class MLP(nn.Sequential):
 - 내부 `_construct_algorithm()` (line 40-91, `rsl_rl/runners/on_policy_runner_amp.py`)에서:
   ```python
   actor_critic_class = self._get_actor_critic_class()  # 오버라이드 가능
-  actor_critic = actor_critic_class(obs, self.cfg["obs_groups"], 
+  actor_critic = actor_critic_class(obs, self.cfg["obs_groups"],
                                       self.env.num_actions, **self.policy_cfg)
   ```
 
@@ -247,7 +247,7 @@ def act_inference_priv(self, obs: TensorDict) -> torch.Tensor:
 | `state_dependent_std` 처리 | ✓ line 317-320 | ✓ line 340-343 | ✓ |
 
 **발견된 문제:**
-학습에서는 `torch.nan_to_num(obs_actor, nan=0.0)`을 line 301에서 호출하지만, `act_inference_priv`는 이 호출을 **빠뜨렸다**. 
+학습에서는 `torch.nan_to_num(obs_actor, nan=0.0)`을 line 301에서 호출하지만, `act_inference_priv`는 이 호출을 **빠뜨렸다**.
 - 이것은 first-frame 센서 오류나 물리 불안정성에서 NaN이 발생할 경우, actor 입력이 다를 수 있음을 의미한다.
 - forward pass 결과가 변할 수 있으므로, 현재 실행 중인 ramp A/B 비교가 **약간 오염**될 수 있다.
 - **권장:** `act_inference_priv` line 339 앞에 `obs_actor = torch.nan_to_num(obs_actor, nan=0.0)` 추가.
@@ -284,7 +284,7 @@ else:
 ### 6.1 정책 구성 (_construct_algorithm)
 
 ```python
-actor_critic = actor_critic_class(obs, self.cfg["obs_groups"], 
+actor_critic = actor_critic_class(obs, self.cfg["obs_groups"],
                                    self.env.num_actions, **self.policy_cfg)
 ```
 
@@ -329,7 +329,7 @@ cfg 값은 무시되고, 런타임에 env에서 읽음.
 
 ```python
 @torch.no_grad()
-def compute_leg_symmetric_states(*, env, obs: TensorDict | None = None, 
+def compute_leg_symmetric_states(*, env, obs: TensorDict | None = None,
                                    actions: torch.Tensor | None = None):
     """num_aug=2로 관찰/동작 L/R 미러링"""
     # 반환: ([original B; mirrored B], [...])
@@ -378,7 +378,7 @@ class DeployablePolicy(nn.Module):
         self.history_encoder = policy.history_encoder
         self.estimator = estimator
         ...
-    
+
     def forward(self, proprio, history):
         obs_actor = self.actor_obs_normalizer(proprio)
         priv_explicit = self.estimator(proprio)
@@ -441,7 +441,7 @@ class ResidualBlock(nn.Module):
         self.ln = nn.LayerNorm(dim)
         self.linear = nn.Linear(dim, dim)
         self.activation = activation
-    
+
     def forward(self, x):
         return x + self.activation(self.linear(self.ln(x)))
 
