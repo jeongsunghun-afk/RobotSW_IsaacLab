@@ -83,6 +83,10 @@ def main() -> None:
             m = re.search(rf"^{k}:\s*(true|false)\s*$", text, re.MULTILINE)
             if m:
                 setattr(env_cfg, k, m.group(1) == "true")
+        # ★ 캡도 복원해야 한다 — 안 하면 캡 없이 학습된 run 을 소스 기본 캡(25.0)으로 재게 된다.
+        m = re.search(r"^foot_reflected_inertia_cap:\s*(null|[0-9.]+)\s*$", text, re.MULTILINE)
+        if m:
+            env_cfg.foot_reflected_inertia_cap = None if m.group(1) == "null" else float(m.group(1))
     cap_cfg = getattr(env_cfg, "foot_reflected_inertia_cap", None)
     print(f"[probe] 적용: {{{', '.join(f'{k}={getattr(env_cfg, k)}' for k in TERM_KEYS)}}}  cap={cap_cfg}")
 

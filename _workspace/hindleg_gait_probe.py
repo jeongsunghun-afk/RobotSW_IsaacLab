@@ -47,7 +47,11 @@ def main():
     from pathlib import Path
 
     yml = Path(args_cli.checkpoint).resolve().parent / "params" / "env.yaml"
-    keys = ("foot_coupling", "foot_transpose", "foot_raw_friction", "foot_reflected_inertia", "terminate_tilt_deg")
+    keys = (
+        "foot_coupling", "foot_transpose", "foot_raw_friction", "foot_reflected_inertia",
+        "foot_reflected_inertia_cap",  # ★ 캡도 run 마다 다르다 — termsON 은 캡 없이 학습됐다
+        "terminate_tilt_deg",
+    )
     if yml.exists():
         text = yml.read_text()
         for k in keys:

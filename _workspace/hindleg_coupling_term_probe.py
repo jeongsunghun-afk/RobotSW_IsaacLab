@@ -95,7 +95,13 @@ def main() -> None:
             m = re.search(rf"^{k}:\s*(true|false)\s*$", text, re.MULTILINE)
             if m:
                 setattr(env_cfg, k, m.group(1) == "true")
-        print(f"[probe] run cfg 복원: {{{', '.join(f'{k}={getattr(env_cfg, k)}' for k in TERM_KEYS)}}}")
+        # ★ 캡도 run 마다 다르다. 불리언만 복원하면 캡 없이 학습된 `termsON` 을 **캡이 걸린 채**
+        #   재고, 그건 그 정책이 본 적 없는 플랜트다.
+        m = re.search(r"^foot_reflected_inertia_cap:\s*(null|[0-9.]+)\s*$", text, re.MULTILINE)
+        if m:
+            env_cfg.foot_reflected_inertia_cap = None if m.group(1) == "null" else float(m.group(1))
+        print(f"[probe] run cfg 복원: {{{', '.join(f'{k}={getattr(env_cfg, k)}' for k in TERM_KEYS)}}}"
+              f"  cap={getattr(env_cfg, 'foot_reflected_inertia_cap', None)}")
     if args_cli.force_terms != "keep":
         on = args_cli.force_terms == "on"
         for k in TERM_KEYS:

@@ -101,6 +101,10 @@ def main() -> None:
             m = re.search(rf"^{k}:\s*(true|false)\s*$", text, re.MULTILINE)
             if m:
                 setattr(env_cfg, k, m.group(1) == "true")
+        # ★ 캡도 복원한다 — 불리언만 되돌리면 캡 없이 학습된 run 이 캡 걸린 플랜트에서 측정된다.
+        m = re.search(r"^foot_reflected_inertia_cap:\s*(null|[0-9.]+)\s*$", text, re.MULTILINE)
+        if m:
+            env_cfg.foot_reflected_inertia_cap = None if m.group(1) == "null" else float(m.group(1))
     if args_cli.force_terms != "keep":
         on = args_cli.force_terms == "on"
         for k in TERM_KEYS:
