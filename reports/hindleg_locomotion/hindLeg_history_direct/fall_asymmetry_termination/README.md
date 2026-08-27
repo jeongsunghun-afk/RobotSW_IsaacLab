@@ -211,6 +211,22 @@ gait probe (model_6000, 명령별 400 step):
 ★ 종료 비대칭 자체는 완전히 해소됐다: 뒤 2.00 % / 앞 2.10 %, 종료율 뒤 29.87 % / 앞 29.44 %.
   더 이상 한쪽만 방치되지 않는다 — 남은 것은 순수하게 플랜트 문제다.
 
+### 6-c-2. 영상 (iter 6000, 로봇 근접 · 카메라가 base 를 따라간다)
+
+| arm | 영상 |
+|---|---|
+| `termfix_termsON` | `../2026-08-27_10-35-28_termfix_termsON/videos/model_6000__closeup-termsON__20260827-143017.mp4` |
+| `termfix_nocouple` | `../2026-08-27_10-35-53_termfix_nocouple/videos/model_6000__closeup-nocouple__20260827-143134.mp4` |
+
+같은 프레임(#200)을 나란히 보면 프로브 수치가 그대로 보인다 — `termsON` 은 **양발을 붙인 채
+몸통을 낮추고 다리를 벌려 버티는** 자세이고, `nocouple` 은 **한 발을 들어 유격 중**이다.
+
+⚠ 렌더 명령은 `./isaaclab.sh -p` 로 감싸면 안 된다 — `--` 뒤 hydra 인자를 래퍼가 먹는다
+(`unrecognized arguments`). conda 파이썬으로 `scripts/tools/report_video.py` 를 직접 부를 것.
+⚠ `play.py` 는 run 의 `params/env.yaml` 이 아니라 **현재 소스 cfg** 로 env 를 만든다 —
+  `nocouple` 은 `env.foot_transpose=false env.foot_reflected_inertia=false
+  env.foot_raw_friction=false` 를 직접 넘겨야 학습된 플랜트에서 재생된다.
+
 ### 6-d. §4-c 의 두 갈래에 대한 답
 
 - **② "교란이 한 번 넘어뜨리는데 env 가 리셋을 안 해 일어설 gradient 를 못 받는다"** → **기각.**
@@ -225,7 +241,20 @@ gait probe (model_6000, 명령별 400 step):
 갈린 뒤 뒤집히지 않았다(`pace0819sym` −0.0012@6k → 0.0016@48k, `only_reflI` 0.0052@6k →
 0.0063@25k) (ⓒ 거동 실측이 "정지"로 일치한다. 12000 에서 재확인한다.
 
-## 7. 남은 것
+## 7. run 정리 (2026-08-27)
+
+판정이 끝난 수정 전 arm 3 개를 종료했다. 체크포인트·tfevents 는 그대로 남아 있어 재분석 가능하다.
+
+| run | 종료 시점 | 왜 더 안 돌려도 되나 |
+|---|---|---|
+| `pace0819sym_nocouple` | model_41400 | plateau 0.0444 확정, `termfix_nocouple` 이 대체 |
+| `pace0819sym_only_reflI` | model_33700 | 실패 확정(0.0063@25k, 평탄) |
+| `pace0819sym_only_rawfric` | model_21300 | 회복 확정(0.0459@12k, stock 과 동률) |
+| `pace0819sym` | model_49999 | 자연 완주 |
+
+계속 도는 것: `termfix_termsON`, `termfix_nocouple` (iter 12000 재확인 대기).
+
+## 8. 남은 것
 
 - `terminate_base_height` 임계를 정하려면 동적 보행 중 몸통 높이 분포를 먼저 재야 한다.
 - `flat_orientation_reward_scale` 이 `-0.0`(비활성)인 이유가 기록돼 있지 않다. 2족이라 의도적
