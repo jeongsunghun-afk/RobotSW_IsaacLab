@@ -64,14 +64,23 @@ def _probe(path: str, min_adv: float, tail: int):
 
 
 def _verdict(r: dict) -> str:
-    """넘어짐 / 정상 종료 / 애매 중 하나."""
-    if r["stop_t"] is None:
-        return "OK (끝까지 전진)"
-    posture = r["folded_frac"] > 0.5 or abs(r["yaw_end"]) > YAW_LOST_DEG
-    late = r["stop_cmd"] is not None and r["stop_cmd"] < 0.6
-    if posture and not late:
+    """넘어짐 / 정상 종료 / 애매 중 하나.
+
+    ★ 자세를 **먼저** 본다. 전진 정지 탐색은 마지막 `tail` 스텝을 제외하므로, 램프 막바지에
+    넘어진 롤아웃은 `stop_t` 가 잡히지 않는다. 예전 판본은 그 경우 자세를 아예 안 보고
+    "OK(끝까지 전진)" 을 냈고, 실제로 folded 75% · yaw −119.6° 인 롤아웃을 정상으로 셌다.
+    누워 있는 자세는 어디서 멈췄든 넘어진 것이다.
+    """
+    folded = r["folded_frac"] > 0.5
+    lost = abs(r["yaw_end"]) > YAW_LOST_DEG
+    if folded and lost:
         return "FALL"
-    if late and not posture:
+    if r["stop_t"] is None:
+        return "OK (끝까지 전진)" if not (folded or lost) else "?? (증거 상충 — 영상 확인)"
+    late = r["stop_cmd"] is not None and r["stop_cmd"] < 0.6
+    if (folded or lost) and not late:
+        return "FALL"
+    if late and not (folded or lost):
         return "OK (램프 끝 감속)"
     return "?? (증거 상충 — 영상 확인)"
 
