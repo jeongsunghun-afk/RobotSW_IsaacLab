@@ -114,6 +114,8 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # policy obs 폭은 관절 인코딩에 달려 있다. `super().__init__` 이 `cfg.observation_space` 로
         # gym space 를 만들므로 **그 전에** 확정해야 하고, hydra 오버라이드는 env 생성 시점엔 이미
         # cfg 에 반영돼 있으므로 여기가 유일하게 맞는 자리다(cfg `__post_init__` 은 너무 이르다).
+        # ⚠ 아래 두 키는 **파생값이다** — 여기서 무조건 덮어쓰므로 hydra 로 직접 오버라이드해도
+        #   조용히 무시된다. 폭을 바꾸려면 `*_tan_norm` 플래그를 쓸 것.
         joint_pos_obs_dim = 12 * 6 if cfg.joint_pos_tan_norm else 12
         cfg.observation_space = 3 + 2 + 1 + joint_pos_obs_dim + 12 + 12
         # disc obs 도 같은 이유로 여기서 확정한다. base(43 또는 103) + root_rot_tan_norm(6).
