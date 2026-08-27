@@ -116,19 +116,32 @@ sim  obs               ─▶ 정책 ─▶ action_sim
 ### 프로토콜 변경 — `source` 하나 → `src_for_sim` / `src_for_real`
 
 ```
-POLICY_CMD  magic(I) seq(I) mode(i) src_for_sim(i) src_for_real(i) x_vel(f) yaw(f)   28 B
+POLICY_CMD  magic(I) seq(I) mode(i) src_for_sim(i) src_for_real(i) x_vel(f) yaw(f) act_scale(f)   32 B
   src_*   -1 = POLICY_SRC_OFF   중립(default) 목표 송신
            0 = POLICY_SRC_SIM   sim obs 로 계산한 액션
            1 = POLICY_SRC_REAL  real obs 로 계산한 액션
 기본값     src_for_sim = 0, src_for_real = 1   — 각자 자기 세계
+act_scale  정책 액션 권한 [0,1] (기본 1.0, 범위 밖은 클램프)
 ```
+
+### `act_scale` — 정책 권한 [0, 1]
+
+```
+target = default + act_scale · ACTION_SCALE · raw_action
+```
+
+`0` 이면 중립(default) 자세, `1` 이면 학습 그대로다. 실기에서 **권한을 0 부터 서서히 올려**
+정책이 처음 붙는 순간의 도약을 없애는 용도다. GUI 는 슬라이더 + 숫자칸을 함께 두고 서로 동기화한다.
+
+⚠ `act_scale = 0` 은 "가만히"가 아니라 **중립 자세로 간다.** 지금 자리 유지가 필요하면
+그 목적지를 `off (hold)` 로 두는 쪽이 맞다 (그쪽은 실측 q 를 되보낸다).
 
 **왜 목적지 중심인가.** 소스 중심(각 액션 → 목적지 비트마스크)으로 두면 두 액션이 같은 목적지를
 노리는 **표현 가능한 충돌**이 생기고, 규칙으로 해소해야 한다. 목적지 중심이면 그 상태가
 원천적으로 없다. 표현력은 같다 — 9 가지 조합이 전부 가능하다.
 
-⚠ 구조체가 24 → 28 B 다. `unpack_policy_cmd` 가 크기 불일치를 `None` 으로 거절하므로 구버전 gui 는
-**조용히 오해석하지 않고 명확히 실패**한다 (자체검정에 24 B 거부 assert 있음).
+⚠ 구조체가 24 → 28 → 32 B 로 두 번 바뀌었다. `unpack_policy_cmd` 가 크기 불일치를 `None` 으로 거절하므로 구버전 gui 는
+**조용히 오해석하지 않고 명확히 실패**한다 (자체검정에 24 B·28 B 거부 assert 있음).
 
 ### 구현 불변식
 

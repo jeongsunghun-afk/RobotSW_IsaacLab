@@ -44,7 +44,8 @@ Gains 그룹에서 적용한 kp/kd는 publisher 프로세스가 REAL_ACT_PORT(98
     - Home (default): 중립(0) 자세로 보간 이동.
     - Relax (zero torque): 무토크(limp) — sim은 kp=kd=0 CMD, 실기는 RELAX 패킷. **기동 기본 상태**라
       GUI를 켜는 것만으로는 어떤 목표도 구동하지 않는다(슬라이더/Home 조작 시 engage).
-    - Joint Sliders: 8관절(leg-major) 슬라이더로 직접 자세 조작(soft limit 범위, rad/deg 표시 토글),
+    - Joint Sliders: 8관절(leg-major) 슬라이더 + **숫자 입력칸**으로 직접 자세 조작
+      (soft limit 범위, rad/deg 토글, 공유 Step 셀렉터로 0.1/1/10 deg — rad 에서는 0.001/0.01/0.1),
       "Send to robot" 체크박스로 목표를 REAL_ACT_PORT(9887)에도 fan-out(--real_host 지정 시 기본 ON).
     - Sine Sweep: 선택 관절에 사인 궤적(soft limit 클램프, 실행 중 파라미터 라이브 반영).
     - Motion Playback: 리타게팅된 SMR 모션 클립(``motion_data/*_joints.npz``) 재생. 현재 자세에서
@@ -527,9 +528,12 @@ class PolicyInferenceThread(QThread):
         self._src_for_real = r2s_udp.POLICY_SRC_REAL
         self._x_vel = 0.0
         self._yaw = 0.0
+        self._act_scale = 1.0
         self._stop = False
 
-    def set_command(self, mode: int, src_for_sim: int, src_for_real: int, x_vel: float, yaw: float) -> None:
+    def set_command(
+        self, mode: int, src_for_sim: int, src_for_real: int, x_vel: float, yaw: float, act_scale: float = 1.0
+    ) -> None:
         """메인 스레드에서 공유 command 갱신 (학습 범위로 클램프).
 
         Args:
@@ -538,6 +542,8 @@ class PolicyInferenceThread(QThread):
             src_for_real: real 목적지로 보낼 액션의 obs 출처 (``POLICY_SRC_*``).
             x_vel: 전진 속도 명령 [m/s].
             yaw: 요 각속도 명령 [rad/s].
+            act_scale: 정책 액션 권한 [0, 1]. ``target = default + act_scale·ACTION_SCALE·raw_action``
+                이므로 0 이면 중립 자세, 1 이면 학습 그대로다.
         """
         with self._lock:
             self._mode = int(mode)
@@ -545,6 +551,7 @@ class PolicyInferenceThread(QThread):
             self._src_for_real = int(src_for_real)
             self._x_vel = max(X_VEL_RANGE[0], min(X_VEL_RANGE[1], float(x_vel)))
             self._yaw = max(YAW_RANGE[0], min(YAW_RANGE[1], float(yaw)))
+            self._act_scale = max(0.0, min(1.0, float(act_scale)))
 
     def request_stop(self) -> None:
         self._stop = True
@@ -607,7 +614,7 @@ class PolicyInferenceThread(QThread):
                 with self._lock:
                     mode = self._mode
                     src_sim, src_real = self._src_for_sim, self._src_for_real
-                    x_vel, yaw = self._x_vel, self._yaw
+                    x_vel, yaw, act_scale = self._x_vel, self._yaw, self._act_scale
 
                 # run 진입(idle→run): 두 갈래 clock/history/prev_action 초기화 + 시동 action.
                 if prev_mode == 0 and mode == 1:
@@ -678,7 +685,8 @@ class PolicyInferenceThread(QThread):
                     with torch.inference_mode():
                         raw_action = model(obs_policy.unsqueeze(0), hist.unsqueeze(0))[0]  # (8,)
                     b.advance(raw_action)  # 자기 prev_action 갱신 (phase 는 아래에서 공유 전진)
-                    targets[src] = (ACTION_SCALE * raw_action + b.default).cpu().numpy()
+                    # act_scale: 정책 권한 [0,1]. 0 이면 default(중립), 1 이면 학습 그대로.
+                    targets[src] = (act_scale * ACTION_SCALE * raw_action + b.default).cpu().numpy()
                 phase = (phase + STEP_DT / GAIT_PERIOD) % 1.0
 
                 # ── 3) 목적지별 배선 ──────────────────────────────────────────────────
@@ -723,7 +731,7 @@ class PolicyInferenceThread(QThread):
                         div = f"  |Δaction| mean={d.mean():.4f} max={d.max():.4f} rad"
                     print(
                         f"[gui_infer] t={seq * STEP_DT:5.1f}s  grav_z={gz:+.2f}  phase={phase:.2f}  "
-                        f"x_vel={x_vel:+.2f} yaw={yaw:+.2f}  "
+                        f"x_vel={x_vel:+.2f} yaw={yaw:+.2f} act_scale={act_scale:.2f}  "
                         f"sim←{_SRC_NAME[src_sim]} real←{_SRC_NAME[src_real]}{div}",
                         flush=True,
                     )
@@ -738,6 +746,12 @@ _ART_FOR_LEGMAJOR: list[int] = [0, 2, 4, 6, 1, 3, 5, 7]
 # articulation 인덱스 p ← leg-major 인덱스 — pack_policy_act(articulation 순서 필요)로 실기 fan-out할 때
 # Joint Sliders(leg-major)의 pose를 재배열하는 용도. _ART_FOR_LEGMAJOR의 역순열.
 _LM_FOR_ART: list[int] = [0, 4, 1, 5, 2, 6, 3, 7]
+
+# 단위별 (스텝 후보, 소수자리, 접미사). 스텝은 **표시 단위 기준**이라 deg 에서 0.1/1/10 도가 그대로 나온다.
+_UNIT_SPEC: dict[str, dict] = {
+    "rad": {"steps": [0.001, 0.01, 0.1], "decimals": 4, "suffix": " rad"},
+    "deg": {"steps": [0.1, 1.0, 10.0], "decimals": 2, "suffix": " deg"},
+}
 
 _SLIDER_STEPS: int = 1000  # Joint Sliders 내부 int 해상도 (soft limit 범위를 이 스텝 수로 양자화)
 
@@ -1265,6 +1279,9 @@ class MainWindow(QMainWindow):
         # 목적지별 obs 출처 (-1=OFF · 0=sim obs · 1=real obs). 기본 = 각자 자기 세계.
         self._src_for_sim: int = r2s_udp.POLICY_SRC_SIM
         self._src_for_real: int = r2s_udp.POLICY_SRC_REAL
+        # 정책 액션 권한 [0,1]. target = default + act_scale·ACTION_SCALE·raw_action.
+        # 실기에서 **권한을 0 부터 서서히 올리는** 용도 — 1.0 이 학습 그대로다.
+        self._act_scale: float = 1.0
         self._x_vel: float = 0.0
         self._yaw: float = 0.0
 
@@ -1834,8 +1851,18 @@ class MainWindow(QMainWindow):
         top_row.addWidget(QLabel("Units:"))
         self._units_combo = QComboBox()
         self._units_combo.addItems(["rad", "deg"])
+        self._units_combo.setCurrentIndex(1)  # deg 기본 — 손으로 자세를 맞출 때 읽기 쉽다
         self._units_combo.currentIndexChanged.connect(self._on_units_changed)
         top_row.addWidget(self._units_combo)
+        top_row.addSpacing(16)
+        # 스텝은 행마다 두면 8줄이 지저분해진다 — 공유 셀렉터 하나로 스핀박스 화살표/방향키 폭을 정한다.
+        top_row.addWidget(QLabel("Step:"))
+        self._step_combo = QComboBox()
+        self._step_combo.currentIndexChanged.connect(self._on_step_changed)
+        top_row.addWidget(self._step_combo)
+        hint = QLabel("type a value, or use the arrows / up-down keys")
+        hint.setObjectName("subtitleLabel")
+        top_row.addWidget(hint)
         top_row.addStretch(1)
         v.addLayout(top_row)
 
@@ -1843,7 +1870,7 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(4)
         self._joint_sliders: list[QSlider] = []
-        self._joint_value_labels: list[QLabel] = []
+        self._joint_spins: list[QDoubleSpinBox] = []
         for i, name in enumerate(motions.JOINT_NAMES):
             name_label = QLabel(name)
             name_label.setMinimumWidth(60)
@@ -1854,12 +1881,17 @@ class MainWindow(QMainWindow):
             slider.setValue(_rad_to_slider(i, motions.DEFAULT_POSE[i]))
             slider.valueChanged.connect(lambda value, idx=i: self._on_joint_slider_changed(idx, value))
             grid.addWidget(slider, i, 1)
-            value_label = QLabel(self._format_joint_value(motions.DEFAULT_POSE[i]))
-            value_label.setMinimumWidth(90)
-            grid.addWidget(value_label, i, 2)
+            spin = QDoubleSpinBox()
+            spin.setKeyboardTracking(False)  # 타이핑 중간값이 로봇으로 나가지 않게 — Enter/포커스 아웃에만 발행
+            spin.setAlignment(Qt.AlignRight)
+            spin.setMinimumWidth(104)
+            spin.valueChanged.connect(lambda val, idx=i: self._on_joint_spin_changed(idx, val))
+            grid.addWidget(spin, i, 2)
             self._joint_sliders.append(slider)
-            self._joint_value_labels.append(value_label)
+            self._joint_spins.append(spin)
+        grid.setColumnStretch(1, 1)
         v.addLayout(grid)
+        self._refresh_joint_units()  # 범위·소수자리·스텝·현재값을 단위에 맞춰 채운다
 
         real_row = QHBoxLayout()
         self._real_enable_check = QCheckBox("Send to robot (UDP 9887)")
@@ -1879,23 +1911,72 @@ class MainWindow(QMainWindow):
         v.addLayout(real_row)
         return group
 
-    def _format_joint_value(self, rad: float) -> str:
-        if self._units_combo.currentIndex() == 1:  # deg
-            return f"{math.degrees(rad):+7.2f} deg"
-        return f"{rad:+7.3f} rad"
+    def _unit_spec(self) -> dict:
+        """현재 표시 단위의 (스텝 후보, 소수자리, 접미사)."""
+        return _UNIT_SPEC[self._units_combo.currentText()]
+
+    def _to_display(self, rad: float) -> float:
+        return math.degrees(rad) if self._units_combo.currentIndex() == 1 else rad
+
+    def _from_display(self, val: float) -> float:
+        return math.radians(val) if self._units_combo.currentIndex() == 1 else val
+
+    def _refresh_joint_units(self) -> None:
+        """단위가 바뀌면 스핀박스의 범위·소수자리·스텝·현재값을 다시 채운다.
+
+        내부 표현은 **항상 rad** 다 — 표시 계층만 바꾼다. 스텝 콤보도 그 단위의 후보로 다시 만든다
+        (deg 에서 0.1/1/10 도, rad 에서 0.001/0.01/0.1 rad).
+        """
+        spec = self._unit_spec()
+        keep = self._step_combo.currentIndex()
+        self._step_combo.blockSignals(True)
+        self._step_combo.clear()
+        self._step_combo.addItems([f"{x:g}{spec['suffix']}" for x in spec["steps"]])
+        self._step_combo.setCurrentIndex(keep if 0 <= keep < len(spec["steps"]) else 1)
+        self._step_combo.blockSignals(False)
+        step = spec["steps"][self._step_combo.currentIndex()]
+        for i in range(NUM_JOINTS):
+            lo, hi = motions.SOFT_LIMITS_RAD[i]
+            rad = _slider_to_rad(i, self._joint_sliders[i].value())
+            spin = self._joint_spins[i]
+            spin.blockSignals(True)
+            spin.setDecimals(spec["decimals"])
+            spin.setSuffix(spec["suffix"])
+            spin.setRange(self._to_display(lo), self._to_display(hi))
+            spin.setSingleStep(step)
+            spin.setValue(self._to_display(rad))
+            spin.blockSignals(False)
+
+    def _on_step_changed(self, idx: int) -> None:
+        steps = self._unit_spec()["steps"]
+        if not 0 <= idx < len(steps):
+            return
+        for spin in self._joint_spins:
+            spin.setSingleStep(steps[idx])
+
+    def _publish_slider_pose(self) -> None:
+        self._sine_deactivate()
+        self._write_hold([_slider_to_rad(i, self._joint_sliders[i].value()) for i in range(NUM_JOINTS)])
 
     def _on_joint_slider_changed(self, joint_idx: int, value: int) -> None:
         rad = _slider_to_rad(joint_idx, value)
-        self._joint_value_labels[joint_idx].setText(self._format_joint_value(rad))
-        self._sine_deactivate()
-        pose = [_slider_to_rad(i, self._joint_sliders[i].value()) for i in range(NUM_JOINTS)]
-        self._write_hold(pose)
+        spin = self._joint_spins[joint_idx]
+        spin.blockSignals(True)  # 되먹임 금지 — 스핀 → 슬라이더 → 스핀 루프가 된다
+        spin.setValue(self._to_display(rad))
+        spin.blockSignals(False)
+        self._publish_slider_pose()
+
+    def _on_joint_spin_changed(self, joint_idx: int, val: float) -> None:
+        """숫자 입력/화살표 → 슬라이더 동기화 후 발행. 양자화 오차로 값이 튀지 않게 되쓰지 않는다."""
+        slider = self._joint_sliders[joint_idx]
+        slider.blockSignals(True)
+        slider.setValue(_rad_to_slider(joint_idx, self._from_display(val)))
+        slider.blockSignals(False)
+        self._publish_slider_pose()
 
     def _on_units_changed(self, _idx: int) -> None:
-        """단위 토글 — 내부는 항상 rad, 값 라벨 표시만 변환한다."""
-        for i in range(NUM_JOINTS):
-            rad = _slider_to_rad(i, self._joint_sliders[i].value())
-            self._joint_value_labels[i].setText(self._format_joint_value(rad))
+        """단위 토글 — 내부는 항상 rad, 표시 계층만 바꾼다."""
+        self._refresh_joint_units()
 
     def _sync_sliders_to_pose(self, pose: list[float]) -> None:
         """슬라이더를 pose로 동기화(신호 차단 — publisher 재발행 루프 방지). Home/startup latch 후 호출."""
@@ -1903,7 +1984,9 @@ class MainWindow(QMainWindow):
             self._joint_sliders[i].blockSignals(True)
             self._joint_sliders[i].setValue(_rad_to_slider(i, pose[i]))
             self._joint_sliders[i].blockSignals(False)
-            self._joint_value_labels[i].setText(self._format_joint_value(pose[i]))
+            self._joint_spins[i].blockSignals(True)
+            self._joint_spins[i].setValue(self._to_display(pose[i]))
+            self._joint_spins[i].blockSignals(False)
 
     def _on_real_enable_toggled(self, checked: bool) -> None:
         with self._shared.get_lock():
@@ -2032,6 +2115,30 @@ class MainWindow(QMainWindow):
         row_route.addWidget(self._route_note, 1)
         v.addLayout(row_route)
 
+        # --- action scale: 정책 권한 [0,1] — 슬라이더와 숫자를 함께 둔다 --------------------
+        row_scale = QHBoxLayout()
+        row_scale.addWidget(QLabel("Action scale:"))
+        self._act_scale_slider = QSlider(Qt.Horizontal)
+        self._act_scale_slider.setRange(0, 100)
+        self._act_scale_slider.setValue(100)
+        self._act_scale_slider.setMinimumWidth(160)
+        self._act_scale_slider.valueChanged.connect(self._on_act_scale_slider)
+        row_scale.addWidget(self._act_scale_slider)
+        self._act_scale_spin = QDoubleSpinBox()
+        self._act_scale_spin.setRange(0.0, 1.0)
+        self._act_scale_spin.setDecimals(2)
+        self._act_scale_spin.setSingleStep(0.05)
+        self._act_scale_spin.setValue(1.0)
+        self._act_scale_spin.setAlignment(Qt.AlignRight)
+        self._act_scale_spin.setKeyboardTracking(False)
+        self._act_scale_spin.valueChanged.connect(self._on_act_scale_spin)
+        row_scale.addWidget(self._act_scale_spin)
+        scale_hint = QLabel("0 = neutral pose, 1 = as trained. Ramp up from 0 on the real robot.")
+        scale_hint.setObjectName("subtitleLabel")
+        row_scale.addWidget(scale_hint)
+        row_scale.addStretch(1)
+        v.addLayout(row_scale)
+
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("x_vel [m/s] fwd/back:"))
         self._x_vel_spin = QDoubleSpinBox()
@@ -2079,7 +2186,7 @@ class MainWindow(QMainWindow):
         """현재 UI 상태(run/source/x_vel/yaw)를 추론 스레드로 전달."""
         if self._policy_thread is not None:
             self._policy_thread.set_command(
-                self._policy_run, self._src_for_sim, self._src_for_real, self._x_vel, self._yaw
+                self._policy_run, self._src_for_sim, self._src_for_real, self._x_vel, self._yaw, self._act_scale
             )
 
     def _on_mode_changed(self, idx: int) -> None:
@@ -2136,6 +2243,25 @@ class MainWindow(QMainWindow):
         self._policy_stop_btn.setEnabled(False)
         self._push_policy_command()
         self._status_label.setText("Policy stopped (idle)")
+
+    def _on_act_scale_slider(self, val: int) -> None:
+        self._set_act_scale(val / 100.0, from_slider=True)
+
+    def _on_act_scale_spin(self, val: float) -> None:
+        self._set_act_scale(val, from_slider=False)
+
+    def _set_act_scale(self, val: float, *, from_slider: bool) -> None:
+        """슬라이더/스핀박스 한쪽을 조용히 맞추고 스레드에 반영한다 (되먹임 루프 방지)."""
+        self._act_scale = max(0.0, min(1.0, float(val)))
+        other = self._act_scale_spin if from_slider else self._act_scale_slider
+        other.blockSignals(True)
+        if from_slider:
+            other.setValue(self._act_scale)
+        else:
+            other.setValue(int(round(self._act_scale * 100)))
+        other.blockSignals(False)
+        self._push_policy_command()
+        self._status_label.setText(f"Action scale: {self._act_scale:.2f}")
 
     def _on_route_sim_changed(self, idx: int) -> None:
         self._src_for_sim = _ROUTE_VALUES_SIM[idx]

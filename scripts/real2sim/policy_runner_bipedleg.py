@@ -259,7 +259,7 @@ def _collect_states(socks: dict, needed: set, last_state: dict, recv_blocking) -
     return got_any
 
 
-def _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy) -> dict:
+def _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy, act_scale=1.0) -> dict:
     """갈래(obs 출처)마다 독립 상태로 한 스텝 추론하고 관절 목표를 돌려준다.
 
     배선이 그 갈래를 안 쓰더라도 **호출한다** — 안 쓰는 갈래를 멈추면 `prev_action`·history 가
@@ -273,6 +273,7 @@ def _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, pol
         device: torch device.
         estimator: proprio → priv_explicit 모듈.
         policy: act_inference 호출 대상.
+        act_scale: 정책 액션 권한 [0, 1]. 0 이면 default(중립), 1 이면 학습 그대로.
 
     Returns:
         ``{obs 출처: 관절 목표 ndarray(8,)}``. state 가 없는 갈래는 키가 빠진다.
@@ -294,7 +295,7 @@ def _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, pol
             obs_dict = {"policy": obs_b, "priv_explicit": priv_explicit, "history": hist.unsqueeze(0)}
             raw_action = policy(obs_dict)[0]  # (8,)
         b.advance(raw_action)
-        targets[src] = (ACTION_SCALE * raw_action + b.default).cpu().numpy()
+        targets[src] = (act_scale * ACTION_SCALE * raw_action + b.default).cpu().numpy()
     return targets
 
 
@@ -344,6 +345,7 @@ def main() -> None:
     no_state = 0  # 연속 state 무응답 횟수 (구버전 STATE 거부를 조용히 넘기지 않기 위한 카운터)
     x_vel = 0.0
     yaw = 0.0
+    act_scale = 1.0  # 정책 액션 권한 [0,1]
     seq = 0
 
     def drain_latest(sock, unpack):
@@ -397,6 +399,7 @@ def main() -> None:
                 prev_mode = mode
                 mode = cmd["mode"]
                 src_for_sim, src_for_real = cmd["src_for_sim"], cmd["src_for_real"]
+                act_scale = max(0.0, min(1.0, cmd.get("act_scale", 1.0)))
                 x_vel = max(X_VEL_RANGE[0], min(X_VEL_RANGE[1], cmd["x_vel"]))
                 yaw = max(YAW_RANGE[0], min(YAW_RANGE[1], cmd["yaw"]))
                 if prev_mode == 0 and mode == 1:
@@ -431,7 +434,7 @@ def main() -> None:
 
             # 3) 갈래별 추론 — 배선과 무관하게 **둘 다** 전진시킨다(배선 변경 시 불연속 방지).
             cmd_vec = torch.tensor([x_vel, 0.0, yaw], device=device)  # y_vel≡0
-            targets = _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy)
+            targets = _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy, act_scale)
             phase = (phase + STEP_DT / GAIT_PERIOD) % 1.0
 
             # 4) 목적지별 배선.
@@ -458,7 +461,7 @@ def main() -> None:
             if seq % 50 == 0:
                 print(
                     f"[policy_runner] t={seq * STEP_DT:5.1f}s  grav_z={float(gravity[2]):+.2f}  "
-                    f"phase={phase:.2f}  x_vel={x_vel:+.2f} yaw={yaw:+.2f}  "
+                    f"phase={phase:.2f}  x_vel={x_vel:+.2f} yaw={yaw:+.2f} act_scale={act_scale:.2f}  "
                     f"sim<-{_SRC_NAME[src_for_sim]} real<-{_SRC_NAME[src_for_real]}",
                     flush=True,
                 )
