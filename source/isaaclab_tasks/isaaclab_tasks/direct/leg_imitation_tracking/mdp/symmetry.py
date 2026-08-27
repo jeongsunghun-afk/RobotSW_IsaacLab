@@ -44,7 +44,7 @@ import torch
 if TYPE_CHECKING:
     from tensordict import TensorDict
 
-__all__ = ["compute_leg_symmetric_states"]
+__all__ = ["compute_leg_symmetric_states", "mirror_joint_name", "mirror_joint_needs_flip"]
 
 # --- obs group dims (leg_imitation_tracking_rma_env.py) ---
 _PROPRIO_DIM = 57
@@ -75,13 +75,13 @@ def _flip_side(prefix: str) -> str:
     return prefix
 
 
-def _mirror_name(name: str) -> str:
+def mirror_joint_name(name: str) -> str:
     """Return the L<->R mirrored joint name (e.g. "FL_hip_joint" -> "FR_hip_joint")."""
     prefix, _, rest = name.partition("_")
     return f"{_flip_side(prefix)}_{rest}" if rest else _flip_side(prefix)
 
 
-def _needs_flip(name: str) -> bool:
+def mirror_joint_needs_flip(name: str) -> bool:
     """Whether a joint's value is sign-flipped after the L<->R swap.
 
     Verified against the (roughly L/R-symmetric) SMR reference distribution:
@@ -111,7 +111,7 @@ def _build_cache(env) -> dict:
     name_to_idx = {n: i for i, n in enumerate(joint_names)}
     perm = []
     for n in joint_names:
-        mirrored = _mirror_name(n)
+        mirrored = mirror_joint_name(n)
         if mirrored not in name_to_idx:
             raise ValueError(
                 f"[leg symmetry] no L/R mirror match for '{n}' (expected '{mirrored}'). names={joint_names}"
@@ -121,7 +121,9 @@ def _build_cache(env) -> dict:
     if torch.unique(joint_swap).numel() != _NUM_JOINTS:
         raise ValueError(f"[leg symmetry] swap perm is not a valid permutation: {perm} (names={joint_names})")
 
-    flip_idx = torch.tensor([i for i, n in enumerate(joint_names) if _needs_flip(n)], dtype=torch.long, device=device)
+    flip_idx = torch.tensor(
+        [i for i, n in enumerate(joint_names) if mirror_joint_needs_flip(n)], dtype=torch.long, device=device
+    )
     # flip set must be invariant under the swap (so post-swap negation at flip_idx is well defined)
     swapped_flip = torch.sort(joint_swap[flip_idx]).values
     if not torch.equal(swapped_flip, torch.sort(flip_idx).values):

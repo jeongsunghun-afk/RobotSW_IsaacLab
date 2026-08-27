@@ -26,7 +26,9 @@ from isaaclab.utils.configclass import configclass
 from isaaclab_assets.robots.rga import LEG_CFG  # isort: skip
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "smr_leg_pkl")
+# smr_leg_pkl(기존 9클립: run/trot/walk/turn) + rpet_leg_pkl(신규 16클립: graded trot/walk/ramp)
+# 을 병합한 디렉토리. rpet 은 USD→DOF_NAMES 재정렬 + dof_names 주입 완료본이라 그대로 로드된다.
+MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "merged_leg_pkl")
 
 NUM_JOINTS: int = 17
 """다리 4개 × (hip, thigh, calf, foot) + 허리 1개."""
@@ -73,9 +75,26 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
     # ── 모션 데이터 ─────────────────────────────────────────────
     motion_file: str = MOTION_FILES_DIR
     reference_body: str = "Base"
+    # AMP expert 샘플링 가중치 방식.
+    #   "length"          : 클립 길이 비례(기본). 길이가 곧 속도대별 질량이 되어 명령 분포와 어긋난다.
+    #   "command_uniform" : 속도축 최근접 셀 폭 비례 → expert 속도 분포가 U[0, lin_vel_x_max] 에 근사.
+    #                       클립 구성과 샘플링 분포를 분리하므로, 특정 대역 보강이 다른 대역을
+    #                       희석시키는 문제를 피한다.
+    #                       ★ 셀 폭은 좌우 짝 유무를 보지 않는다. 속도축이 성긴 구간에 홀로 놓인
+    #                       짝 없는 클립이 큰 가중치를 받아 expert 분포에 좌우 편향을 남긴다
+    #                       (ds14 실측: 짧은 미러 없는 클립 하나가 1.3% → 20.2%).
+    #   "command_uniform_mirror" : 위와 같되, 좌우 짝이 없는 클립의 미러본을 먼저 합성해 클립
+    #                       집합을 대칭으로 만든 뒤 셀 가중치를 매긴다. 짝끼리는 평균 속도가 같아
+    #                       항상 같은 가중치를 받으므로 expert 좌우 편향이 구조적으로 0 이 된다.
+    motion_weight_mode: str = "length"  # "length" | "command_uniform" | "command_uniform_mirror"
 
-    # 항상 RSI (Reference State Initialization) 사용
-    reset_strategy: str = "random"  # "random" | "random_start"
+    # 리셋 전략. "random"/"random_start" 는 RSI(모션 프레임). "stand" 포함 시(예: "random_stand")
+    # rel_stand_envs 비율만큼 정지(default_pos+noise, root 속도 0)로 리셋 → 정지 출발·저속 안정 학습.
+    reset_strategy: str = "random"  # "random" | "random_start" | "random_stand"
+    rel_stand_envs: float = 0.1  # reset_strategy 에 "stand" 포함 시 정지 리셋할 env 비율
+    stand_reset_joint_noise: float = 0.1  # 정지 리셋 시 관절 위치 noise 진폭 [rad]
+    # 속도 command deadzone: |vx cmd| <= 이 값이면 0 으로 클램프 [m/s] (0.0=OFF). 저속서 default 유지 유도.
+    cmd_deadzone: float = 0.0
 
     # ── 속도추종 command 범위 ────────────────────────────────────
     # 레퍼런스 모션 분포: vx 0.0~5.0 m/s, yaw rate -1.5~2.3 rad/s
@@ -94,6 +113,9 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
     yaw_vel_reward_w: float = 0.3  # yaw 속도 추종 가중치
     vel_err_scale: float = 0.5  # lin_vel reward 지수 스케일
     yaw_vel_err_scale: float = 0.5  # yaw_vel reward 지수 스케일
+    # 관절 토크 페널티: reward += -torque_penalty_w * sum(applied_torque²). 0.0 = OFF(기본).
+    # 보행 관례상 lin_vel_reward_w=1.0 기준 torque≈-1e-5 비율 → 이 env(lin_vel_w=0.7)에선 7e-6 권장.
+    torque_penalty_w: float = 0.0
 
     # ── 조기 종료 ───────────────────────────────────────────────
     early_termination: bool = True

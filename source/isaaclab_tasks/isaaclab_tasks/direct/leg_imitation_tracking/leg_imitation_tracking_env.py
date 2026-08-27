@@ -85,7 +85,21 @@ class LegImitationTrackingEnv(DirectRLEnv):
             motion_files = pkl_files
         else:
             motion_files = [motion_file]
-        self._motion_lib = LegMotionLib(motion_files=motion_files, device=self.device)
+        weight_mode = self.cfg.motion_weight_mode
+        valid_modes = ("length", "command_uniform", "command_uniform_mirror")
+        if weight_mode not in valid_modes:
+            raise ValueError(f"motion_weight_mode 는 {valid_modes} 중 하나여야 한다: {weight_mode}")
+        self._motion_lib = LegMotionLib(
+            motion_files=motion_files,
+            device=self.device,
+            mirror_complete=weight_mode == "command_uniform_mirror",
+        )
+        if weight_mode != "length":
+            w = self._motion_lib.set_motion_weights_command_uniform(self.cfg.lin_vel_x_max)
+            speeds = self._motion_lib.motion_mean_speeds
+            print(f"[LegMotionLib] weight_mode={weight_mode} (vel_max={self.cfg.lin_vel_x_max:.2f} m/s)")
+            for name, v, p in zip(self._motion_lib.motion_names, speeds.tolist(), w.tolist()):
+                print(f"  {name:32s} {v:5.2f} m/s  weight {100 * p:5.2f}%")
 
         # ── body / joint 인덱스 ──────────────────────────────────
         self.ref_body_index = self._robot.data.body_names.index(self.cfg.reference_body)
@@ -179,6 +193,7 @@ class LegImitationTrackingEnv(DirectRLEnv):
         self._episode_sums = {
             "lin_vel_reward": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "yaw_vel_reward": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "torque_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
         }
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -296,10 +311,17 @@ class LegImitationTrackingEnv(DirectRLEnv):
         yaw_vel_err = (self._yaw_vel_cmd - yaw_vel_b) ** 2
         yaw_vel_reward = torch.exp(-self.cfg.yaw_vel_err_scale * yaw_vel_err)
 
-        reward = self.cfg.lin_vel_reward_w * lin_vel_reward + self.cfg.yaw_vel_reward_w * yaw_vel_reward
+        # ── (3) 관절 토크 페널티 (opt-in, torque_penalty_w=0.0 이면 no-op) ──
+        # applied_torque = 액추에이터/effort-limit 적용 후 실제 토크 [N, 17].
+        torque_penalty = -self.cfg.torque_penalty_w * torch.sum(self._robot.data.applied_torque.torch**2, dim=-1)
+
+        reward = (
+            self.cfg.lin_vel_reward_w * lin_vel_reward + self.cfg.yaw_vel_reward_w * yaw_vel_reward + torque_penalty
+        )
 
         self._episode_sums["lin_vel_reward"] += lin_vel_reward
         self._episode_sums["yaw_vel_reward"] += yaw_vel_reward
+        self._episode_sums["torque_penalty"] += torque_penalty
 
         return reward
 
@@ -401,14 +423,28 @@ class LegImitationTrackingEnv(DirectRLEnv):
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 
-        # 항상 RSI
-        root_state, joint_pos, joint_vel = self._reset_strategy_rsi(env_ids)  # type: ignore[arg-type]
+        # 리셋 전략 분기: reset_strategy 에 "stand" 포함 시 rel_stand_envs 비율만큼 정지(default_pos+noise,
+        # root 속도 0)로 리셋(정지 출발·저속 안정 학습), 나머지는 RSI(모션 프레임). 기본은 전부 RSI.
+        stand_ids = env_ids[:0]
+        rsi_ids = env_ids
+        if "stand" in self.cfg.reset_strategy and self.cfg.rel_stand_envs > 0.0:
+            is_stand = torch.rand(len(env_ids), device=self.device) < self.cfg.rel_stand_envs
+            stand_ids = env_ids[is_stand]
+            rsi_ids = env_ids[~is_stand]
 
         # IsaacLab 3.0: partial-env writes use the *_index API with keyword args.
-        self._robot.write_root_link_pose_to_sim_index(root_pose=root_state[:, :7], env_ids=env_ids)
-        # root_state[:, 7:] 는 위에서 이미 COM 기준으로 보정해 두었다.
-        self._robot.write_root_com_velocity_to_sim_index(root_velocity=root_state[:, 7:], env_ids=env_ids)
-        self._robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel, env_ids=env_ids)
+        # root_state[:, 7:] 는 (RSI 경로에서) 이미 COM 기준으로 보정해 두었다.
+        if len(rsi_ids) > 0:
+            root_state, joint_pos, joint_vel = self._reset_strategy_rsi(rsi_ids)
+            self._robot.write_root_link_pose_to_sim_index(root_pose=root_state[:, :7], env_ids=rsi_ids)
+            self._robot.write_root_com_velocity_to_sim_index(root_velocity=root_state[:, 7:], env_ids=rsi_ids)
+            self._robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel, env_ids=rsi_ids)
+
+        if len(stand_ids) > 0:
+            root_state, joint_pos, joint_vel = self._reset_strategy_stand(stand_ids)
+            self._robot.write_root_link_pose_to_sim_index(root_pose=root_state[:, :7], env_ids=stand_ids)
+            self._robot.write_root_com_velocity_to_sim_index(root_velocity=root_state[:, 7:], env_ids=stand_ids)
+            self._robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel, env_ids=stand_ids)
 
         # 속도 명령 재샘플링 (버퍼 초기화 — 불변규칙 §3)
         self._resample_steering(env_ids)  # type: ignore[arg-type]
@@ -478,6 +514,33 @@ class LegImitationTrackingEnv(DirectRLEnv):
 
         return root_state, joint_pos_out, joint_vel_out
 
+    def _reset_strategy_stand(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """정지(standing) 초기화 — default_joint_pos + noise, root 속도 0.
+
+        정지 출발·저속 안정성 학습용. AMP agent-history 버퍼는 참조 모션으로 seed 한다
+        (discriminator expert 샘플은 collect_reference_motions 에서 별도로 뽑으므로 무관하며,
+        seed 는 이후 H(=num_amp_observations) 스텝 내 실제 관측으로 교체된다).
+        """
+        n = len(env_ids)
+        # default_root_state pos 는 env-local → world 로 env_origins 더함, 속도는 0(정지).
+        root_state = self._robot.data.default_root_state[env_ids].clone()  # [n,13], 직립
+        root_state[:, 0:3] = root_state[:, 0:3] + self.scene.env_origins[env_ids]
+        root_state[:, 7:13] = 0.0
+
+        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
+        noise = (torch.rand_like(joint_pos) * 2.0 - 1.0) * self.cfg.stand_reset_joint_noise
+        joint_pos = joint_pos + noise
+        joint_vel = torch.zeros_like(self._robot.data.default_joint_vel[env_ids])
+
+        # AMP agent-history seed (참조 모션; expert 와 무관, H 스텝 내 씻김)
+        amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(n)
+        self.amp_observation_buffer[env_ids] = amp_obs_buf
+        self._amp_quat_buf[env_ids] = quat_hist
+        if self.cfg.include_rel_track_obs:
+            self._hist_root_pos_w[env_ids] = root_pos_hist
+
+        return root_state, joint_pos, joint_vel
+
     # ──────────────────────────────────────────────────────────
     # 속도 명령 관리 (재샘플링)
     # ──────────────────────────────────────────────────────────
@@ -487,10 +550,14 @@ class LegImitationTrackingEnv(DirectRLEnv):
         n = len(env_ids)
 
         # vx: [lin_vel_x_min, lin_vel_x_max]
-        self._lin_vel_cmd[env_ids, 0] = (
+        vx = (
             torch.rand(n, device=self.device) * (self.cfg.lin_vel_x_max - self.cfg.lin_vel_x_min)
             + self.cfg.lin_vel_x_min
         )
+        # command deadzone: |vx| <= cmd_deadzone → 0 (저속서 정지/default 유지 유도)
+        if self.cfg.cmd_deadzone > 0.0:
+            vx = torch.where(vx.abs() <= self.cfg.cmd_deadzone, torch.zeros_like(vx), vx)
+        self._lin_vel_cmd[env_ids, 0] = vx
         # vy: [lin_vel_y_min, lin_vel_y_max] — 기본 (0.0, 0.0) 이므로 항상 0
         self._lin_vel_cmd[env_ids, 1] = (
             torch.rand(n, device=self.device) * (self.cfg.lin_vel_y_max - self.cfg.lin_vel_y_min)

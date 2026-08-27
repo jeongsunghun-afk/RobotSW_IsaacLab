@@ -43,6 +43,8 @@ import pickle
 import numpy as np
 import torch
 
+from .mdp.symmetry import mirror_joint_name, mirror_joint_needs_flip
+
 # ──────────────────────────────────────────────────────────────
 # Leg FK / 변환 유틸리티
 # ──────────────────────────────────────────────────────────────
@@ -239,6 +241,51 @@ def _quat_body_ang_vel(quat_wxyz: np.ndarray, dt: float) -> np.ndarray:
     return ang_vel.astype(np.float32)
 
 
+# PKL 프레임의 좌우 미러 규약. `mdp/symmetry.py` 의 관절 규약을 DOF_NAMES 순서로 굳힌 것이며,
+# 데이터셋에 이미 들어 있는 `*_mirror.pkl` 5쌍을 비트 단위로 재현하는 것을 확인했다
+# (= 리타게팅 스크립트가 미러본을 만들 때 쓴 변환과 동일).
+_MIRROR_PERM = [DOF_NAMES.index(mirror_joint_name(n)) for n in DOF_NAMES]
+_MIRROR_SIGN = np.array([-1.0 if mirror_joint_needs_flip(n) else 1.0 for n in DOF_NAMES], dtype=np.float32)
+
+
+def _mirror_frames(frames: np.ndarray) -> np.ndarray:
+    """PKL 프레임 (N, 23) 을 시상면 기준 좌우 반전합니다.
+
+    ``M = diag(1, -1, 1)`` 반사에 대해 root 위치는 y 가 뒤집히고, 회전은 ``R -> M R M`` 이라
+    회전축이 ``(nx, -ny, nz)`` 로 가면서 각도 부호가 바뀐다. exponential map ``e = θ·n`` 에서는
+    이것이 ``(-ex, ey, -ez)`` 로 나타난다. 관절은 L<->R 스왑 후 hip / waist / 뒷발 부호 반전이다.
+
+    Args:
+        frames: 원본 프레임 [root_pos 3 [m], exp_map 3 [rad], dof 17 [rad]], shape [N, 23].
+
+    Returns:
+        미러된 프레임, shape [N, 23].
+    """
+    out = frames.copy()
+    out[:, 1] = -frames[:, 1]  # root_pos y [m]
+    out[:, 3] = -frames[:, 3]  # exp_map x [rad]
+    out[:, 5] = -frames[:, 5]  # exp_map z [rad]
+    out[:, 6:FRAME_DIM] = frames[:, 6:FRAME_DIM][:, _MIRROR_PERM] * _MIRROR_SIGN
+    return out
+
+
+def mirror_motion_name(name: str) -> str:
+    """모션 클립 이름의 좌우 짝 이름을 돌려줍니다.
+
+    규약은 데이터셋 파일명 그대로다 — ``_mirror`` 토큰을 붙이거나 떼며, 리타게터 접미사
+    ``_stmr`` 이 있으면 그 앞에 넣는다 (``leg_walk_turn_stmr`` <-> ``leg_walk_turn_mirror_stmr``).
+
+    Args:
+        name: 확장자를 뺀 클립 이름.
+
+    Returns:
+        짝이 되는 클립 이름.
+    """
+    if "_mirror" in name:
+        return name.replace("_mirror", "", 1)
+    return name[: -len("_stmr")] + "_mirror_stmr" if name.endswith("_stmr") else name + "_mirror"
+
+
 def _finite_diff(arr: np.ndarray, dt: float) -> np.ndarray:
     """Forward finite difference (N, D) → (N, D), 마지막 프레임은 이전 복사."""
     vel = np.zeros_like(arr)
@@ -309,6 +356,15 @@ class LegMotionLib:
         PyTorch 디바이스 문자열 (예: "cuda:0", "cpu").
     weights : list[float] | None
         모션별 샘플링 가중치. None이면 프레임 수 비례 균등 가중치.
+    mirror_complete : bool
+        True 면 좌우 짝이 없는 클립마다 미러본을 합성해 붙여 클립 집합을 좌우 대칭으로 만든다.
+        expert 분포의 좌우 편향을 구조적으로 0 으로 만들며, `weights` 를 함께 주는 것은 금지한다
+        (합성 후 클립 수가 달라져 길이가 안 맞는다).
+
+        전제 두 가지를 기동 시 assert 로 검사한다 — 짝 이름은 `mirror_motion_name` 규약을 따라야
+        하고, 짝끼리 `motion_mean_speeds` 가 같아야 한다. 후자는 이 값이 `|v|` 라서 성립하는데,
+        미러가 vy 부호만 뒤집으므로 전진 위주 클립에서는 정확히 보존된다. 횡방향 이동이 큰 클립이
+        섞이면 깨진다.
     """
 
     def __init__(
@@ -316,6 +372,7 @@ class LegMotionLib:
         motion_files: str | list[str],
         device: str,
         weights: list[float] | None = None,
+        mirror_complete: bool = False,
     ) -> None:
         self._device = device
 
@@ -342,9 +399,31 @@ class LegMotionLib:
         num_frames_list: list[int] = []
         fps_list: list[float | np.ndarray] = []
 
+        # ── 원본 프레임 읽기 ────────────────────────────────────────
+        clips: list[tuple[str, np.ndarray, float]] = []  # (이름, frames, fps)
         for path in motion_files:
             assert os.path.isfile(path), f"파일이 존재하지 않습니다: {path}"
-            rp, rq, lv, av, dp, dv, fp, fps = self._load_pkl(path)
+            frames, fps = self._read_pkl(path)
+            clips.append((os.path.splitext(os.path.basename(path))[0], frames, fps))
+
+        # ── 좌우 짝 없는 클립의 미러본 합성 ──────────────────────────
+        # 짝이 있는 클립끼리는 평균 속도가 같아 어떤 가중 방식에서도 같은 가중치를 받고 서로
+        # 상쇄된다. 짝이 없는 클립만 expert 분포에 좌우 편향을 남기므로 여기서 메운다.
+        if mirror_complete:
+            assert weights is None, "mirror_complete=True 에서는 weights 를 직접 줄 수 없다 (클립 수가 달라진다)."
+            present = {name for name, _, _ in clips}
+            for name, frames, fps in list(clips):
+                partner = mirror_motion_name(name)
+                if partner in present:
+                    continue
+                present.add(partner)
+                clips.append((partner, _mirror_frames(frames), fps))
+                print(f"[LegMotionLib] 미러 합성: {name} → {partner}")
+
+        # ── 파생량 계산 ─────────────────────────────────────────────
+        self._motion_names = [name for name, _, _ in clips]
+        for name, frames, fps in clips:
+            rp, rq, lv, av, dp, dv, fp = self._derive_frame_data(frames, fps)
             n = rp.shape[0]
             all_root_pos.append(rp)
             all_root_quat.append(rq)
@@ -355,7 +434,7 @@ class LegMotionLib:
             all_foot_pos.append(fp)
             num_frames_list.append(n)
             fps_list.append(fps)
-            print(f"[LegMotionLib] 로드: {os.path.basename(path)} — {n} 프레임 ({(n - 1) / fps:.2f}s @ {fps:.0f}fps)")
+            print(f"[LegMotionLib] 로드: {name} — {n} 프레임 ({(n - 1) / fps:.2f}s @ {fps:.0f}fps)")
 
         # ── 모션별 메타데이터 ───────────────────────────────────────
         num_frames_arr = np.array(num_frames_list, dtype=np.int64)
@@ -366,7 +445,7 @@ class LegMotionLib:
         if weights is None:
             w = motion_lengths.astype(np.float64)
         else:
-            assert len(weights) == len(motion_files), "weights 길이가 파일 수와 불일치"
+            assert len(weights) == len(clips), "weights 길이가 파일 수와 불일치"
             w = np.array(weights, dtype=np.float64)
         w = w / w.sum()
 
@@ -384,15 +463,99 @@ class LegMotionLib:
         self._motion_weights = torch.tensor(w, dtype=torch.float32, device=device)
 
         # 각 모션의 플랫 배열 내 시작 인덱스
-        start_idx = np.zeros(len(motion_files), dtype=np.int64)
+        start_idx = np.zeros(len(clips), dtype=np.int64)
         start_idx[1:] = num_frames_arr[:-1].cumsum()
         self._motion_start_idx = torch.tensor(start_idx, dtype=torch.long, device=device)
 
-        num_motions = len(motion_files)
+        num_motions = len(clips)
         total_len = motion_lengths.sum()
         print(f"[LegMotionLib] 총 {num_motions}개 모션, {total_len:.2f}s 로드 완료")
 
+        if mirror_complete:
+            self._assert_mirror_pairs()
+
+    def _assert_mirror_pairs(self) -> None:
+        """미러 완성이 의존하는 불변식을 검사합니다.
+
+        가중 방식과 무관하게 좌우 편향이 0 이려면 (1) 모든 클립에 짝이 있고 (2) 짝끼리 평균 속도가
+        같아야 한다. (2) 가 깨지면 두 클립이 속도축에서 서로 다른 셀에 놓여 다른 가중치를 받는다.
+        이름 규약이 다른 데이터셋이 들어오면 (1) 이, 횡방향 이동이 큰 클립이 들어오면 (2) 가
+        조용히 깨지므로 기동 시 실패시킨다.
+        """
+        speeds = self.motion_mean_speeds
+        present = {name: i for i, name in enumerate(self._motion_names)}
+        for name, i in present.items():
+            partner = mirror_motion_name(name)
+            assert partner in present, (
+                f"미러 짝이 없다: '{name}' → '{partner}'. 데이터셋 이름 규약이 mirror_motion_name 과"
+                f" 다르다. 클립: {sorted(present)}"
+            )
+            gap = float(abs(speeds[i] - speeds[present[partner]]))
+            assert gap <= 1e-4, (
+                f"미러 짝의 평균 속도가 다르다: '{name}' {float(speeds[i]):.4f} vs '{partner}'"
+                f" {float(speeds[present[partner]]):.4f} m/s (차이 {gap:.4f}). 평균 속도는 |v| 라"
+                f" 횡방향 이동이 큰 클립은 미러 후에도 같은 값이 되지 않을 수 있다."
+            )
+
     # ── 공개 인터페이스 ────────────────────────────────────────────
+
+    @property
+    def motion_mean_speeds(self) -> torch.Tensor:
+        """모션별 평균 수평 속도 [m/s], shape [num_motions], float.
+
+        root 위치의 프레임 간 차분으로 계산한다(world frame xy 평면).
+        """
+        speeds = []
+        for i in range(len(self._motion_lengths)):
+            s = int(self._motion_start_idx[i])
+            n = int(self._motion_num_frames[i])
+            pos_xy = self._frame_root_pos[s : s + n, :2]
+            fps = (n - 1) / float(self._motion_lengths[i])
+            step = torch.linalg.norm(pos_xy[1:] - pos_xy[:-1], dim=-1) * fps
+            speeds.append(step.mean())
+        return torch.stack(speeds)
+
+    def set_motion_weights_command_uniform(self, vel_max: float) -> torch.Tensor:
+        """샘플링 가중치를 재설정해 expert 속도 분포가 U[0, vel_max] 에 근사하도록 만든다.
+
+        기본(길이 비례) 가중치는 클립 길이가 곧 분포가 되어, 명령 분포와 무관하게 특정 속도대가
+        과대/과소 대표된다. 여기서는 각 모션에 **속도축 상의 담당 구간(최근접 셀)** 폭을 가중치로
+        준다. 셀 경계는 이웃 속도와의 중점이며 [0, vel_max] 로 잘린다. 셀 폭의 합이 vel_max 라
+        정규화 후 분포는 균등 명령 분포에 대응한다. 같은 속도를 갖는 모션(예: mirror 쌍)은 해당
+        셀을 균등 분할한다.
+
+        Args:
+            vel_max: 명령 선속도 상한 [m/s]. 보통 env cfg 의 `lin_vel_x_max`.
+
+        Returns:
+            재설정된 정규화 가중치, shape [num_motions], float.
+        """
+        speeds = self.motion_mean_speeds
+        order = torch.argsort(speeds)
+        sorted_speeds = speeds[order].clamp(0.0, vel_max)
+
+        # 이웃 중점으로 셀 경계 구성 (양 끝은 0 과 vel_max).
+        mids = 0.5 * (sorted_speeds[1:] + sorted_speeds[:-1])
+        lo = torch.cat([sorted_speeds.new_zeros(1), mids])
+        hi = torch.cat([mids, sorted_speeds.new_full((1,), vel_max)])
+        cell = (hi - lo).clamp(min=0.0)
+
+        # 동일 속도(mirror 쌍 등)는 셀을 균등 분할 — 위 중점 계산에서 폭 0 이 되므로 재분배한다.
+        w_sorted = cell.clone()
+        i = 0
+        while i < len(sorted_speeds):
+            j = i
+            while j + 1 < len(sorted_speeds) and torch.isclose(sorted_speeds[j + 1], sorted_speeds[i], atol=1e-4):
+                j += 1
+            if j > i:
+                w_sorted[i : j + 1] = w_sorted[i : j + 1].sum() / (j - i + 1)
+            i = j + 1
+
+        w = torch.empty_like(w_sorted)
+        w[order] = w_sorted
+        w = w.clamp(min=1e-6)
+        self._motion_weights = (w / w.sum()).to(self._device)
+        return self._motion_weights
 
     def sample_motions(self, n: int) -> torch.Tensor:
         """가중치 기반 모션 ID 샘플링.
@@ -454,6 +617,14 @@ class LegMotionLib:
         return int(self._motion_num_frames.shape[0])
 
     @property
+    def motion_names(self) -> list[str]:
+        """모션 클립 이름 (확장자 제외), 인덱스는 가중치/속도 배열과 같은 순서.
+
+        ``mirror_complete=True`` 로 합성된 미러본도 포함되므로 파일 목록보다 길 수 있다.
+        """
+        return list(self._motion_names)
+
+    @property
     def total_length(self) -> float:
         return float(self._motion_lengths.sum().item())
 
@@ -491,24 +662,18 @@ class LegMotionLib:
         return idx0 + start_idx, idx1 + start_idx, blend
 
     @staticmethod
-    def _load_pkl(path: str) -> tuple:
-        """PKL 파일 로드 + 속도/FK 계산.
+    def _read_pkl(path: str) -> tuple[np.ndarray, float]:
+        """PKL 파일에서 원본 프레임과 fps 만 읽습니다 (파생량 계산 없음).
+
+        Args:
+            path: PKL 파일 경로.
 
         Returns:
-            root_pos   (N, 3)    world frame
-            root_quat  (N, 4)    (w, x, y, z)
-            lin_vel    (N, 3)    body frame
-            ang_vel    (N, 3)    body frame
-            dof_pos    (N, 17)
-            dof_vel    (N, 17)
-            foot_pos   (N, 4, 3) body-local frame
-            fps        float
+            ``(frames, fps)`` — frames shape [N, 23], fps [Hz].
         """
         with open(path, "rb") as f:
             data = pickle.load(f)
 
-        fps = float(data["fps"])
-        dt = 1.0 / fps
         frames = np.array(data["frames"], dtype=np.float32)  # (N, 23)
         assert frames.shape[1] == FRAME_DIM, f"프레임 크기 불일치: {frames.shape[1]} != {FRAME_DIM} ({path})"
 
@@ -517,6 +682,26 @@ class LegMotionLib:
         assert pkl_dof_names is None or list(pkl_dof_names) == DOF_NAMES, (
             f"PKL 관절 순서가 DOF_NAMES 와 다릅니다 ({path}): {pkl_dof_names}"
         )
+        return frames, float(data["fps"])
+
+    @staticmethod
+    def _derive_frame_data(frames: np.ndarray, fps: float) -> tuple:
+        """원본 프레임에서 속도/자세/발 위치를 파생합니다.
+
+        Args:
+            frames: 프레임 배열, shape [N, 23].
+            fps: 프레임 레이트 [Hz].
+
+        Returns:
+            root_pos   (N, 3)    world frame [m]
+            root_quat  (N, 4)    (w, x, y, z)
+            lin_vel    (N, 3)    body frame [m/s]
+            ang_vel    (N, 3)    body frame [rad/s]
+            dof_pos    (N, 17)   [rad]
+            dof_vel    (N, 17)   [rad/s]
+            foot_pos   (N, 4, 3) body-local frame [m]
+        """
+        dt = 1.0 / fps
 
         root_pos = frames[:, 0:3]  # (N, 3)
         root_exp_map = frames[:, 3:6]  # (N, 3) exponential map
@@ -531,4 +716,4 @@ class LegMotionLib:
 
         foot_pos = _leg_fk_foot_pos(dof_pos)  # (N, 4, 3) body-local
 
-        return root_pos, root_quat, lin_vel, ang_vel, dof_pos, dof_vel, foot_pos, float(fps)
+        return root_pos, root_quat, lin_vel, ang_vel, dof_pos, dof_vel, foot_pos
