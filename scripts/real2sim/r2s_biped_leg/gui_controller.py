@@ -75,6 +75,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(__file__))
 import chirp  # noqa: E402
 import motions  # noqa: E402
@@ -93,6 +95,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -148,6 +151,18 @@ ACTION_SCALE: float = 0.25
 GAIT_PERIOD: float = 0.6  # s
 STEP_DT: float = 0.02  # s (decimation 4 / 200 Hz) → 50 Hz control
 DEFAULT_JOINT_POS: list[float] = [0.0] * NUM_JOINTS  # hind_leg USD default 전부 0
+# 교차 배선(sim obs → 실기) 안전 클램프 [rad]. 실기 실측 q 기준으로 목표를 이 폭 안에 조인다.
+# 0.05 rad(2.9°) 근거: PD 오차가 그 안이면 calf 토크가 kp·0.05 = 112.5×0.05 ≈ 5.6 N·m 로,
+# 안전 트립(관절 22.5 N·m)의 1/4 이다. 속도로는 50 Hz 에서 2.5 rad/s — 속도 트립 3.49 아래.
+# ⚠ 두 세계의 자세는 얼마든지 벌어질 수 있다. 이 클램프가 없으면 그 차이가 그대로 실기 명령이 된다.
+CROSS_CLAMP_RAD: float = 0.05
+# 배선 콤보: 표시 문자열 ↔ POLICY_SRC_* 값
+_ROUTE_ITEMS: list[str] = ["off (neutral hold)", "action from SIM obs", "action from REAL obs"]
+_ROUTE_VALUES: list[int] = [-1, 0, 1]
+_ROUTE_INDEX: dict[int, int] = {-1: 0, 0: 1, 1: 2}
+# 로깅용 이름 (-1=OFF)
+_SRC_NAME: dict[int, str] = {-1: "OFF", 0: "simobs", 1: "realobs"}
+
 X_VEL_RANGE: tuple[float, float] = (-0.5, 2.0)
 YAW_RANGE: tuple[float, float] = (-0.5, 0.5)
 
@@ -459,11 +474,30 @@ class PolicyInferenceThread(QThread):
 
     policy_runner_bipedleg.py 의 obs 구성(PolicyState)과 요청-응답 lockstep을 그대로 이식한다.
     Qt 이벤트 루프를 막지 않도록 blocking recv 를 이 스레드에서 수행하고, 자세(grav_z)는 signal 로
-    메인 스레드에 전달한다. 스레드는 GUI 수명 동안 살아 있고, 공유 command(mode/source/x_vel/yaw)를
-    매 루프 읽는다: mode=0(idle)이면 action 미송신 → sim 은 step 하지 않고 직립 유지, mode=1(run)이면 폐루프.
+    메인 스레드에 전달한다. 스레드는 GUI 수명 동안 살아 있고, 공유 command 를 매 루프 읽는다.
 
-    lockstep 불변식(**중요**): action 송신 → sim state blocking 대기 → 추론 → 다음 action.
-    1 action = 1 sim step. 자유 타이머로 free-running 하면 자유베이스 2족이 넘어진다.
+    lockstep 불변식(**중요**): action 송신 → state blocking 대기 → 추론 → 다음 action.
+    1 action = 1 step. 자유 타이머로 free-running 하면 자유베이스 2족이 넘어진다.
+
+    ★ 2026-08-27 — **두 갈래 동시 추론 + 목적지별 배선** (deploy 시험용)
+    -------------------------------------------------------------------
+    실기 배포를 검증하려면 같은 정책을 두 입력으로 동시에 돌려 비교해야 한다::
+
+        real obs ─▶ 정책 ─▶ action_real
+        sim  obs ─▶ 정책 ─▶ action_sim
+
+    그리고 그 둘을 **어느 쪽으로 보낼지 목적지마다 따로** 고를 수 있어야 한다
+    (교차 배선 포함). 그래서 명령이 `source` 하나에서 `src_for_sim`/`src_for_real`
+    둘로 바뀌었다 — **목적지 중심**이라 "두 액션이 같은 목적지를 노리는" 충돌이
+    원천적으로 표현되지 않는다.
+
+    갈래마다 **독립 상태**를 둔다 (`_branches`). `prev_action` 과 history 를 공유하면
+    한쪽이 다른 쪽의 다음 obs 를 덮어써서, 결과가 플랜트 불일치처럼 보이는 장부 버그가 된다.
+    **어느 목적지로도 안 나가는 갈래도 자기 액션으로 계속 전진**시킨다 — 그래야 배선을
+    도중에 바꿔도 불연속이 없다. gait clock 만은 벽시계라 **공유**한다.
+
+    ``OFF`` 는 "패킷 미송신"이 아니라 **중립(default) 목표 송신**이다. 미송신으로 두면
+    lockstep 상대가 step 하지 않아 state 가 안 오고, 그 state 를 쓰는 갈래가 교착한다.
     """
 
     # grav_z, phase, x_vel, yaw — 1초(50 step)마다 방출 (상태바 갱신용).
@@ -477,16 +511,28 @@ class PolicyInferenceThread(QThread):
         self._real_host = real_host
         self._lock = threading.Lock()
         self._mode = 0  # 0=idle, 1=run
-        self._source = 0  # 0=sim, 1=real
+        # ★ 2026-08-27: 목적지별 obs 출처. -1=OFF(중립 유지) · 0=sim obs · 1=real obs.
+        #   기본값은 "각자 자기 세계" — real obs→real, sim obs→sim.
+        self._src_for_sim = r2s_udp.POLICY_SRC_SIM
+        self._src_for_real = r2s_udp.POLICY_SRC_REAL
         self._x_vel = 0.0
         self._yaw = 0.0
         self._stop = False
 
-    def set_command(self, mode: int, source: int, x_vel: float, yaw: float) -> None:
-        """메인 스레드에서 공유 command 갱신 (학습 범위로 클램프)."""
+    def set_command(self, mode: int, src_for_sim: int, src_for_real: int, x_vel: float, yaw: float) -> None:
+        """메인 스레드에서 공유 command 갱신 (학습 범위로 클램프).
+
+        Args:
+            mode: 0=idle(정책 정지·중립 유지), 1=run.
+            src_for_sim: sim 목적지로 보낼 액션의 obs 출처 (``POLICY_SRC_*``).
+            src_for_real: real 목적지로 보낼 액션의 obs 출처 (``POLICY_SRC_*``).
+            x_vel: 전진 속도 명령 [m/s].
+            yaw: 요 각속도 명령 [rad/s].
+        """
         with self._lock:
             self._mode = int(mode)
-            self._source = int(source)
+            self._src_for_sim = int(src_for_sim)
+            self._src_for_real = int(src_for_real)
             self._x_vel = max(X_VEL_RANGE[0], min(X_VEL_RANGE[1], float(x_vel)))
             self._yaw = max(YAW_RANGE[0], min(YAW_RANGE[1], float(yaw)))
 
@@ -500,7 +546,10 @@ class PolicyInferenceThread(QThread):
             self.failed.emit(f"model load failed: {exc}")
             return
         device = self._device
-        ps = PolicyState(device)
+        # 갈래별 독립 상태 — key = obs 출처(0=sim, 1=real). prev_action/history 를 공유하면
+        # 한쪽이 다른 쪽의 다음 obs 를 덮어쓴다 (docstring 참고).
+        branches = {r2s_udp.POLICY_SRC_SIM: PolicyState(device), r2s_udp.POLICY_SRC_REAL: PolicyState(device)}
+        phase = 0.0  # gait clock — 벽시계라 두 갈래가 **공유**한다
 
         # --- 소켓 (policy_runner_bipedleg.py 와 동일 대역) ---
         sim_state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # sim rich state 수신
@@ -515,12 +564,13 @@ class PolicyInferenceThread(QThread):
         real_act_addr = (self._real_host, r2s_udp.REAL_ACT_PORT) if self._real_host else None
         mon_addr = (HOST, r2s_udp.MONITOR_PORT)
 
-        default_np = ps.default.cpu().numpy()
+        default_np = branches[r2s_udp.POLICY_SRC_SIM].default.cpu().numpy()
         seq = 0
         prev_mode = 0
+        last_state = {r2s_udp.POLICY_SRC_SIM: None, r2s_udp.POLICY_SRC_REAL: None}
 
         def recv_state_blocking(sock, timeout: float = 0.2):
-            """선택된 source 소켓에서 state 하나 blocking 대기 후 latest-wins drain. 없으면 None."""
+            """소켓에서 state 하나 blocking 대기 후 latest-wins drain. 없으면 None."""
             sock.settimeout(timeout)
             try:
                 data, _ = sock.recvfrom(4096)
@@ -533,26 +583,30 @@ class PolicyInferenceThread(QThread):
                     d, _ = sock.recvfrom(4096)
                 except (BlockingIOError, OSError):
                     break
-                p = r2s_udp.unpack_policy_state(d)
-                if p is not None:
-                    latest = p
+                pkt = r2s_udp.unpack_policy_state(d)
+                if pkt is not None:
+                    latest = pkt
             return latest
 
-        def send_action(target) -> None:
-            packet = r2s_udp.pack_policy_act(seq, target)
-            act_sock.sendto(packet, sim_act_addr)  # sim
-            if real_act_addr is not None:
-                act_sock.sendto(packet, real_act_addr)  # real (seam)
+        def send_to(addr, target) -> None:
+            if addr is not None:
+                act_sock.sendto(r2s_udp.pack_policy_act(seq, target), addr)
 
         try:
             while not self._stop:
                 with self._lock:
-                    mode, source, x_vel, yaw = self._mode, self._source, self._x_vel, self._yaw
+                    mode = self._mode
+                    src_sim, src_real = self._src_for_sim, self._src_for_real
+                    x_vel, yaw = self._x_vel, self._yaw
 
-                # run 진입(idle→run): clock/history/prev_action 초기화 + 시동 action(sim 회신 주소 학습).
+                # run 진입(idle→run): 두 갈래 clock/history/prev_action 초기화 + 시동 action.
                 if prev_mode == 0 and mode == 1:
-                    ps.reset()
-                    send_action(default_np)
+                    for b in branches.values():
+                        b.reset()
+                    phase = 0.0
+                    last_state[r2s_udp.POLICY_SRC_SIM] = last_state[r2s_udp.POLICY_SRC_REAL] = None
+                    send_to(sim_act_addr, default_np)
+                    send_to(real_act_addr, default_np)
                     seq += 1
                 prev_mode = mode
 
@@ -560,56 +614,100 @@ class PolicyInferenceThread(QThread):
                     self.msleep(10)  # idle: action 미송신 → sim step 안 함 → upright 유지
                     continue
 
-                # 방금 보낸 action에 대한 sim/real state 대기 (요청-응답 lockstep).
-                src_sock = real_state_sock if source == 1 else sim_state_sock
-                state = recv_state_blocking(src_sock)
-                if state is None:
-                    send_action(default_np)  # 응답 없음 → 재시동
+                # ── 1) 소비되는 출처의 state 만 대기한다 ───────────────────────────────
+                #     쓰지도 않는 real 을 기다리면 real 이 조용할 때 sim 까지 멈춘다.
+                needed = {v for v in (src_sim, src_real) if v >= 0}
+                socks = {r2s_udp.POLICY_SRC_SIM: sim_state_sock, r2s_udp.POLICY_SRC_REAL: real_state_sock}
+                got_any = False
+                for src in sorted(needed):
+                    st = recv_state_blocking(socks[src])
+                    if st is None:
+                        continue
+                    if st["convention_version"] != _REQUIRED_CONVENTION_VERSION:
+                        self.failed.emit(
+                            f"coordinate convention mismatch: got v{st['convention_version']}, "
+                            f"need v{_REQUIRED_CONVENTION_VERSION} (env not migrated yet)"
+                        )
+                        return
+                    last_state[src] = st
+                    got_any = True
+                if needed and not got_any:
+                    # 필요한 출처가 하나도 응답하지 않음 → 재시동(중립). 스텝을 건너뛰면 lockstep 이 어긋난다.
+                    send_to(sim_act_addr, default_np)
+                    send_to(real_act_addr, default_np)
                     seq += 1
                     continue
-                # 좌표 규약 검사 — 정책은 관절 좌표만 안다. 변환은 브리지가 전담하므로 여기서
-                # 맞춰주지 않고 멈춘다(policy_runner_bipedleg.py와 같은 규칙).
-                # 구버전(84 B) STATE는 크기 불일치로 위 None 분기에서 이미 걸러진다.
-                if state["convention_version"] != _REQUIRED_CONVENTION_VERSION:
-                    self.failed.emit(
-                        f"coordinate convention mismatch: got v{state['convention_version']}, "
-                        f"need v{_REQUIRED_CONVENTION_VERSION} (env not migrated yet)"
-                    )
-                    return
 
-                # 추론 → 다음 action (articulation 순서). deployable jit 는 estimator/history_encoder 내장이라
-                # 호출은 model(proprio, history) 뿐 (priv_explicit 불필요).
-                q = torch.tensor(state["q"], device=device)
-                dq = torch.tensor(state["dq"], device=device)
-                gravity = torch.tensor(state["gravity"], device=device)
-                cmd_vec = torch.tensor([x_vel, 0.0, yaw], device=device)  # y_vel≡0
+                # ── 2) 갈래별 추론 — 배선과 무관하게 **둘 다** 전진시킨다 ─────────────
+                #     안 내보내는 갈래를 멈추면 배선을 바꾸는 순간 history 가 튄다.
+                cmd_vec = torch.tensor([x_vel, 0.0, yaw], device=device)
+                targets: dict[int, object] = {}
+                for src, b in branches.items():
+                    st = last_state[src]
+                    if st is None:
+                        continue
+                    b.phase = phase  # clock 공유
+                    q = torch.tensor(st["q"], device=device)
+                    dq = torch.tensor(st["dq"], device=device)
+                    gravity = torch.tensor(st["gravity"], device=device)
+                    obs_policy = b.build_obs(q, dq, gravity, cmd_vec)  # (34,)
+                    hist = b.push_history(obs_policy)  # (10,34)
+                    with torch.inference_mode():
+                        raw_action = model(obs_policy.unsqueeze(0), hist.unsqueeze(0))[0]  # (8,)
+                    b.advance(raw_action)  # 자기 prev_action 갱신 (phase 는 아래에서 공유 전진)
+                    targets[src] = (ACTION_SCALE * raw_action + b.default).cpu().numpy()
+                phase = (phase + STEP_DT / GAIT_PERIOD) % 1.0
 
-                obs_policy = ps.build_obs(q, dq, gravity, cmd_vec)  # (34,)
-                hist = ps.push_history(obs_policy)  # (10,34)
-                with torch.inference_mode():
-                    raw_action = model(obs_policy.unsqueeze(0), hist.unsqueeze(0))[0]  # (8,)
-                ps.advance(raw_action)
-                target = (ACTION_SCALE * raw_action + ps.default).cpu().numpy()
-                send_action(target)
+                # ── 3) 목적지별 배선 ──────────────────────────────────────────────────
+                #     OFF(-1) 는 미송신이 아니라 **중립 송신**이다 (docstring 참고).
+                tgt_sim = targets.get(src_sim, default_np) if src_sim >= 0 else default_np
+                tgt_real = targets.get(src_real, default_np) if src_real >= 0 else default_np
 
-                # monitor 중계 (action_q=target vs sim q/dq; tau는 rich state에 없어 0).
-                # target/q/dq 는 articulation 순서라, monitor.py 가 기대하는 leg-major(motions.JOINT_NAMES)로
-                # 재배열해야 한다 — 이전엔 articulation 순서 그대로 보내 monitor의 관절 레이블과 어긋났었다.
-                target_lm = [target[a] for a in _ART_FOR_LEGMAJOR]
-                q_lm = [state["q"][a] for a in _ART_FOR_LEGMAJOR]
-                dq_lm = [state["dq"][a] for a in _ART_FOR_LEGMAJOR]
-                mon_sock.sendto(r2s_udp.pack_monitor(seq, target_lm, q_lm, dq_lm, [0.0] * NUM_JOINTS), mon_addr)
+                # ★ 교차 배선 안전장치 — sim obs 로 계산한 액션을 **실기**로 보내는 칸.
+                #   두 세계의 자세가 얼마든지 벌어질 수 있으므로, 실기 실측 q 기준으로 목표를 조인다.
+                #   |목표−q| ≤ CROSS_CLAMP 이면 PD 오차가 그 안이라 calf 기준 토크가
+                #   kp·clamp ≈ 112.5×0.05 = 5.6 N·m — 안전 트립(관절 22.5)의 1/4 이다.
+                if src_real == r2s_udp.POLICY_SRC_SIM and real_act_addr is not None:
+                    st_real = last_state[r2s_udp.POLICY_SRC_REAL]
+                    if st_real is None:
+                        tgt_real = None  # 실기 상태를 모르면 조일 수 없다 → 보내지 않는다
+                    else:
+                        q_real = np.asarray(st_real["q"], dtype=float)
+                        tgt_real = np.clip(
+                            np.asarray(tgt_real, dtype=float), q_real - CROSS_CLAMP_RAD, q_real + CROSS_CLAMP_RAD
+                        )
+
+                send_to(sim_act_addr, tgt_sim)
+                if tgt_real is not None:
+                    send_to(real_act_addr, tgt_real)
+
+                # monitor 중계 (action_q=sim 목적지 목표 vs sim q/dq; tau 는 rich state 에 없어 0).
+                st_mon = last_state[r2s_udp.POLICY_SRC_SIM]
+                if st_mon is not None:
+                    target_lm = [tgt_sim[a] for a in _ART_FOR_LEGMAJOR]
+                    q_lm = [st_mon["q"][a] for a in _ART_FOR_LEGMAJOR]
+                    dq_lm = [st_mon["dq"][a] for a in _ART_FOR_LEGMAJOR]
+                    mon_sock.sendto(r2s_udp.pack_monitor(seq, target_lm, q_lm, dq_lm, [0.0] * NUM_JOINTS), mon_addr)
                 seq += 1
 
-                # 1초(50 step)마다 자세 로깅 — grav_z≈-1이면 직립, 0/양수면 기울어짐/전도.
+                # 1초(50 step)마다 로깅 — grav_z≈-1 이면 직립. 두 갈래가 다 살아 있으면 **발산량**도 낸다.
                 if seq % 50 == 0:
-                    gz = float(gravity[2])
+                    st_ref = last_state[src_sim] if src_sim >= 0 else last_state[src_real]
+                    gz = float(st_ref["gravity"][2]) if st_ref is not None else 0.0
+                    div = ""
+                    if len(targets) == 2:
+                        d = np.abs(
+                            np.asarray(targets[r2s_udp.POLICY_SRC_REAL], dtype=float)
+                            - np.asarray(targets[r2s_udp.POLICY_SRC_SIM], dtype=float)
+                        )
+                        div = f"  |Δaction| mean={d.mean():.4f} max={d.max():.4f} rad"
                     print(
-                        f"[gui_infer] t={seq * STEP_DT:5.1f}s  grav_z={gz:+.2f}  phase={ps.phase:.2f}  "
-                        f"x_vel={x_vel:+.2f} yaw={yaw:+.2f}  src={'real' if source == 1 else 'sim'}",
+                        f"[gui_infer] t={seq * STEP_DT:5.1f}s  grav_z={gz:+.2f}  phase={phase:.2f}  "
+                        f"x_vel={x_vel:+.2f} yaw={yaw:+.2f}  "
+                        f"sim←{_SRC_NAME[src_sim]} real←{_SRC_NAME[src_real]}{div}",
                         flush=True,
                     )
-                    self.status.emit(gz, float(ps.phase), float(x_vel), float(yaw))
+                    self.status.emit(gz, float(phase), float(x_vel), float(yaw))
         finally:
             for s in (sim_state_sock, real_state_sock, act_sock, mon_sock):
                 s.close()
@@ -1144,7 +1242,9 @@ class MainWindow(QMainWindow):
         # policy mode 상태
         self._mode: str = "position"  # "position" | "policy"
         self._policy_run: int = 0  # 0=idle, 1=run
-        self._policy_source: int = 0  # 0=sim, 1=real
+        # 목적지별 obs 출처 (-1=OFF · 0=sim obs · 1=real obs). 기본 = 각자 자기 세계.
+        self._src_for_sim: int = r2s_udp.POLICY_SRC_SIM
+        self._src_for_real: int = r2s_udp.POLICY_SRC_REAL
         self._x_vel: float = 0.0
         self._yaw: float = 0.0
 
@@ -1884,13 +1984,32 @@ class MainWindow(QMainWindow):
         self._policy_stop_btn.setEnabled(False)
         row1.addWidget(self._policy_stop_btn)
         row1.addSpacing(20)
-        row1.addWidget(QLabel("Input source:"))
-        self._source_combo = QComboBox()
-        self._source_combo.addItems(["Sim", "Real"])
-        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
-        row1.addWidget(self._source_combo)
         row1.addStretch(1)
         v.addLayout(row1)
+
+        # --- action routing: 목적지마다 "어느 obs 로 계산한 액션을 보낼지" 고른다 -----------
+        # 소스 중심(각 액션 → 목적지 체크박스)으로 두면 두 액션이 같은 목적지를 노리는 충돌이
+        # 표현 가능해진다. 목적지 중심이면 그 상태가 원천적으로 없다.
+        row_route = QHBoxLayout()
+        row_route.addWidget(QLabel("Action routing —"))
+        row_route.addWidget(QLabel("Sim gets:"))
+        self._route_sim_combo = QComboBox()
+        self._route_sim_combo.addItems(_ROUTE_ITEMS)
+        self._route_sim_combo.setCurrentIndex(_ROUTE_INDEX[r2s_udp.POLICY_SRC_SIM])
+        self._route_sim_combo.currentIndexChanged.connect(self._on_route_sim_changed)
+        row_route.addWidget(self._route_sim_combo)
+        row_route.addSpacing(16)
+        row_route.addWidget(QLabel("Real gets:"))
+        self._route_real_combo = QComboBox()
+        self._route_real_combo.addItems(_ROUTE_ITEMS)
+        self._route_real_combo.setCurrentIndex(_ROUTE_INDEX[r2s_udp.POLICY_SRC_REAL])
+        self._route_real_combo.currentIndexChanged.connect(self._on_route_real_changed)
+        row_route.addWidget(self._route_real_combo)
+        row_route.addSpacing(16)
+        self._route_note = QLabel("")
+        self._route_note.setWordWrap(True)
+        row_route.addWidget(self._route_note, 1)
+        v.addLayout(row_route)
 
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("x_vel [m/s] fwd/back:"))
@@ -1938,7 +2057,9 @@ class MainWindow(QMainWindow):
     def _push_policy_command(self) -> None:
         """현재 UI 상태(run/source/x_vel/yaw)를 추론 스레드로 전달."""
         if self._policy_thread is not None:
-            self._policy_thread.set_command(self._policy_run, self._policy_source, self._x_vel, self._yaw)
+            self._policy_thread.set_command(
+                self._policy_run, self._src_for_sim, self._src_for_real, self._x_vel, self._yaw
+            )
 
     def _on_mode_changed(self, idx: int) -> None:
         self._mode = "policy" if idx == 1 else "position"
@@ -1980,8 +2101,9 @@ class MainWindow(QMainWindow):
         self._policy_run_btn.setEnabled(False)
         self._policy_stop_btn.setEnabled(True)
         self._push_policy_command()
-        src = "Real" if self._policy_source == 1 else "Sim"
-        self._status_label.setText(f"Policy running (source={src})")
+        self._status_label.setText(
+            f"Policy running — sim <- {_SRC_NAME[self._src_for_sim]}, real <- {_SRC_NAME[self._src_for_real]}"
+        )
 
     def _on_policy_stop_clicked(self) -> None:
         self._policy_run = 0
@@ -1994,10 +2116,50 @@ class MainWindow(QMainWindow):
         self._push_policy_command()
         self._status_label.setText("Policy stopped (idle)")
 
-    def _on_source_changed(self, idx: int) -> None:
-        self._policy_source = idx  # 0=sim, 1=real
+    def _on_route_sim_changed(self, idx: int) -> None:
+        self._src_for_sim = _ROUTE_VALUES[idx]
         self._push_policy_command()
-        self._status_label.setText(f"Input source: {'Real' if idx == 1 else 'Sim'}")
+        self._refresh_route_note()
+
+    def _on_route_real_changed(self, idx: int) -> None:
+        """실기 목적지 배선 변경. **sim obs → real 은 확인을 받는다.**"""
+        want = _ROUTE_VALUES[idx]
+        if want == r2s_udp.POLICY_SRC_SIM:
+            ok = QMessageBox.warning(
+                self,
+                "Cross-wire to the real robot",
+                "You are about to drive the REAL robot with actions computed from SIMULATION "
+                "observations.\n\n"
+                "The two worlds can be in completely different poses, so this action may not "
+                "correspond to where the real leg actually is.\n\n"
+                f"Safety: targets are clamped to the measured real joint angle +/- "
+                f"{CROSS_CLAMP_RAD:.3f} rad ({math.degrees(CROSS_CLAMP_RAD):.1f} deg), which keeps the "
+                f"calf PD torque near {112.5 * CROSS_CLAMP_RAD:.1f} N.m against a 22.5 N.m trip. "
+                "Nothing is sent while real state is missing.\n\n"
+                "Proceed?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ok != QMessageBox.Yes:
+                self._route_real_combo.blockSignals(True)
+                self._route_real_combo.setCurrentIndex(_ROUTE_INDEX[self._src_for_real])
+                self._route_real_combo.blockSignals(False)
+                return
+        self._src_for_real = want
+        self._push_policy_command()
+        self._refresh_route_note()
+
+    def _refresh_route_note(self) -> None:
+        """현재 배선을 한 줄로 보여준다 — 교차 배선이면 눈에 띄게."""
+        cross = self._src_for_real == r2s_udp.POLICY_SRC_SIM or self._src_for_sim == r2s_udp.POLICY_SRC_REAL
+        txt = f"sim <- {_SRC_NAME[self._src_for_sim]} | real <- {_SRC_NAME[self._src_for_real]}"
+        if self._src_for_real == r2s_udp.POLICY_SRC_SIM:
+            txt += f"  [CROSS: clamped to real q +/- {CROSS_CLAMP_RAD:.2f} rad]"
+        elif cross:
+            txt += "  [CROSS]"
+        self._route_note.setText(txt)
+        self._route_note.setStyleSheet("color:#b45309;" if cross else "")
+        self._status_label.setText(f"Action routing: {txt}")
 
     def _on_x_vel_changed(self, val: float) -> None:
         self._x_vel = val

@@ -15,11 +15,16 @@ Isaac Sim(SimulationApp)을 띄우지 않는다 — 순수 torch + rsl_rl 로 �
     policy_runner ──REAL_ACT(9887)──▶ real ──REAL_STATE(9888)──▶ policy_runner  (seam)
 
 50Hz 루프:
-    1. gui POLICY_CMD drain → mode / input_source / x_vel / yaw
-    2. input_source(sim/real) state drain → q, dq, gravity  (articulation 순서)
-    3. mode=run & state 有 → obs 구성(bit-parity) → estimator priv_explicit → act_inference
-       → target = action_scale·action + default → **sim + real 양쪽 fan-out**
-    4. clock 진행 / prev_action 갱신
+    1. gui POLICY_CMD drain → mode / src_for_sim / src_for_real / x_vel / yaw
+    2. **소비되는 출처만** state drain → q, dq, gravity  (articulation 순서)
+    3. mode=run → 갈래(sim obs / real obs)마다 독립 상태로 추론 → 각각 target
+    4. 목적지별 배선 — sim·real 이 각자 지정된 갈래의 target 을 받는다 (OFF 는 중립 송신)
+    5. clock 공유 전진 / 갈래별 prev_action·history 갱신
+
+★ 2026-08-27: 종전 "입력 하나 고르고 액션은 양쪽 fan-out" 에서 **목적지 중심 배선**으로 바뀌었다.
+  deploy 시험에서 real obs→real 과 sim obs→sim 을 동시에 돌리고 교차 배선도 보기 위한 것이다.
+  갈래마다 `prev_action`·history 를 분리하지 않으면 서로의 다음 obs 를 덮어써서, 장부 버그가
+  플랜트 불일치처럼 보인다. gait clock 만 공유한다.
 
 joint 순서는 **articulation 순서**로 통일(재매핑 없음). sim_runner get_policy_state 와 정책이 동일 순서.
 
@@ -40,6 +45,7 @@ import socket
 import sys
 import time
 
+import numpy as np
 import torch
 import yaml
 
@@ -47,6 +53,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "r2s_biped_leg"))
 from r2s_udp import (  # isort: skip
     POLICY_ACT_PORT,
     POLICY_CMD_PORT,
+    POLICY_SRC_REAL,
+    POLICY_SRC_SIM,
     POLICY_STATE_PORT,
     REAL_ACT_PORT,
     REAL_STATE_PORT,
@@ -61,6 +69,14 @@ from r2s_udp import (  # isort: skip
 NUM_JOINTS = 8
 POLICY_DIM = 3 + 3 + NUM_JOINTS * 3 + 4  # gravity + cmd + (jpos,jvel,action) + clock = 34
 HISTORY_LEN = 10
+CROSS_CLAMP_RAD: float = 0.05
+"""교차 배선(sim obs → 실기) 안전 클램프 [rad]. ``gui_controller.CROSS_CLAMP_RAD`` 와 같은 값이어야 한다.
+
+0.05 rad(2.9°) 근거: PD 오차가 그 안이면 calf 토크가 112.5×0.05 ≈ 5.6 N·m 로 안전 트립(관절 22.5)의
+1/4 이다. 속도로는 50 Hz 에서 2.5 rad/s — 속도 트립 3.49 아래.
+"""
+_SRC_NAME: dict[int, str] = {-1: "OFF", 0: "simobs", 1: "realobs"}
+
 ACTION_SCALE = 0.25
 GAIT_PERIOD = 0.6  # s
 STEP_DT = 0.02  # s (decimation 4 / 200 Hz) → 50 Hz control
@@ -202,6 +218,45 @@ class PolicyState:
         self.prev_action = raw_action.clone()
 
 
+def _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy) -> dict:
+    """갈래(obs 출처)마다 독립 상태로 한 스텝 추론하고 관절 목표를 돌려준다.
+
+    배선이 그 갈래를 안 쓰더라도 **호출한다** — 안 쓰는 갈래를 멈추면 `prev_action`·history 가
+    멈춰 있다가 배선을 바꾸는 순간 튄다. gait clock 은 호출자가 공유 값으로 넣어 준다.
+
+    Args:
+        branches: ``{obs 출처: PolicyState}``.
+        last_state: ``{obs 출처: 마지막 rich state 또는 None}``.
+        phase: 공유 gait clock ∈ [0, 1).
+        cmd_vec: 속도 명령 (3,).
+        device: torch device.
+        estimator: proprio → priv_explicit 모듈.
+        policy: act_inference 호출 대상.
+
+    Returns:
+        ``{obs 출처: 관절 목표 ndarray(8,)}``. state 가 없는 갈래는 키가 빠진다.
+    """
+    targets: dict[int, object] = {}
+    for src, b in branches.items():
+        st = last_state[src]
+        if st is None:
+            continue
+        b.phase = phase  # clock 공유
+        q = torch.tensor(st["q"], device=device)
+        dq = torch.tensor(st["dq"], device=device)
+        gravity = torch.tensor(st["gravity"], device=device)
+        obs_policy = b.build_obs(q, dq, gravity, cmd_vec)  # (34,)
+        hist = b.push_history(obs_policy)  # (10,34)
+        with torch.inference_mode():
+            obs_b = obs_policy.unsqueeze(0)
+            priv_explicit = estimator(obs_b)  # (1,6) — base vel 추정
+            obs_dict = {"policy": obs_b, "priv_explicit": priv_explicit, "history": hist.unsqueeze(0)}
+            raw_action = policy(obs_dict)[0]  # (8,)
+        b.advance(raw_action)
+        targets[src] = (ACTION_SCALE * raw_action + b.default).cpu().numpy()
+    return targets
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="R2S-BipedLeg policy runner (UDP bridge, no Isaac app).")
     parser.add_argument("--run_dir", required=True, help="학습 run 디렉토리 (params/agent.yaml 포함).")
@@ -213,7 +268,11 @@ def main() -> None:
 
     device = args.device
     policy, estimator = _load_policy(args.run_dir, args.checkpoint, device)
-    ps = PolicyState(device)
+    # 갈래별 독립 상태 — key = obs 출처. prev_action/history 공유 금지 (docstring 참고).
+    branches = {POLICY_SRC_SIM: PolicyState(device), POLICY_SRC_REAL: PolicyState(device)}
+    ps = branches[POLICY_SRC_SIM]  # default/기존 참조 호환용
+    phase = 0.0  # gait clock — 두 갈래 공유
+    last_state = {POLICY_SRC_SIM: None, POLICY_SRC_REAL: None}
 
     # --- 소켓 ---
     cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # gui POLICY_CMD 수신
@@ -239,7 +298,8 @@ def main() -> None:
     )
 
     mode = 0  # 0=idle, 1=run
-    source = 0  # 0=sim, 1=real
+    src_for_sim = POLICY_SRC_SIM  # 목적지별 obs 출처 (-1=OFF · 0=sim obs · 1=real obs)
+    src_for_real = POLICY_SRC_REAL
     no_state = 0  # 연속 state 무응답 횟수 (구버전 STATE 거부를 조용히 넘기지 않기 위한 카운터)
     x_vel = 0.0
     yaw = 0.0
@@ -276,11 +336,14 @@ def main() -> None:
                 latest = p
         return latest
 
+    def send_to(addr, target) -> None:
+        if addr is not None:
+            act_sock.sendto(pack_policy_act(seq, target), addr)
+
     def send_action(target) -> None:
-        packet = pack_policy_act(seq, target)
-        act_sock.sendto(packet, sim_act_addr)  # sim
-        if real_act_addr is not None:
-            act_sock.sendto(packet, real_act_addr)  # real (seam)
+        """양쪽 중립 송신 (재시동·시동용). 배선은 루프에서 목적지별로 따로 한다."""
+        send_to(sim_act_addr, target)
+        send_to(real_act_addr, target)
 
     # 요청-응답 lockstep: policy_runner가 action을 보내면 sim_runner가 정확히 1 step 후 state를 회신하고,
     # policy_runner는 그 state로 다음 action을 계산한다 → policy 1 step = sim 1 step (학습 불변식 유지).
@@ -291,11 +354,15 @@ def main() -> None:
             cmd = drain_latest(cmd_sock, unpack_policy_cmd)
             if cmd is not None:
                 prev_mode = mode
-                mode, source = cmd["mode"], cmd["source"]
+                mode = cmd["mode"]
+                src_for_sim, src_for_real = cmd["src_for_sim"], cmd["src_for_real"]
                 x_vel = max(X_VEL_RANGE[0], min(X_VEL_RANGE[1], cmd["x_vel"]))
                 yaw = max(YAW_RANGE[0], min(YAW_RANGE[1], cmd["yaw"]))
                 if prev_mode == 0 and mode == 1:
-                    ps.reset()  # run 진입 시 clock/history/prev_action 초기화
+                    for _b in branches.values():
+                        _b.reset()  # run 진입 시 갈래별 clock/history/prev_action 초기화
+                    phase = 0.0
+                    last_state[POLICY_SRC_SIM] = last_state[POLICY_SRC_REAL] = None
                     send_action(ps.default.cpu().numpy())  # 시동: sim_runner 회신 주소 학습 + 첫 step
                     seq += 1
 
@@ -303,61 +370,69 @@ def main() -> None:
                 time.sleep(0.01)  # idle: action 미송신 → sim은 step하지 않고 upright 유지
                 continue
 
-            # 2) 방금 보낸 action에 대한 sim/real state를 대기 (요청-응답)
-            src_sock = real_state_sock if source == 1 else sim_state_sock
-            state = recv_state_blocking(src_sock)
-            if state is None:
-                # ⚠ 구버전(84 B) STATE 도 여기로 온다 — unpack이 크기 불일치로 None을 주기 때문.
-                #   그대로 두면 조용한 무한 재시동 루프가 되므로 일정 횟수마다 원인을 알린다.
+            # 2) 소비되는 출처만 대기한다 — 안 쓰는 real 을 기다리면 real 침묵 시 sim 까지 멈춘다.
+            needed = {v for v in (src_for_sim, src_for_real) if v >= 0}
+            socks = {POLICY_SRC_SIM: sim_state_sock, POLICY_SRC_REAL: real_state_sock}
+            got_any = False
+            for src in sorted(needed):
+                st = recv_state_blocking(socks[src])
+                if st is None:
+                    continue
+                ver = st.get("convention_version")
+                if ver != _REQUIRED_CONVENTION_VERSION:
+                    raise SystemExit(
+                        f"[policy_runner] 좌표 규약 불일치 — env 좌표 이관 전.\n"
+                        f"  받은 convention_version={ver}, 필요={_REQUIRED_CONVENTION_VERSION} "
+                        f"(src={'real' if src == POLICY_SRC_REAL else 'sim'})\n"
+                        f"  0 = gear 미적용 + foot raw각 / 1 = gear 적용 + foot 관절각.\n"
+                        f"  정책은 관절 좌표만 안다 — 이 러너는 변환하지 않는다(변환은 real_runner 담당)."
+                    )
+                last_state[src] = st
+                got_any = True
+            if needed and not got_any:
                 no_state += 1
                 if no_state % 50 == 0:
                     print(
                         f"[policy_runner] ⚠ state 무응답 {no_state}회 — 송신자가 죽었거나, **구버전 84 B "
                         f"STATE**를 보내고 있다(규약 필드 없음 → 크기 불일치로 거부). "
-                        f"src={'real' if source == 1 else 'sim'}",
+                        f"needed={sorted(needed)}",
                         flush=True,
                     )
-                send_action(ps.default.cpu().numpy())  # 응답 없음 → 재시동
+                send_action(ps.default.cpu().numpy())  # 응답 없음 → 재시동(중립)
                 seq += 1
                 continue
             no_state = 0
 
-            # 3) 좌표 규약 검사 — 불일치면 **즉시 종료**한다.
-            #    변환은 브리지(real_runner)가 전담하고 여기서는 하지 않는다(2026-08-14 결정):
-            #    정책 러너를 gui_controller에 통합할 계획이라, 여기에 변환을 두면 GUI 안에
-            #    raw/관절 두 규약이 공존하게 된다. 그래서 "맞춰주기"가 아니라 "거부"가 맞다.
-            ver = state.get("convention_version")
-            if ver != _REQUIRED_CONVENTION_VERSION:
-                raise SystemExit(
-                    f"[policy_runner] 좌표 규약 불일치 — env 좌표 이관 전.\n"
-                    f"  받은 convention_version={ver}, 필요={_REQUIRED_CONVENTION_VERSION} "
-                    f"(source={'real' if source == 1 else 'sim'})\n"
-                    f"  0 = gear 미적용 + foot raw각 / 1 = gear 적용 + foot 관절각.\n"
-                    f"  정책은 관절 좌표만 안다 — 이 러너는 변환하지 않는다(변환은 real_runner 담당)."
-                )
-
-            # 3) 추론 → 다음 action (articulation 순서)
-            q = torch.tensor(state["q"], device=device)
-            dq = torch.tensor(state["dq"], device=device)
-            gravity = torch.tensor(state["gravity"], device=device)
+            # 3) 갈래별 추론 — 배선과 무관하게 **둘 다** 전진시킨다(배선 변경 시 불연속 방지).
             cmd_vec = torch.tensor([x_vel, 0.0, yaw], device=device)  # y_vel≡0
+            targets = _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy)
+            phase = (phase + STEP_DT / GAIT_PERIOD) % 1.0
 
-            obs_policy = ps.build_obs(q, dq, gravity, cmd_vec)  # (34,)
-            hist = ps.push_history(obs_policy)  # (10,34)
-            with torch.inference_mode():
-                obs_b = obs_policy.unsqueeze(0)  # (1,34)
-                priv_explicit = estimator(obs_b)  # (1,6) — base vel 추정
-                obs_dict = {"policy": obs_b, "priv_explicit": priv_explicit, "history": hist.unsqueeze(0)}
-                raw_action = policy(obs_dict)[0]  # (8,) articulation 순서
-            ps.advance(raw_action)
-            target = (ACTION_SCALE * raw_action + ps.default).cpu().numpy()
-            send_action(target)
+            # 4) 목적지별 배선. OFF 는 미송신이 아니라 **중립 송신** (미송신은 lockstep 교착을 만든다).
+            default_np = ps.default.cpu().numpy()
+            tgt_sim = targets.get(src_for_sim, default_np) if src_for_sim >= 0 else default_np
+            tgt_real = targets.get(src_for_real, default_np) if src_for_real >= 0 else default_np
+            # ★ 교차 배선 안전장치 — sim obs 액션을 실기로 보낼 때는 실기 실측 q 기준으로 조인다.
+            if src_for_real == POLICY_SRC_SIM and real_act_addr is not None:
+                st_real = last_state[POLICY_SRC_REAL]
+                if st_real is None:
+                    tgt_real = None  # 실기 상태를 모르면 조일 수 없다 → 보내지 않는다
+                else:
+                    qr = np.asarray(st_real["q"], dtype=float)
+                    tgt_real = np.clip(np.asarray(tgt_real, dtype=float), qr - CROSS_CLAMP_RAD, qr + CROSS_CLAMP_RAD)
+            send_to(sim_act_addr, tgt_sim)
+            if tgt_real is not None:
+                send_to(real_act_addr, tgt_real)
             seq += 1
+            gravity = torch.tensor(
+                (last_state[src_for_sim] if src_for_sim >= 0 else last_state[src_for_real])["gravity"], device=device
+            )
             # 1초(50 step)마다 자세 로깅 — grav_z≈-1이면 직립, 0/양수면 기울어짐/전도.
             if seq % 50 == 0:
                 print(
                     f"[policy_runner] t={seq * STEP_DT:5.1f}s  grav_z={float(gravity[2]):+.2f}  "
-                    f"phase={ps.phase:.2f}  x_vel={x_vel:+.2f} yaw={yaw:+.2f}  src={'real' if source == 1 else 'sim'}",
+                    f"phase={phase:.2f}  x_vel={x_vel:+.2f} yaw={yaw:+.2f}  "
+                    f"sim<-{_SRC_NAME[src_for_sim]} real<-{_SRC_NAME[src_for_real]}",
                     flush=True,
                 )
     except KeyboardInterrupt:

@@ -98,3 +98,59 @@ x_vel∈[-0.5, 2.0], y_vel≡0(미학습, 슬라이더 금지), yaw∈[-0.5, 0.5
 - sim-primary: fix_base=False면 정책 없이 안 서지만 정책이 폐루프로 균형. spawn z=0.6(학습값).
 - 50Hz UDP 왕복(sim_runner↔policy_runner) 지연이 한 step(20ms) 안에 드는지.
 - estimator로 priv_explicit 채움: `runner.alg.estimator(obs["policy"])`. base velocity state 불필요.
+
+
+---
+
+## 액션 배선 (2026-08-27) — deploy 시험용 두 갈래 동시 추론
+
+배포를 검증하려면 같은 정책을 **두 입력으로 동시에** 돌려 비교해야 한다:
+
+```
+real obs (모터 엔코더) ─▶ 정책 ─▶ action_real
+sim  obs               ─▶ 정책 ─▶ action_sim
+```
+
+그리고 그 둘을 **어느 쪽으로 보낼지 목적지마다 따로** 고를 수 있어야 한다(교차 배선 포함).
+
+### 프로토콜 변경 — `source` 하나 → `src_for_sim` / `src_for_real`
+
+```
+POLICY_CMD  magic(I) seq(I) mode(i) src_for_sim(i) src_for_real(i) x_vel(f) yaw(f)   28 B
+  src_*   -1 = POLICY_SRC_OFF   중립(default) 목표 송신
+           0 = POLICY_SRC_SIM   sim obs 로 계산한 액션
+           1 = POLICY_SRC_REAL  real obs 로 계산한 액션
+기본값     src_for_sim = 0, src_for_real = 1   — 각자 자기 세계
+```
+
+**왜 목적지 중심인가.** 소스 중심(각 액션 → 목적지 비트마스크)으로 두면 두 액션이 같은 목적지를
+노리는 **표현 가능한 충돌**이 생기고, 규칙으로 해소해야 한다. 목적지 중심이면 그 상태가
+원천적으로 없다. 표현력은 같다 — 9 가지 조합이 전부 가능하다.
+
+⚠ 구조체가 24 → 28 B 다. `unpack_policy_cmd` 가 크기 불일치를 `None` 으로 거절하므로 구버전 gui 는
+**조용히 오해석하지 않고 명확히 실패**한다 (자체검정에 24 B 거부 assert 있음).
+
+### 구현 불변식
+
+| 항목 | 규칙 | 안 지키면 |
+|---|---|---|
+| `prev_action`·history | **갈래마다 분리** | 한쪽이 다른 쪽의 다음 obs 를 덮어써서 장부 버그가 플랜트 불일치처럼 보인다 |
+| 안 나가는 갈래 | **그래도 자기 액션으로 전진** | 배선을 도중에 바꾸면 history 가 튄다 |
+| gait clock | **공유** (벽시계) | 두 갈래가 비교 불가능해진다 |
+| `OFF` | 미송신이 아니라 **중립 송신** | lockstep 상대가 step 안 함 → state 안 옴 → 그 state 쓰는 갈래가 교착 |
+| state 대기 | **소비되는 출처만** | 안 쓰는 real 이 조용하면 sim 까지 멈춘다 |
+
+### ★ 교차 배선 안전장치 — `sim obs → real`
+
+두 세계의 자세는 얼마든지 벌어질 수 있으므로, 그 액션이 실기 다리의 현재 위치와 무관할 수 있다.
+
+- GUI 에서 이 조합을 고르면 **확인 대화상자**가 뜬다.
+- 러너는 목표를 **실기 실측 `q` 기준 ±`CROSS_CLAMP_RAD`(0.05 rad = 2.9°)** 로 조인다.
+  PD 오차가 그 안이면 calf 토크가 `112.5 × 0.05 ≈ 5.6 N·m` — 안전 트립(관절 22.5 N·m)의 1/4.
+  속도로는 50 Hz 에서 2.5 rad/s 로 속도 트립 3.49 아래.
+- **실기 state 가 없으면 아예 보내지 않는다** (조일 기준이 없으므로).
+
+### 비교 지표
+
+두 갈래가 다 살아 있으면 1 초마다 `|Δaction| mean/max [rad]` 를 로그에 낸다 —
+같은 정책·같은 명령에서 **입력만 다를 때** 액션이 얼마나 갈라지는지가 곧 sim-실기 갭이다.

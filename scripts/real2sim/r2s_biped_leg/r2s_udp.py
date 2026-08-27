@@ -257,20 +257,39 @@ def unpack_ieff(data: bytes) -> dict | None:
 # policy mode: command (gui -> policy_runner)
 # ---------------------------------------------------------------------------
 
-# magic(I) seq(I) mode(i) source(i) x_vel(f) yaw(f)
-#   mode:   0=idle(정책 정지), 1=run
-#   source: 0=sim(sim state로 폐루프), 1=real(real state로 폐루프)
-_POLICY_CMD_FMT: str = "<IIiiff"
+# magic(I) seq(I) mode(i) src_for_sim(i) src_for_real(i) x_vel(f) yaw(f)
+#   mode:         0=idle(정책 정지), 1=run
+#   src_for_sim:  sim 로 보낼 액션을 **어느 obs 로 계산할지**. -1=안 보냄 · 0=sim obs · 1=real obs
+#   src_for_real: real 로 보낼 액션. 같은 규약.
+#
+# ★ 2026-08-27: 종전 `source(i)` 하나(= 입력만 고르고 액션은 sim·real 양쪽 fan-out)에서
+#   **목적지 중심**으로 바꿨다. 이유는 두 가지다.
+#     (a) deploy 시험은 "real obs → 정책 → real" 과 "sim obs → 정책 → sim" 을 **동시에**
+#         돌리고 교차 배선까지 보고 싶다. 종전 구조로는 표현이 안 된다.
+#     (b) 소스 중심(각 소스 → 목적지 비트마스크)으로 두면 두 액션이 같은 목적지를 노리는
+#         **표현 가능한 충돌**이 생긴다. 목적지 중심이면 그 상태가 원천적으로 없다.
+#
+# ⚠ 구조체 크기가 24 → 28 B 로 바뀐다. POLICY_CMD 는 gui→policy_runner 파이썬 구간 전용이라
+#   실기 브릿지(C++)와 무관하고, `unpack_policy_cmd` 가 크기 불일치를 None 으로 거절하므로
+#   구버전 gui 는 **조용히 오해석하지 않고 명확히 실패**한다.
+_POLICY_CMD_FMT: str = "<IIiiiff"
 POLICY_CMD_SIZE: int = struct.calcsize(_POLICY_CMD_FMT)
 
+# src_for_* 값
+POLICY_SRC_OFF: int = -1
+POLICY_SRC_SIM: int = 0
+POLICY_SRC_REAL: int = 1
 
-def pack_policy_cmd(seq: int, mode: int, source: int, x_vel: float, yaw: float) -> bytes:
+
+def pack_policy_cmd(seq: int, mode: int, src_for_sim: int, src_for_real: int, x_vel: float, yaw: float) -> bytes:
     """gui -> policy_runner 제어 명령 직렬화.
 
     Args:
         seq: 증가 시퀀스 번호.
         mode: 0=idle(정책 정지·중립 유지), 1=run.
-        source: 폐루프 input source. 0=sim, 1=real.
+        src_for_sim: sim 목적지로 보낼 액션의 obs 출처.
+            :data:`POLICY_SRC_OFF` / :data:`POLICY_SRC_SIM` / :data:`POLICY_SRC_REAL`.
+        src_for_real: real 목적지로 보낼 액션의 obs 출처. 같은 규약.
         x_vel: 전진 속도 명령 [m/s]. 학습 범위 [-0.5, 2.0].
         yaw: 요 각속도 명령 [rad/s]. 학습 범위 [-0.5, 0.5].
 
@@ -278,7 +297,14 @@ def pack_policy_cmd(seq: int, mode: int, source: int, x_vel: float, yaw: float) 
         POLICY_CMD_SIZE 바이트 패킷.
     """
     return struct.pack(
-        _POLICY_CMD_FMT, POLICY_CMD_MAGIC, seq & 0xFFFFFFFF, int(mode), int(source), float(x_vel), float(yaw)
+        _POLICY_CMD_FMT,
+        POLICY_CMD_MAGIC,
+        seq & 0xFFFFFFFF,
+        int(mode),
+        int(src_for_sim),
+        int(src_for_real),
+        float(x_vel),
+        float(yaw),
     )
 
 
@@ -286,14 +312,21 @@ def unpack_policy_cmd(data: bytes) -> dict | None:
     """policy 명령 역직렬화. magic 불일치/크기 오류 시 None.
 
     Returns:
-        키: ``seq``, ``mode``, ``source``, ``x_vel``, ``yaw``.
+        키: ``seq``, ``mode``, ``src_for_sim``, ``src_for_real``, ``x_vel``, ``yaw``.
     """
     if len(data) != POLICY_CMD_SIZE:
         return None
-    magic, seq, mode, source, x_vel, yaw = struct.unpack(_POLICY_CMD_FMT, data)
+    magic, seq, mode, src_sim, src_real, x_vel, yaw = struct.unpack(_POLICY_CMD_FMT, data)
     if magic != POLICY_CMD_MAGIC:
         return None
-    return {"seq": seq, "mode": mode, "source": source, "x_vel": x_vel, "yaw": yaw}
+    return {
+        "seq": seq,
+        "mode": mode,
+        "src_for_sim": src_sim,
+        "src_for_real": src_real,
+        "x_vel": x_vel,
+        "yaw": yaw,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -750,10 +783,18 @@ if __name__ == "__main__":
     assert abs(t3[3] - 5.0) < 1e-9 and abs(t3[2] - 15.0) < 1e-9, t3
 
     # policy mode 패킷 왕복.
-    pc = pack_policy_cmd(4, 1, 0, 1.5, -0.3)
-    assert len(pc) == POLICY_CMD_SIZE, (len(pc), POLICY_CMD_SIZE)
+    pc = pack_policy_cmd(4, 1, POLICY_SRC_SIM, POLICY_SRC_REAL, 1.5, -0.3)
+    assert len(pc) == POLICY_CMD_SIZE == 28, (len(pc), POLICY_CMD_SIZE)
     dpc = unpack_policy_cmd(pc)
-    assert dpc["mode"] == 1 and dpc["source"] == 0 and abs(dpc["x_vel"] - 1.5) < 1e-6 and abs(dpc["yaw"] + 0.3) < 1e-6
+    assert dpc["mode"] == 1 and abs(dpc["x_vel"] - 1.5) < 1e-6 and abs(dpc["yaw"] + 0.3) < 1e-6
+    assert dpc["src_for_sim"] == POLICY_SRC_SIM and dpc["src_for_real"] == POLICY_SRC_REAL
+    # 교차 배선(sim obs → real) 과 off 도 왕복되는가.
+    dpx = unpack_policy_cmd(pack_policy_cmd(5, 1, POLICY_SRC_OFF, POLICY_SRC_SIM, 0.0, 0.0))
+    assert dpx["src_for_sim"] == POLICY_SRC_OFF and dpx["src_for_real"] == POLICY_SRC_SIM
+    # ★구버전 24 B CMD 는 **조용히 오해석되지 않고** 거절돼야 한다.
+    _legacy_cmd = struct.pack("<IIiiff", POLICY_CMD_MAGIC, 4, 1, 0, 1.5, -0.3)
+    assert len(_legacy_cmd) == 24
+    assert unpack_policy_cmd(_legacy_cmd) is None, "24 B CMD 는 거부돼야 한다"
     g = [0.0, 0.0, -1.0]
     ps = pack_policy_state(5, z, z, g)
     assert len(ps) == POLICY_STATE_SIZE == 85, (len(ps), POLICY_STATE_SIZE)
