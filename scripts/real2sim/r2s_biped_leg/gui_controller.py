@@ -95,7 +95,6 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -151,15 +150,22 @@ ACTION_SCALE: float = 0.25
 GAIT_PERIOD: float = 0.6  # s
 STEP_DT: float = 0.02  # s (decimation 4 / 200 Hz) → 50 Hz control
 DEFAULT_JOINT_POS: list[float] = [0.0] * NUM_JOINTS  # hind_leg USD default 전부 0
-# 교차 배선(sim obs → 실기) 안전 클램프 [rad]. 실기 실측 q 기준으로 목표를 이 폭 안에 조인다.
-# 0.05 rad(2.9°) 근거: PD 오차가 그 안이면 calf 토크가 kp·0.05 = 112.5×0.05 ≈ 5.6 N·m 로,
-# 안전 트립(관절 22.5 N·m)의 1/4 이다. 속도로는 50 Hz 에서 2.5 rad/s — 속도 트립 3.49 아래.
-# ⚠ 두 세계의 자세는 얼마든지 벌어질 수 있다. 이 클램프가 없으면 그 차이가 그대로 실기 명령이 된다.
-CROSS_CLAMP_RAD: float = 0.05
 # 배선 콤보: 표시 문자열 ↔ POLICY_SRC_* 값
-_ROUTE_ITEMS: list[str] = ["off (neutral hold)", "action from SIM obs", "action from REAL obs"]
-_ROUTE_VALUES: list[int] = [-1, 0, 1]
-_ROUTE_INDEX: dict[int, int] = {-1: 0, 0: 1, 1: 2}
+# sim 목적지: 세 가지 다 고를 수 있다.
+#   real obs → sim 은 **미러링**이다 — 실기가 폐루프를 도는 동안 같은 obs 로 sim 몸이 어떻게
+#   반응하는지 보는 용도라 안전하고 유용하다(실기로 나가는 것은 아무것도 안 바뀐다).
+_ROUTE_ITEMS_SIM: list[str] = ["off (hold)", "action from SIM obs", "action from REAL obs (mirror)"]
+_ROUTE_VALUES_SIM: list[int] = [-1, 0, 1]
+# real 목적지: **sim obs 는 뺐다.**
+#   실기 obs 가 학습 분포 안에 있으려면 실기가 **자기 액션으로 폐루프를 돌아야** 한다.
+#   그래서 "sim obs 로 실기를 민다"는 중간 단계가 성립하지 않는다 — 그 조합의 유일한 쓰임이
+#   사라졌고, 남겨 두면 두 세계의 자세 차가 그대로 실기 명령이 되는 위험만 남는다.
+#   검증 계단은 **sim obs → sim** 과 **real obs → real** 둘뿐이다.
+_ROUTE_ITEMS_REAL: list[str] = ["off (hold)", "action from REAL obs"]
+_ROUTE_VALUES_REAL: list[int] = [-1, 1]
+_ROUTE_INDEX_SIM: dict[int, int] = {-1: 0, 0: 1, 1: 2}
+_ROUTE_INDEX_REAL: dict[int, int] = {-1: 0, 1: 1}
+
 # 로깅용 이름 (-1=OFF)
 _SRC_NAME: dict[int, str] = {-1: "OFF", 0: "simobs", 1: "realobs"}
 
@@ -496,8 +502,12 @@ class PolicyInferenceThread(QThread):
     **어느 목적지로도 안 나가는 갈래도 자기 액션으로 계속 전진**시킨다 — 그래야 배선을
     도중에 바꿔도 불연속이 없다. gait clock 만은 벽시계라 **공유**한다.
 
-    ``OFF`` 는 "패킷 미송신"이 아니라 **중립(default) 목표 송신**이다. 미송신으로 두면
-    lockstep 상대가 step 하지 않아 state 가 안 오고, 그 state 를 쓰는 갈래가 교착한다.
+    ``OFF`` 는 "패킷 미송신"이 아니라 **그 목적지의 실측 q 를 그대로 되보내는 hold** 다.
+    미송신으로 두면 lockstep 상대가 step 하지 않아 state 가 안 오고(실기도 회신이 20 ms 페이싱에
+    묶여 있다), 그 state 를 쓰는 갈래가 교착한다. 그렇다고 **중립(default) 자세를 보내면 실기가
+    실제로 움직인다** — 배포 계단 2 단계(real obs → sim)에서 실기는 가만히 있어야 하므로
+    그건 안전 결함이다. 실측 q 를 되보내면 패킷은 흐르고 명령은 "지금 자리 유지"가 된다.
+    (state 를 아직 못 받았으면 default 로 떨어진다 — 그때는 기준이 없다.)
     """
 
     # grav_z, phase, x_vel, yaw — 1초(50 step)마다 방출 (상태바 갱신용).
@@ -619,6 +629,19 @@ class PolicyInferenceThread(QThread):
                 needed = {v for v in (src_sim, src_real) if v >= 0}
                 socks = {r2s_udp.POLICY_SRC_SIM: sim_state_sock, r2s_udp.POLICY_SRC_REAL: real_state_sock}
                 got_any = False
+                # 소비하지 않는 출처도 **드레인은 한다** — 안 하면 소켓 버퍼가 쌓이고,
+                # OFF hold 가 참조하는 실측 q 가 낡은 값으로 굳는다.
+                for src, sk in socks.items():
+                    if src in needed:
+                        continue
+                    while True:
+                        try:
+                            d, _ = sk.recvfrom(4096)
+                        except (BlockingIOError, OSError):
+                            break
+                        pkt = r2s_udp.unpack_policy_state(d)
+                        if pkt is not None:
+                            last_state[src] = pkt
                 for src in sorted(needed):
                     st = recv_state_blocking(socks[src])
                     if st is None:
@@ -659,27 +682,24 @@ class PolicyInferenceThread(QThread):
                 phase = (phase + STEP_DT / GAIT_PERIOD) % 1.0
 
                 # ── 3) 목적지별 배선 ──────────────────────────────────────────────────
-                #     OFF(-1) 는 미송신이 아니라 **중립 송신**이다 (docstring 참고).
-                tgt_sim = targets.get(src_sim, default_np) if src_sim >= 0 else default_np
-                tgt_real = targets.get(src_real, default_np) if src_real >= 0 else default_np
+                #     OFF(-1) 는 미송신이 아니라 **그 목적지 실측 q 로 hold** 다 (docstring 참고).
+                def _hold(dst_src: int):
+                    st_h = last_state[dst_src]
+                    return np.asarray(st_h["q"], dtype=float) if st_h is not None else default_np
 
-                # ★ 교차 배선 안전장치 — sim obs 로 계산한 액션을 **실기**로 보내는 칸.
-                #   두 세계의 자세가 얼마든지 벌어질 수 있으므로, 실기 실측 q 기준으로 목표를 조인다.
-                #   |목표−q| ≤ CROSS_CLAMP 이면 PD 오차가 그 안이라 calf 기준 토크가
-                #   kp·clamp ≈ 112.5×0.05 = 5.6 N·m — 안전 트립(관절 22.5)의 1/4 이다.
-                if src_real == r2s_udp.POLICY_SRC_SIM and real_act_addr is not None:
-                    st_real = last_state[r2s_udp.POLICY_SRC_REAL]
-                    if st_real is None:
-                        tgt_real = None  # 실기 상태를 모르면 조일 수 없다 → 보내지 않는다
-                    else:
-                        q_real = np.asarray(st_real["q"], dtype=float)
-                        tgt_real = np.clip(
-                            np.asarray(tgt_real, dtype=float), q_real - CROSS_CLAMP_RAD, q_real + CROSS_CLAMP_RAD
-                        )
+                tgt_sim = (
+                    targets.get(src_sim, _hold(r2s_udp.POLICY_SRC_SIM))
+                    if src_sim >= 0
+                    else _hold(r2s_udp.POLICY_SRC_SIM)
+                )
+                tgt_real = (
+                    targets.get(src_real, _hold(r2s_udp.POLICY_SRC_REAL))
+                    if src_real >= 0
+                    else _hold(r2s_udp.POLICY_SRC_REAL)
+                )
 
                 send_to(sim_act_addr, tgt_sim)
-                if tgt_real is not None:
-                    send_to(real_act_addr, tgt_real)
+                send_to(real_act_addr, tgt_real)
 
                 # monitor 중계 (action_q=sim 목적지 목표 vs sim q/dq; tau 는 rich state 에 없어 0).
                 st_mon = last_state[r2s_udp.POLICY_SRC_SIM]
@@ -1994,17 +2014,18 @@ class MainWindow(QMainWindow):
         row_route.addWidget(QLabel("Action routing —"))
         row_route.addWidget(QLabel("Sim gets:"))
         self._route_sim_combo = QComboBox()
-        self._route_sim_combo.addItems(_ROUTE_ITEMS)
-        self._route_sim_combo.setCurrentIndex(_ROUTE_INDEX[r2s_udp.POLICY_SRC_SIM])
+        self._route_sim_combo.addItems(_ROUTE_ITEMS_SIM)
+        self._route_sim_combo.setCurrentIndex(_ROUTE_INDEX_SIM[r2s_udp.POLICY_SRC_SIM])
         self._route_sim_combo.currentIndexChanged.connect(self._on_route_sim_changed)
         row_route.addWidget(self._route_sim_combo)
         row_route.addSpacing(16)
         row_route.addWidget(QLabel("Real gets:"))
         self._route_real_combo = QComboBox()
-        self._route_real_combo.addItems(_ROUTE_ITEMS)
-        self._route_real_combo.setCurrentIndex(_ROUTE_INDEX[r2s_udp.POLICY_SRC_REAL])
+        self._route_real_combo.addItems(_ROUTE_ITEMS_REAL)
+        self._route_real_combo.setCurrentIndex(_ROUTE_INDEX_REAL[r2s_udp.POLICY_SRC_REAL])
         self._route_real_combo.currentIndexChanged.connect(self._on_route_real_changed)
         row_route.addWidget(self._route_real_combo)
+        row_route.addSpacing(16)
         row_route.addSpacing(16)
         self._route_note = QLabel("")
         self._route_note.setWordWrap(True)
@@ -2117,48 +2138,23 @@ class MainWindow(QMainWindow):
         self._status_label.setText("Policy stopped (idle)")
 
     def _on_route_sim_changed(self, idx: int) -> None:
-        self._src_for_sim = _ROUTE_VALUES[idx]
+        self._src_for_sim = _ROUTE_VALUES_SIM[idx]
         self._push_policy_command()
         self._refresh_route_note()
 
     def _on_route_real_changed(self, idx: int) -> None:
-        """실기 목적지 배선 변경. **sim obs → real 은 확인을 받는다.**"""
-        want = _ROUTE_VALUES[idx]
-        if want == r2s_udp.POLICY_SRC_SIM:
-            ok = QMessageBox.warning(
-                self,
-                "Cross-wire to the real robot",
-                "You are about to drive the REAL robot with actions computed from SIMULATION "
-                "observations.\n\n"
-                "The two worlds can be in completely different poses, so this action may not "
-                "correspond to where the real leg actually is.\n\n"
-                f"Safety: targets are clamped to the measured real joint angle +/- "
-                f"{CROSS_CLAMP_RAD:.3f} rad ({math.degrees(CROSS_CLAMP_RAD):.1f} deg), which keeps the "
-                f"calf PD torque near {112.5 * CROSS_CLAMP_RAD:.1f} N.m against a 22.5 N.m trip. "
-                "Nothing is sent while real state is missing.\n\n"
-                "Proceed?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if ok != QMessageBox.Yes:
-                self._route_real_combo.blockSignals(True)
-                self._route_real_combo.setCurrentIndex(_ROUTE_INDEX[self._src_for_real])
-                self._route_real_combo.blockSignals(False)
-                return
-        self._src_for_real = want
+        self._src_for_real = _ROUTE_VALUES_REAL[idx]
         self._push_policy_command()
         self._refresh_route_note()
 
     def _refresh_route_note(self) -> None:
-        """현재 배선을 한 줄로 보여준다 — 교차 배선이면 눈에 띄게."""
-        cross = self._src_for_real == r2s_udp.POLICY_SRC_SIM or self._src_for_sim == r2s_udp.POLICY_SRC_REAL
+        """현재 배선을 한 줄로 보여준다. real 이 정책 명령을 받는 상태면 눈에 띄게."""
         txt = f"sim <- {_SRC_NAME[self._src_for_sim]} | real <- {_SRC_NAME[self._src_for_real]}"
-        if self._src_for_real == r2s_udp.POLICY_SRC_SIM:
-            txt += f"  [CROSS: clamped to real q +/- {CROSS_CLAMP_RAD:.2f} rad]"
-        elif cross:
-            txt += "  [CROSS]"
+        live = self._src_for_real >= 0
+        if live:
+            txt += "  [REAL IS DRIVEN]"
         self._route_note.setText(txt)
-        self._route_note.setStyleSheet("color:#b45309;" if cross else "")
+        self._route_note.setStyleSheet("color:#b45309;" if live else "")
         self._status_label.setText(f"Action routing: {txt}")
 
     def _on_x_vel_changed(self, val: float) -> None:

@@ -18,7 +18,8 @@ Isaac Sim(SimulationApp)을 띄우지 않는다 — 순수 torch + rsl_rl 로 �
     1. gui POLICY_CMD drain → mode / src_for_sim / src_for_real / x_vel / yaw
     2. **소비되는 출처만** state drain → q, dq, gravity  (articulation 순서)
     3. mode=run → 갈래(sim obs / real obs)마다 독립 상태로 추론 → 각각 target
-    4. 목적지별 배선 — sim·real 이 각자 지정된 갈래의 target 을 받는다 (OFF 는 중립 송신)
+    4. 목적지별 배선 — sim·real 이 각자 지정된 갈래의 target 을 받는다
+       (OFF 는 미송신이 아니라 **그 목적지 실측 q 로 hold** — 중립 자세를 보내면 실기가 움직인다)
     5. clock 공유 전진 / 갈래별 prev_action·history 갱신
 
 ★ 2026-08-27: 종전 "입력 하나 고르고 액션은 양쪽 fan-out" 에서 **목적지 중심 배선**으로 바뀌었다.
@@ -69,12 +70,6 @@ from r2s_udp import (  # isort: skip
 NUM_JOINTS = 8
 POLICY_DIM = 3 + 3 + NUM_JOINTS * 3 + 4  # gravity + cmd + (jpos,jvel,action) + clock = 34
 HISTORY_LEN = 10
-CROSS_CLAMP_RAD: float = 0.05
-"""교차 배선(sim obs → 실기) 안전 클램프 [rad]. ``gui_controller.CROSS_CLAMP_RAD`` 와 같은 값이어야 한다.
-
-0.05 rad(2.9°) 근거: PD 오차가 그 안이면 calf 토크가 112.5×0.05 ≈ 5.6 N·m 로 안전 트립(관절 22.5)의
-1/4 이다. 속도로는 50 Hz 에서 2.5 rad/s — 속도 트립 3.49 아래.
-"""
 _SRC_NAME: dict[int, str] = {-1: "OFF", 0: "simobs", 1: "realobs"}
 
 ACTION_SCALE = 0.25
@@ -216,6 +211,52 @@ class PolicyState:
         """clock 진행 + prev_action 갱신 (obs 구성 후 호출)."""
         self.phase = (self.phase + STEP_DT / GAIT_PERIOD) % 1.0
         self.prev_action = raw_action.clone()
+
+
+def _collect_states(socks: dict, needed: set, last_state: dict, recv_blocking) -> bool:
+    """state 소켓을 갱신한다. 소비되는 출처는 **blocking** 대기, 나머지는 드레인만.
+
+    안 쓰는 출처도 드레인해야 소켓 버퍼가 안 쌓이고, ``OFF`` hold 가 참조하는 실측 q 가
+    낡은 값으로 굳지 않는다. 좌표 규약이 어긋나면 그 자리에서 종료한다 — 이 러너는 변환하지
+    않는다(변환은 real_runner 담당).
+
+    Args:
+        socks: ``{obs 출처: socket}``.
+        needed: 이번 틱에 실제로 소비되는 출처 집합.
+        last_state: 갱신 대상 ``{obs 출처: rich state 또는 None}`` (제자리 수정).
+        recv_blocking: blocking 수신 함수.
+
+    Returns:
+        ``needed`` 중 하나라도 새 state 를 받았으면 True.
+    """
+    for src, sk in socks.items():
+        if src in needed:
+            continue
+        while True:
+            try:
+                data, _ = sk.recvfrom(4096)
+            except (BlockingIOError, OSError):
+                break
+            pkt = unpack_policy_state(data)
+            if pkt is not None:
+                last_state[src] = pkt
+    got_any = False
+    for src in sorted(needed):
+        st = recv_blocking(socks[src])
+        if st is None:
+            continue
+        ver = st.get("convention_version")
+        if ver != _REQUIRED_CONVENTION_VERSION:
+            raise SystemExit(
+                f"[policy_runner] 좌표 규약 불일치 — env 좌표 이관 전.\n"
+                f"  받은 convention_version={ver}, 필요={_REQUIRED_CONVENTION_VERSION} "
+                f"(src={'real' if src == POLICY_SRC_REAL else 'sim'})\n"
+                f"  0 = gear 미적용 + foot raw각 / 1 = gear 적용 + foot 관절각.\n"
+                f"  정책은 관절 좌표만 안다 — 이 러너는 변환하지 않는다(변환은 real_runner 담당)."
+            )
+        last_state[src] = st
+        got_any = True
+    return got_any
 
 
 def _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy) -> dict:
@@ -373,22 +414,7 @@ def main() -> None:
             # 2) 소비되는 출처만 대기한다 — 안 쓰는 real 을 기다리면 real 침묵 시 sim 까지 멈춘다.
             needed = {v for v in (src_for_sim, src_for_real) if v >= 0}
             socks = {POLICY_SRC_SIM: sim_state_sock, POLICY_SRC_REAL: real_state_sock}
-            got_any = False
-            for src in sorted(needed):
-                st = recv_state_blocking(socks[src])
-                if st is None:
-                    continue
-                ver = st.get("convention_version")
-                if ver != _REQUIRED_CONVENTION_VERSION:
-                    raise SystemExit(
-                        f"[policy_runner] 좌표 규약 불일치 — env 좌표 이관 전.\n"
-                        f"  받은 convention_version={ver}, 필요={_REQUIRED_CONVENTION_VERSION} "
-                        f"(src={'real' if src == POLICY_SRC_REAL else 'sim'})\n"
-                        f"  0 = gear 미적용 + foot raw각 / 1 = gear 적용 + foot 관절각.\n"
-                        f"  정책은 관절 좌표만 안다 — 이 러너는 변환하지 않는다(변환은 real_runner 담당)."
-                    )
-                last_state[src] = st
-                got_any = True
+            got_any = _collect_states(socks, needed, last_state, recv_state_blocking)
             if needed and not got_any:
                 no_state += 1
                 if no_state % 50 == 0:
@@ -408,21 +434,22 @@ def main() -> None:
             targets = _infer_branches(branches, last_state, phase, cmd_vec, device, estimator, policy)
             phase = (phase + STEP_DT / GAIT_PERIOD) % 1.0
 
-            # 4) 목적지별 배선. OFF 는 미송신이 아니라 **중립 송신** (미송신은 lockstep 교착을 만든다).
+            # 4) 목적지별 배선.
+            #    OFF 는 미송신이 아니라 **그 목적지 실측 q 로 hold** 다. 미송신이면 lockstep 상대가
+            #    step 하지 않아 state 가 끊기고, 중립(default)을 보내면 **실기가 실제로 움직인다**
+            #    (배포 계단 2 단계에서 실기는 가만히 있어야 한다).
             default_np = ps.default.cpu().numpy()
-            tgt_sim = targets.get(src_for_sim, default_np) if src_for_sim >= 0 else default_np
-            tgt_real = targets.get(src_for_real, default_np) if src_for_real >= 0 else default_np
-            # ★ 교차 배선 안전장치 — sim obs 액션을 실기로 보낼 때는 실기 실측 q 기준으로 조인다.
-            if src_for_real == POLICY_SRC_SIM and real_act_addr is not None:
-                st_real = last_state[POLICY_SRC_REAL]
-                if st_real is None:
-                    tgt_real = None  # 실기 상태를 모르면 조일 수 없다 → 보내지 않는다
-                else:
-                    qr = np.asarray(st_real["q"], dtype=float)
-                    tgt_real = np.clip(np.asarray(tgt_real, dtype=float), qr - CROSS_CLAMP_RAD, qr + CROSS_CLAMP_RAD)
+
+            def _hold(dst_src: int):
+                st_h = last_state[dst_src]
+                return np.asarray(st_h["q"], dtype=float) if st_h is not None else default_np
+
+            tgt_sim = targets.get(src_for_sim, _hold(POLICY_SRC_SIM)) if src_for_sim >= 0 else _hold(POLICY_SRC_SIM)
+            tgt_real = (
+                targets.get(src_for_real, _hold(POLICY_SRC_REAL)) if src_for_real >= 0 else _hold(POLICY_SRC_REAL)
+            )
             send_to(sim_act_addr, tgt_sim)
-            if tgt_real is not None:
-                send_to(real_act_addr, tgt_real)
+            send_to(real_act_addr, tgt_real)
             seq += 1
             gravity = torch.tensor(
                 (last_state[src_for_sim] if src_for_sim >= 0 else last_state[src_for_real])["gravity"], device=device
