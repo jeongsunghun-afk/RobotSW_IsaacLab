@@ -14,6 +14,10 @@ hold 구간의 뒤쪽 `tail` 비율만 써서 램프 전이의 과도응답을 �
 `duty` = hold 구간에서 순간 `|jvel| RMS > 0.4` 인 스텝의 비율. 1.0=연속 보행, 0=정지 자세 유지.
 `ach`  = median(vx) / 명령. 100% 초과는 **과잉**이며, 저속에서는 "천천히 못 걷는다"는 별개의 실패다.
 
+★★ **넘어진 롤아웃은 기본으로 제외한다.** 넘어진 회차의 duty 는 능력이 아니다 — 누워서 가만히
+있으면 0.00, 누운 채 버둥거리면 1.00 이 나와 **양쪽 극단이 다 찍힌다**. 섞어서 평균내면 그 팔의
+저속 개시 능력이 아니라 붕괴 양상을 재는 셈이 된다. 판정은 `ramp_fall_probe` 에 위임한다.
+
 ★ cmd 0.5 의 상승 duty 는 **이봉**이라 평균만 보면 안 된다(0.00 과 1.00 이 섞인 평균 0.5 는
 "항상 애매하게 걷는다"가 아니라 "반은 서고 반은 걷는다"이다). `--each` 로 롤아웃별 값을 찍고,
 `spread` = max-min 으로 이봉 폭을 함께 낸다 — 처방이 들었다면 평균이 아니라 **spread 가 줄어야**
@@ -25,8 +29,17 @@ hold 구간의 뒤쪽 `tail` 비율만 써서 램프 전이의 과도응답을 �
 
 import argparse
 import glob
+import pathlib
+import sys
 
 import numpy as np
+
+# 저장소 루트에서 `./isaaclab.sh -p _workspace/leg/ramp_onset_duty.py` 로 부르는 게 기본 사용법이라
+# 스크립트 디렉터리가 sys.path 에 없다. 옆 모듈을 쓰려면 직접 넣어야 한다.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from ramp_fall_probe import _probe as _fall_probe  # noqa: E402
+from ramp_fall_probe import _verdict as _fall_verdict  # noqa: E402
 
 DUTY_JVEL_RMS = 0.4  # 보행 판정 임계 [rad/s]
 
@@ -63,6 +76,11 @@ def main():
     ap.add_argument("--cmd", type=float, default=0.5, help="분석할 속도 명령 [m/s]")
     ap.add_argument("--tail", type=float, default=0.6, help="hold 구간 뒤쪽 사용 비율")
     ap.add_argument("--each", action="store_true", help="롤아웃별 duty 를 함께 출력(이봉 확인용)")
+    ap.add_argument(
+        "--keep_fallen",
+        action="store_true",
+        help="넘어진 롤아웃도 포함(기본은 제외). 넘어진 회차의 duty 는 능력이 아니다 — 위 docstring 참조",
+    )
     args = ap.parse_args()
 
     print(f"cmd {args.cmd} m/s · duty = |jvel|RMS > {DUTY_JVEL_RMS} 비율 · ach = median(vx)/cmd")
@@ -71,11 +89,16 @@ def main():
     print("-" * 62)
     for spec in args.specs:
         label, pattern = spec.split("=", 1)
-        rows = []
+        rows, dropped = [], 0
         for p in sorted(glob.glob(pattern)):
+            if not args.keep_fallen and _fall_verdict(_fall_probe(p, 0.3, 300)) == "FALL":
+                dropped += 1
+                continue
             rows += probe(p, args.cmd, args.tail)
+        if dropped:
+            print(f"{label:28s} ※ 넘어진 롤아웃 {dropped}개 제외 (--keep_fallen 으로 포함)")
         if not rows:
-            print(f"{label:28s} (매칭된 npz 없음: {pattern})")
+            print(f"{label:28s} (남은 npz 없음: {pattern})")
             continue
         for direction in ("up", "down"):
             x = [(duty, ach) for k, duty, ach in rows if k == direction]
