@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import gymnasium as gym
 import torch
 import warp as wp
@@ -126,6 +128,9 @@ class HindLegEnv(DirectRLEnv):
         self._foot_raw_friction = self._foot_coupling and bool(getattr(self.cfg, "foot_raw_friction", True))
         # 반사관성 off-diagonal — 벨트가 만드는 항이므로 커플링이 꺼지면 같이 꺼진다.
         self._foot_reflected_inertia = self._foot_coupling and bool(getattr(self.cfg, "foot_reflected_inertia", True))
+        # 넘어짐 종료 임계 (:meth:`_get_dones` 참고). cos 는 한 번만 계산한다.
+        tilt = getattr(self.cfg, "terminate_tilt_deg", None)
+        self._tilt_cos_limit = math.cos(math.radians(tilt)) if tilt is not None else 1.0
         if self._foot_coupling:
             self._calf_ids, _ = self._robot.find_joints(["HL_calf_joint", "HR_calf_joint"], preserve_order=True)
             self._foot_ids, _ = self._robot.find_joints(["HL_foot_joint", "HR_foot_joint"], preserve_order=True)
@@ -316,7 +321,7 @@ class HindLegEnv(DirectRLEnv):
             #     rad/s 까지 가고 19.67% 가 교차점 4.92 를 넘는다. 구식이 곡선을 실제로 벗어난 건
             #     **0.012%** 로 드물지만 그때 최대 **101 N·m** 를 calf 에 실었다 — 평균은 같아도
             #     희귀 폭주 이벤트가 사라지는 것이 이 변경의 실질이다.
-            #     근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
+            #     근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
             # ⚠ `applied_torque` 에는 직전 스텝에 우리가 foot 에 넣은 **반사관성 보정도 섞여 있다**.
             #   그건 모터 토크가 아니라 관성항이라 벨트로 전달되면 안 된다(넣으면 off-diagonal 이
             #   전치를 타고 calf 에 한 번 더 들어가 이중계상). 같은 1스텝 지연으로 캐시해 뺀다.
@@ -576,6 +581,22 @@ class HindLegEnv(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         died = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        # ★ 2026-08-27: base 접촉만으로는 **뒤로 넘어진 자세가 종료되지 않는다.**
+        #   이 다리는 몸통 아래로 두 다리가 뻗어 있어, 뒤로 자빠지면 hip/thigh/calf 링크가 몸통을
+        #   받쳐 `base_collision` 이 지면에 닿지 않는다. 실측(`_workspace/hindleg_fall_probe.py`,
+        #   `pace0819sym` model_48500, 256 env × 2800 step):
+        #       뒤로 넘어짐 = 전 스텝의 91.96 %, 그 상태의 **종료율 0.000 %**
+        #       앞으로 넘어짐 = 0.35 %, 종료율 5.65 %  (base 가 닿으므로 잡힌다)
+        #       에피소드당 뒤로 넘어진 채 658.1 step = **에피소드의 92.9 %**
+        #       time-out 674 건 전부(674/674) 넘어진 채로 끝났다
+        #   즉 학습 분포의 대부분이 "누운 자세"였다. 기울기 기준을 더해 전후 대칭으로 끊는다.
+        #   ⚠ 이 항을 켜면 종료 조건이 바뀌므로 **2026-08-26 이전 run 과 학습 곡선을 직접 비교할 수
+        #     없다** (같은 플랜트가 아니라 같은 task 가 아니게 된다).
+        if self.cfg.terminate_tilt_deg is not None:
+            # projected_gravity_b[:, 2] = −cos(tilt). 기립 −1 → 넘어질수록 0 에 접근.
+            died = died | (self._robot.data.projected_gravity_b[:, 2] > -self._tilt_cos_limit)
+        if self.cfg.terminate_base_height is not None:
+            died = died | (self._robot.data.root_link_pos_w[:, 2] < self.cfg.terminate_base_height)
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):

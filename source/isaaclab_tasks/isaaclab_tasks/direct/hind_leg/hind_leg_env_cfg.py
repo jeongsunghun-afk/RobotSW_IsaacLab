@@ -135,6 +135,31 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     action_scale = 0.25
     action_space = 26
 
+    # 넘어짐 종료 임계 [deg] — 몸통 z축이 연직에서 이만큼 벌어지면 종료한다. None = 비활성.
+    #
+    # ★ 왜 필요한가 (2026-08-27 실측). 종전 종료 조건은 ``base.*`` 접촉 하나뿐이었는데, 이 다리는
+    #   몸통 **아래로** 두 다리가 뻗은 구조라 뒤로 자빠지면 hip/thigh/calf 링크가 몸통을 받쳐
+    #   ``base_collision`` 이 지면에 닿지 않는다. 결과가 전후 비대칭이었다:
+    #
+    #       자세          전 스텝 비율   그 상태의 종료율   지면 반력을 받는 링크
+    #       뒤로 넘어짐      91.96 %       0.000 %          다리 링크 156.9 N (base 0.00 N)
+    #       앞으로 넘어짐     0.35 %       5.652 %          base 가 닿는다
+    #
+    #   그래서 정책이 **누운 자세라는 흡수 상태**를 찾아버렸다 — 에피소드의 92.9 %(658 step)를
+    #   뒤로 누운 채 보내고 time-out 674 건이 **전부** 넘어진 채 끝났다. 학습 분포의 대부분이
+    #   보행이 아니라 누운 자세였다는 뜻이다.
+    #   근거: reports/hindleg_locomotion/hindLeg_history_direct/fall_asymmetry_termination/
+    #        (`_workspace/hindleg_fall_probe.py`, pace0819sym model_48500, 256 env × 2800 step)
+    #
+    # 60° 근거: 정상 보행 정책(`nocouple` model_34100)의 기울기는 p99 에서 19.7°다 — 3 배 여유.
+    #   넘어진 자세는 84° 였다. 그 사이 어디를 잡아도 되지만 보행 여유를 우선했다.
+    # ⚠ 이 값을 바꾸면 task 자체가 달라진다 — 2026-08-26 이전 run 과 학습 곡선 직접 비교 불가.
+    terminate_tilt_deg: float | None = 60.0
+    # 몸통 높이 종료 [m] — 기울지 않고 주저앉는 붕괴용. **기본 None**: 위 실측에서 넘어짐의
+    #   99.6 %(92.30 중 91.96+0.35)가 기울기 기준만으로 잡혔고, 동적 보행 중 몸통이 얼마나
+    #   내려가는지는 아직 안 쟀다. 안 잰 임계로 정상 동작을 끊을 위험이 더 크다.
+    terminate_base_height: float | None = None
+
     priv_explicit = False
     priv_latent = False
     ang_vel = False
@@ -290,6 +315,11 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     action_scale = 0.25
     action_space = 8
 
+    # 넘어짐 종료 임계 — 근거·측정치는 :class:`HindLegFlatEnvCfg` 의 같은 필드 주석 참고.
+    # ``HindLeg-Direct-v0`` 가 쓰는 cfg 가 이쪽이므로 실측도 이 환경에서 났다.
+    terminate_tilt_deg: float | None = 60.0
+    terminate_base_height: float | None = None
+
     priv_explicit = True
     priv_latent = True
     ang_vel = False
@@ -337,7 +367,7 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     #     19.67% 의 스텝이 교차점을 넘는다. 구식이 실제로 곡선을 벗어난 건 **0.012%** 로 드물지만,
     #     벗어날 때 최대 **101 N·m** 를 calf 에 실었다 — `obs_clip` 을 넣게 만든 종류의 희귀
     #     폭주 이벤트다. 평균 거동은 사실상 같겠지만 동일 플랜트로 취급하면 안 된다.
-    #     근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
+    #     근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
     foot_transpose: bool = True
 
     # foot 마찰을 raw(모터축) 좌표로 — r2s_biped_leg `foot_raw_friction`과 같은 스위치(기본 True).
@@ -362,7 +392,7 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     #   않는다 — 보정을 effort target 에 더하므로 각 모터의 토크-속도 곡선이 다시 잘라 준다.
     #   1.95M 표본에서 NaN 0, |q̇| 24.54→24.96 (DR off) / 32.04 (DR on, baseline 24.70 대비 +30%).
     #   미측정: 밑바닥부터 학습하는 초기 거친 구간.
-    #   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §12
+    #   근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §12
     foot_reflected_inertia: bool = True
 
     # 학습 신호 클리핑 — 희귀 물리 폭주 이벤트의 극단 obs/reward가 GAE bootstrap을 타고
