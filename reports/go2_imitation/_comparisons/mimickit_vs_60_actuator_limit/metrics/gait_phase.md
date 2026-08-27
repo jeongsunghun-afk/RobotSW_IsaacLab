@@ -127,6 +127,23 @@
   3.5  0.541  0.50(R0.78)  0.72(R0.71)  0.24(R0.44)      1.00  ?
   4.0  0.052  0.62(R0.20)  0.85(R0.59)  0.47(R0.33)      0.67  ?
 
+[tan-norm 40k]  ramp_tannorm/stock_40000
+  cmd     vx        FL-FR        FL-RL        FL-RR stride Hz  gait  (R=env 일치도)
+  0.5  0.369  0.52(R0.90)  0.81(R0.95)  0.30(R0.87)      1.00  ?
+  1.0  0.651  0.50(R0.84)  0.71(R0.90)  0.19(R0.93)      1.67  ?
+  1.5  1.101  0.50(R0.84)  0.56(R0.84)  0.06(R0.92)      2.00  trot
+  2.0  1.324  0.50(R0.82)  0.53(R0.83)  0.04(R0.89)      2.33  trot
+  2.5  1.379  0.50(R0.81)  0.52(R0.79)  0.02(R0.87)      2.33  trot
+  3.0  1.306  0.49(R0.86)  0.53(R0.78)  0.03(R0.84)      2.33  trot
+  3.5  0.395  0.48(R0.79)  0.73(R0.59)  0.19(R0.59)      1.83  ?
+  4.0  0.125  0.44(R0.54)  0.87(R0.76)  0.31(R0.71)      0.67  ?
+
+[tan-norm 48k] 없음: /home/lgb/IsaacLab-6.0/reports/go2_imitation/_comparisons/mimickit_vs_60_actuator_limit/metrics/ramp_tannorm/stock_48000/ramp_data.npz
+
+[tan-norm 56k] 없음: /home/lgb/IsaacLab-6.0/reports/go2_imitation/_comparisons/mimickit_vs_60_actuator_limit/metrics/ramp_tannorm/stock_56000/ramp_data.npz
+
+[tan-norm 60k] 없음: /home/lgb/IsaacLab-6.0/reports/go2_imitation/_comparisons/mimickit_vs_60_actuator_limit/metrics/ramp_tannorm/stock_59999/ramp_data.npz
+
 [PACE 0.8]  ramp_lerp08_pace/pace_59999
   cmd     vx        FL-FR        FL-RL        FL-RR stride Hz  gait  (R=env 일치도)
   0.5  0.352  0.49(R0.98)  0.78(R0.99)  0.28(R0.98)      1.00  ?

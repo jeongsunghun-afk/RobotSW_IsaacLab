@@ -60,7 +60,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_from_angle_axis, quat_mul
+from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_mul
 
 from .go2_imitation_tracking_env_cfg import (
     PACE_ARMATURE,
@@ -116,6 +116,9 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # cfg 에 반영돼 있으므로 여기가 유일하게 맞는 자리다(cfg `__post_init__` 은 너무 이르다).
         joint_pos_obs_dim = 12 * 6 if cfg.joint_pos_tan_norm else 12
         cfg.observation_space = 3 + 2 + 1 + joint_pos_obs_dim + 12 + 12
+        # disc obs 도 같은 이유로 여기서 확정한다. base(43 또는 103) + root_rot_tan_norm(6).
+        amp_joint_dim = 12 * 6 if cfg.amp_joint_tan_norm else 12
+        cfg.amp_observation_space = amp_joint_dim + 12 + 1 + 3 + 3 + 12 + 6
 
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -148,17 +151,22 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         )
 
         # ── tan-norm 인코딩용 관절 회전축 [12, 3] ────────────────
-        if self.cfg.joint_pos_tan_norm:
-            axes = []
-            for name in self._robot.data.joint_names:
-                match = [ax for suffix, ax in self.JOINT_AXIS_BY_SUFFIX.items() if suffix in name]
-                if len(match) != 1:
-                    raise ValueError(
-                        f"관절 '{name}' 의 회전축을 정할 수 없다 (매칭 {len(match)} 건). "
-                        f"`JOINT_AXIS_BY_SUFFIX` 에 접미사를 추가할 것."
-                    )
-                axes.append(match[0])
-            self._joint_axis = torch.tensor(axes, dtype=torch.float32, device=self.device)  # [12, 3]
+        # policy(`_joint_axis`)와 disc(`_amp_joint_axis`)가 따로 켜질 수 있어 둘로 나눈다.
+        # 꺼진 쪽은 **빈 텐서**다 — `_compute_amp_obs` 는 jit 함수라 Optional 을 못 받으므로
+        # `numel() == 0` 을 off 신호로 쓴다.
+        axes = []
+        for name in self._robot.data.joint_names:
+            match = [ax for suffix, ax in self.JOINT_AXIS_BY_SUFFIX.items() if suffix in name]
+            if len(match) != 1:
+                raise ValueError(
+                    f"관절 '{name}' 의 회전축을 정할 수 없다 (매칭 {len(match)} 건). "
+                    f"`JOINT_AXIS_BY_SUFFIX` 에 접미사를 추가할 것."
+                )
+            axes.append(match[0])
+        _axis = torch.tensor(axes, dtype=torch.float32, device=self.device)  # [12, 3]
+        _empty = torch.zeros(0, 3, dtype=torch.float32, device=self.device)
+        self._joint_axis = _axis if self.cfg.joint_pos_tan_norm else _empty
+        self._amp_joint_axis = _axis if self.cfg.amp_joint_tan_norm else _empty
 
         # ── motion_lib ↔ IsaacLab joint 순서 매핑 ────────────────
         # IsaacLab joint 순서(알파벳 등)와 PKL DOF_NAMES 순서가 다를 수 있음.
@@ -182,7 +190,9 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         # ── AMP 관측 버퍼 ─────────────────────────────────────────
         # amp_observation_space (cfg=49) = base(43) + root_rot_tan_norm(6)  [R4]
         # amp_observation_buffer 내부 저장은 base 43-dim만; tan_norm 6D는 소비 시점에 계산됨.
-        _AMP_BASE_DIM = 43  # 내부 버퍼 차원 (고정)
+        # 내부 버퍼 차원 = per-step disc obs 에서 root_rot_tan_norm(6)을 뺀 것.
+        # tan-norm 이면 103, 아니면 43. cfg 값에서 유도해 두 상수가 갈라지지 않게 한다.
+        _AMP_BASE_DIM = self.cfg.amp_observation_space - 6
         self.amp_observation_size = self.cfg.num_amp_observations * (
             self.cfg.amp_observation_space + (2 if self.cfg.include_rel_track_obs else 0)
         )
@@ -331,6 +341,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             root_lin_vel_b,
             root_ang_vel_b,
             local_key_body_pos,
+            self._amp_joint_axis,
         )
         for i in reversed(range(self.cfg.num_amp_observations - 1)):
             self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]
@@ -536,6 +547,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             root_lin_vel_b_t,
             root_ang_vel_b_t,
             local_key_body_pos_t,
+            self._amp_joint_axis,
         )  # [n, amp_obs_space=43]
         # 히스토리를 terminal state 기준으로 구성 (_get_observations와 동일한 시프트)
         terminal_buf = self.amp_observation_buffer[env_ids].clone()  # [n, H, 43]
@@ -790,15 +802,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         """
         if not self.cfg.joint_pos_tan_norm:
             return joint_pos_rel
-        n, j = joint_pos_rel.shape
-        axis = self._joint_axis.unsqueeze(0).expand(n, -1, -1).reshape(n * j, 3)
-        quat = quat_from_angle_axis(joint_pos_rel.reshape(n * j), axis)  # [N*12, 4] xyzw
-        tan_ref = torch.zeros(n * j, 3, dtype=joint_pos_rel.dtype, device=joint_pos_rel.device)
-        tan_ref[:, 0] = 1.0  # (1, 0, 0)
-        norm_ref = torch.zeros_like(tan_ref)
-        norm_ref[:, 2] = 1.0  # (0, 0, 1)
-        tan_norm = torch.cat([quat_apply(quat, tan_ref), quat_apply(quat, norm_ref)], dim=-1)  # [N*12, 6]
-        return tan_norm.reshape(n, j * 6)
+        return _joint_tan_norm(joint_pos_rel, self._joint_axis)
 
     def _apply_obs_dr(self, obs: torch.Tensor) -> torch.Tensor:
         """policy proprio 에 **중력·관절속도** 관측 노이즈를 더한다. AMP obs/priv_explicit 는 불변.
@@ -1006,6 +1010,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             lin_vel,
             ang_vel,
             foot_pos,
+            self._amp_joint_axis,
         )
 
         amp_obs_buf = amp_obs.view(num_samples, n_hist, -1)  # [N, H, 43]
@@ -1078,6 +1083,38 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
 
 
 @torch.jit.script
+def _joint_tan_norm(theta: torch.Tensor, axis: torch.Tensor) -> torch.Tensor:
+    """관절각 → 관절별 회전의 tan-norm (MimicKit ``quat_to_tan_norm`` 과 같은 값).
+
+    회전축 a 둘레로 θ 만큼 돌린 회전을 기준 tan(1,0,0)·norm(0,0,1) 에 적용해 관절당 6 차원을
+    만든다. 쿼터니언을 거치지 않고 로드리게스 식 ``v·cosθ + (a×v)·sinθ + a(a·v)(1−cosθ)`` 를
+    직접 쓴다 — 결과는 같고(단위 테스트로 확인) jit 안에서 안전하다.
+
+    **policy obs 와 disc obs 가 이 함수 하나를 공유한다.** 두 경로가 따로 구현되면 언젠가
+    갈라지는데, disc 는 정책 obs 와 달리 expert(참조 모션) 쪽과도 대칭이어야 해서 치명적이다.
+
+    Args:
+        theta: 관절각 [rad], shape [batch, num_joints].
+        axis: 관절별 단위 회전축, shape [num_joints, 3].
+
+    Returns:
+        shape [batch, num_joints * 6] — 관절마다 [tan(3), norm(3)].
+    """
+    n, j = theta.shape[0], theta.shape[1]
+    c = torch.cos(theta).unsqueeze(-1)  # [n, j, 1]
+    s = torch.sin(theta).unsqueeze(-1)
+    a = axis.unsqueeze(0).expand(n, j, 3)  # [n, j, 3]
+    out = torch.zeros(n, j, 6, dtype=theta.dtype, device=theta.device)
+    for k in range(2):
+        ref = torch.zeros(3, dtype=theta.dtype, device=theta.device)
+        ref[0 if k == 0 else 2] = 1.0  # tan=(1,0,0), norm=(0,0,1)
+        v = ref.view(1, 1, 3).expand(n, j, 3)
+        rot = v * c + torch.cross(a, v, dim=-1) * s + a * (a * v).sum(-1, keepdim=True) * (1.0 - c)
+        out[:, :, 3 * k : 3 * k + 3] = rot
+    return out.reshape(n, j * 6)
+
+
+@torch.jit.script
 def _compute_amp_obs(
     dof_pos: torch.Tensor,
     dof_vel: torch.Tensor,
@@ -1085,15 +1122,24 @@ def _compute_amp_obs(
     root_lin_vel: torch.Tensor,
     root_ang_vel: torch.Tensor,
     foot_pos_local: torch.Tensor,
+    joint_axis: torch.Tensor,
 ) -> torch.Tensor:
-    """AMP disc 기본 관측 벡터 계산 (43-dim).
+    """AMP disc 기본 관측 벡터 계산 (43-dim, tan-norm 이면 103-dim).
 
     dof_pos(12) + dof_vel(12) + root_height(1) + lin_vel(3) + ang_vel(3) + foot_pos(12)
     root_rot_tan_norm(6)은 _apply_root_rot_tan_norm()에서 window stacking 후 추가됨 (→ 49-dim).
+
+    ★ live(정책) · terminal · expert(참조 모션) **세 경로가 전부 이 함수를 지난다.** disc 는
+    정책과 expert 를 같은 자로 재야 의미가 있으므로, 인코딩을 여기 한 곳에만 두는 게 필수다.
+
+    Args:
+        joint_axis: 비어 있으면 ``dof_pos`` 를 raw 라디안 12 로 그대로 넣는다. [12, 3] 이면
+            관절별 회전의 tan-norm 72 로 바꾼다 (``amp_joint_tan_norm=True``).
     """
+    dof_pos_obs = _joint_tan_norm(dof_pos, joint_axis) if joint_axis.numel() > 0 else dof_pos
     return torch.cat(
         [
-            dof_pos,  # 12
+            dof_pos_obs,  # 12 (raw) 또는 72 (tan-norm)
             dof_vel,  # 12
             root_pos[:, 2:3],  # 1 (root 높이)
             root_lin_vel,  # 3

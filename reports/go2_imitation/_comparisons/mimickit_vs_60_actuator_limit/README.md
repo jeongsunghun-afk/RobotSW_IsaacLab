@@ -970,3 +970,93 @@ lerp 0.8        0.02      0.05      0.02      0.01   <- 실제 3.9 m/s 로 달�
 
 원자료: 두 쪽 체크포인트 가중치 shape · `logs/amp_adaptation_module_20260512_160750/{env,engine,agent}_config.yaml`
 · estimator 오차는 `metrics/ramp_*/[..]/ramp_data.npz` 의 `est_lin`/`gt_lin`
+
+---
+
+## 17. (2026-08-27) 관측 표현 arm — 정책 쪽 결과, disc 쪽 착수, 그리고 참조 데이터 결함 1 건
+
+### 17-a. 정책 tan-norm (`tannorm_stock`) — 40k 에서 중단
+
+§16-f 의 후보 1 순위였다. `cmd 3.5`·`4.0` **0%**, 위상차 전 구간 **trot**. 40k 한 점만 재고
+중단했다(사용자 판정). 같은 40000 체크포인트끼리 맞춰 비교하면:
+
+```
+  arm @40000 |    cmd 2.0     cmd 2.5     cmd 3.0     cmd 3.5     cmd 4.0
+    baseline | 1.315(98)   1.389(94)   0.686(41)   0.180( 0)   0.037( 0)
+    const LR | 1.406(94)   1.567(94)   1.672(94)   0.594( 3)   0.051( 0)
+    tan-norm | 1.324(86)   1.379(86)   1.306( 0)   0.395( 0)   0.125( 0)
+```
+
+⚠ `cmd 3.0` 에서 **두 지표가 반대 방향**이다 — tan-norm median 이 baseline 의 거의 2 배인데
+(1.306 vs 0.686) 달성률은 0% vs 41%. 모순이 아니라 분포 모양이다: 달성 문턱이 1.5 m/s 인데
+baseline 은 **양봉**(41% 가 1.7 에서 달리고 나머지는 주저앉아 median 이 끌려내려감), tan-norm 은
+**뭉쳐 있는데 문턱 바로 아래**다. 어느 쪽이 낫다고 말할 수 없다.
+
+한 점이라 우열은 판정하지 않는다 — baseline 자신의 `cmd 3.0` 이 40k 이후 점마다
+0.686(41%) / 1.686(58%) / 1.623(53%) / 1.240(42%) 로 vx 가 2.5 배 범위에서 흔들린다.
+**판정 가능한 것은 "전이 없음" 하나**이고, 그건 한 점으로도 말할 수 있다(대각 위상차 0.02~0.04).
+
+### 17-b. ★ 정책 쪽 노브는 6/6 실패했다 — 벽은 style 신호에 있다
+
+| arm | 바꾼 것 | `cmd 3.5` | 보행 |
+|---|---|---:|---|
+| baseline | — | 0% | trot |
+| vel_err_scale 1.0 | 보상 스케일 | 0% | trot |
+| push off | 외란 | 0% | trot |
+| vel1 + nopush | 둘 다 | 0% | trot |
+| const LR | 옵티마이저 스케줄 | 9% | trot |
+| tan-norm (policy) | 관측 표현 | 0% | trot |
+
+여섯 arm 이 서로 다른 축을 건드렸는데 전부 같은 자리로 수렴한다. 산포가 아니라 구조다.
+반면 `lerp` 를 올려 **style 을 약화**하면 한 번에 열린다(`cmd 4.0` 97%, bound 로 전이).
+
+### 17-c. disc 관측 분해 — 차이 85 중 **84 가 관절 각도 표현**이다
+
+§16-a 에서 disc 폭만 비교했던 것(49 vs 134)을 성분까지 분해했다
+(`amp_env.compute_disc_obs` = `deepmimic_env.compute_tar_obs` + `compute_disc_vel_obs`):
+
+| 성분 | 우리 | MimicKit |
+|---|---:|---:|
+| **관절 각도** | **12** (raw rad) | **96** (tan-norm, 16 관절) |
+| root 위치 | 높이 1 | 참조 기준 상대 xy 2 |
+| root 회전 | tan-norm 6 | tan-norm 6 |
+| key body(발) | 12 | 12 |
+| root 선속도 / 각속도 | 3 / 3 | 3 / 3 |
+| 관절 속도 | 12 | 12 |
+| 합 | **49** | **134** |
+
+`49 + 84 + 1 = 134` 로 정확히 닫힌다. → **`amp_joint_tan_norm` arm 착수**
+(`2026-08-27_10-54-18_ampTanNorm_stock`, per-step 49 → **109**).
+
+### 17-d. ⚠ 참조 모션 각속도에 yaw 랩 결함 — **전 AMP run 에 들어가 있었다**
+
+disc 스모크에서 expert 값 범위가 `[−353, 41]` 로 나와 추적했다.
+
+```
+motion_lib.py:445   euler_rates = _finite_diff(root_euler, dt)   # yaw 를 unwrap 하지 않는다
+```
+
+`go2_walk_turn` 과 그 mirror 에 **yaw 랩이 1 회씩** 있고, 그 프레임에서 `Δyaw ≈ 2π` 가 그대로
+미분돼 각속도가 **373.4 rad/s** 로 튄다(실제 2.26). `2π × 60 fps = 377.0` 과 일치한다.
+
+정규화가 이를 전 구간에 퍼뜨린다 — `ppo_amp.py:187` 이
+`update_normalization(cat([expert, policy]))` 라 expert 가 통계에 들어간다:
+
+```
+                  std        wx       wy        wz     |max|
+현재 코드                 0.526    1.572    10.280     373.4
+np.unwrap 적용            0.586    1.006     0.544      13.6
+팽창률                    0.90x    1.56x    18.9x
+```
+
+→ **disc 가 보는 expert yaw rate 가 실제의 5% 로 눌린다.** 2628 프레임 중 2 개(0.08%)의 결과다.
+pitch 도 64% 로 눌린다.
+
+⚠ **이것이 4 m/s 천장의 원인일 가능성은 낮다** — 눌리는 것이 주로 yaw 인데 고속 전이는 pitch 축
+문제이고, 같은 데이터로 lerp 0.8 은 잘 열린다. 그래도 실재하는 결함이다.
+
+**지금 고치지 않는다.** 지금 도는 `ampTanNorm` arm 이 이전 arm 들과 같은 expert 분포를 써야
+단일 변수 비교가 성립한다. 별도 arm(`np.unwrap` 적용)으로 돌릴 것.
+
+원자료: `metrics/ramp_tannorm/stock_40000/` · 요약 `metrics/mimickit_align_summary.md`
+· 위상 `metrics/gait_phase.md`

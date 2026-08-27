@@ -218,8 +218,24 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     #: ⚠ 42 → 102 는 actor 1 층(68→128)과 history encoder 입력(420→1020)도 같이 키운다 — 교란 요인.
     joint_pos_tan_norm: bool = False
 
+    #: **discriminator** 관측의 관절 각도를 raw 라디안 12 대신 tan-norm 72 로 넣는다.
+    #: :attr:`joint_pos_tan_norm` 과 같은 인코딩이지만 적용 대상이 policy 가 아니라 disc 다.
+    #:
+    #: 왜 disc 인가: §16 에서 MimicKit disc 가 per-step **134**, 우리가 **49** 인 것을 확인했고,
+    #: 분해해 보면 그 차이 85 중 **84 가 관절 각도 표현 하나**다(12 raw vs 96 tan-norm).
+    #: 그리고 §14~15 에서 style 0.5 로 고정한 정책 쪽 arm 이 6/6 전부 trot 에 갇혔다 —
+    #: 벽을 만드는 것이 style 신호라면 그 신호를 만드는 disc 를 봐야 한다.
+    #:
+    #: ⚠ 켜면 per-step disc obs 가 49 → **109** (base 43 → 103 + root_rot_tan_norm 6)로 바뀌어
+    #: **이전 AMP run 과 disc 차원이 달라진다.** amp_reward 절대값도 직접 비교할 수 없다.
+    #: ⚠ live · terminal · expert 세 경로가 모두 ``_compute_amp_obs`` 를 지나므로 인코딩은
+    #: 그 한 곳에서만 갈린다. 정책과 expert 를 다른 자로 재는 일은 구조적으로 생기지 않는다.
+    amp_joint_tan_norm: bool = False
+
     num_amp_observations: int = 10  # disc hist depth (ablation: 2→10, MimicKit 방향)
-    amp_observation_space: int = 49  # per-step disc obs (R4: +6 root_rot_tan_norm)
+    #: per-step disc obs (R4: +6 root_rot_tan_norm). ⚠ :attr:`amp_joint_tan_norm` 이면 109 —
+    #: env `__init__` 이 hydra 오버라이드 확정 후 다시 계산해 덮어쓴다.
+    amp_observation_space: int = 49
     include_rel_track_obs: bool = False  # 상대적 2D 궤적 포함 여부 토글
 
     # ── 모션 데이터 ─────────────────────────────────────────────
