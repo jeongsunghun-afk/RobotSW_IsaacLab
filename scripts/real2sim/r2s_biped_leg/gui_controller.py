@@ -2133,8 +2133,26 @@ class MainWindow(QMainWindow):
         self._act_scale_spin.setKeyboardTracking(False)
         self._act_scale_spin.valueChanged.connect(self._on_act_scale_spin)
         row_scale.addWidget(self._act_scale_spin)
-        scale_hint = QLabel("0 = neutral pose, 1 = as trained. Ramp up from 0 on the real robot.")
+        scale_hint = QLabel("0 = neutral pose, 1 = as trained. NOT a torque limiter — see tooltip.")
         scale_hint.setObjectName("subtitleLabel")
+        # ★ 종전 안내는 "0 에서 천천히 올려라" 였다. 실측이 그걸 기각했다 — 중간값이 **더 위험**하다.
+        _scale_tip = (
+            "Intermediate values are NOT a gentle version of the policy.\n"
+            "Measured in sim (termfix_reflIcap model_24800, cmd 1.0 m/s), counting\n"
+            "torque excursions long enough to latch the limp trip (>=3 control steps):\n"
+            "    scale        1.0     0.8     0.6\n"
+            "    calf runs     75     138     378\n"
+            "    foot runs     48     376    2527\n"
+            "Mean torque RISES as the scale drops (foot 7.0 -> 7.5 -> 9.2 N.m) because\n"
+            "scaling pulls targets toward the default pose, so the leg under-swings and\n"
+            "lands harder. The policy was trained at 1.0; anything less is out of\n"
+            "distribution.\n\n"
+            "Use this to verify wiring and joint direction at low authority, or to park\n"
+            "at 0. Do not use it to make walking 'safer' — it does the opposite."
+        )
+        scale_hint.setToolTip(_scale_tip)
+        self._act_scale_slider.setToolTip(_scale_tip)
+        self._act_scale_spin.setToolTip(_scale_tip)
         row_scale.addWidget(scale_hint)
         row_scale.addStretch(1)
         v.addLayout(row_scale)
