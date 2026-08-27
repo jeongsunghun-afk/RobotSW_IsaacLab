@@ -41,6 +41,12 @@ parser.add_argument("--cmd_x", type=float, nargs="+", default=[0.3, 0.5, 1.0])
 parser.add_argument("--trip_nm", type=float, default=15.0, help="펌웨어 보고 토크 임계 [N·m, 채널 기준].")
 parser.add_argument("--trip_ms", type=float, default=50.0, help="래치까지 필요한 지속 시간 [ms].")
 parser.add_argument("--tilt_deg", type=float, default=50.0, help="넘어짐 판정 기울기 [deg] — 걷는 스텝만 센다.")
+parser.add_argument(
+    "--act_scale", type=float, default=1.0,
+    help="정책 action 에 곱하는 배율 [0~1]. 배포 GUI 의 action scale 과 같은 자리다 — 트립을 "
+    "피하려고 이 값을 낮췄을 때 **토크가 실제로 얼마나 내려가고 속도를 얼마나 잃는지** 잰다. "
+    "⚠ 정책은 배율 1.0 에서 학습됐으므로 낮춘 값은 학습 분포 밖이다.",
+)
 add_launcher_args(parser)
 args_cli, _ = setup_preset_cli(parser)
 args_cli.headless = True
@@ -127,21 +133,25 @@ def main() -> None:
         for cmd_x in args_cli.cmd_x:
             cmd = torch.zeros_like(u._commands)
             cmd[:, 0] = cmd_x
-            rec: dict[str, list[torch.Tensor]] = {"calf": [], "foot": [], "gz": []}
+            rec: dict[str, list[torch.Tensor]] = {"calf": [], "foot": [], "gz": [], "vx": []}
             with torch.inference_mode():
                 for i in range(args_cli.steps):
                     u._commands[:] = cmd
-                    obs, _, _, _ = env.step(policy(obs))
+                    obs, _, _, _ = env.step(policy(obs) * args_cli.act_scale)
                     u._commands[:] = cmd
                     if i < 100:
                         continue
                     for nm, ids in joint_ids.items():
                         rec[nm].append(robot.data.applied_torque[:, ids].abs().clone())
                     rec["gz"].append(robot.data.projected_gravity_b[:, 2:3].expand(-1, 2).clone())
+                    rec["vx"].append(robot.data.root_lin_vel_b[:, 0:1].expand(-1, 2).clone())
             R = {k: torch.stack(v) for k, v in rec.items()}
             up = R["gz"] <= -cos_thr  # [T, N, 2] 아니라 [T, N*?]: 관절 열 수에 맞춰 이미 확장돼 있다
 
-            print(f"\n{'=' * 92}\n[cmd vx = {cmd_x:.2f}]  기립 스텝 {float(up.float().mean()) * 100:.1f} %")
+            vx = float(R["vx"][up].mean())
+            print(f"\n{'=' * 92}\n[cmd vx = {cmd_x:.2f}  act_scale {args_cli.act_scale:.2f}]"
+                  f"  기립 스텝 {float(up.float().mean()) * 100:.1f} %"
+                  f"  실제 vx {vx:6.3f} m/s  달성률 {vx / cmd_x * 100 if cmd_x else float('nan'):5.0f} %")
             for nm in ("calf", "foot"):
                 tau = R[nm]
                 thr = args_cli.trip_nm * GEAR_K[nm]
