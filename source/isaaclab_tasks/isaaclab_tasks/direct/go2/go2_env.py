@@ -69,6 +69,10 @@ class Go2Env(DirectRLEnv):
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
+        # Hip (abduction) joint indices — used to halve the hip action range (see WTWEnv)
+        self._hip_joint_ids = torch.tensor(
+            [i for i, n in enumerate(self._robot.data.joint_names) if "hip" in n], dtype=torch.long, device=self.device
+        )
         print(self.cfg)
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalized_body_names)
 
@@ -87,15 +91,21 @@ class Go2Env(DirectRLEnv):
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
         # we need to explicitly filter collisions for CPU simulation
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped when the scene cfg declares no
+        # entities (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs
+        # unfiltered — robots from different envs physically collide. Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        actions = self._actions.clone()
+        if self.cfg.hip_scale_reduction:
+            actions[:, self._hip_joint_ids] *= 0.5
+        self._processed_actions = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)

@@ -155,7 +155,10 @@ class Go2RecoveryEnvCfg(DirectRLEnvCfg):
     action_clip: float = 100.0
     # hip joint(index 0,3,6,9) action scale 0.5× (참조 FR-Net 채택, 균형 권장)
     # True이면 hip 인덱스 action에 0.5를 곱한 후 scale 적용
-    hip_action_scale: float = 0.5
+    # 2026-08-03 이전 이름은 `hip_action_scale: float = 0.5`. 다른 Go2 env와 이름/타입을
+    # 통일하며 bool로 바꿨고, 0.5는 적용부(env.py)에 하드코딩됐다. 값은 모든 과거 런에서
+    # 0.5였으므로 동작은 동일하다. 그 이전 런의 params/env.yaml에는 옛 이름이 남아 있다.
+    hip_scale_reduction: bool = True
 
     # ── M2 recovery reward ────────────────────────────────────────────────────
     # reward_reset = (roll_w·r_roll + stand_w·r_stand) × reward_reset_scale

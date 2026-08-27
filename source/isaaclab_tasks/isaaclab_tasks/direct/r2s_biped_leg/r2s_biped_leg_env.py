@@ -354,6 +354,11 @@ class R2SBipedLegEnv(DirectRLEnv):
                     i_off = self._data_tensor(self.robot.data.joint_armature)[:, self._foot_art_ids]
                     corr_calf = -i_off * acc[:, self._foot_art_ids]
                     corr_foot = -i_off * acc[:, self._calf_art_ids]
+                    cap = getattr(self.cfg, "foot_reflected_inertia_cap", None)
+                    if cap is not None:
+                        # 학습 env(`hind_leg_env`)와 **같은 캡** — 안 맞추면 다른 플랜트가 된다.
+                        corr_calf = corr_calf.clamp(-cap, cap)
+                        corr_foot = corr_foot.clamp(-cap, cap)
                 tau_fric = None
                 if self.cfg.foot_raw_friction:
                     # 관절 좌표 PhysX 마찰을 끄고(매 제어 스텝 = 매 물리 스텝, decimation=1)
@@ -378,7 +383,7 @@ class R2SBipedLegEnv(DirectRLEnv):
                     #   과거 PACE 적합값과 직접 비교 가능하다. 반면 **합성 chirp**
                     #   (`collect_chirp_sim_bipedleg.py`, 10 Hz 스윕)는 foot 이 속도 클립 24.70 까지
                     #   가서 5.42% 의 스텝이 달라진다 — 그걸로 적합/검증하면 안 된다.
-                    #   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
+                    #   근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §11
                     # ⚠ 직전 스텝에 foot 에 넣은 반사관성 보정은 모터 토크가 아니므로 빼 준다
                     #   (안 빼면 off-diagonal 이 전치를 타고 calf 에 이중으로 들어간다).
                     tau_calf = self.robot.data.applied_torque[:, self._foot_art_ids] - self._mrefl_foot_prev
@@ -585,6 +590,11 @@ class R2SBipedLegEnv(DirectRLEnv):
             i_off = self._data_tensor(self.robot.data.joint_armature)[:, self._foot_art_ids]
             corr_calf = -i_off * acc[:, self._foot_art_ids]
             corr_foot = -i_off * acc[:, self._calf_art_ids]
+            cap = getattr(self.cfg, "foot_reflected_inertia_cap", None)
+            if cap is not None:
+                # 학습 env(`hind_leg_env`)와 **같은 캡** — 안 맞추면 다른 플랜트가 된다.
+                corr_calf = corr_calf.clamp(-cap, cap)
+                corr_foot = corr_foot.clamp(-cap, cap)
         tau_fric = None
         if self.cfg.foot_raw_friction:
             # 감속기·벨트 마찰은 모터축(raw)에 앉아 있다 — foot 자체 PD에 feedforward로 더한다
@@ -608,7 +618,7 @@ class R2SBipedLegEnv(DirectRLEnv):
             #   마찰을 다시 더하거나 다시 클램프하면 이중계상이다. 지연은 1 physics step.
             #   ⚠ 실측: 배포 게인(kp_foot=20)에서는 foot 이 교차점 q̇ ≈ 4.92 rad/s 에 도달조차 못 해
             #     두 식이 **같다**. 차이는 live hold(`coupling_hold_kp` 200)처럼 게인이 높은 경로에서만
-            #     난다(스텝의 17.2%). 근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe §11
+            #     난다(스텝의 17.2%). 근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe §11
             # ⚠ `applied_torque` 에는 직전 스텝에 foot 에 넣은 **반사관성 보정도 섞여 있다**. 그건
             #   모터 토크가 아니라 관성항이라 벨트로 전달되면 안 된다(그대로 두면 off-diagonal 이
             #   전치를 타고 calf 에 한 번 더 들어간다). 같은 1스텝 지연으로 캐시해 뺀다.

@@ -192,8 +192,11 @@ class Go2RecoveryEnv(DirectRLEnv):
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
         self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped when the scene cfg declares no
+        # entities (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs
+        # unfiltered — robots from different envs physically collide. Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -206,7 +209,8 @@ class Go2RecoveryEnv(DirectRLEnv):
 
         # Tier-0: hip joint action scale 0.5× (name-based self._hip_joint_ids)
         scaled = clipped.clone()
-        scaled[:, self._hip_joint_ids] = scaled[:, self._hip_joint_ids] * self.cfg.hip_action_scale
+        if self.cfg.hip_scale_reduction:
+            scaled[:, self._hip_joint_ids] *= 0.5
 
         self._actions = clipped  # 로깅/smoothness 계산은 clip 전 원본 기준이 일반적이나
         # 참조(FR-Net)는 joint_pos_target 차이로 smoothness 계산 → clip 후 scaled 사용

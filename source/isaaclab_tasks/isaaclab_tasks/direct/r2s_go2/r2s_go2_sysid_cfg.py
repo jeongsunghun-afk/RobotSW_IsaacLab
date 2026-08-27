@@ -87,23 +87,41 @@ SYNTHETIC_GT_DELAY: int = 4  # [sim step] = 8 ms @500 Hz
 class Go2PaceCfg(PaceCfg):
     """GO2용 PACE 설정 — 데이터 경로, 관절 순서, CMA-ES 탐색 범위."""
 
-    robot_name: str = "go2_sim"  # 합성 데이터용. 실기 데이터는 "go2_real"로 바꾼다.
+    robot_name: str = "go2_real"  # 로그 디렉터리 이름도 겸한다 (logs/pace/<robot_name>/)
     data_dir: str = "go2_sim/chirp_data.pt"  # upstream fit.py(단일 데이터셋) 호환용
     joint_order: list[str] = JOINT_ORDER  # CONTRACT §2 — 실기 LowState 인덱스 0..11과 동일
 
     # 적합용 데이터셋 (<repo>/data/ 기준). 여러 시퀀스를 동시에 맞출 수 있다 —
     # 논문도 진폭이 다른 여러 시퀀스를 쓰고, 단일 드라이브 단계에서는 게인 3종을 결합 적합한다.
     # 각 .pt는 녹화 당시의 kp/kd를 담고 있으며 재생 시 그 게인이 actuator에 복원된다.
+    #
+    # ★ 2026-08-04 재수집분을 쓴다 (`go2_real/`). 2026-07-15 캡처는 시간축이 104 ms 어긋나
+    # 폐기했고, 그걸 사후 보정한 `go2_real_aligned/` 도 쓰지 않는다 — 보정 시 **진짜 구동 지연
+    # (≈8 ms)까지 함께 빼버려** 적합기 delay 가 1 ms 로 수렴했기 때문이다.
+    # 재수집분은 수집 시점에 정렬 6~8 ms(3~4 step), 유실 2~5% 로 확인됐다. 이 정도 지연은
+    # 아래 `delay` 상한 10 step 안이므로 **보정하지 않고 적합기가 식별하게 둔다.**
+    # 근거·측정: `reports/real2sim/_comparisons/pace_go2_sysid_excitation_audit/`.
+    #
+    # 배분: **배포 게인(kp=25)을 반드시 적합에 포함**한다. 학습·배포가 25/0.5 이므로 그 조건이
+    # 적합에서 빠지면 안 된다. kp=15 는 게인이 낮아 플랜트가 가장 잘 보이는 데이터셋이다
+    # (논문: "we therefore use small gains"). kp=35 를 hold-out 으로 남긴다.
     datasets: list[str] = [
-        "go2_real/chirp_kp15.pt",  # kp=25 kd=0.5, 진폭 100%
-        # "go2_real/chirp_kp25.pt",  # kp=40 kd=1.0, 진폭  80%
-        "go2_real/chirp_kp35.pt",  # kp=60 kd=1.5, 진폭  60% (게인이 높을수록 진폭을 줄여 토크 포화를 피한다 —
-        #                            포화 구간은 토크가 파라미터에 무감각해져 정보를 파괴한다)
+        "go2_real/chirp_kp15.pt",  # kp=15 kd=0.5 — 플랜트가 가장 잘 보인다
+        "go2_real/chirp_kp25.pt",  # kp=25 kd=0.5 — **배포 게인**
     ]
 
     # hold-out 검증용 (적합에 절대 쓰지 않는다). 논문의 전신 단계 검증 방식 = **보지 않은 PD 게인**
     # 및 보지 않은 궤적에서 재현되는지 확인 (Tytan: ID at kp=60/kd=2 → validation at kp=145/kd=5).
-    holdout: list[str] = ["go2_real/chirp_kp25.pt"]  # kp=35 kd=0.8, 진폭 90%, 0.1–6 Hz
+    # ⚠ 이 hold-out 은 **게인 일반화만** 검증한다. 세 캡처가 같은 세션·같은 대역·같은 리그를
+    # 공유하므로, **수집 자체의 결함은 원리적으로 못 잡는다.** 실제로 104 ms 어긋남을 이
+    # hold-out 은 통과시켰다(RMSE 0.017). 물리적 타당성은 별도 검사할 것
+    # (에너지 수지 / 독립 회귀 / 링크 관성 / 가시성 — 위 reports 디렉터리의 logs/).
+    #
+    # ⚠ **리그 오염이 남아 있다.** 매단 base 의 pitch 각가속도가 관절 토크의 13~15%(중앙값,
+    # 최대 34%)를 만든다. `--pattern pitch_cancel` 로 21.5% → 6.7%(저진폭 스윕 기준)까지
+    # 줄였지만 0 이 아니다. base 고정이 불가능한 리그의 한계이며, 이 몫은 모델에 항이 없어
+    # armature/viscous/coulomb 가 흡수한다. 결과 해석 시 이 편향을 명시할 것.
+    holdout: list[str] = ["go2_real/chirp_kp35.pt"]  # kp=35 kd=0.5
     # 49 = armature(12) + viscous(12) + coulomb(12) + bias(12) + delay(1)
     bounds_params: torch.Tensor = torch.zeros((4 * NUM_JOINTS + 1, 2))
 
@@ -142,6 +160,11 @@ class R2SGo2SysidEnvCfg(R2SGo2EnvCfg):
 
     sysid: bool = True
     fix_base: bool = True  # 공중 고정 — 접촉력이 들어오면 식별이 오염된다.
+
+    # ⚠ **반드시 False.** live 모드는 식별된 PACE 물성을 sim 에 써넣지만(기본 True), 여기는 그
+    # 물성을 **찾는** 쪽이다. 켜두면 CMA-ES 가 이미 PACE 값이 들어간 플랜트 위에서 적합을 시작해
+    # armature/마찰이 이중 적용되고 식별 결과가 조용히 망가진다.
+    use_pace_params: bool = False
 
     decimation: int = 1
     sim: SimulationCfg = SimulationCfg(dt=1.0 / SYSID_RATE_HZ, render_interval=1)

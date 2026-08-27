@@ -242,11 +242,34 @@ class LegImitationTrackingRMAPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     def __post_init__(self):
         # L/R mirror data-augmentation (num_aug=2). AMP obs travel via extras["amp_obs"] (separate
-        # discriminator path), so they are NOT mirrored here. use_mirror_loss=False → pure data-aug.
+        # discriminator path), so they are NOT mirrored here.
+        # use_mirror_loss defaults OFF (pure data-aug). Opt-in per-run via env vars:
+        #   LEG_MIRROR_LOSS=1 LEG_MIRROR_LOSS_COEFF=1.0  → add explicit mirror-consistency loss.
+        # (Rationale: data-aug alone let Loss/symmetry drift up unchecked → high-speed symmetry
+        #  break; the mirror loss actively penalizes it. See reports symmetry_retrain README.)
+        import os
+
+        # AMP reward 비중 조절: LEG_TASK_REWARD_LERP 로 task 비중(=lerp) override (기본 0.5 = 50% task + 50% amp).
+        # 값↑ → task 비중↑, AMP 비중↓ → 참조 밖 gait(예: 정지 출발) 탐색 여지↑. lerp fusion 전용.
+        # (symmetry 조기 return 앞에 두어 LEG_SYMMETRY_AUG 값과 무관하게 항상 적용.)
+        _lerp = os.environ.get("LEG_TASK_REWARD_LERP")
+        if _lerp is not None:
+            self.amp["task_reward_lerp"] = float(_lerp)
+
+        # Full symmetry opt-out (default ON). Set LEG_SYMMETRY_AUG=0 to disable ALL symmetry
+        # (no data-aug, no mirror loss) — e.g. when the reference dataset already contains
+        # mirrored clips, so L/R symmetry is enforced at the data level via the AMP discriminator.
+        # symmetry_cfg=None makes rsl_rl skip the entire symmetry path (ppo.py guard).
+        if os.environ.get("LEG_SYMMETRY_AUG", "1") == "0":
+            self.algorithm.symmetry_cfg = None
+            return
+
+        _mirror_loss = os.environ.get("LEG_MIRROR_LOSS", "0") == "1"
+        _mirror_coeff = float(os.environ.get("LEG_MIRROR_LOSS_COEFF", "0.0"))
         self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
             use_data_augmentation=True,
-            use_mirror_loss=False,
-            mirror_loss_coeff=0.0,
+            use_mirror_loss=_mirror_loss,
+            mirror_loss_coeff=_mirror_coeff,
             data_augmentation_func=(
                 "isaaclab_tasks.direct.leg_imitation_tracking.mdp.symmetry:compute_leg_symmetric_states"
             ),

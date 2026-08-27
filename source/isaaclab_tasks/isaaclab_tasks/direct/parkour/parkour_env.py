@@ -823,11 +823,16 @@ class Go2ParkourEnv(DirectRLEnv):
             self._update_edge_mask_visualization()
 
         # Height scan: relative height difference (robot_z - ray_hit_z - 0.5)
-        # WARNING (Change K): The comment below is STALE. The code still uses pos_w[:, 2]
-        # which includes the RayCasterCfg offset=(0,0,20). This means the formula is
-        # (base_z + 20) - terrain_z - 0.5 ≈ 19.84 → always clipped to 1.0 (dead channel).
-        # The DEBUG block below will confirm whether this saturation is occurring.
-        # Fix: replace pos_w[:, 2] with root_pos_w[:, 2] once the diagnostic confirms the bug.
+        # NOTE (Change K, verified 2026-08-25): pos_w carries NO offset - it is exactly
+        # equal to root_pos_w. RayCasterCfg's offset=(0,0,20) only shifts ray start points,
+        # not the reported pos_w (measured: pos_w == root_pos_w to 6 decimals). The channel
+        # is alive, not dead: formula = base_z - hit_z - 0.3. In crawl tunnels the downward
+        # ray hits the ceiling underside (hit_z=0.986 vs base_z=0.2675), giving -1.018, which
+        # falls below clip(-1,1) and saturates to exactly -1.0 - a terrain-geometry artifact,
+        # not a code bug. Currently unconnected: in 3D-teacher runs (clearance_as_scan=True),
+        # obs_out["critic"] is commented out and obs_groups.critic substitutes clearance for
+        # scan, so this 187-d _scan reaches neither actor nor critic.
+        # Evidence: reports/go2_parkour/_comparisons/crawl_perception_visualization/ (2026-08-25).
         recently_reset = self.episode_length_buf <= 1  # [N] bool — env just reset this step
         do_global_refresh = self.common_step_counter % 5 == 0  # 10 Hz cadence gate (hardware constraint)
 

@@ -83,6 +83,11 @@ class Go2AmpEnv(DirectRLEnv):
         # RSI로 리셋된 환경만 pose termination 적용 (default 전략 환경 제외)
         self._rsi_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
+        # hip(abduction) 관절 인덱스 — 액션 범위 축소용
+        self._hip_joint_ids = torch.tensor(
+            [i for i, n in enumerate(self._robot.data.joint_names) if "hip" in n], dtype=torch.long, device=self.device
+        )
+
         # 모션 로더에서 DOF 인덱스 매핑
         robot_joint_names = list(self._robot.data.joint_names)
         try:
@@ -135,8 +140,11 @@ class Go2AmpEnv(DirectRLEnv):
         )
 
         self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped when the scene cfg declares no
+        # entities (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs
+        # unfiltered — robots from different envs physically collide. Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=["/World/ground"])
 
         self.scene.articulations["robot"] = self._robot
         self.scene.sensors["contact_sensor"] = self.contact_sensor
@@ -151,7 +159,10 @@ class Go2AmpEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        actions = self._actions.clone()
+        if self.cfg.hip_scale_reduction:
+            actions[:, self._hip_joint_ids] *= 0.5
+        self._processed_actions = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
 
     def _post_physics_step(self):
         self._episode_motion_times += self.step_dt

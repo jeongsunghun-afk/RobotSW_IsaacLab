@@ -128,6 +128,9 @@ class Go2NeckInteractionEnv(Go2InteractionEnv):
             neck_action = (self._current_neck_q - neck_default) / self.cfg.action_scale
             applied_actions[:, self._action_neck_ids] = neck_action
 
+        if self.cfg.hip_scale_reduction:
+            applied_actions[:, self._hip_joint_ids] *= 0.5
+
         # 상호작용 행동 스케일 적용
         self._processed_actions = self.cfg.action_scale * applied_actions + self._robot.data.default_joint_pos
 

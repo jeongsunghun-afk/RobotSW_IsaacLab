@@ -128,6 +128,9 @@ class HindLegEnv(DirectRLEnv):
         self._foot_raw_friction = self._foot_coupling and bool(getattr(self.cfg, "foot_raw_friction", True))
         # 반사관성 off-diagonal — 벨트가 만드는 항이므로 커플링이 꺼지면 같이 꺼진다.
         self._foot_reflected_inertia = self._foot_coupling and bool(getattr(self.cfg, "foot_reflected_inertia", True))
+        # 반사관성 off-diagonal 의 안정성 캡 (cfg 주석에 근거). None = 무제한.
+        cap = getattr(self.cfg, "foot_reflected_inertia_cap", None)
+        self._refl_cap = float(cap) if cap is not None else None
         # 넘어짐 종료 임계 (:meth:`_get_dones` 참고). cos 는 한 번만 계산한다.
         tilt = getattr(self.cfg, "terminate_tilt_deg", None)
         self._tilt_cos_limit = math.cos(math.radians(tilt)) if tilt is not None else 1.0
@@ -296,6 +299,11 @@ class HindLegEnv(DirectRLEnv):
             i_off = self._data_tensor(self._robot.data.joint_armature)[:, self._foot_ids]
             corr_calf = -i_off * acc[:, self._foot_ids]
             corr_foot = -i_off * acc[:, self._calf_ids]
+            if self._refl_cap is not None:
+                # 명시적 1스텝 지연 항이라 발산을 스스로 못 막는다 — 상수로 자른다.
+                # ⚠ 마찰의 속도의존 캡을 쓰면 안 된다(적합 구간 4.29 % 발동). cfg 주석 참고.
+                corr_calf = corr_calf.clamp(-self._refl_cap, self._refl_cap)
+                corr_foot = corr_foot.clamp(-self._refl_cap, self._refl_cap)
         tau_fric = None
         if self._foot_raw_friction:
             # 감속기·벨트 마찰은 모터축(raw)에 앉아 있다 — foot PD에 feedforward로 더한다

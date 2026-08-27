@@ -5,12 +5,15 @@
 
 """Configuration for the LiDAR sensor."""
 
-from typing import Literal
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Literal
 
 from isaaclab.sensors.ray_caster.ray_caster_cfg import RayCasterCfg
 from isaaclab.utils.configclass import configclass
 
-from .lidar_sensor import LidarSensor
+if TYPE_CHECKING:
+    from .lidar_sensor import LidarSensor
 
 
 @configclass
@@ -26,7 +29,7 @@ class LidarSensorCfg(RayCasterCfg):
         Multi-mesh self-occlusion is deferred.
     """
 
-    class_type: type = LidarSensor
+    class_type: type[LidarSensor] | str = "{DIR}.lidar_sensor:LidarSensor"
 
     ray_alignment: Literal["base", "yaw", "world"] = "yaw"
 

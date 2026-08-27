@@ -56,6 +56,7 @@ class Go2AmpEnvCfg(DirectRLEnvCfg):
     # 공간
     observation_space = 42
     action_space = 12  # Go2 DOF 수
+    hip_scale_reduction = True  # hip(abduction) 관절 액션을 0.5배로 축소
     state_space = 0
     num_amp_observations = 10
     amp_observation_space = 43

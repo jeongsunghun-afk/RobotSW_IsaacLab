@@ -70,7 +70,9 @@ import numpy as np
 import torch
 
 from isaaclab.sensors.lidar_sensor import LidarSensor
+from isaaclab.utils.math import quat_apply, quat_conjugate, quat_mul, yaw_quat
 
+from ..parkour.voxel_occupancy import VoxelOccupancyCfg, voxel_grid_shape
 from .parkour_imitation_random_goal_env import Go2ParkourImitationRandomGoalEnv
 from .parkour_imitation_random_goal_lidar_env_cfg import ParkourImitationRandomGoalLidarEnvCfg
 
@@ -80,6 +82,11 @@ from .parkour_imitation_random_goal_lidar_env_cfg import ParkourImitationRandomG
 _BODY_OCC_GRID_PATH: Path = (
     Path(__file__).parents[5] / "_workspace/parkour_imitation_lidar/r1_throughput/body_occ_azel_grid.npy"
 )
+
+# Steps at which the occupancy-grid diagnostic reports, mirroring the [VoxelOccupancy] cadence in
+# ``parkour_env``.  Treated as thresholds rather than exact matches — see
+# ``_log_lidar_grid_diagnostics``.
+_LIDAR_GRID_DIAG_STEPS: tuple[int, ...] = (5, 50, 150, 300, 500, 2000, 5000, 9000)
 
 
 class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
@@ -156,6 +163,58 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             dtype=torch.float32,
         )
 
+        # Metric-grid geometry for the occupancy representation (rung A1-0).  Deliberately the
+        # SAME grid as the teacher's voxel input — same bounds, same 0.1 m resolution, same
+        # yaw-aligned origin at the clearance mount — so the two are directly comparable and the
+        # grid can later serve as the auxiliary-loss target's coordinate system.  A default
+        # VoxelOccupancyCfg is constructed rather than reading the parent's ``_voxel_cfg``, which
+        # only exists when the voxel scanner is enabled; nothing here mutates that config or
+        # touches ``fill_voxel_grid`` (its output feeds the frozen teacher).
+        self._lidar_grid_cfg: VoxelOccupancyCfg = VoxelOccupancyCfg()
+        self._lidar_grid_shape: tuple[int, int, int] = voxel_grid_shape(self._lidar_grid_cfg)
+        self._lidar_grid_lo: torch.Tensor = torch.tensor(
+            [self._lidar_grid_cfg.x_range[0], self._lidar_grid_cfg.y_range[0], self._lidar_grid_cfg.z_range[0]],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        # Cell centres in the grid's own frame, at lo + i*res (matching fill_voxel_grid's
+        # round((p - lo)/res) indexing).  Precomputed because the accumulator warp evaluates them
+        # every sensor tick.
+        _nx, _ny, _nz = self._lidar_grid_shape
+        _res = self._lidar_grid_cfg.resolution
+        _ii = torch.meshgrid(
+            torch.arange(_nx, device=self.device, dtype=torch.float32),
+            torch.arange(_ny, device=self.device, dtype=torch.float32),
+            torch.arange(_nz, device=self.device, dtype=torch.float32),
+            indexing="ij",
+        )
+        self._lidar_grid_centres: torch.Tensor = self._lidar_grid_lo + torch.stack(_ii, dim=-1) * _res
+
+        # Base-frame offset from the grid origin (clearance mount) to the Mid-360 mount, so a
+        # ray's endpoint is grid_origin -> mount -> d * direction.
+        self._lidar_grid_origin_shift: torch.Tensor = torch.tensor(
+            cfg.mid360_lidar.offset.pos, device=self.device, dtype=torch.float32
+        ) - torch.tensor([0.0, 0.0, cfg.lidar_grid_origin_z], device=self.device, dtype=torch.float32)
+
+        # Accumulator state (rung A1-1).  Allocated unconditionally: (1024, 27, 21, 13) float32 is
+        # 30 MB, small enough that gating it would cost more in branching than it saves.
+        self._lidar_grid_acc: torch.Tensor = torch.zeros(
+            self.num_envs, _nx, _ny, _nz, device=self.device, dtype=torch.float32
+        )
+        # Pose of the grid frame at the accumulator's last update, used to transport it forward.
+        self._lidar_grid_prev_pos: torch.Tensor = torch.zeros(self.num_envs, 3, device=self.device)
+        self._lidar_grid_prev_yaw: torch.Tensor = torch.zeros(self.num_envs, device=self.device)
+        # Index of the next milestone in _LIDAR_GRID_DIAG_STEPS the diagnostic has yet to report.
+        self._lidar_grid_diag_next: int = 0
+
+        # Per-env "the stack has not been filled since the last reset" flag, consumed by the
+        # first push after a reset when cfg.lidar_fill_stack_on_reset is set.  Initialised True
+        # so the very first push of an episode fills every slot instead of leaving K-1 of them
+        # at the zero frame, which decodes as geometry touching the sensor (ch0 = 0.0) rather
+        # than as an empty bin (ch0 = 1.0).  Allocated unconditionally — it costs N bytes and
+        # keeps _reset_idx branch-free.
+        self._lidar_stack_needs_fill: torch.Tensor = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
         # Sensor-rate push cadence (default OFF — activated via cfg.lidar_stack_at_sensor_rate).
         #
         # Background: LidarSensorCfg inherits update_period=0.0 from SensorBaseCfg, so the
@@ -193,8 +252,25 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             return
         if env_ids is None:
             self._lidar_frame_buf.zero_()
+            self._lidar_stack_needs_fill.fill_(True)
         else:
             self._lidar_frame_buf[env_ids] = 0.0
+            self._lidar_stack_needs_fill[env_ids] = True
+
+        # Occupancy accumulator: drop the map and re-anchor the pose reference to the freshly
+        # placed robot.  Zeroing alone would suffice for correctness (warping zeros yields zeros
+        # regardless of the pose delta), but a stale reference would make the first transported
+        # frame after a reset meaningless once the map refills.
+        if hasattr(self, "_lidar_grid_acc"):
+            origin, yaw = self._grid_frame_pose()
+            if env_ids is None:
+                self._lidar_grid_acc.zero_()
+                self._lidar_grid_prev_pos.copy_(origin)
+                self._lidar_grid_prev_yaw.copy_(yaw)
+            else:
+                self._lidar_grid_acc[env_ids] = 0.0
+                self._lidar_grid_prev_pos[env_ids] = origin[env_ids]
+                self._lidar_grid_prev_yaw[env_ids] = yaw[env_ids]
 
         # Reset push counter for sensor-rate cadence (only allocated when flag=True).
         # Re-initialise to push_every (not 0) so reset envs push on their very first step,
@@ -308,6 +384,370 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
     # Observation hook — R2 obs["lidar"]
     # ------------------------------------------------------------------
 
+    def _draw_lidar_grid(self) -> None:
+        """Draw the *student's* LiDAR-derived occupancy grid for the active viewer env.
+
+        Counterpart to :meth:`~isaaclab_tasks.direct.parkour.parkour_env.Go2ParkourEnv._draw_voxel_occupied`,
+        which draws the teacher's privileged grid in orange. This draws what the LiDAR student
+        actually reads, in cyan, in the same frame — so the two overlays are directly comparable
+        and the density difference (student is 6-11x denser: ~500-800 cells against the teacher's
+        ~70-80) is visible rather than only tabulated.
+
+        Only meaningful when ``cfg.lidar_obs_as_occupancy_grid`` is set; otherwise the student
+        reads the angular range image and there is no metric grid to draw.
+        """
+        import isaaclab.sim as sim_utils
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+        from isaaclab.utils.math import quat_apply_yaw
+
+        grid = getattr(self, "_lidar_grid_last", None)
+        if grid is None:
+            return
+
+        res = self._lidar_grid_cfg.resolution
+        if not hasattr(self, "_lidar_grid_visualizer"):
+            self._lidar_grid_visualizer = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path="/Visuals/Parkour/lidar_grid",
+                    markers={
+                        "occupied": sim_utils.CuboidCfg(
+                            size=(res, res, res),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.0, 0.75, 0.95),  # cyan — teacher's grid is orange
+                                opacity=0.55,
+                            ),
+                        )
+                    },
+                )
+            )
+
+        e = self._get_active_viewer_env_id()
+        nx, ny, nz = self._lidar_grid_shape
+        occ_idx = (grid[e].view(nx, ny, nz) > 0.5).nonzero(as_tuple=False)  # (M, 3)
+        if occ_idx.shape[0] == 0:
+            self._lidar_grid_visualizer.set_visibility(False)
+            return
+
+        # Same inverse fill convention as the teacher's draw: centre = lo + idx * res, then
+        # yaw-rotate into world and offset by the grid origin. quat_apply_yaw strips roll/pitch,
+        # which is what the yaw-aligned grid frame requires.
+        lo = self._lidar_grid_lo
+        local = lo.unsqueeze(0) + occ_idx.float() * res  # (M, 3)
+        origin, _ = self._grid_frame_pose()
+        quat = self._robot.data.root_quat_w.torch[e].unsqueeze(0).expand(local.shape[0], -1)
+        self._lidar_grid_visualizer.set_visibility(True)
+        self._lidar_grid_visualizer.visualize(translations=quat_apply_yaw(quat, local) + origin[e])
+
+    def _grid_frame_pose(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """World position of the grid origin and the yaw of the grid frame.
+
+        The origin is the clearance mount, ``base + R_wb * (0, 0, grid_origin_z)`` — the offset is
+        specified in the base frame, so it must be rotated, not merely added.
+
+        Returns:
+            ``(N, 3)`` origin position [m] and ``(N,)`` yaw [rad].
+        """
+        q_wb = self._robot.data.root_quat_w.torch
+        base_pos = self._robot.data.root_pos_w.torch
+        off = torch.zeros_like(base_pos)
+        off[:, 2] = self.cfg.lidar_grid_origin_z
+        origin = base_pos + quat_apply(q_wb, off)
+        yaw = torch.atan2(
+            2.0 * (q_wb[:, 3] * q_wb[:, 2] + q_wb[:, 0] * q_wb[:, 1]),
+            1.0 - 2.0 * (q_wb[:, 1] * q_wb[:, 1] + q_wb[:, 2] * q_wb[:, 2]),
+        )
+        return origin, yaw
+
+    def _update_occupancy_accumulator(self, distances: torch.Tensor, hit_valid: torch.Tensor) -> torch.Tensor:
+        """Transport the accumulator into the current frame and blend in the fresh scan.
+
+        Runs at the sensor rate: between ticks the held accumulator is returned unchanged, which
+        both matches real 10 Hz deployment and avoids warping five times per new measurement.
+
+        Envs whose accumulator has no reference pose yet (fresh reset) are seeded with the current
+        scan rather than blended, so an episode never starts from a frame that claims everything
+        is empty.
+
+        Returns:
+            ``(N, nx * ny * nz)`` float32 accumulated occupancy in [0, 1].
+        """
+        alpha = float(self.cfg.lidar_grid_ema_alpha)
+        origin, yaw = self._grid_frame_pose()
+
+        if getattr(self.cfg, "lidar_grid_accumulate_at_sensor_rate", True) and hasattr(self, "_lidar_push_ctr"):
+            self._lidar_push_ctr += 1
+            tick = self._lidar_push_ctr >= self._lidar_push_every
+            if not bool(tick.any()):
+                return self._lidar_grid_acc.reshape(self.num_envs, -1)
+            self._lidar_push_ctr[tick] = 0
+        else:
+            tick = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
+        frame = self._compute_lidar_occupancy_grid(distances, hit_valid).view(self.num_envs, *self._lidar_grid_shape)
+
+        # Transport: d is the new origin expressed in the OLD frame, so the translation is rotated
+        # by the OLD yaw, not the new one.
+        dpos = origin - self._lidar_grid_prev_pos
+        c, s = torch.cos(self._lidar_grid_prev_yaw), torch.sin(self._lidar_grid_prev_yaw)
+        d = torch.stack([c * dpos[:, 0] + s * dpos[:, 1], -s * dpos[:, 0] + c * dpos[:, 1], dpos[:, 2]], dim=-1)
+        dpsi = yaw - self._lidar_grid_prev_yaw
+        warped = self._warp_occupancy_acc(self._lidar_grid_acc, d, dpsi)
+
+        # Decayed max, not a plain EMA.  A lerp would report a *currently observed* occupied cell
+        # as only ``1 - alpha`` = 0.06 on its first sighting and need ~10 ticks to become
+        # legible, which inverts the intent: fresh observations must read at full strength and
+        # only memory should fade.  ``max(alpha * warped, frame)`` gives exactly that — current
+        # data wins wherever it exists, remembered data fills the rest and decays with the same
+        # half-life the alpha table describes.
+        blended = torch.maximum(alpha * warped, frame)
+        # Envs that did not tick hold their previous value.  No separate "seeded" flag is needed:
+        # ``_reset_idx`` zeroes the accumulator, so on the first tick of an episode the warp of
+        # zeros is zeros and the max collapses to ``frame``.
+        self._lidar_grid_acc = torch.where(tick.view(-1, 1, 1, 1), blended, self._lidar_grid_acc)
+        self._lidar_grid_prev_pos = torch.where(tick.view(-1, 1), origin, self._lidar_grid_prev_pos)
+        self._lidar_grid_prev_yaw = torch.where(tick, yaw, self._lidar_grid_prev_yaw)
+
+        acc_flat = self._lidar_grid_acc.reshape(self.num_envs, -1)
+        # Only report when env 0 actually ticked.  Envs tick on their own schedule (and reset at
+        # different times), so ``tick.any()`` can be true while env 0's accumulator is up to
+        # ``push_every - 1`` control steps stale.  Comparing that against env 0's *current* frame
+        # produces a spuriously negative accumulation gain.
+        if bool(tick[0]):
+            self._log_lidar_grid_diagnostics(acc_flat, single_frame=frame.reshape(self.num_envs, -1))
+        return acc_flat
+
+    def _warp_occupancy_acc(self, acc: torch.Tensor, d: torch.Tensor, dpsi: torch.Tensor) -> torch.Tensor:
+        """Resample a yaw-aligned occupancy accumulator into the current body frame.
+
+        The accumulator lives in the yaw-aligned frame, which moves with the robot, so between
+        sensor ticks its contents must be transported into the new frame before anything is
+        blended in.  A point whose coordinates in the NEW frame are ``c`` sits at world position
+        ``o_new + R_z(psi_new) c``, so its coordinates in the OLD frame are::
+
+            c_old = R_z(psi_new - psi_old) c + R_z(psi_old)^T (o_new - o_old)
+                  = R_z(dpsi) c + d
+
+        which is what this method samples at.  Cells whose source falls outside the old volume
+        read 0 — the correct value, since nothing is known there.
+
+        Args:
+            acc: ``(N, nx, ny, nz)`` accumulator in the previous tick's frame.
+            d: ``(N, 3)`` translation of the new origin expressed in the OLD frame [m].
+            dpsi: ``(N,)`` yaw of the new frame relative to the old one [rad].
+
+        Returns:
+            ``(N, nx, ny, nz)`` accumulator resampled into the current frame.
+        """
+        nx, ny, nz = self._lidar_grid_shape
+        res = self._lidar_grid_cfg.resolution
+        c = self._lidar_grid_centres  # (nx, ny, nz, 3), values lo + i*res
+
+        cos = torch.cos(dpsi).view(-1, 1, 1, 1)
+        sin = torch.sin(dpsi).view(-1, 1, 1, 1)
+        cx, cy, cz = c[..., 0], c[..., 1], c[..., 2]
+        x_old = cos * cx - sin * cy + d[:, 0].view(-1, 1, 1, 1)
+        y_old = sin * cx + cos * cy + d[:, 1].view(-1, 1, 1, 1)
+        z_old = cz.expand_as(x_old) + d[:, 2].view(-1, 1, 1, 1)
+
+        lo = self._lidar_grid_lo
+
+        def norm(v: torch.Tensor, lo_a: torch.Tensor, n: int) -> torch.Tensor:
+            """Metric coordinate -> grid_sample coordinate in [-1, 1] with align_corners=True."""
+            return 2.0 * ((v - lo_a) / res) / max(n - 1, 1) - 1.0
+
+        # grid_sample on a 5D input (N, C, D, H, W) reads the last axis of ``grid`` as (W, H, D).
+        # With the accumulator stored as (N, 1, nx, ny, nz) that is (nz, ny, nx), so the sampling
+        # coordinates must be stacked z, y, x — reversed relative to the metric ordering.
+        samp = torch.stack(
+            [norm(z_old, lo[2], nz), norm(y_old, lo[1], ny), norm(x_old, lo[0], nx)], dim=-1
+        )  # (N, nx, ny, nz, 3)
+
+        return torch.nn.functional.grid_sample(
+            acc.unsqueeze(1), samp, mode="bilinear", padding_mode="zeros", align_corners=True
+        ).squeeze(1)
+
+    def _log_lidar_grid_diagnostics(self, grid: torch.Tensor, single_frame: torch.Tensor | None = None) -> None:
+        """Print occupancy statistics for the scattered grid at a few fixed steps.
+
+        Follows the same convention as the ``[VoxelOccupancy step=...]`` diagnostic in
+        ``parkour_env``: a handful of steps, no cfg gate beyond the representation being active.
+
+        This exists because the failure mode it guards against is silent.  An all-zero grid — the
+        signature of a frame error that pushes every point out of bounds — trains happily and
+        produces a plausible loss curve.  So does a grid built with the tilt removal inverted.
+        The two numbers that settle it:
+
+        * ``occ`` versus the teacher's ``occupied``: the scatter must actually land in the volume.
+        * ``recall`` with tilt removal versus without: the rotated scatter must agree with the
+          teacher's yaw-aligned grid *better* than the unrotated one.  If the two are equal the
+          rotation is a no-op; if the unrotated one wins it is applied backwards.  Both cases pass
+          every shape and range check.
+        """
+        # Report at the first eligible step at or after each milestone, not on the milestone
+        # itself.  In the accumulating path the caller only reports on env 0's sensor tick, and
+        # ticks land on steps congruent to 1 (mod push_every) while the milestones are multiples
+        # of 5 — under the default cadence the two never coincide and the diagnostic would be
+        # silent for the whole run.
+        step = int(self.common_step_counter)
+        nxt = self._lidar_grid_diag_next
+        if nxt >= len(_LIDAR_GRID_DIAG_STEPS) or step < _LIDAR_GRID_DIAG_STEPS[nxt]:
+            return
+        self._lidar_grid_diag_next = nxt + 1
+        with torch.no_grad():
+            nx, ny, nz = self._lidar_grid_shape
+            occ = grid[0] > 0.5
+            line = f"\n[LidarGrid step={step}] grid=({nx},{ny},{nz}) occ={int(occ.sum())}/{occ.numel()}"
+
+            teacher = getattr(self, "_voxel_grid", None)
+            if teacher is not None:
+                t_occ = teacher[0].reshape(-1) == 1
+                inter = int((occ & t_occ).sum())
+                t_n = int(t_occ.sum())
+                recall = inter / t_n if t_n else float("nan")
+                prec = inter / int(occ.sum()) if int(occ.sum()) else float("nan")
+                line += f" teacher_occupied={t_n} recall={recall:.3f} precision={prec:.3f}"
+                if single_frame is None:
+                    # Single-frame mode: the discriminating check is whether removing roll/pitch
+                    # improves agreement at all.  Comparing an ACCUMULATED grid against an
+                    # unrotated SINGLE frame would confound the two changes, so it is skipped
+                    # once accumulation is on (A1-0 already validated the rotation).
+                    raw = self._compute_lidar_occupancy_grid(
+                        self._mid360.data.distances, self._lidar_grid_last_hit_valid, apply_tilt_removal=False
+                    )
+                    r_recall = int(((raw[0] > 0.5) & t_occ).sum()) / t_n if t_n else float("nan")
+                    verdict = "OK: rotation helps" if recall > r_recall + 1e-6 else "SUSPECT: rotation does not help"
+                    line += f" | no-tilt-removal recall={r_recall:.3f} ({verdict})"
+                else:
+                    # Accumulation gain: how much of the teacher's grid the memory covers that the
+                    # current scan alone does not.  This is the number rung A1-1 exists to produce.
+                    s_recall = int(((single_frame[0] > 0.5) & t_occ).sum()) / t_n if t_n else float("nan")
+                    line += f" | single-frame recall={s_recall:.3f} gain={recall - s_recall:+.3f}"
+            print(line)
+
+    def _compute_lidar_occupancy_grid(
+        self, distances: torch.Tensor, hit_valid: torch.Tensor, apply_tilt_removal: bool = True
+    ) -> torch.Tensor:
+        """Scatter the Mid-360 hits into the teacher's voxel frame as a binary occupancy grid.
+
+        This is the metric-grid representation for rung A1-0.  It consumes exactly the same
+        ``distances`` / ``hit_valid`` as ``_compute_range_image`` — the sensor, its noise and
+        dropout model, and the self-occlusion mask are all upstream of the branch and therefore
+        common to both arms.  The two differ only in how those per-ray measurements are encoded.
+
+        Both encodings compress; they differ in which axis collapses.  The angular projection
+        merges rays that point in nearly the same direction but return **different depths**
+        (``scatter_reduce(amin)`` keeps the nearest), and its row spacing degrades from 0.11 m at
+        0.74 m range to 1.69 m at 4.05 m with only 17 of 24 rows ever seeing ground.  Metric
+        cells instead merge hits that landed at the **same 3D location**, which is geometrically
+        redundant.  (The raw counts — ~13.8k forward hits into ~1.3k filled bins — overstate the
+        information loss, since many of those rays hit the same surface patch anyway.)
+
+        Frame.  The grid matches the teacher's voxel grid exactly — **yaw-aligned** body frame
+        (roll and pitch removed), origin at the clearance-scanner mount (base + ``grid_origin_z``),
+        resolution ``cfg.resolution``, cell centres at ``lo + i * res``.  The Mid-360 itself is
+        mounted with ``ray_alignment="base"``, so its rays tilt with the body; removing roll and
+        pitch here is what puts student and teacher in a common frame, and is also why a
+        pitch-dependent deficit (raised step tops first appearing 2.6-2.7 deg more nose-up) can
+        improve for free.
+
+        Rotation.  ``q_yb`` maps base -> yaw-aligned, obtained by cancelling the yaw part of the
+        base orientation: ``conj(yaw(q_wb)) * q_wb``.  Two invariants pin this down and both fail
+        silently otherwise (training still runs and the loss curve still looks plausible):
+        rotating in place must not move geometry in grid coordinates, and at nonzero pitch the
+        rotated scatter must agree with the teacher's grid better than the unrotated one.
+
+        Args:
+            distances: ``(N, R)`` sensor distances [m]; miss and dropout already stored as
+                ``max_distance``.
+            hit_valid: ``(N, R)`` bool, True = genuine hit (not miss, dropout, self-occluded).
+
+        Returns:
+            ``(N, nx * ny * nz)`` float32 binary occupancy, 1.0 where a hit landed.
+        """
+        cfg = self._lidar_grid_cfg
+        nx, ny, nz = self._lidar_grid_shape
+        n_cells = nx * ny * nz
+        res = cfg.resolution
+        lo = self._lidar_grid_lo  # (3,) x_min, y_min, z_min
+
+        # Body-frame vector from the GRID origin (clearance mount) to each hit point:
+        # mount offset of the Mid-360 minus the grid origin offset, plus d * ray direction.
+        dirs = self._mid360.ray_directions.torch
+        if dirs.dim() == 3:
+            dirs = dirs[0]  # (R, 3) — env-identical under the static 6.0 pattern
+        # ``.torch`` is required: root_quat_w is a warp ProxyArray, and yaw_quat is
+        # torch.jit.script'd so it rejects anything that is not a real Tensor.  Indexing a
+        # ProxyArray happens to work elsewhere in the parkour env, which is why this only
+        # surfaces once the value reaches a scripted function.
+        q_wb = self._robot.data.root_quat_w.torch  # (N, 4) xyzw, base -> world
+        if apply_tilt_removal:
+            q_yb = quat_mul(quat_conjugate(yaw_quat(q_wb)), q_wb)  # (N, 4) base -> yaw-aligned
+        else:
+            # Identity: leaves the scatter in the base frame.  Only used by the diagnostic, to
+            # show that removing roll/pitch really improves agreement with the teacher's grid.
+            q_yb = torch.zeros_like(q_wb)
+            q_yb[:, 3] = 1.0
+
+        # +1 spare cell absorbs out-of-bounds and invalid rays, so no nonzero()/sync is needed.
+        grid = torch.zeros(self.num_envs, n_cells + 1, device=self.device, dtype=torch.float32)
+
+        # Chunk over envs: the intermediate is (chunk, R, 3) and R is ~24k, so a full-batch
+        # (1024, 24000, 3) float32 temporary would be ~295 MB before counting quat_apply's own.
+        chunk = max(1, int(getattr(self.cfg, "lidar_grid_chunk_size", 256)))
+        for beg in range(0, self.num_envs, chunk):
+            end = min(beg + chunk, self.num_envs)
+            m = end - beg
+            v_b = self._lidar_grid_origin_shift + distances[beg:end].unsqueeze(-1) * dirs  # (m, R, 3)
+            p = quat_apply(q_yb[beg:end].unsqueeze(1).expand(m, dirs.shape[0], 4), v_b)  # (m, R, 3)
+
+            idx = ((p - lo) / res).round().long()  # (m, R, 3)
+            in_bounds = (
+                (idx[..., 0] >= 0)
+                & (idx[..., 0] < nx)
+                & (idx[..., 1] >= 0)
+                & (idx[..., 1] < ny)
+                & (idx[..., 2] >= 0)
+                & (idx[..., 2] < nz)
+            )
+            keep = in_bounds & hit_valid[beg:end]
+            flat = idx[..., 0] * (ny * nz) + idx[..., 1] * nz + idx[..., 2]
+            flat = torch.where(keep, flat, torch.full_like(flat, n_cells))  # dump invalid
+            grid[beg:end].scatter_(1, flat, 1.0)
+
+        return grid[:, :n_cells]
+
+    def _push_frames(self, env_ids: torch.Tensor | None, frame: torch.Tensor, K: int) -> None:
+        """Insert ``frame`` at slot k=0 for ``env_ids`` (``None`` = all), shifting older slots.
+
+        Envs whose stack has not been filled since their last reset get ``frame`` replicated
+        into all K slots instead, when ``cfg.lidar_fill_stack_on_reset`` is set.  Without that,
+        the K-1 stale slots hold the zero frame, whose ``ch0 = 0.0`` decodes as geometry
+        touching the sensor rather than as an empty bin (``ch0 = 1.0``); the resulting window of
+        false observations lasts ``K * push_every`` control steps after every reset and so grows
+        with K, biasing any comparison across window lengths.
+
+        Args:
+            env_ids: Envs to push for, or ``None`` for all envs.
+            frame: ``(N, C, H, W)`` newly measured range image, indexed by env id.
+            K: Number of slots in the ring buffer.
+        """
+        ids = torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
+
+        fill_ids = ids
+        if getattr(self.cfg, "lidar_fill_stack_on_reset", False):
+            needs_fill = self._lidar_stack_needs_fill[ids]
+            fill_ids = ids[~needs_fill]
+            replicate_ids = ids[needs_fill]
+            if replicate_ids.numel() > 0:
+                # Broadcast (M, 1, C, H, W) over the K axis.
+                self._lidar_frame_buf[replicate_ids] = frame[replicate_ids].unsqueeze(1)
+                self._lidar_stack_needs_fill[replicate_ids] = False
+
+        if fill_ids.numel() > 0:
+            if K > 1:
+                self._lidar_frame_buf[fill_ids, 1:] = self._lidar_frame_buf[fill_ids, :-1].clone()
+            self._lidar_frame_buf[fill_ids, 0] = frame[fill_ids]
+
     def _get_observations(self) -> dict:
         """Return parent obs dict with the R2 range-image ``obs["lidar"]``.
 
@@ -351,6 +791,36 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         max_sensor_dist: float = self.cfg.mid360_lidar.max_distance  # 40.0 m
         hit_valid = (raw_dist < max_sensor_dist) & ~occluded  # (N, R) bool
 
+        # Metric-grid representation (rung A1-0): replace obs["lidar"] with a binary occupancy
+        # grid in the teacher's voxel frame and skip the range-image pipeline entirely.  Returning
+        # early keeps the two representations mutually exclusive, so the arm isolates exactly one
+        # change.
+        if getattr(self.cfg, "lidar_obs_as_occupancy_grid", False):
+            # Kept for the diagnostic's second, tilt-removal-disabled scatter.
+            self._lidar_grid_last_hit_valid = hit_valid
+            if getattr(self.cfg, "lidar_obs_use_privileged_voxel", False):
+                # Ceiling control: hand the student the teacher's *own* grid, so its terrain
+                # input carries zero reconstruction error.  Every other wiring is untouched —
+                # the student still reads obs["lidar"] through ``obs_groups["voxel"]``, so the
+                # runner's storage whitelist and encoder are identical to the A1-0 arm and the
+                # only thing that changes is the grid's provenance.  Whatever this arm cannot
+                # reach is therefore out of reach for *any* LiDAR reconstruction module.
+                obs["lidar"] = obs["voxel"]
+                # Positive check that the substitution really happened: this arm's whole value
+                # rests on it, and a silent no-op would look exactly like A1-0 in every log.
+                # Against the teacher's own grid the diagnostic must read recall=precision=1.000.
+                self._log_lidar_grid_diagnostics(obs["lidar"])
+            elif getattr(self.cfg, "lidar_grid_accumulate", False):
+                obs["lidar"] = self._update_occupancy_accumulator(raw_dist, hit_valid)
+            else:
+                grid = self._compute_lidar_occupancy_grid(raw_dist, hit_valid)
+                self._log_lidar_grid_diagnostics(grid)
+                obs["lidar"] = grid
+            # Cached for :meth:`_draw_lidar_grid` — set on every branch so the overlay always
+            # shows the grid the policy was actually handed this step, privileged copy included.
+            self._lidar_grid_last = obs["lidar"]
+            return obs
+
         # Project to range image; roll ring buffer; expose obs["lidar"].
         frame = self._compute_range_image(raw_dist, hit_valid)  # (N, 2, H, W)
 
@@ -365,15 +835,11 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
             should_push = self._lidar_push_ctr >= self._lidar_push_every  # (N,) bool
             push_env_ids = should_push.nonzero(as_tuple=False).squeeze(-1)  # (M,)
             if push_env_ids.numel() > 0:
-                if K > 1:
-                    self._lidar_frame_buf[push_env_ids, 1:] = self._lidar_frame_buf[push_env_ids, :-1].clone()
-                self._lidar_frame_buf[push_env_ids, 0] = frame[push_env_ids]
+                self._push_frames(push_env_ids, frame, K)
                 self._lidar_push_ctr[push_env_ids] = 0
         else:
             # Default (False): push every control step — original behaviour, unchanged.
-            if K > 1:
-                self._lidar_frame_buf[:, 1:] = self._lidar_frame_buf[:, :-1].clone()
-            self._lidar_frame_buf[:, 0] = frame
+            self._push_frames(None, frame, K)
 
         # obs["lidar"]: (N, K*C*H*W) via C-order reshape.
         # CONTRACT: layout is (N, K, C, H, W).reshape(N, -1).

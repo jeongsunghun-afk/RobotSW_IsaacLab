@@ -15,7 +15,7 @@ go2_amp의 Go2MotionLoader에서 검증된 PKL 파싱·FK·속도 계산 코드�
 
 PKL 프레임 레이아웃 (18개 값):
   [0:3]   root_pos  (x, y, z)
-  [3:6]   root_euler  (roll, pitch, yaw) [rad]
+  [3:6]   root_rot  (exponential map = axis * angle) [rad]
   [6:18]  joint_pos (12 DOF — DOF_NAMES 순서)
   velocities / foot positions: finite difference 및 FK 자동 계산
 
@@ -138,16 +138,21 @@ def _go2_fk_foot_pos(joint_pos: np.ndarray) -> np.ndarray:
     return foot_pos
 
 
-def _euler_to_quat_wxyz(rpy: np.ndarray) -> np.ndarray:
-    """Roll-Pitch-Yaw → quaternion (w, x, y, z) ZYX 내재적 회전."""
-    r, p, y = rpy[:, 0] / 2, rpy[:, 1] / 2, rpy[:, 2] / 2
-    cr, cp, cy = np.cos(r), np.cos(p), np.cos(y)
-    sr, sp, sy = np.sin(r), np.sin(p), np.sin(y)
-    w = cr * cp * cy + sr * sp * sy
-    x = sr * cp * cy - cr * sp * sy
-    yq = cr * sp * cy + sr * cp * sy
-    z = cr * cp * sy - sr * sp * cy
-    return np.stack([w, x, yq, z], axis=-1).astype(np.float32)
+def _exp_map_to_quat_wxyz(exp_map: np.ndarray) -> np.ndarray:
+    """Exponential map (axis * angle) → quaternion (w, x, y, z).
+
+    변환 스크립트 ``convert_smr_to_pkl.quat_to_exp_map`` 의 역변환.
+    """
+    angle = np.linalg.norm(exp_map, axis=-1)  # (N,)
+    small = angle < 1e-8
+    safe_angle = np.where(small, 1.0, angle)
+    axis = exp_map / safe_angle[:, None]
+
+    half = 0.5 * angle
+    w = np.cos(half)
+    xyz = axis * np.sin(half)[:, None]
+    xyz = np.where(small[:, None], 0.0, xyz)
+    return np.concatenate([w[:, None], xyz], axis=-1).astype(np.float32)
 
 
 def _finite_diff(arr: np.ndarray, dt: float) -> np.ndarray:
@@ -179,14 +184,29 @@ def _world_vel_to_body(vel_world: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarr
     return np.stack([vx, vy, vz], axis=-1).astype(np.float32)
 
 
-def _euler_rates_to_body_angvel(euler: np.ndarray, euler_rates: np.ndarray) -> np.ndarray:
-    """ZYX Euler rates → body frame 각속도."""
-    roll, pitch = euler[:, 0], euler[:, 1]
-    dr, dp, dy = euler_rates[:, 0], euler_rates[:, 1], euler_rates[:, 2]
-    wx = dr - np.sin(pitch) * dy
-    wy = np.cos(roll) * dp + np.sin(roll) * np.cos(pitch) * dy
-    wz = -np.sin(roll) * dp + np.cos(roll) * np.cos(pitch) * dy
-    return np.stack([wx, wy, wz], axis=-1).astype(np.float32)
+def _quat_body_ang_vel(quat_wxyz: np.ndarray, dt: float) -> np.ndarray:
+    """Quaternion 시계열 → body frame 각속도 [rad/s].
+
+    w_body = 2 * vec(q_t^{-1} ⊗ q_{t+1}) / dt (finite difference).
+    """
+    q0 = quat_wxyz[:-1]
+    q1 = quat_wxyz[1:].copy()
+
+    # 이웃 프레임 간 부호 뒤집힘(double cover) 제거
+    flip = np.sum(q0 * q1, axis=-1) < 0.0
+    q1[flip] = -q1[flip]
+
+    # q_rel = conj(q0) ⊗ q1
+    w0, x0, y0, z0 = q0[:, 0], -q0[:, 1], -q0[:, 2], -q0[:, 3]
+    w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
+    rx = w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1
+    ry = w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1
+    rz = w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1
+
+    ang_vel = np.zeros_like(quat_wxyz[:, :3])
+    ang_vel[:-1] = 2.0 * np.stack([rx, ry, rz], axis=-1) / dt
+    ang_vel[-1] = ang_vel[-2] if len(ang_vel) > 1 else 0.0
+    return ang_vel.astype(np.float32)
 
 
 def _slerp_torch(q0: torch.Tensor, q1: torch.Tensor, blend: torch.Tensor) -> torch.Tensor:
@@ -434,16 +454,15 @@ class Go2MotionLib:
         assert frames.shape[1] == 18, f"프레임 크기 불일치: {frames.shape[1]} != 18 ({path})"
 
         root_pos = frames[:, 0:3]  # (N, 3)
-        root_euler = frames[:, 3:6]  # (N, 3) roll/pitch/yaw
+        root_exp_map = frames[:, 3:6]  # (N, 3) exponential map (axis * angle)
         dof_pos = frames[:, 6:18]  # (N, 12)
 
-        root_quat = _euler_to_quat_wxyz(root_euler)  # (N, 4) wxyz
+        root_quat = _exp_map_to_quat_wxyz(root_exp_map)  # (N, 4) wxyz
         lin_vel_world = _finite_diff(root_pos, dt)  # (N, 3) world frame
-        euler_rates = _finite_diff(root_euler, dt)  # (N, 3)
         dof_vel = _finite_diff(dof_pos, dt)  # (N, 12)
 
         lin_vel = _world_vel_to_body(lin_vel_world, root_quat)  # body frame
-        ang_vel = _euler_rates_to_body_angvel(root_euler, euler_rates)  # body frame
+        ang_vel = _quat_body_ang_vel(root_quat, dt)  # body frame (쿼터니언 차분)
 
         foot_pos = _go2_fk_foot_pos(dof_pos)  # (N, 4, 3) body-local
 

@@ -12,7 +12,8 @@
 Runner:    OnPolicyRunnerAMP
 Policy:    ActorCriticRMA  (history encoder + priv encoder, scan 없음)
 Algorithm: PPOAMP  (PPO + AMP discriminator)
-Estimator: priv_explicit(root_lin_vel_b) 예측 (실배포 시 실측 lin_vel 대체)
+Estimator: priv_explicit(root_lin_vel_b + root_ang_vel_b) 예측 — 둘 다 policy obs에 없으므로
+           proprio(42)+history로부터의 **미관측 상태 추정** 과제다
 
 MimicKit amp_go2_task_agent.yaml 하이퍼파라미터 기반 (AMP dict 값은 불변).
 
@@ -22,11 +23,11 @@ AMP reward mixing:
   - annealing 5000 iter (= 5000×24=120000 steps)
 
 obs_groups: env가 반환하는 dict obs {policy, priv_explicit, priv_latent, history} 라우팅.
-  policy:        proprio                [N, 45]
-  priv_explicit: root_lin_vel_b*scale   [N, 3]
+  policy:        proprio                [N, 42]
+  priv_explicit: root_lin_vel_b*scale + root_ang_vel_b*scale  [N, 6]
   priv_latent:   armature/friction/...  [N, 19]
-  history:       policy proprio history [N, 10, 45]
-  critic total:  45+3+19 = 67
+  history:       policy proprio history [N, 10, 42]
+  critic total:  42+6+19 = 67
 scan 그룹 없음 (이 env는 height_scan/clearance 미사용 — ActorCriticRMA는 scan이 obs_groups에
 없으면 scan encoder를 생략한다).
 """
@@ -44,7 +45,7 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations: int = 50000
     save_interval: int = 100
     experiment_name: str = "go2_imitation_tracking"
-    clip_actions: float = 4.0
+    clip_actions: float = 10.0
 
     # OnPolicyRunnerAMP 사용 (RMA + estimator)
     class_name: str = "OnPolicyRunnerAMP"
@@ -68,11 +69,14 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         activation="elu",
     )
 
-    # priv_explicit(root_lin_vel_b) 예측 — 실배포 시 estimator가 실측 대체
+    # priv_explicit(root 선속도/각속도) 예측 — 배포 시 lin_vel 실측 대체 + ang_vel denoising.
+    # loss_blocks는 진단 전용 분해(최적화 대상 loss는 불변): 단일 스칼라로는 ang 블록이
+    # 실제로 학습되는지, lin 대비 수치적으로 묻히는지 구분할 수 없다.
     estimator: dict = {
         "hidden_dims": [128, 64],
         "learning_rate": 1.0e-3,
         "train_with_estimated_states": True,
+        "loss_blocks": {"lin": [0, 3], "ang": [3, 6]},
     }
 
     algorithm: RslRlPpoAlgorithmCfg = RslRlPpoAlgorithmCfg(

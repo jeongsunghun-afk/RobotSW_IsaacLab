@@ -204,7 +204,15 @@ class Go2ParkourImitationRandomGoalEnv(Go2ParkourImitationEnv):
             # Viewer-forced envs (_skip_curriculum[ids] == True) are excluded so
             # _change_terrain_for_viewer's forced terrain type/level is not overwritten
             # by the flat-override block in _update_terrain_curriculum.
-            grad_mask = self._graduated[ids] & ~self._skip_curriculum[ids]  # [n] bool
+            #
+            # Restrict random-goal mode to graduated envs that are ALREADY on flat terrain
+            # (self._env_class == TERRAIN_CLASS_FLAT). This prevents draining graduated envs
+            # off the challenging terrains (hurdle/gap/stair/step) onto flat — only flat-resident
+            # graduated envs do random-goal (yaw) training, so those hard terrains keep their
+            # robots instead of visibly emptying into the flat column.
+            grad_mask = (
+                self._graduated[ids] & ~self._skip_curriculum[ids] & (self._env_class[ids] == TERRAIN_CLASS_FLAT)
+            )  # [n] bool
             grad_env_ids = ids[grad_mask]
             if grad_env_ids.numel() > 0:
                 coin = torch.rand(grad_env_ids.numel(), device=self.device)

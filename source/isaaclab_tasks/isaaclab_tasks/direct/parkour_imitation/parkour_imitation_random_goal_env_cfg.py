@@ -21,6 +21,51 @@ from isaaclab.utils.configclass import configclass
 from isaaclab_tasks.direct.parkour_imitation.parkour_imitation_env_cfg import ParkourImitationEnvCfg
 
 
+def apply_easy_entry_terrain_lowering(
+    cfg: "ParkourImitationRandomGoalEnvCfg",
+    *,
+    hurdle_height: float = 0.01,
+    gap_length: float = 0.02,
+    step_height: float = 0.02,
+    stair_height: float = 0.02,
+) -> None:
+    """Lower the difficulty-0 end of each obstacle sub-terrain in-place ("re-entry rung").
+
+    Rewrites only the *lower* bound of the ``parkour_hurdle`` / ``parkour_gap`` /
+    ``parkour_step`` / ``parkour_stair`` sub-terrain ranges; the upper bounds (the final
+    skill target) are left untouched.  This gives a flat walker a promotable rung below
+    level 0 so the 6.0 curriculum can re-enter (see
+    :class:`ParkourImitationRandomGoalEasyEntryEnvCfg` for the full motivation).
+
+    Must be called from ``__post_init__`` *after* ``super().__post_init__()`` so it mutates
+    the instance-local deep-copied terrain generator (``@configclass`` deep-copies mutable
+    members during post-init), never the module-level shared ``PARKOUR_TERRAINS_CFG``.
+
+    ``parkour_flat`` also uses ``MeshParkourHurdleTerrainCfg`` but with a (0.0, 0.0) height
+    range — it must stay perfectly flat, so it is deliberately not touched here.
+
+    Args:
+        cfg: The random-goal env cfg whose terrain sub-terrains are mutated in-place.
+        hurdle_height: New lower bound for the ``parkour_hurdle`` height range [m].
+        gap_length: New lower bound for the ``parkour_gap`` length range [m].
+        step_height: New lower bound for the ``parkour_step`` height range [m].
+        stair_height: New lower bound for the ``parkour_stair`` height range [m].
+    """
+    sub = cfg.terrain.terrain_generator.sub_terrains
+
+    hurdle = sub["parkour_hurdle"]
+    hurdle.hurdle_height_range = (hurdle_height, hurdle.hurdle_height_range[1])
+
+    gap = sub["parkour_gap"]
+    gap.gap_length_range = (gap_length, gap.gap_length_range[1])
+
+    step = sub["parkour_step"]
+    step.step_height_range = (step_height, step.step_height_range[1])
+
+    stair = sub["parkour_stair"]
+    stair.stair_height_range = (stair_height, stair.stair_height_range[1])
+
+
 @configclass
 class ParkourImitationRandomGoalEnvCfg(ParkourImitationEnvCfg):
     """Configuration for the Go2 ParkourImitation-Symmetry-RandomGoal environment.
@@ -144,24 +189,13 @@ class ParkourImitationRandomGoalEasyEntryEnvCfg(ParkourImitationRandomGoalEnvCfg
 
     def __post_init__(self):
         super().__post_init__()
-        # ``tg`` is instance-local: @configclass deep-copies every mutable member during
-        # super().__post_init__(), so mutating sub-terrain ranges here cannot leak into
-        # the module-level PARKOUR_TERRAINS_CFG shared by the other parkour tasks.
-        sub = self.terrain.terrain_generator.sub_terrains
-
-        # parkour_flat also uses MeshParkourHurdleTerrainCfg but with a (0.0, 0.0) height
-        # range — it must stay perfectly flat, so it is deliberately not touched here.
-        hurdle = sub["parkour_hurdle"]
-        hurdle.hurdle_height_range = (self.easy_entry_hurdle_height, hurdle.hurdle_height_range[1])
-
-        gap = sub["parkour_gap"]
-        gap.gap_length_range = (self.easy_entry_gap_length, gap.gap_length_range[1])
-
-        step = sub["parkour_step"]
-        step.step_height_range = (self.easy_entry_step_height, step.step_height_range[1])
-
-        stair = sub["parkour_stair"]
-        stair.stair_height_range = (self.easy_entry_stair_height, stair.stair_height_range[1])
+        apply_easy_entry_terrain_lowering(
+            self,
+            hurdle_height=self.easy_entry_hurdle_height,
+            gap_length=self.easy_entry_gap_length,
+            step_height=self.easy_entry_step_height,
+            stair_height=self.easy_entry_stair_height,
+        )
 
 
 @configclass
@@ -234,3 +268,64 @@ class ParkourImitationRandomGoalTeacher3DVoxelEnvCfg(ParkourImitationRandomGoalT
     # Activate voxel grid builder.  clearance scanner is inherited (enable_clearance_scanner=True)
     # because voxel filling reuses the clearance ray hits (see parkour_env.py logic).
     enable_voxel_scanner: bool = True
+
+
+@configclass
+class ParkourImitationRandomGoalTeacher3DEasyEntryEnvCfg(ParkourImitationRandomGoalTeacher3DEnvCfg):
+    """Teacher3D (3D clearance, 294-dim) on the EasyEntry lowered-obstacle terrain floor.
+
+    Identical to :class:`ParkourImitationRandomGoalTeacher3DEnvCfg` (clearance scanner,
+    ``parkour_crawl`` ceiling terrain, random-goal, AMP, rewards — all inherited unchanged)
+    except the difficulty-0 end of each obstacle sub-terrain is lowered so the 6.0
+    curriculum can re-enter obstacle levels (see
+    :class:`ParkourImitationRandomGoalEasyEntryEnvCfg`).
+
+    ``super().__post_init__()`` first runs the Teacher3D proportion rebalance (which keeps
+    the ``parkour_hurdle`` / ``parkour_gap`` / ``parkour_step`` / ``parkour_stair`` keys at
+    proportion 0.15 each and adds ``parkour_crawl`` at 0.25); the lowering then rewrites
+    only the *range* lower bounds of those four keys — the two operations are orthogonal.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        apply_easy_entry_terrain_lowering(self)
+
+
+@configclass
+class ParkourImitationRandomGoalTeacher3DVoxelEasyEntryEnvCfg(ParkourImitationRandomGoalTeacher3DVoxelEnvCfg):
+    """Voxel-teacher (3D clearance + voxel occupancy) on the EasyEntry terrain floor.
+
+    Identical to :class:`ParkourImitationRandomGoalTeacher3DVoxelEnvCfg` (voxel scanner +
+    inherited clearance scanner, ``parkour_crawl`` terrain, random-goal, AMP — all unchanged)
+    except the difficulty-0 obstacle floor is lowered exactly as in
+    :func:`apply_easy_entry_terrain_lowering`.  ``super().__post_init__()`` resolves to the
+    Teacher3D proportion rebalance (Voxel adds no own ``__post_init__``), so the same
+    orthogonality argument as :class:`ParkourImitationRandomGoalTeacher3DEasyEntryEnvCfg`
+    holds.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        apply_easy_entry_terrain_lowering(self)
+
+
+@configclass
+class ParkourImitationRandomGoalTeacher3DVoxelGTEasyEntryEnvCfg(
+    ParkourImitationRandomGoalTeacher3DVoxelEasyEntryEnvCfg
+):
+    """Voxel teacher whose grid is a ground-truth volume rather than a ray-hit scatter.
+
+    The only change from :class:`ParkourImitationRandomGoalTeacher3DVoxelEasyEntryEnvCfg` is
+    ``voxel_gt_columns``.  The clearance scanner's fill marks one cell per ray hit point, so with
+    294 diverging rays about 70-80 of 7371 cells are occupied and three defects follow: solid
+    geometry no ray struck is indistinguishable from air, the volume below a surface is never
+    filled, and the marked set flickers with pose.  Column rays enumerate every column and fill
+    below the surface instead, giving roughly 1,700 occupied cells on flat ground and turning a
+    hole in the floor into a wholly empty column.
+
+    **Not comparable to the ray-sampled voxel teacher.**  This changes the teacher's observation,
+    so a policy trained here starts a separate baseline family; distillation numbers measured
+    against the older teacher do not carry over.
+    """
+
+    voxel_gt_columns: bool = True

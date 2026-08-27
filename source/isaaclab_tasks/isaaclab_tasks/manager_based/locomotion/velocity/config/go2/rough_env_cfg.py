@@ -29,8 +29,14 @@ class UnitreeGo2RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.terrain.terrain_generator.sub_terrains["random_rough"].noise_range = (0.01, 0.06)
         self.scene.terrain.terrain_generator.sub_terrains["random_rough"].noise_step = 0.01
 
-        # reduce action scale
-        self.actions.joint_pos.scale = 0.25
+        # reduce action scale, with the hip (abduction) action halved. The direct Go2 envs express
+        # this as a ``hip_scale_reduction`` flag; here the same effect comes from a per-joint scale.
+        # Every joint must be listed — joints left unmatched keep a scale of 1.0.
+        self.actions.joint_pos.scale = {
+            ".*_hip_joint": 0.125,
+            ".*_thigh_joint": 0.25,
+            ".*_calf_joint": 0.25,
+        }
 
         # rewards
         self.rewards.feet_air_time.params["sensor_cfg"].body_names = ".*_foot"

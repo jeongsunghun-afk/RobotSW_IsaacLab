@@ -513,7 +513,9 @@ class ParkourImitationRandomGoalLidarDistillR4EasyEntryEnvCfg(ParkourImitationRa
 
 
 @configclass
-class ParkourImitationRandomGoalLidarSLGridCrawlEasyEntryEnvCfg(ParkourImitationRandomGoalLidarDistillGridEasyEntryEnvCfg):
+class ParkourImitationRandomGoalLidarSLGridCrawlEasyEntryEnvCfg(
+    ParkourImitationRandomGoalLidarDistillGridEasyEntryEnvCfg
+):
     """From-scratch LiDAR-grid arm trained on a mix that **includes** ``parkour_crawl``.
 
     The SL-Grid arm this inherits from trains on the five-terrain mix at 0.20 each and never

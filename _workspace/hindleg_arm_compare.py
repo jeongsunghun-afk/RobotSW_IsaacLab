@@ -33,6 +33,8 @@ ARMS = [
     ("termfix_termsON  ", "*_termfix_termsON", "후", "ON "),
     ("pace0819sym_nocpl", "*_pace0819sym_nocouple", "전", "OFF"),
     ("termfix_nocouple ", "*_termfix_nocouple", "후", "OFF"),
+    ("termfix_reflIcap ", "*_termfix_reflIcap", "후", "ON+캡"),
+    ("termfix_only_tr  ", "*_termfix_only_transpose", "후", "전치"),
     ("only_reflI       ", "*_pace0819sym_only_reflI", "전", "reflI"),
     ("only_rawfric     ", "*_pace0819sym_only_rawfric", "전", "rawfr"),
     ("stock baseline   ", "2026-08-13_12-04-06_colmesh_v2_gpu2", "전", "―  "),
@@ -112,7 +114,7 @@ def main() -> None:
 
     # 새 arm 은 구간 스캔 — 마지막 200 iter 의 min/max 를 함께 낸다 (스파이크는 스냅샷으로 안 잡힌다)
     print("\n--- 신규 arm 구간 스캔 (최근 200 iter, reward/eplen) ---")
-    for name in ("termfix_termsON  ", "termfix_nocouple "):
+    for name in ("termfix_reflIcap ", "termfix_only_tr  "):
         d = data[name]
         if d is None or TAGS[0] not in d:
             print(f"{name:19s}  (데이터 없음)")

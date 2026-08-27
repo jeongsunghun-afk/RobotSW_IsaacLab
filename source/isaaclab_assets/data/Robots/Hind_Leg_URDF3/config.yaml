@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 asset_path: /home/lgb/Dog_Motion_data_3D/robots/Hind_Leg_URDF3/urdf/Hind_Leg.urdf
 usd_dir: /home/lgb/IsaacLab-6.0/source/isaaclab_assets/data/Robots/Hind_Leg_URDF3
 usd_file_name: Hind_Leg/Hind_Leg.usda

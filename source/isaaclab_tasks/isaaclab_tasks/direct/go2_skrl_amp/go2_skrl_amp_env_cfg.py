@@ -55,6 +55,7 @@ class Go2SkrlAmpEnvCfg(DirectRLEnvCfg):
     # 공간
     observation_space = 42
     action_space = 12
+    hip_scale_reduction = True  # hip(abduction) 관절 액션을 0.5배로 축소
     state_space = 0
     num_amp_observations = 2  # skrl AMP 히스토리 길이 (humanoid_amp 스타일)
     amp_observation_space = 43  # 단일 프레임 AMP obs 크기

@@ -75,3 +75,4 @@ class ParkourLidarEnvCfg(ParkourEnvCfg):
         random_angle_noise=0.0,  # declared but not implemented; 0 = no silent effect
         pixel_std_dev_multiplier=0.0,  # declared but not implemented; 0 = no silent effect
     )
+    reward_scales["collision"] = -6.0

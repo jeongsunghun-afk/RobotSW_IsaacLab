@@ -67,8 +67,11 @@ class HumanoidAmpEnv(DirectRLEnv):
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
         # we need to explicitly filter collisions for CPU simulation
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped when the scene cfg declares no
+        # entities (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs
+        # unfiltered — robots from different envs physically collide. Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=["/World/ground"])
 
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot

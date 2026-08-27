@@ -394,6 +394,25 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     #   미측정: 밑바닥부터 학습하는 초기 거친 구간.
     #   근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §12
     foot_reflected_inertia: bool = True
+    # 반사관성 off-diagonal 의 **안정성 캡** [N·m]. None = 무제한(2026-08-27 이전 동작).
+    #
+    # 왜 필요한가. `corr = −I_off·q̈` 는 1 스텝 지연된 **명시적** feedforward 라 보존항이 아니다 —
+    # 위상에 따라 ±감쇠로 작동한다. 실측(`hindleg_coupling_intent_check.py`): 학습이 막힌 정책의
+    # 무릎에서 **−5.32 W** 를 빼내고, 크기가 **313~406 N·m** 까지 튄다(calf effort limit 126 의
+    # 2.5~3.2 배). `foot_raw_friction` 만 캡이 있어 무해했다.
+    #
+    # ⚠ **`foot_raw_friction` 의 캡 형태를 쓰면 안 된다.** 그 캡 `|τ| ≤ (I+I_link)·|q̇|/dt` 이
+    #   성립하는 이유는 마찰 토크가 속도와 함께 0 이 되기 때문인데, 관성항은 정반대로 **속도 0
+    #   교차점이 `q̈` 최대** 지점이다. 적합 캡처 13 개(15.9 만 스텝)에 걸어 보면 **4.29 % 스텝에서
+    #   발동**하고 최대 5094 배 초과한다 — PACE 가 적합한 플랜트가 조용히 달라진다.
+    #
+    # 25.0 근거: 적합에 쓴 캡처 9 개를 sim 에서 재생해 잰 이 항의 최댓값이 **10.605 N·m**
+    #   (PhysX `joint_acc` 기준. 실기 위치 2 회미분으로는 11.5 로, 추정량이 달라도 일치한다).
+    #   그 2.4 배이므로 **적합 구간에서는 한 번도 발동하지 않는다** ⇒ PACE 재적합 불필요.
+    #   동시에 보행 폭주 313~406 N·m 은 자른다.
+    #   근거: reports/hindleg_locomotion/hindLeg_history_direct/fall_asymmetry_termination/
+    #        metrics/refl_cap_scan.txt
+    foot_reflected_inertia_cap: float | None = 25.0
 
     # 학습 신호 클리핑 — 희귀 물리 폭주 이벤트의 극단 obs/reward가 GAE bootstrap을 타고
     # value loss 지수 발산을 일으키는 것을 차단 (2026-08-12 signfix_coupled v1/v2 파국).

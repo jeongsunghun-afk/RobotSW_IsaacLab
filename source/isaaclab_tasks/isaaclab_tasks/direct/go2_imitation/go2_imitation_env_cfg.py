@@ -59,6 +59,7 @@ class Go2ImitationEnvCfg(DirectRLEnvCfg):
     # ── 공간 ────────────────────────────────────────────────────
     observation_space: int = 44 + 6  # policy obs: gravity(3)+steering(5)+joint(12)+vel(12)+action(12)
     action_space: int = 12
+    hip_scale_reduction: bool = True  # hip(abduction) 관절 액션을 0.5배로 축소
     state_space: int = 0
 
     num_amp_observations: int = 10  # disc hist depth (ablation: 2→10, MimicKit 방향)

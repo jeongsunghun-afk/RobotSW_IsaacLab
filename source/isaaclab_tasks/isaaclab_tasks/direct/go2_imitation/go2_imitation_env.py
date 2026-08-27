@@ -40,7 +40,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_mul
+from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_mul
 
 from .go2_imitation_env_cfg import Go2ImitationEnvCfg
 from .motion_lib import Go2MotionLib
@@ -84,6 +84,11 @@ class Go2ImitationEnv(DirectRLEnv):
         self.ref_body_index = self._robot.data.body_names.index(self.cfg.reference_body)
         self.key_body_indexes = [self._robot.data.body_names.index(name) for name in self.KEY_BODY_NAMES]
 
+        # hip(abduction) 관절 인덱스 — 액션 범위 축소용
+        self._hip_joint_ids = torch.tensor(
+            [i for i, n in enumerate(self._robot.data.joint_names) if "hip" in n], dtype=torch.long, device=self.device
+        )
+
         # ── motion_lib ↔ IsaacLab joint 순서 매핑 ────────────────
         # IsaacLab joint 순서(알파벳 등)와 PKL DOF_NAMES 순서가 다를 수 있음.
         # go2_amp_env.py의 motion_dof_indexes 패턴과 동일.
@@ -118,7 +123,7 @@ class Go2ImitationEnv(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )
-        # [R4] per-step root_quat history buffer (wxyz, identity-initialized).
+        # [R4] per-step root_quat history buffer (xyzw, identity-initialized).
         # Kept separate from amp_observation_buffer so base 43-dim stays untouched.
         # The heading-relative tan_norm 6D is computed at consumption time.
         self._amp_quat_buf = torch.zeros(
@@ -126,7 +131,7 @@ class Go2ImitationEnv(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )
-        self._amp_quat_buf[..., 0] = 1.0  # identity quat wxyz: w=1
+        self._amp_quat_buf[..., 3] = 1.0  # identity quat xyzw: w=1
 
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w = torch.zeros(
@@ -164,8 +169,11 @@ class Go2ImitationEnv(DirectRLEnv):
         )
 
         self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped when the scene cfg declares no
+        # entities (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs
+        # unfiltered — robots from different envs physically collide. Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=["/World/ground"])
 
         self.scene.articulations["robot"] = self._robot
         self.scene.sensors["contact_sensor"] = self.contact_sensor
@@ -180,7 +188,10 @@ class Go2ImitationEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        actions = self._actions.clone()
+        if self.cfg.hip_scale_reduction:
+            actions[:, self._hip_joint_ids] *= 0.5
+        self._processed_actions = self.cfg.action_scale * actions + self._robot.data.default_joint_pos
 
     def _post_physics_step(self):
         # 목표 방향 타이머 업데이트
@@ -195,11 +206,10 @@ class Go2ImitationEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         root_pos_w = self._robot.data.body_pos_w[:, self.ref_body_index]  # [N,3]
-        # NOTE (IsaacLab 3.0 migration): body_quat_w is now (x,y,z,w). The internal AMP
-        # heading helpers (_calc_heading_quat*) and motion_lib still assume (w,x,y,z), so the
-        # AMP root-rotation features mix conventions — finite (no NaN) but semantically wrong.
-        # Correctness fix (motion_lib + heading helpers + _amp_quat_buf init) deferred; see report.
-        root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]  # [N,4] (x,y,z,w) in 3.0
+        # IsaacLab 3.0+: body_quat_w is (x,y,z,w). Heading helpers and _amp_quat_buf are
+        # now fully xyzw-aware; motion_lib quats (wxyz) are converted at the consumption
+        # boundary inside _compute_reference_buffers and _reset_strategy_rsi.
+        root_quat_w = self._robot.data.body_quat_w[:, self.ref_body_index]  # [N,4] xyzw
         # IsaacLab 3.0: ArticulationData props return ProxyArray; .torch needed at
         # @torch.jit.script boundaries (_compute_amp_obs). Indexed accessors above
         # (body_pos_w[:, i], body_quat_w[:, i]) already unwrap to torch via __getitem__.
@@ -230,7 +240,7 @@ class Go2ImitationEnv(DirectRLEnv):
                 self._hist_root_pos_w[:, i + 1] = self._hist_root_pos_w[:, i]
 
         self.amp_observation_buffer[:, 0] = amp_obs_step.clone()
-        self._amp_quat_buf[:, 0] = root_quat_w.clone()  # [R4] wxyz
+        self._amp_quat_buf[:, 0] = root_quat_w.clone()  # [R4] xyzw (from body_quat_w)
 
         if self.cfg.include_rel_track_obs:
             self._hist_root_pos_w[:, 0] = root_pos_w.clone()
@@ -473,13 +483,15 @@ class Go2ImitationEnv(DirectRLEnv):
         )
 
         # root_state [N, 13]: pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
+        # motion_lib returns wxyz; IsaacLab 6.0 sim and quat_apply expect xyzw.
+        root_quat_xyzw = convert_quat(root_quat, to="xyzw")
         root_state = self._robot.data.default_root_state[env_ids].clone()
         root_state[:, 0:3] = root_pos + self.scene.env_origins[env_ids]
-        root_state[:, 3:7] = root_quat  # wxyz
+        root_state[:, 3:7] = root_quat_xyzw  # xyzw
 
         # motion_lib 속도는 body frame → world frame 변환 필요
-        root_state[:, 7:10] = quat_apply(root_quat, lin_vel_b)
-        root_state[:, 10:13] = quat_apply(root_quat, ang_vel_b)
+        root_state[:, 7:10] = quat_apply(root_quat_xyzw, lin_vel_b)
+        root_state[:, 10:13] = quat_apply(root_quat_xyzw, ang_vel_b)
 
         joint_pos_out = self._robot.data.default_joint_pos[env_ids].clone()
         joint_vel_out = self._robot.data.default_joint_vel[env_ids].clone()
@@ -579,9 +591,10 @@ class Go2ImitationEnv(DirectRLEnv):
 
         amp_obs_buf = amp_obs.view(num_samples, n_hist, -1)  # [N, H, 43]
         root_pos_hist = root_pos.view(num_samples, n_hist, 3)
-        # [R4] return full quat history (N, H, 4) so callers can build tan_norm window
-        quat_hist = root_quat.view(num_samples, n_hist, 4)  # [N, H, 4]
-        curr_root_quat = quat_hist[:, 0, :]  # [N, 4] current frame
+        # [R4] return full quat history (N, H, 4) — convert wxyz (motion_lib) → xyzw (IsaacLab 6.0)
+        # so all consumers (_reset_strategy_rsi, collect_reference_motions) receive xyzw directly.
+        quat_hist_wxyz = root_quat.view(num_samples, n_hist, 4)
+        quat_hist = convert_quat(quat_hist_wxyz.reshape(-1, 4), to="xyzw").reshape(num_samples, n_hist, 4)
         return amp_obs_buf, root_pos_hist, quat_hist
 
     def collect_reference_motions(
@@ -686,7 +699,7 @@ def _apply_root_rot_tan_norm(
       - tan_norm: [quat_rotate(q, [1,0,0]), quat_rotate(q, [0,0,1])] (MimicKit torch_util.py:216-227)
 
     Args:
-        quat_buf: [N, H, 4] wxyz — per-step root_quat history (index 0 = newest)
+        quat_buf: [N, H, 4] xyzw — per-step root_quat history (index 0 = newest)
         num_envs: N
         n_hist:   H
 
@@ -719,25 +732,25 @@ def _apply_root_rot_tan_norm(
 
 @torch.jit.script
 def _calc_heading_quat(quat: torch.Tensor) -> torch.Tensor:
-    """Yaw-only quaternion (heading) 추출. quat: [N,4] wxyz."""
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    """Yaw-only quaternion (heading) 추출. quat: [N,4] xyzw."""
+    x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     half_yaw = yaw * 0.5
     heading = torch.stack(
-        [torch.cos(half_yaw), torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw)],
+        [torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw), torch.cos(half_yaw)],
         dim=-1,
     )
-    return heading  # [N,4] wxyz
+    return heading  # [N,4] xyzw
 
 
 @torch.jit.script
 def _calc_heading_quat_inv(quat: torch.Tensor) -> torch.Tensor:
-    """Heading quaternion 역원 (heading 기준 로컬 변환용). quat: [N,4] wxyz."""
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    """Heading quaternion 역원 (heading 기준 로컬 변환용). quat: [N,4] xyzw."""
+    x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     half_yaw = -yaw * 0.5  # inverse = negative yaw
     heading_inv = torch.stack(
-        [torch.cos(half_yaw), torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw)],
+        [torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw), torch.cos(half_yaw)],
         dim=-1,
     )
-    return heading_inv  # [N,4] wxyz
+    return heading_inv  # [N,4] xyzw

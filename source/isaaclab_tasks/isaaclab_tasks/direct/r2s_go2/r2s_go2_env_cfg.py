@@ -97,7 +97,7 @@ class R2SGo2EnvCfg(DirectRLEnvCfg):
     # 식별한 값이다. 예전엔 이 env 가 nominal `UNITREE_GO2_CFG`(armature 0.01, 마찰 0)로 돌아
     # 학습 env(`Go2-Imitation-Tracking-v0`, armature 0.17~0.20 / viscous 2.3~2.5)와 플랜트가
     # 전혀 달랐고, 그래서 학습 정책을 GUI Policy 모드로 돌리면 관절이 초당 ~22회 진동했다
-    # (`reports/rsl_rl/go2_imitation_tracking/_comparisons/r2s_sim_plant_gap/`).
+    # (`reports/go2_imitation/_comparisons/r2s_sim_plant_gap/`).
     #
     # ⚠ kp/kd 는 25/0.5 로 **유지한다** — viscous 가 kd 오차를 흡수하도록 함께 식별된 조합이라
     #   게인을 따로 바꾸면 식별 결과가 깨진다(`PACE_KP`/`PACE_KD` 주석 참고).

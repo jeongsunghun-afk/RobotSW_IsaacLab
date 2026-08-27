@@ -83,7 +83,10 @@ class HindLegParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
-        max_grad_norm=1.0,
+        # 2026-08-12: signfix_coupled_realgains 런이 iter ~9748부터 value loss 스파이크 누증
+        # (0.7→17.9→122.9→167.9) 후 iter 10001에서 1e13→inf→NaN 파국. EasyEntry 파국 대응과
+        # 동일하게 0.5로 강화 (1.0에서는 스파이크 시 critic 가중치 폭주를 못 막았음).
+        max_grad_norm=0.5,
     )
 
 

@@ -207,7 +207,9 @@ def _livox_simple_grid_pattern(cfg: patterns_cfg.LivoxPatternCfg, device: str) -
     vertical_fov_min = math.radians(cfg.vertical_fov_deg_min)
     vertical_fov_max = math.radians(cfg.vertical_fov_deg_max)
 
-    ray_directions = torch.zeros((cfg.vertical_line_num, cfg.horizontal_line_num, 3), dtype=torch.float32, device=device)
+    ray_directions = torch.zeros(
+        (cfg.vertical_line_num, cfg.horizontal_line_num, 3), dtype=torch.float32, device=device
+    )
 
     for i in range(cfg.vertical_line_num):
         for j in range(cfg.horizontal_line_num):

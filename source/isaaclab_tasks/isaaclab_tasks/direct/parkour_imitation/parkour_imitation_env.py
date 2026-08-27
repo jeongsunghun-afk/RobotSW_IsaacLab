@@ -42,7 +42,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_mul
+from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_mul
 
 from isaaclab_tasks.direct.parkour.parkour_env import Go2ParkourEnv
 from isaaclab_tasks.direct.parkour.parkour_env_cfg import TERRAIN_CLASS_FLAT
@@ -101,16 +101,17 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
             device=self.device,
         )
 
-        # ── AMP quat history buffer [N, H, 4] (wxyz, identity-initialized) ──
+        # ── AMP quat history buffer [N, H, 4] (xyzw, identity-initialized) ──
         # Per-step root_quat history for heading-relative tan_norm computation.
         # Ring-buffer with same oldest/newest convention as _amp_obs_buf.
+        # IsaacLab 6.0 uses xyzw convention: identity = [x=0, y=0, z=0, w=1] → index 3.
         self._amp_quat_buf = torch.zeros(
             self.num_envs,
             cfg.amp_history_length,
             4,
             device=self.device,
         )
-        self._amp_quat_buf[..., 0] = 1.0  # identity quat wxyz: w=1
+        self._amp_quat_buf[..., 3] = 1.0  # identity quat xyzw: w=1 at index 3
 
         # ── Per-env flat terrain mask [N] bool ───────────────────────────────
         self._flat_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -190,7 +191,7 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
         ``torch.roll(..., shifts=-1, dims=1)`` shifts left so index -1 is overwritten.
         """
         root_pos_w = self._robot.data.root_pos_w  # [N, 3]
-        root_quat_w = self._robot.data.root_quat_w  # [N, 4]  wxyz convention
+        root_quat_w = self._robot.data.root_quat_w  # [N, 4]  xyzw convention (IsaacLab 6.0)
         root_lin_vel_b = self._robot.data.root_lin_vel_b  # [N, 3]
         root_ang_vel_b = self._robot.data.root_ang_vel_b  # [N, 3]
 
@@ -320,9 +321,9 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
 
         # Clear AMP history and reward for reset envs
         self._amp_obs_buf[env_ids] = 0.0
-        # Reset quat buf to identity quaternion (w=1, x=y=z=0)
+        # Reset quat buf to identity quaternion — xyzw: [0,0,0,1] → w=1 at index 3
         self._amp_quat_buf[env_ids] = 0.0
-        self._amp_quat_buf[env_ids, :, 0] = 1.0
+        self._amp_quat_buf[env_ids, :, 3] = 1.0
         self._amp_reward_buf[env_ids] = 0.0
 
         # Refresh flat mask after super has updated _env_class via terrain curriculum
@@ -396,9 +397,14 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
             dim=-1,
         )  # [N*H, 43]
 
+        # Convert expert rq from wxyz (motion_lib internal) to xyzw (IsaacLab 6.0).
+        # This makes expert convention match live root_quat_w so both paths share
+        # the same _calc_heading_quat_inv / quat_mul / quat_apply convention.
+        rq = convert_quat(rq, to="xyzw")  # [N*H, 4]  wxyz → xyzw
+
         # Reshape to [N, H, 43] and [N, H, 4] for _apply_root_rot_tan_norm
         base_buf = base_frame.view(num_samples, H, 43)  # [N, H, 43]
-        quat_buf = rq.view(num_samples, H, 4)  # [N, H, 4]
+        quat_buf = rq.view(num_samples, H, 4)  # [N, H, 4]  xyzw
 
         # Append tan_norm to produce [N, H, 49] then flatten to [N, H*49]
         return self._build_flat_amp_obs(base_buf, quat_buf)  # [N, 490]
@@ -436,15 +442,15 @@ class Go2ParkourImitationEnv(Go2ParkourEnv):
 
 @torch.jit.script
 def _calc_heading_quat_inv(quat: torch.Tensor) -> torch.Tensor:
-    """Yaw-only quaternion inverse (heading 기준 로컬 변환). quat: [N,4] wxyz."""
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    """Yaw-only quaternion inverse (heading 기준 로컬 변환). quat: [N,4] xyzw."""
+    x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     half_yaw = -yaw * 0.5  # inverse = negative yaw
     heading_inv = torch.stack(
-        [torch.cos(half_yaw), torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw)],
+        [torch.zeros_like(half_yaw), torch.zeros_like(half_yaw), torch.sin(half_yaw), torch.cos(half_yaw)],
         dim=-1,
     )
-    return heading_inv  # [N,4] wxyz
+    return heading_inv  # [N,4] xyzw: [x=0, y=0, z=sin(half_yaw), w=cos(half_yaw)]
 
 
 def _apply_root_rot_tan_norm(
@@ -464,7 +470,7 @@ def _apply_root_rot_tan_norm(
     (go2_imitation 의 shift-left 규약과 반대. newest=index 0 대신 index -1.)
 
     Args:
-        quat_buf: [N, H, 4] wxyz — per-step root_quat history (index -1 = newest)
+        quat_buf: [N, H, 4] xyzw — per-step root_quat history (index -1 = newest)
         num_envs: N
         n_hist:   H
 

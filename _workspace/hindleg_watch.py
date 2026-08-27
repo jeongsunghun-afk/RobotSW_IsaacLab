@@ -40,7 +40,7 @@ import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
 
 RUNS = Path(__file__).resolve().parents[1] / "logs" / "rsl_rl" / "hindLeg_history_direct"
-ARMS = {"termfix_termsON": "*_termfix_termsON", "termfix_nocouple": "*_termfix_nocouple"}
+ARMS = {"termfix_reflIcap": "*_termfix_reflIcap", "termfix_only_transpose": "*_termfix_only_transpose"}
 WARMUP = 200
 
 

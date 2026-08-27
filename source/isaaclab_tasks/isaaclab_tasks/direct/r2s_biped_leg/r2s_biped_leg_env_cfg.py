@@ -74,7 +74,7 @@ JOINT_LABELS: list[str] = [
 #   반드시 틀린다 — 토크 모니터에서 찾았던 것과 **같은 종류의 버그**다(README §8).
 #   여기 값은 sim 플랜트 기준(관절)이라 맞지만, GUI 가 이 값을 실기로 보내면 calf 가 2.25 배
 #   과도해진다. GUI/real_runner 중 한쪽에 변환을 넣어야 한다.
-#   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §13
+#   근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §13
 DEFAULT_KP: list[float] = [100.0, 50.0, 112.5, 28.8, 100.0, 50.0, 112.5, 28.8]
 DEFAULT_KD: list[float] = [5.0, 5.0, 11.25, 7.2, 5.0, 5.0, 11.25, 7.2]
 
@@ -180,7 +180,7 @@ class R2SBipedLegEnvCfg(DirectRLEnvCfg):
     #   지극히 평범한 값). 즉 그 검정은 반증이 아니라 **판정 불능**이었다.
     #   (당시 마찰 추정 1.1 N·m 은 gear_k 오염 적합에서 나온 값인 데다, chirp 는 calf 가 움직이는
     #    구간이라 **운동마찰**을 잰 것 — foot 단독 chirp 의 정지 상태에 적용할 값이 아니었다.)
-    #   기록: reports/_comparisons/pace_bipedleg_foot_coupling_probe/GEAR_K_INVALIDATION.md §6
+    #   기록: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/GEAR_K_INVALIDATION.md §6
     #
     # 판정 가능한 검정: **calf 를 천천히 등속으로 움직이면서**(이미 미끄러지는 중 = 정지마찰 없음)
     #   foot 을 chirp 한다. 그러면 외란이 무릎 추종오차/토크에 반드시 드러난다.
@@ -222,6 +222,9 @@ class R2SBipedLegEnvCfg(DirectRLEnvCfg):
     #     τ_calf += −I_off·q̈_foot,  τ_foot += −I_off·q̈_calf   (I_off = foot armature, DR 자동 일관)
     # 실측상 발산하지 않는다(§12) — 보정을 effort target 에 더해 모터 곡선이 다시 자르기 때문.
     foot_reflected_inertia: bool = True
+    # 학습 env `hind_leg_env_cfg.foot_reflected_inertia_cap` 과 **같은 값이어야 한다**
+    # (여기만 빠지면 PACE 가 학습 env 와 다른 플랜트에 적합된다). 근거는 그쪽 주석.
+    foot_reflected_inertia_cap: float | None = 25.0
 
     foot_raw_friction: bool = True
 

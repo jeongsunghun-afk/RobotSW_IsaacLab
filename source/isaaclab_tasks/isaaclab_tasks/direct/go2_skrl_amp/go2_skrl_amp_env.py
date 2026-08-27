@@ -78,6 +78,11 @@ class Go2SkrlAmpEnv(DirectRLEnv):
             print("[Go2SkrlAmpEnv] DOF 이름 불일치 — 1:1 순서 매핑 사용")
             self.motion_dof_indexes = list(range(min(len(robot_joint_names), self._motion_loader.num_dofs)))
 
+        # hip(abduction) 관절 인덱스 — 액션 범위 축소용
+        self._hip_joint_ids = torch.tensor(
+            [i for i, n in enumerate(robot_joint_names) if "hip" in n], dtype=torch.long, device=self.device
+        )
+
         # X/Y linear velocity + yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
 
@@ -107,8 +112,11 @@ class Go2SkrlAmpEnv(DirectRLEnv):
             ),
         )
         self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+        # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0
+        # the auto-filter path (interactive_scene:218) is skipped when the scene cfg declares no
+        # entities (has_scene_cfg_entities=False), so the old cpu-only guard left GPU runs
+        # unfiltered — robots from different envs physically collide. Ref: IsaacLab #1918.
+        self.scene.filter_collisions(global_prim_paths=["/World/ground"])
         self.scene.articulations["robot"] = self.robot
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -117,7 +125,10 @@ class Go2SkrlAmpEnv(DirectRLEnv):
         self.actions = actions.clone()
 
     def _apply_action(self):
-        target = self.cfg.action_scale * self.actions + self.robot.data.default_joint_pos.torch
+        actions = self.actions.clone()
+        if self.cfg.hip_scale_reduction:
+            actions[:, self._hip_joint_ids] *= 0.5
+        target = self.cfg.action_scale * actions + self.robot.data.default_joint_pos.torch
         self.robot.set_joint_position_target(target)
 
     def _get_observations(self) -> dict:
