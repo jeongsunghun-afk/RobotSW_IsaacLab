@@ -38,7 +38,11 @@ parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--num_envs", type=int, default=128)
 parser.add_argument("--steps", type=int, default=600, help="명령당 스텝 수 (앞 100 은 과도 구간으로 버린다).")
 parser.add_argument("--cmd_x", type=float, nargs="+", default=[0.3, 0.5, 1.0])
-parser.add_argument("--trip_nm", type=float, default=15.0, help="펌웨어 보고 토크 임계 [N·m, 채널 기준].")
+parser.add_argument(
+    "--trip_nm", type=float, nargs="+", default=[15.0],
+    help="펌웨어 보고 토크 임계 [N·m, 채널 기준]. 여러 개 주면 **한 번의 롤아웃**으로 전부 평가한다 — "
+    "'임계를 얼마로 풀면 트립이 사라지는가'를 재는 용도(같은 궤적이라 비교가 공정하다).",
+)
 parser.add_argument("--trip_ms", type=float, default=50.0, help="래치까지 필요한 지속 시간 [ms].")
 parser.add_argument("--tilt_deg", type=float, default=50.0, help="넘어짐 판정 기울기 [deg] — 걷는 스텝만 센다.")
 parser.add_argument(
@@ -124,10 +128,13 @@ def main() -> None:
         cos_thr = math.cos(math.radians(args_cli.tilt_deg))
         dt_ctrl = float(u.cfg.sim.dt) * int(u.cfg.decimation)
         need = max(1, math.ceil(args_cli.trip_ms / 1000.0 / dt_ctrl))
+        thresholds = sorted(args_cli.trip_nm)
         print(f"[probe] 제어 주기 {dt_ctrl * 1000:.1f} ms  ⇒ 트립까지 연속 **{need} 스텝** 필요"
-              f"  (임계 채널 {args_cli.trip_nm:.1f} N·m / {args_cli.trip_ms:.0f} ms)")
+              f"  ({args_cli.trip_ms:.0f} ms)")
+        print(f"[probe] 평가할 채널 임계 {thresholds} N·m  → 관절 기준:")
         for nm, k in GEAR_K.items():
-            print(f"         {nm:5s} 관절 기준 임계 = {args_cli.trip_nm:.1f} × {k} = {args_cli.trip_nm * k:.1f} N·m")
+            js = "  ".join(f"{t * k:.1f}" for t in thresholds)
+            print(f"         {nm:5s} ×{k}  =  {js}")
 
         obs = env.get_observations()
         for cmd_x in args_cli.cmd_x:
@@ -154,28 +161,23 @@ def main() -> None:
                   f"  실제 vx {vx:6.3f} m/s  달성률 {vx / cmd_x * 100 if cmd_x else float('nan'):5.0f} %")
             for nm in ("calf", "foot"):
                 tau = R[nm]
-                thr = args_cli.trip_nm * GEAR_K[nm]
-                # 걷는 스텝만 본다 — 넘어진 뒤의 토크는 실기에서 재현할 상황이 아니다.
-                flat = tau[up]
-                over = tau > thr
-                # 런 길이는 시간축이 살아 있어야 하므로 [T, N*joints] 로 편다.
-                t, n, j = over.shape
-                lens = run_lengths((over & up).reshape(t, n * j))
-                trips = lens[lens >= need]
-                n_env_cols = n * j
+                flat = tau[up]  # 걷는 스텝만 — 넘어진 뒤의 토크는 실기에서 재현할 상황이 아니다
+                t, n, j = tau.shape
                 print(f"  {nm:5s} |tau| [N·m]  mean {float(flat.mean()):6.2f}  p95 {float(flat.quantile(0.95)):6.2f}"
                       f"  p99 {float(flat.quantile(0.99)):6.2f}  max {float(flat.max()):7.2f}"
-                      f"   (관절 임계 {thr:.1f})")
-                lf = lens.float()  # quantile 은 부동소수만 받는다
-                print(f"        초과율 {float((over & up).float().sum() / up.float().sum()) * 100:6.3f} %"
-                      f"   런 {lens.numel():5d} 개"
-                      f"   길이 p50 {int(lf.quantile(0.5)) if lens.numel() else 0:2d}"
-                      f"  p99 {int(lf.quantile(0.99)) if lens.numel() else 0:2d}"
-                      f"  max {int(lens.max()) if lens.numel() else 0:3d} 스텝")
-                verdict = "★ 트립" if trips.numel() else "통과"
-                print(f"        ≥{need} 스텝 런 **{trips.numel()}** 개 / 관절-env {n_env_cols} 개"
-                      f"  ⇒ {verdict}"
-                      + (f"  (최장 {int(trips.max()) * dt_ctrl * 1000:.0f} ms)" if trips.numel() else ""))
+                      f"   (관절-env 열 {n * j})")
+                print(f"        {'채널':>6s} {'관절임계':>8s} {'초과율':>8s} {'런':>7s}"
+                      f" {'최장':>6s}  {'≥' + str(need) + '스텝':>8s}  판정")
+                for tnm in thresholds:
+                    thr = tnm * GEAR_K[nm]
+                    over = (tau > thr) & up
+                    lens = run_lengths(over.reshape(t, n * j))
+                    trips = lens[lens >= need]
+                    longest = f"{int(lens.max()) * dt_ctrl * 1000:.0f}ms" if lens.numel() else "—"
+                    verdict = f"★ 트립 {trips.numel()}" if trips.numel() else "통과"
+                    print(f"        {tnm:6.1f} {thr:8.1f}"
+                          f" {float(over.float().sum() / up.float().sum()) * 100:7.3f}%"
+                          f" {lens.numel():7d} {longest:>6s}  {trips.numel():8d}  {verdict}")
         print(f"\n{'=' * 92}")
         env.close()
 
