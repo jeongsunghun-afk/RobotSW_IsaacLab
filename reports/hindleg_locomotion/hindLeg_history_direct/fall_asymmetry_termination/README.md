@@ -378,9 +378,52 @@ chirp_gui_all_20260825_170649.pt      1.045    6.658     8.114
 | `pace0819sym_only_rawfric` | model_21300 | 회복 확정(0.0459@12k, stock 과 동률) |
 | `pace0819sym` | model_49999 | 자연 완주 |
 
-계속 도는 것: `termfix_termsON`, `termfix_nocouple` (iter 12000 재확인 대기).
+**정정 (같은 날 14:51)** — 위 표를 쓴 뒤 사용자 지시로 `termfix_termsON`(model_7900) ·
+`termfix_nocouple`(model_11000) 도 종료했다. 두 로그 모두 **Traceback 없이 같은 시각에 끝났다** —
+크래시가 아니라 kill 이다. 15:34 에 그 자리로 `termfix_reflIcap` · `termfix_only_transpose` 를 올렸다.
 
-## 8. 남은 것
+## 8. 캡 A/B — **캡 하나가 에피소드 길이를 12.7 배로 바꾼다** (iter 6000, 2026-08-27)
+
+수정된 종료 조건 아래에서 돌린 arm 은 넷뿐이고, 그 넷만 서로 비교할 수 있다.
+§39-c-2 의 8 조합 진리표는 **깨진 종료 조건에서 잰 것**이라 여기에 못 섞는다 —
+거기서는 긴 에피소드가 성공이 아니라 **누워서 time-out 하는 병리**였다.
+
+| arm | 3 항 | 캡 | `mean_episode_length` @6000 | 판정 |
+|---|---|---|---|---|
+| `termfix_nocouple` | off | — | 964.5 | ✅ |
+| `termfix_reflIcap` | **on** | **25 N·m** | **966.9** | ✅ |
+| `termfix_only_transpose` | 전치만 | — | 935.1 | ✅ |
+| `termfix_termsON` | **on** | **없음** | **75.9** | ❌ 정체 |
+
+`termsON` 과 `reflIcap` 은 **플래그 하나만** 다르다. 그 하나로 75.9 → 966.9 (**12.7 배**)다.
+
+정체가 실재한다는 별도 증거 — `termsON` 마지막 iter 의 종료 계수:
+
+```
+termsON     base_contact 50.6667   time_out 0.0000     eplen  75.9
+nocouple    base_contact  0.1667   time_out 3.9167     eplen 964.5
+```
+
+`termsON` 은 **한 번도 살아서 끝나지 못한다.** 3000→6000 구간에서 74.7 → 75.9 로 평탄하고
+`noise_std` 는 0.32 → 0.29 로 **줄어든다** — 탐색을 접고 나쁜 국소해에 수렴하는 모양이다.
+
+### 8-a. 이 실험이 말하는 것과 말하지 않는 것
+
+말하는 것:
+
+- 캡 없는 반사관성 항은 **실패에 필요조건**이다 (`reflIcap` 이 유일한 차이로 회복하므로).
+- 전치 항 단독은 **실패에 충분조건이 아니다** (`only_transpose` 가 935.1 로 정상).
+- 캡 25 N·m 는 세 항을 **전부 켠 채로** `nocouple` 궤적에 붙인다 (966.9 vs 964.5, 차이 0.2 %).
+
+말하지 **않는** 것:
+
+- 「반사관성 단독이 범인」은 아직 못 말한다. 수정된 종료 조건에서 `only_reflI` · `only_rawfric` 를
+  **안 돌렸다.** 구 진리표의 그 두 arm 은 깨진 조건에서 잰 값이라 못 쓴다.
+- reward/step 은 6000 에서 `reflIcap` 0.0431 · `only_transpose` 0.0430 으로 사실상 동률이다.
+  3500 에서 있었던 격차(0.0406 vs 0.0350)는 **수렴 속도 차이**였지 최종 능력 차이가 아니었다.
+  ★ iter 3500 스냅샷으로 arm 순위를 매겼으면 오판이었다.
+
+## 9. 남은 것
 
 - `terminate_base_height` 임계를 정하려면 동적 보행 중 몸통 높이 분포를 먼저 재야 한다.
 - `flat_orientation_reward_scale` 이 `-0.0`(비활성)인 이유가 기록돼 있지 않다. 2족이라 의도적
