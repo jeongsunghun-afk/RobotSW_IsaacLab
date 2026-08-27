@@ -69,6 +69,13 @@ parser.add_argument(
     "그만큼 나머지 파라미터의 조건수가 좋아진다 (README §29-e).",
 )
 parser.add_argument(
+    "--freeze_bias_joints",
+    default=None,
+    help="--freeze_bias 를 이 관절들에만 적용한다 (콤마 구분, 그룹명 또는 관절명). 생략하면 8개 전부. "
+    "예: 'hip,thigh,calf' = foot bias 만 자유. foot 은 raw 엔코더 채널이라 bias 가 영점이 아니라 "
+    "커플링 계수 오차를 흡수하고 있을 수 있다 (README §30-b).",
+)
+parser.add_argument(
     "--bias_bound",
     type=float,
     default=None,
@@ -85,6 +92,14 @@ parser.add_argument(
     "관절이 아니라 **블록**을 접는다. "
     "'파생 armature로도 마찰·지연이 벌충해 같은 score에 도달하는가'를 재는 용도 — 도달하면 "
     "armature 초과분은 식별 아티팩트이고, 못 하면 진짜 관성이다 (README §25).",
+)
+parser.add_argument(
+    "--freeze_armature_joints",
+    default=None,
+    help="--freeze_armature 를 이 관절들에만 적용한다 (콤마 구분, 그룹명 또는 관절명). 생략하면 8개 전부. "
+    "예: 'hip' = hip armature 만 고정하고 hip 마찰·bias 는 자유. 캡처가 그 관절의 공진대를 "
+    "지나지 않으면(hip: 2.0 Hz 에서 멈춘 반면 공진은 2.80 Hz) 관성은 원리적으로 식별 불가인데, "
+    "자유로 두면 저주파 잔차를 최소화하는 값으로 흘러가 **마찰 신호를 먹는다** (README §29-b).",
 )
 parser.add_argument(
     "--foot_transpose",
@@ -178,7 +193,36 @@ def gain_summary(kp: torch.Tensor, kd: torch.Tensor) -> str:
     return f"kp=[{kp_s}] kd=[{kd_s}]"
 
 
-def freeze_armature_bounds(bounds: torch.Tensor, num_joints: int, source: str) -> None:
+JOINT_GROUPS = {"hip": [0, 4], "thigh": [1, 5], "calf": [2, 6], "foot": [3, 7]}
+
+
+def select_joints(spec: str | None, joint_order: list[str], flag: str) -> list[int]:
+    """``"hip,HL_foot"`` 같은 토큰 목록을 leg-major 인덱스로 푼다.
+
+    Args:
+        spec: 콤마 구분 토큰. 그룹명(hip/thigh/calf/foot) 또는 관절명. ``None`` 이면 전체.
+        joint_order: cfg 의 관절 순서 (8개, leg-major).
+        flag: 오류 메시지에 쓸 CLI 플래그 이름.
+
+    Returns:
+        정렬된 관절 인덱스. ``spec`` 이 ``None`` 이면 전체 인덱스.
+    """
+    if spec is None:
+        return list(range(len(joint_order)))
+    sel: set[int] = set()
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if tok in JOINT_GROUPS:
+            sel.update(JOINT_GROUPS[tok])
+        else:
+            full = tok if tok.endswith("_joint") else tok + "_joint"
+            if full not in joint_order:
+                raise RuntimeError(f"{flag} 토큰 인식 불가: {tok} (그룹 {list(JOINT_GROUPS)} 또는 관절명)")
+            sel.add(joint_order.index(full))
+    return sorted(sel)
+
+
+def freeze_armature_bounds(bounds: torch.Tensor, num_joints: int, source: str, joints: list[int] | None = None) -> None:
     """armature 블록의 bounds 폭을 0 으로 접어 상수로 만든다 (``--freeze_armature``).
 
     ``--fit_joints`` 와 같은 수법이지만 접는 방향이 다르다 — 관절이 아니라 **블록**이다.
@@ -189,6 +233,9 @@ def freeze_armature_bounds(bounds: torch.Tensor, num_joints: int, source: str) -
         bounds: 탐색 범위 [하한, 상한], shape (4*num_joints + 1, 2). 제자리에서 수정된다.
         num_joints: 관절 수.
         source: ``"derived"`` 이면 rga.py 파생 반사관성, 아니면 mean_*.pt 경로.
+        joints: 접을 관절 인덱스. ``None`` 이면 8개 전부. 일부만 주면 **그 관절의 armature 만**
+            상수가 되고 같은 관절의 마찰·bias 는 자유롭게 남는다 — 여기가 값을 못 싣는 관절
+            (hip: 공진대 캡처가 없어 관성이 식별 불가)이 마찰 신호를 먹어치우는 것을 막는다.
     """
     if source == "derived":
         # rga.py 의 파생 반사관성 대각 — I_r(=7.4e-4)·N², calf 는 I_r(N_c²+N_f²).
@@ -198,16 +245,18 @@ def freeze_armature_bounds(bounds: torch.Tensor, num_joints: int, source: str) -
         src = torch.load(source, map_location="cpu").to(torch.float32).reshape(-1)[:num_joints]
     if src.numel() != num_joints:
         raise RuntimeError(f"--freeze_armature 값 개수 불일치: {src.numel()} != {num_joints}")
-    bounds[0:num_joints, 0] = src
-    bounds[0:num_joints, 1] = src
+    sel = list(range(num_joints)) if joints is None else joints
+    for i in sel:
+        bounds[i, 0] = src[i]
+        bounds[i, 1] = src[i]
     print(
-        f"[INFO]: armature 고정 ({source}) — {[round(float(x), 4) for x in src]}, "
-        f"나머지 {bounds.shape[0] - num_joints}개만 탐색",
+        f"[INFO]: armature 고정 ({source}) 관절 {sel} — {[round(float(src[i]), 4) for i in sel]}, "
+        f"나머지 {bounds.shape[0] - len(sel)}개만 탐색",
         flush=True,
     )
 
 
-def freeze_bias_bounds(bounds: torch.Tensor, num_joints: int, source: str) -> None:
+def freeze_bias_bounds(bounds: torch.Tensor, num_joints: int, source: str, joints: list[int] | None = None) -> None:
     """encoder bias 블록의 bounds 폭을 0 으로 접어 상수로 만든다 (``--freeze_bias``).
 
     :func:`freeze_armature_bounds` 와 같은 수법이고 블록 위치만 다르다
@@ -217,6 +266,10 @@ def freeze_bias_bounds(bounds: torch.Tensor, num_joints: int, source: str) -> No
         bounds: 탐색 범위 [하한, 상한], shape (4*num_joints + 1, 2). 제자리에서 수정된다.
         num_joints: 관절 수.
         source: ``"zero"`` 이면 전부 0, 아니면 mean_*.pt 경로.
+        joints: 접을 관절 인덱스. ``None`` 이면 8개 전부. foot 만 남기는 용도가 있다 —
+            foot 은 raw 엔코더 채널(``raw = q_foot + coef·q_calf``)이라 bias 가 영점이 아니라
+            커플링 계수 오차를 흡수하고 있을 수 있고(§30-b 에서 새 레일까지 달렸다), 그 잔차를
+            0 으로 접으면 foot 의 마찰·관성으로 밀려난다.
     """
     lo, hi = 3 * num_joints, 4 * num_joints
     if source == "zero":
@@ -225,11 +278,13 @@ def freeze_bias_bounds(bounds: torch.Tensor, num_joints: int, source: str) -> No
         src = torch.load(source, map_location="cpu").to(torch.float32).reshape(-1)[lo:hi]
     if src.numel() != num_joints:
         raise RuntimeError(f"--freeze_bias 값 개수 불일치: {src.numel()} != {num_joints}")
-    bounds[lo:hi, 0] = src
-    bounds[lo:hi, 1] = src
+    sel = list(range(num_joints)) if joints is None else joints
+    for i in sel:
+        bounds[lo + i, 0] = src[i]
+        bounds[lo + i, 1] = src[i]
     print(
-        f"[INFO]: bias 고정 ({source}) — {[round(float(x), 4) for x in src]}, "
-        f"나머지 {bounds.shape[0] - num_joints}개만 탐색",
+        f"[INFO]: bias 고정 ({source}) 관절 {sel} — {[round(float(src[i]), 4) for i in sel]}, "
+        f"나머지 {bounds.shape[0] - len(sel)}개만 탐색",
         flush=True,
     )
 
@@ -293,17 +348,7 @@ def main():
         frozen = torch.load(args_cli.freeze_from, map_location="cpu").to(torch.float32)
         if frozen.numel() != sim2real.bounds_params.shape[0]:
             raise RuntimeError(f"freeze_from 파라미터 수 불일치: {frozen.numel()} != {sim2real.bounds_params.shape[0]}")
-        groups = {"hip": [0, 4], "thigh": [1, 5], "calf": [2, 6], "foot": [3, 7]}
-        lm_sel: set[int] = set()
-        for tok in args_cli.fit_joints.split(","):
-            tok = tok.strip()
-            if tok in groups:
-                lm_sel.update(groups[tok])
-            else:
-                full = tok if tok.endswith("_joint") else tok + "_joint"
-                if full not in joint_order:
-                    raise RuntimeError(f"--fit_joints 토큰 인식 불가: {tok} (그룹 {list(groups)} 또는 관절명)")
-                lm_sel.add(joint_order.index(full))
+        lm_sel = select_joints(args_cli.fit_joints, joint_order, "--fit_joints")
         n = len(joint_order)
         free = {4 * n}  # delay는 항상 함께 식별
         for blk in range(4):
@@ -313,18 +358,28 @@ def main():
                 sim2real.bounds_params[k, 0] = frozen[k]
                 sim2real.bounds_params[k, 1] = frozen[k]
         print(
-            f"[INFO]: 부분 적합 — 탐색 {len(free)}개(관절 {sorted(lm_sel)} × 4블록 + delay), "
+            f"[INFO]: 부분 적합 — 탐색 {len(free)}개(관절 {lm_sel} × 4블록 + delay), "
             f"나머지 {sim2real.bounds_params.shape[0] - len(free)}개는 {args_cli.freeze_from} 값으로 고정"
         )
 
     if args_cli.freeze_armature is not None:
-        freeze_armature_bounds(sim2real.bounds_params, len(joint_order), args_cli.freeze_armature)
+        freeze_armature_bounds(
+            sim2real.bounds_params,
+            len(joint_order),
+            args_cli.freeze_armature,
+            select_joints(args_cli.freeze_armature_joints, joint_order, "--freeze_armature_joints"),
+        )
 
     # ⚠ 순서 주의 — 넓히기를 먼저, 고정을 나중에. 둘 다 주면 고정이 이긴다.
     if args_cli.bias_bound is not None:
         widen_bias_bounds(sim2real.bounds_params, len(joint_order), args_cli.bias_bound)
     if args_cli.freeze_bias is not None:
-        freeze_bias_bounds(sim2real.bounds_params, len(joint_order), args_cli.freeze_bias)
+        freeze_bias_bounds(
+            sim2real.bounds_params,
+            len(joint_order),
+            args_cli.freeze_bias,
+            select_joints(args_cli.freeze_bias_joints, joint_order, "--freeze_bias_joints"),
+        )
 
     # warp 커널은 관절 인덱스를 int32로 요구한다. 텐서 인덱싱에는 long 버전을 쓴다.
     joint_ids = torch.tensor(

@@ -25,8 +25,8 @@ joint 순서는 **articulation 순서**로 통일(재매핑 없음). sim_runner 
 
 실행:
     CUDA_VISIBLE_DEVICES=0 python scripts/real2sim/policy_runner_bipedleg.py \
-        --run_dir logs/rsl_rl/hindLeg_history_direct/2026-07-22_18-05-50_history_60_baseline \
-        --checkpoint model_23100.pt
+        --run_dir logs/rsl_rl/hindLeg_history_direct/2026-08-26_13-41-55_pace0819sym \
+        --checkpoint model_50000.pt
     # real 엔드포인트가 있으면:  --real_host 192.168.x.y --real_port 9887
 """
 

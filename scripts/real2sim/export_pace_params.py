@@ -36,12 +36,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="PACE mean_*.pt → 플랜트 파라미터 json")
     parser.add_argument("--mean", required=True, help="fit_bipedleg.py 산출 mean_*.pt 경로 (물리 단위 33개)")
     parser.add_argument("--out", default="data/bipedleg_pace_params.json", help="출력 json 경로")
+    parser.add_argument(
+        "--symmetrize",
+        action="store_true",
+        help="좌우(HL/HR)를 평균해 대칭화한다. **`rga.py` 에 반영한 값과 맞추려면 필수** — "
+        "0819 적합의 viscous 좌우비(hip 3.24 · foot 3.54)는 캡처들이 kd 를 공유해 생긴 축퇴 "
+        "아티팩트이고(README §37-e), `rga.py` 는 좌우평균을 싣고 있다(§38-c). 이 플래그 없이 "
+        "내보내면 GUI 오버라이드가 학습 플랜트와 **다른 로봇**을 sim 에 적용한다.",
+    )
     args = parser.parse_args()
 
     mean_path = Path(args.mean)
     sim = torch.load(mean_path, map_location="cpu").double()
     if sim.numel() != 4 * NUM_JOINTS + 1:
         raise SystemExit(f"기대 33개 파라미터, 실제 {sim.numel()}개: {mean_path}")
+    if args.symmetrize:
+        half = NUM_JOINTS // 2
+        for blk in range(4):  # armature / viscous / coulomb / bias — delay 는 스칼라라 제외
+            lo = blk * NUM_JOINTS
+            mean_lr = 0.5 * (sim[lo : lo + half] + sim[lo + half : lo + NUM_JOINTS])
+            sim[lo : lo + half] = mean_lr
+            sim[lo + half : lo + NUM_JOINTS] = mean_lr
+        print("[export_pace_params] 좌우 평균으로 대칭화 (rga.py 반영값과 동일 규칙)")
 
     n = NUM_JOINTS
     payload = {

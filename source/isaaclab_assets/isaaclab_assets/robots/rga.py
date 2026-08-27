@@ -536,33 +536,72 @@ HIND_LEG_CFG = ArticulationCfg(
                 ".*_foot_joint": 100.8,
             },
             saturation_effort=126.0,
-            # 실측 반사관성 ROTOR_I 7.4e-4 × 실제감속비² (RL_INTERFACE.md §6-a).
-            # hip/thigh 7²=0.0363, calf 10.5²=0.0816, foot 8.4²=0.0522 kg·m².
-            # PACE가 관절별 armature를 식별하면 이 값을 덮어쓰면 된다(현재는 실측 nominal).
+            # ★★ 2026-08-26: **PACE 식별값으로 교체.** 여기부터 armature·마찰 세 항은 파생값이
+            #   아니라 실기 chirp 재현으로 적합한 값이다.
+            #
+            #   출처: `logs/pace/bipedleg_0819_biasfrozen/26_08_25_15-27-59/mean_076.pt` 의
+            #        **좌우 평균**. 25 차원 적합(encoder bias 8 개를 0 으로 고정)이다.
+            #
+            #   근거 — kd 5.0 hold-out 4 개(어느 적합에도 안 들어간 캡처)의 관절당 RMS:
+            #        stock(종전 값)  0.770°     PACE 좌우평균  0.332°   → **5.4 배**
+            #        마찰만 바꾸면 0.628° 이므로 이득의 큰 쪽은 armature 다.
+            #        → reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/
+            #          README.md §38, metrics/eval_stock_vs_pace.txt
+            #
+            #   ⚠ **좌우 평균을 쓴다.** 적합 원본은 viscous 좌우비가 hip 3.24 · foot 3.54 인데,
+            #     이건 캡처 7 개가 kd 를 공유해 생긴 축퇴 아티팩트임이 밝혀졌다(§37-e: kd 2.5
+            #     캡처를 넣으면 1.4 로 무너진다). 대칭화 비용은 hold-out **3.9 %**(0.326→0.332°)
+            #     뿐이라, 알려진 아티팩트를 학습 플랜트에 굽는 것보다 싸다.
+            #
+            #   ⚠ armature 의 물리적 의미가 바뀌었다 — 이제 `I_r·N²` 이 아니라 식별값이다.
+            #     파생값 대비 hip ×3.83 / thigh ×2.84 / calf ×1.72 / foot ×1.60.
+            #     왜 파생값이 작은지는 §25 참조(로터만 센 값이라 그렇다).
+            #   ⚠ **hip 은 아직 식별되지 않았다** — 캡처가 공진대(2.80 Hz)에 못 들어갔다(§34-b).
+            #     0.1390 은 그 상태에서 나온 값이니 신뢰도가 다른 셋보다 낮다.
             armature={
-                ".*_hip_joint": 0.0363,
-                ".*_thigh_joint": 0.0363,
-                # ★ 2026-08-18: calf 0.0816 → 0.1338. 옛 값은 `I_r·N_c²` — **calf 로터만** 센 것이다.
-                #   벨트가 무릎을 건너므로 무릎이 돌면 foot 로터도 돈다(θ_f = N_f·(q_f + q_c)) ⇒
-                #   calf 관절은 foot 로터 관성도 짊어진다:
-                #       M_refl = I_r·[[N_c² + N_f²,  N_f²],   =  [[0.1338,  0.0522],
-                #                     [N_f²,         N_f²]]       [0.0522,  0.0522]]
-                #   대각 두 개가 여기 armature 고, off-diagonal 은 PhysX 가 표현할 수 없어
-                #   env 의 `foot_reflected_inertia` 항이 명시적 보정토크로 넣는다.
-                #   ⚠ **foot 대각과 off-diagonal 은 같은 양**(둘 다 `I_r·N_f²`)이라, env 는 I_off 를
-                #     별도 상수가 아니라 foot armature 에서 읽는다 — DR 이 걸려도 자동으로 일관된다.
-                ".*_calf_joint": 0.1338,  # I_r·(N_c² + N_f²) = 7.4e-4 × (10.5² + 8.4²)
-                ".*_foot_joint": 0.0522,  # I_r·N_f² = 7.4e-4 × 8.4²  (= off-diagonal 과 동일)
+                ".*_hip_joint": 0.1390,  # 파생 0.0363 × 3.83  ← ⚠ 미식별(§34-b)
+                ".*_thigh_joint": 0.1029,  # 파생 0.0363 × 2.84
+                # 벨트가 무릎을 건너므로 무릎이 돌면 foot 로터도 돈다(θ_f = N_f·(q_f + q_c)) ⇒
+                # calf 관절은 foot 로터 관성도 짊어진다. 파생 형태는
+                #     M_refl = I_r·[[N_c² + N_f²,  N_f²],   =  [[0.1338,  0.0522],
+                #                   [N_f²,         N_f²]]       [0.0522,  0.0522]]
+                # 이고, 대각 두 개가 여기 armature 다. off-diagonal 은 PhysX 가 표현할 수 없어
+                # env 의 `foot_reflected_inertia` 항이 명시적 보정토크로 넣는다.
+                # ⚠ env 는 I_off 를 **foot 대각 armature 에서 읽는다** — 파생값에서는 둘이 같은
+                #   양(`I_r·N_f²`)이었기 때문이다. 식별값에서는 그 항등식이 더 이상 성립하지
+                #   않지만, **sysid env 도 같은 규칙으로 재생하며 적합했으므로**(같은 슬롯을
+                #   대각·off-diagonal 양쪽에 씀) 여기 옮겨도 적합 당시와 같은 플랜트가 된다.
+                #   규칙을 바꿀 때는 PACE 재적합이 필요하다.
+                ".*_calf_joint": 0.2304,  # 파생 0.1338 × 1.72
+                ".*_foot_joint": 0.0834,  # 파생 0.0522 × 1.60  (= off-diagonal 로도 읽힌다)
             },
-            # 실측 관절 마찰/감쇠 (hip 2축 실측, 타축 외삽 — RL_INTERFACE.md §6-a).
+            # 관절 마찰 — 위 armature 와 같은 출처(PACE 0819 좌우평균). 종전 값은 전 관절 균일
+            # 0.38 / 0.09 였는데, 그건 hip 2 축 실측 + 타축 외삽이었다(RL_INTERFACE.md §6-a).
             # Isaac ≥5.0에서 friction/dynamic_friction은 계수가 아니라 effort [N·m]다.
             # URDF <dynamics friction>은 physx variant 레이어에 묻혀 sim에 반영되지 않는 것을
             # 스모크로 확인(해상표 "Not Specified") → cfg로 명시 주입한다.
-            # ⚠ 실기는 Stribeck(정지 0.63~0.71 N·m, 동 0.505~0.575)이라 상수 0.38은
-            #   저속을 25~35% 과소평가한다(§6-e) — DR 후보. PACE 식별값이 나오면 덮어쓸 것.
-            friction={".*": 0.38},
-            dynamic_friction={".*": 0.38},
-            viscous_friction={".*": 0.09},
+            #
+            # ⚠ PACE 는 **정지/동마찰을 구분하지 않는다**(coulomb 한 항). 실기는 Stribeck 이라
+            #   (정지 0.63~0.71 N·m, 동 0.505~0.575) 저속에서 여전히 갭이 남는다 — §37-e-2 가
+            #   "kd 를 바꾸면 한 플랜트로 둘 다 못 맞춘다"의 원인 후보로 지목한 것이 이것이다.
+            friction={
+                ".*_hip_joint": 0.7768,
+                ".*_thigh_joint": 0.5780,
+                ".*_calf_joint": 0.9191,
+                ".*_foot_joint": 0.8499,
+            },
+            dynamic_friction={
+                ".*_hip_joint": 0.7768,
+                ".*_thigh_joint": 0.5780,
+                ".*_calf_joint": 0.9191,
+                ".*_foot_joint": 0.8499,
+            },
+            viscous_friction={
+                ".*_hip_joint": 0.6366,
+                ".*_thigh_joint": 0.1957,
+                ".*_calf_joint": 0.6186,
+                ".*_foot_joint": 0.0337,  # ★ 유일하게 종전(0.09)보다 **작다** — ×0.37
+            },
             # PD gains — **실기 드라이버 게인의 관절 공간 환산** (2026-08-18).
             #
             # 이전 값(65/53/12/20 + 6/4.8/1.1/1.0)은 구 모델 I_eff 기반 **설계값**이었고 실기와
@@ -579,7 +618,7 @@ HIND_LEG_CFG = ArticulationCfg(
             # ⚠ **n = 2 는 채택이지 확정이 아니다** (`GAIN_GEAR_SCALE`/`DEFAULT_GAIN_EXPONENT` 와
             #   같은 베팅, 재적합에서 "약한 지지"). n 이 뒤집히면 calf 112.5→75, foot 28.8→24 다.
             #   calf 는 **어느 n 이든 옛 값 12 보다 4.2~9.4 배 단단하다** — 격차 자체는 n 과 무관.
-            #   근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §13
+            #   근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md §13
             stiffness={
                 ".*_hip_joint": 100.0,  # 100 × 1.0²
                 ".*_thigh_joint": 50.0,  # 50 × 1.0²

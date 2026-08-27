@@ -20,8 +20,8 @@ Isaac 앱 없이 순수 torch + rsl_rl 로 로드한다 (mock env). conda isaac-
 
 실행:
     CUDA_VISIBLE_DEVICES=0 python scripts/real2sim/export_deployable_bipedleg.py \
-        --run_dir logs/rsl_rl/hindLeg_history_direct/2026-07-22_18-05-50_history_60_baseline \
-        --checkpoint model_23100.pt
+        --run_dir logs/rsl_rl/hindLeg_history_direct/2026-08-26_13-41-55_pace0819sym \
+        --checkpoint model_50000.pt
     # → <run_dir>/exported/deployable_policy.pt  (torch.jit)
 """
 

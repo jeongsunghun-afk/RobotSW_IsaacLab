@@ -1,7 +1,18 @@
 # R2S-BipedLeg Policy Mode 구현 SPEC
 
-학습된 hind_leg history 정책(`model_23100.pt`)을 gui_controller에서 policy mode로 구동.
+학습된 hind_leg history 정책을 gui_controller에서 policy mode로 구동.
 초기 요구(사용자): ①policy mode ②x_vel/yaw command UI ③action을 sim+real 동시 전송.
+
+> **모델 선택 (2026-08-26 갱신)** — 특정 체크포인트를 박아 두지 않는다. GUI 의 Plant 그룹에
+> **Policy model 콤보**가 붙어 `logs/rsl_rl/hindLeg_history_direct/*/exported/deployable_policy.pt`
+> 를 훑고, **Plant 라디오와 같은 플랜트로 학습된 최신 정책**을 자동 선택한다.
+> 플랜트 판정은 run 의 `params/env.yaml` 에 기록된 actuator 블록으로 한다(run 이름이 아니다):
+> foot viscous `0.09`=stock · `0.0337`=PACE(현재 `rga.py`) · 없음=legacy.
+> 학습 계약(obs 34 · action_scale · gait_period · step_dt · command range)이 GUI 상수와
+> 어긋나는 후보는 **사유를 달아 선택 불가**로 표시한다. `--model` 로 명시하면 목록 맨 위에 얹힌다.
+>
+> 왜 바뀌었나: 종전에는 `_DEFAULT_MODEL_PATH` 로 `2026-07-22` run 을 박아 뒀는데, `rga.py` 플랜트가
+> 바뀌어도 그 상수는 안 따라와서 **없어진 로봇용 정책**이 조용히 기본값이 됐다.
 
 ## 확정 아키텍처 (검증 완료 2026-07-23)
 

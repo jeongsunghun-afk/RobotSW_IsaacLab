@@ -33,11 +33,14 @@ Isaac Sim은 띄우지 않는다 (torch만 필요).
 1. **균일 그리드 정렬** — 명령(50 Hz 발행시각)과 실기 TELEM(≈50 Hz 도착시각)이 비동기이므로,
    물리 그리드(기본 200 Hz)에 명령은 ZOH(브리지가 마지막 ACT를 유지, slew 기본 0), 실측은 선형보간으로 얹는다.
 2. **foot 좌표** — 0번 정규화를 거치면 foot 항은 **항상 raw각**(q_foot+q_calf)이다(명령·실측 모두).
-   ★**기본은 raw 유지**(``--keep_raw_foot``)다. 현재 sysid env 는 ``foot_coupling=True``
-   (``r2s_biped_leg_sysid_cfg.py:221``)로 **데이터도 재생도 채점도 전부 raw** 규약이며, 그게 옳다 —
-   엔코더가 raw 만 재므로 관절각으로 바꾸면 calf 의 측정 잡음이 foot 채널에 섞이고 커플링 계수
-   가정이 데이터에 구워진다.
-   ``--keep_raw_foot`` 를 끄면(구 규약) 관절각으로 변환한다:
+   ★**적합에 쓰려면 ``--keep_raw_foot`` 를 반드시 붙여야 한다.** 현재 sysid env 는
+   ``foot_coupling=True`` (``r2s_biped_leg_sysid_cfg.py:221``)로 **데이터도 재생도 채점도 전부
+   raw** 규약이며, 그게 옳다 — 엔코더가 raw 만 재므로 관절각으로 바꾸면 calf 의 측정 잡음이
+   foot 채널에 섞이고 커플링 계수 가정이 데이터에 구워진다.
+   ⚠ **CLI 기본값은 raw 가 아니다** (``store_true``, 기본 off = 관절각 변환). 권장값과 기본값이
+   어긋나 있으니 명령을 그대로 복사해 쓸 것. 빠뜨리면 ``fit_bipedleg.py`` 가 ``coupling_converted``
+   를 보고 거부한다 — 조용히 틀리지는 않지만, 적합을 띄운 뒤에야 알게 된다(2026-08-25 실제 발생).
+   ``--keep_raw_foot`` 를 안 주면(구 규약) 관절각으로 변환한다:
    ``q_foot_joint = q_raw − q_calf(실측)``, ``des_foot_joint = raw_cmd − q_calf(실측)``.
    ⚠ 그 경로의 모델 갭: 실기 foot PD 의 kd 는 (q̇_f+q̇_c)에 걸리는데 재생은 q̇_f 만 보고,
    foot 모터 토크의 calf 전치(τ_c += τ_f)도 재생에 없다 — calf·foot 식별에 오차가 들어간다.
@@ -54,8 +57,8 @@ Isaac Sim은 띄우지 않는다 (torch만 필요).
     # 판정만
     /home/user/miniconda3/envs/isaac-6.0/bin/python3.12 scripts/real2sim/convert_gui_chirp_bipedleg.py \\
         --captures 'data/bipedleg_gui/chirp_gui_2026*.npz'
-    # 변환 저장
-    ... --out_dir data/bipedleg_real
+    # 변환 저장 — 적합용이면 --keep_raw_foot 필수 (2번 항목 참조)
+    ... --out_dir data/bipedleg_real --keep_raw_foot
 """
 
 from __future__ import annotations

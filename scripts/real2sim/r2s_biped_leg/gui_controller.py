@@ -128,16 +128,16 @@ except ImportError:  # pragma: no cover - numpy 미설치 경로
     motion_clips = None
     _MOTION_OK = False
 
-# 기본 deployable 모델 경로 (export_deployable_bipedleg.py 산출물).
-_DEFAULT_MODEL_PATH: str = os.path.join(
+# 학습 run 이 쌓이는 곳. 여기서 export 된 정책 후보를 훑는다.
+# ⚠ 종전에는 `_DEFAULT_MODEL_PATH` 로 특정 run(2026-07-22 baseline)을 박아 뒀는데, 플랜트가
+#   바뀌어도 그 상수는 안 따라와서 **없어진 로봇용 정책**을 조용히 기본값으로 쓰게 됐다.
+#   이제 스캔해서 플랜트가 맞는 것을 고른다 (`scan_policy_candidates`).
+_RUNS_ROOT: str = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "..",
     "logs",
     "rsl_rl",
     "hindLeg_history_direct",
-    "2026-07-22_18-05-50_history_60_baseline",
-    "exported",
-    "deployable_policy.pt",
 )
 
 # --- policy obs/target 계약 (policy_runner_bipedleg.py 와 bit-parity) ---
@@ -150,6 +150,137 @@ STEP_DT: float = 0.02  # s (decimation 4 / 200 Hz) → 50 Hz control
 DEFAULT_JOINT_POS: list[float] = [0.0] * NUM_JOINTS  # hind_leg USD default 전부 0
 X_VEL_RANGE: tuple[float, float] = (-0.5, 2.0)
 YAW_RANGE: tuple[float, float] = (-0.5, 0.5)
+
+# ── 정책 후보 스캔 ───────────────────────────────────────────────────────────────────────
+#
+# 학습 run 마다 플랜트가 다르다. 정책은 자기가 학습한 플랜트를 전제로 움직이므로, **어느 플랜트로
+# 학습됐는지**를 모델 옆에 붙여 두지 않으면 조용히 엉뚱한 정책을 실기에 올리게 된다.
+#
+# 판별은 run 의 `params/env.yaml` 에서 한다 — run 이름이 아니라 **실제로 학습에 쓰인 actuator
+# 블록**이 거기 기록돼 있기 때문이다. foot viscous 한 필드가 세대를 전부 가른다:
+#
+#     0.09    stock (rga.py 2026-08-26 이전, 전 관절 균일)
+#     0.0337  PACE 0819 좌우평균 (현재 rga.py — README §38)
+#     없음     legacy (viscous 주입 이전 run)
+_PLANT_STOCK: str = "stock"
+_PLANT_PACE: str = "PACE"
+_PLANT_UNKNOWN: str = "legacy"
+_PLANT_FOOT_VISCOUS: dict[str, float] = {_PLANT_STOCK: 0.09, _PLANT_PACE: 0.0337}
+_PLANT_MATCH_TOL: float = 5e-4
+
+# 정책이 GUI 와 맞물리려면 학습 env 가 이 값들이어야 한다. 하나라도 다르면 obs 가 어긋나거나
+# 목표각 스케일이 달라져 **조용히** 다른 동작이 나온다 — 후보에서 제외하고 사유를 보여 준다.
+# (`dt × decimation` 은 STEP_DT 와 비교하므로 여기 목록에 없다)
+_ENV_CONTRACT: dict[str, object] = {
+    "observation_space": POLICY_DIM,
+    "action_scale": ACTION_SCALE,
+    "gait_period": GAIT_PERIOD,
+}
+
+
+def _env_yaml_load(path: str) -> dict:
+    """IsaacLab 이 저장한 ``params/env.yaml`` 을 읽는다.
+
+    ``yaml.safe_load`` 는 IsaacLab 이 남기는 ``python/tuple`` 등의 태그에서 죽는다. 그렇다고
+    ``unsafe_load`` 를 쓰면 임의 코드 실행 경로가 열리므로, **파이썬 태그를 평범한 컨테이너로
+    떨어뜨리는** 로더를 쓴다 — 우리가 보는 필드는 전부 스칼라·리스트·딕트다.
+
+    Args:
+        path: ``params/env.yaml`` 경로.
+
+    Returns:
+        파싱된 dict.
+    """
+    import yaml
+
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    def _plain(loader, suffix, node):  # noqa: ARG001 - multi_constructor 시그니처
+        if isinstance(node, yaml.SequenceNode):
+            return loader.construct_sequence(node)
+        if isinstance(node, yaml.MappingNode):
+            return loader.construct_mapping(node)
+        return loader.construct_scalar(node)
+
+    _Loader.add_multi_constructor("tag:yaml.org,2002:python/", _plain)
+    _Loader.add_multi_constructor("!", _plain)
+    with open(path) as f:
+        return yaml.load(f, Loader=_Loader) or {}
+
+
+def _classify_plant(env: dict) -> str:
+    """학습 env 의 actuator 블록에서 플랜트 세대를 판정한다 (위 표 참조)."""
+    legs = (env.get("robot") or {}).get("actuators", {}).get("legs", {}) or {}
+    visc = legs.get("viscous_friction")
+    if isinstance(visc, dict):
+        foot = visc.get(".*_foot_joint", visc.get(".*"))
+    else:
+        foot = visc
+    if foot is None:
+        return _PLANT_UNKNOWN
+    for tag, ref in _PLANT_FOOT_VISCOUS.items():
+        if abs(float(foot) - ref) <= _PLANT_MATCH_TOL:
+            return tag
+    return _PLANT_UNKNOWN
+
+
+def _contract_mismatch(env: dict) -> str:
+    """GUI 하드코딩 계약과 어긋나는 항목을 문자열로 돌려준다. 맞으면 빈 문자열."""
+    bad = []
+    for key, want in _ENV_CONTRACT.items():
+        got = env.get(key)
+        if got is None or abs(float(got) - float(want)) > 1e-9:  # type: ignore[arg-type]
+            bad.append(f"{key}={got}≠{want}")
+    dt = (env.get("sim") or {}).get("dt")
+    dec = env.get("decimation")
+    if dt is None or dec is None or abs(float(dt) * int(dec) - STEP_DT) > 1e-9:
+        bad.append(f"step_dt={dt}×{dec}≠{STEP_DT}")
+    cmd = env.get("command_cfg") or {}
+    for key, want_range in (("lin_vel_x_range", X_VEL_RANGE), ("ang_vel_range", YAW_RANGE)):
+        got = cmd.get(key) or env.get(key)
+        if got is None or len(got) != 2 or abs(got[0] - want_range[0]) > 1e-9 or abs(got[1] - want_range[1]) > 1e-9:
+            bad.append(f"{key}={got}≠{list(want_range)}")
+    return " · ".join(bad)
+
+
+def scan_policy_candidates(runs_root: str = _RUNS_ROOT) -> list[dict]:
+    """export 된 deployable 정책을 훑어 후보 목록을 만든다 (최신순).
+
+    Args:
+        runs_root: 학습 run 디렉터리들의 부모.
+
+    Returns:
+        dict 목록. 키는 ``path`` · ``run`` · ``mtime`` · ``plant`` · ``reason``
+        (``reason`` 이 비어 있으면 선택 가능).
+    """
+    import glob
+
+    out: list[dict] = []
+    for path in glob.glob(os.path.join(runs_root, "*", "exported", "deployable_policy.pt")):
+        run_dir = os.path.dirname(os.path.dirname(path))
+        entry = {
+            "path": os.path.normpath(path),
+            "run": os.path.basename(run_dir),
+            "mtime": os.path.getmtime(path),
+            "plant": _PLANT_UNKNOWN,
+            "reason": "",
+        }
+        env_yaml = os.path.join(run_dir, "params", "env.yaml")
+        if not os.path.isfile(env_yaml):
+            entry["reason"] = "params/env.yaml 없음 — 학습 계약을 확인할 수 없다"
+        else:
+            try:
+                env = _env_yaml_load(env_yaml)
+            except Exception as exc:  # noqa: BLE001 - 어떤 파싱 실패든 후보에서 빼면 된다
+                entry["reason"] = f"env.yaml 파싱 실패 ({type(exc).__name__})"
+            else:
+                entry["plant"] = _classify_plant(env)
+                entry["reason"] = _contract_mismatch(env)
+        out.append(entry)
+    out.sort(key=lambda e: e["mtime"], reverse=True)
+    return out
+
 
 FRAME_HZ: float = 50.0  # 시퀀스 프레임 생성 주파수 (publisher가 경과 시간으로 인덱싱)
 PUBLISH_HZ: float = 50.0
@@ -977,6 +1108,10 @@ class MainWindow(QMainWindow):
         # UI가 잠깐 멈춰도(사용자 조작) publisher가 목표 생성·발행을 계속한다.
         self._shared = shared
         # policy mode: deployable jit 경로/디바이스. 모델이 있고 torch가 있어야 policy UI 활성.
+        # ⚠ 2026-08-26 부터 **기본은 자동 스캔**이다 — `_build_plant_group` 의 Policy model 콤보가
+        #   `scan_policy_candidates()` 로 후보를 찾아 플랜트에 맞는 것을 고르고 여기에 써 넣는다.
+        #   `--model` 을 준 경우에만 그 경로가 `_model_override` 로 목록 맨 위에 얹힌다.
+        self._model_override = model_path
         self._model_path = model_path
         self._device = device
         self._real_host = real_host
@@ -1392,20 +1527,32 @@ class MainWindow(QMainWindow):
     # -- plant params UI --
 
     def _build_plant_group(self) -> QGroupBox:
-        """Plant 그룹 — 스톡 actuator cfg vs PACE 식별 파라미터 선택 적용.
+        """Plant 그룹 — sim 플랜트 물성 선택 적용 + 그 플랜트로 학습된 정책 선택.
 
         Apply는 PLANT(R2PP) 패킷을 CMD 포트로 one-shot 송신한다(publisher 미개입 —
         50Hz 명령 스트림과 크기·magic이 달라 sim_runner drain에서 안전하게 갈린다).
-        PACE json이 없거나 깨졌으면 라디오를 비활성화하고 사유를 표시한다.
+
+        ⚠ **라벨을 2026-08-26 에 고쳤다.** 종전에는 "Stock cfg" / "PACE identified" 였는데
+        둘 다 거짓이 됐었다 — `rga.py` 에 PACE 값이 반영되면서(README §38) mode 0 이 복원하는
+        `robot.data.default_*` 자체가 PACE 가 됐고, json 은 08-13 의 **폐기된** 적합이었다.
+        지금은 세 갈래 전부 무엇을 싣는지 이름에 적는다.
+
+        ⚠ PLANT 패킷은 **sim_runner 에만** 간다(127.0.0.1 CMD 포트). 실기 로봇은 이 라디오와
+        무관하다 — 실기 쪽에서 이 선택의 의미는 "어느 sim 에서 학습된 정책을 고를까" 뿐이다.
         """
-        group = QGroupBox("Plant (sim physics params)")
+        group = QGroupBox("Plant (sim physics) + policy")
         v = QVBoxLayout(group)
         row = QHBoxLayout()
-        self._plant_stock_radio = QRadioButton("Stock cfg")
-        self._plant_stock_radio.setChecked(True)
-        self._plant_pace_radio = QRadioButton("PACE identified")
-        row.addWidget(self._plant_stock_radio)
-        row.addWidget(self._plant_pace_radio)
+        # mode 0 — env 가 init 때 캐시해 둔 `robot.data.default_*` 복원. 그 출처가 rga.py 다.
+        self._plant_default_radio = QRadioButton("rga.py default (PACE 0819-sym)")
+        self._plant_default_radio.setChecked(True)
+        # mode 1 + 파생값 — PACE 이전 플랜트를 sim 에서 되살려 A/B 하는 용도.
+        self._plant_stock_radio = QRadioButton("Stock (파생 I_r·N²)")
+        # mode 1 + json — 다른 적합을 실어 볼 때. 지금 json 은 default 와 같은 값이다.
+        self._plant_pace_radio = QRadioButton("PACE json")
+        for w in (self._plant_default_radio, self._plant_stock_radio, self._plant_pace_radio):
+            row.addWidget(w)
+            w.toggled.connect(self._refresh_model_combo)
         plant_btn = QPushButton("Apply Plant")
         plant_btn.setObjectName("primaryButton")
         plant_btn.clicked.connect(self._on_plant_apply_clicked)
@@ -1416,36 +1563,145 @@ class MainWindow(QMainWindow):
             src = str(self._pace_params.get("source_run", "?"))
             delay = self._pace_params.get("delay_ms_unapplied", "?")
             src_short = f"{os.path.basename(os.path.dirname(src))}/{os.path.basename(src)}"
-            info = f"PACE params: {src_short}  (bias/delay {delay}ms not applied)"
+            info = f"PACE json: {src_short}  (bias/delay {delay}ms not applied) · PLANT 패킷은 sim 전용"
         else:
             self._plant_pace_radio.setEnabled(False)
-            info = f"PACE params unavailable: {self._pace_params_err}"
+            info = f"PACE json unavailable: {self._pace_params_err} · PLANT 패킷은 sim 전용"
         info_label = QLabel(info)
         info_label.setWordWrap(True)
         v.addWidget(info_label)
+
+        # ── 정책 모델 선택 ────────────────────────────────────────────────────────────
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Policy model:"))
+        self._model_combo = QComboBox()
+        self._model_combo.setMinimumWidth(420)
+        self._model_combo.currentIndexChanged.connect(self._on_model_selected)
+        model_row.addWidget(self._model_combo, stretch=1)
+        rescan_btn = QPushButton("Rescan")
+        rescan_btn.clicked.connect(lambda: self._refresh_model_combo(rescan=True))
+        model_row.addWidget(rescan_btn)
+        v.addLayout(model_row)
+        self._model_info_label = QLabel("")
+        self._model_info_label.setWordWrap(True)
+        v.addWidget(self._model_info_label)
+        self._refresh_model_combo(rescan=True)
         return group
 
-    def _on_plant_apply_clicked(self) -> None:
-        use_pace = self._plant_pace_radio.isChecked()
-        if use_pace and self._pace_params is None:
+    def _selected_plant_tag(self) -> str:
+        """지금 선택된 라디오가 가리키는 플랜트 세대."""
+        if self._plant_stock_radio.isChecked():
+            return _PLANT_STOCK
+        return _PLANT_PACE  # rga.py default 와 PACE json 은 둘 다 PACE 0819-sym 이다
+
+    def _refresh_model_combo(self, rescan: bool = False) -> None:
+        """플랜트 선택에 맞는 정책 후보로 콤보를 다시 채운다 (최신순, 일치하는 것이 맨 위).
+
+        후보를 **지우지는 않는다** — 플랜트가 다르거나 계약이 어긋나는 것도 사유를 붙여 보여 준다.
+        조용히 사라지면 "왜 내 모델이 목록에 없지"가 되고, 그러면 결국 아무거나 고르게 된다.
+        """
+        if rescan or not hasattr(self, "_policy_candidates"):
+            self._policy_candidates = scan_policy_candidates()
+            # `--model` 로 명시한 경로가 스캔에 안 잡히면(다른 experiment_name 등) 직접 얹는다.
+            # 사람이 손으로 지목한 것을 목록에서 빼는 쪽이 더 나쁜 놀람이다.
+            override = getattr(self, "_model_override", None)
+            if override and not any(c["path"] == override for c in self._policy_candidates):
+                self._policy_candidates.insert(
+                    0,
+                    {
+                        "path": override,
+                        "run": f"--model {os.path.basename(os.path.dirname(os.path.dirname(override)))}",
+                        "mtime": os.path.getmtime(override) if os.path.isfile(override) else 0.0,
+                        "plant": _PLANT_UNKNOWN,
+                        "reason": "" if os.path.isfile(override) else "파일 없음",
+                    },
+                )
+        want = self._selected_plant_tag()
+        # 일치(플랜트 같고 계약 통과) → 그 외 순. 각 그룹 안에서는 최신순(스캐너가 이미 정렬).
+        ranked = sorted(
+            self._policy_candidates,
+            key=lambda c: (0 if (c["plant"] == want and not c["reason"]) else 1, -c["mtime"]),
+        )
+        self._model_combo.blockSignals(True)
+        self._model_combo.clear()
+        for c in ranked:
+            marks = []
+            if c["plant"] != want:
+                marks.append(f"plant={c['plant']}≠{want}")
+            if c["reason"]:
+                marks.append(c["reason"])
+            suffix = f"   ⚠ {' · '.join(marks)}" if marks else "   ✓"
+            self._model_combo.addItem(f"[{c['plant']}] {c['run']}{suffix}", c["path"])
+        self._model_combo.blockSignals(False)
+        if not ranked:
+            self._model_info_label.setText(
+                f"deployable_policy.pt 후보 없음 — export_deployable_bipedleg.py 로 먼저 내보낼 것 ({_RUNS_ROOT})"
+            )
             return
-        if use_pace:
+        self._model_combo.setCurrentIndex(0)
+        self._on_model_selected(0)
+
+    def _on_model_selected(self, index: int) -> None:
+        """콤보 선택 → 추론에 쓸 모델 경로 갱신. 정책 구동 중에는 거절한다."""
+        if index < 0 or self._model_combo.count() == 0:
+            return
+        path = self._model_combo.itemData(index)
+        if self._policy_thread is not None:
+            self._model_info_label.setText(
+                "⚠ 정책 구동 중에는 모델을 바꿀 수 없다 — Position mode 로 내린 뒤 다시 고를 것"
+            )
+            return
+        cand = next((c for c in self._policy_candidates if c["path"] == path), None)
+        if cand is None:
+            return
+        want = self._selected_plant_tag()
+        if cand["reason"]:
+            self._model_info_label.setText(f"✗ 사용 불가 — {cand['reason']}")
+            self._model_path = None
+        elif cand["plant"] != want:
+            # 막지는 않는다. 실기에서는 플랜트 라디오가 아무 영향이 없으므로 "다른 sim 에서 학습된
+            # 정책을 굳이 올려 본다"가 정당할 때가 있다. 다만 눈에 띄게 적는다.
+            self._model_info_label.setText(
+                f"⚠ 플랜트 불일치 — 이 정책은 '{cand['plant']}' 로 학습됐는데 선택은 '{want}' 다. "
+                "sim 이면 Apply Plant 로 맞추고, 실기면 이 정책이 전제한 로봇과 실기가 다르다는 뜻이다."
+            )
+            self._model_path = path
+        else:
+            self._model_info_label.setText(f"✓ {path}")
+            self._model_path = path
+        self._policy_available = self._model_path is not None and _TORCH_OK and os.path.isfile(self._model_path)
+        if hasattr(self, "_mode_combo"):
+            self._mode_combo.model().item(1).setEnabled(self._policy_available)
+
+    def _on_plant_apply_clicked(self) -> None:
+        stock = self._plant_stock_radio.isChecked()
+        pace_json = self._plant_pace_radio.isChecked()
+        if stock:
+            # 파생 반사관성 + PACE 이전 균일 마찰 (README §38-b 의 `stock` 집합과 같은 값).
+            arma = [0.0363, 0.0363, 0.1338, 0.0522] * 2
+            visc = [0.09] * NUM_JOINTS
+            coulomb = [0.38] * NUM_JOINTS
+            pkt = r2s_udp.pack_plant(1, 1, arma, visc, coulomb)
+            msg = "Plant: stock (파생 I_r·N² + 균일마찰) sent to sim"
+        elif pace_json:
             p = self._pace_params
+            if p is None:
+                return
             arma = [float(p["armature"][n]) for n in motions.JOINT_NAMES]
             visc = [float(p["viscous"][n]) for n in motions.JOINT_NAMES]
             coulomb = [float(p["coulomb"][n]) for n in motions.JOINT_NAMES]
             pkt = r2s_udp.pack_plant(1, 1, arma, visc, coulomb)
+            msg = "Plant: PACE json sent to sim"
         else:
             zeros = [0.0] * NUM_JOINTS
             pkt = r2s_udp.pack_plant(1, 0, zeros, zeros, zeros)
+            msg = "Plant: rga.py default (PACE 0819-sym) restore sent to sim"
         tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             tx.sendto(pkt, (HOST, r2s_udp.CMD_PORT))
         finally:
             tx.close()
-        self._status_label.setText(
-            "Plant: PACE identified params sent to sim" if use_pace else "Plant: stock cfg restore sent to sim"
-        )
+        self._status_label.setText(msg)
 
     # -- joint sliders UI --
 
@@ -2375,9 +2631,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="R2S-BipedLeg GUI controller (position + GUI 내부 policy 추론).")
     parser.add_argument(
         "--model",
-        default=_DEFAULT_MODEL_PATH,
-        help="deployable jit 경로 (기본: history_60_baseline/exported/deployable_policy.pt). "
-        "없으면 Policy mode 비활성.",
+        default=None,
+        help="deployable jit 경로를 명시적으로 지정한다. **기본은 자동 스캔** — "
+        f"{os.path.relpath(_RUNS_ROOT, _REPO_ROOT)}/*/exported/deployable_policy.pt 를 훑어 "
+        "Plant 라디오와 같은 플랜트로 학습된 최신 정책을 고른다(GUI 의 Policy model 콤보에서 변경 가능). "
+        "이 옵션을 주면 그 경로가 목록 맨 위에 얹힌다.",
     )
     parser.add_argument(
         "--device",
