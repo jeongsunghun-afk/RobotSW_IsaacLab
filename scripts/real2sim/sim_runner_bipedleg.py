@@ -377,7 +377,14 @@ def _run_unified_loop(env, conv_ver: int) -> None:
     #   이게 없으면 정책 50 Hz(20 ms) 사이에 5 ms 타임아웃이 3 번 터져 슬라이더 경로가 끼어들고,
     #   결과적으로 정책 1 action 당 4 step 이 돌아 **lockstep 불변식이 조용히 깨진다**.
     #   `_run_policy_loop` 가 타임아웃에 step 없이 continue 하는 것과 같은 취지다.
-    policy_own_s = 0.2
+    #
+    # ⚠ 값이 **1.0 s** 인 이유 — 비용이 비대칭이다.
+    #   너무 길면: 정책이 멈춘 뒤 슬라이더가 최대 1 s 늦게 듣는다 (불편할 뿐).
+    #   너무 짧으면: 정책이 조금만 느려져도 슬라이더 스텝이 끼어들어 **lockstep 이 깨진다** (치명적).
+    #   처음엔 0.2 s 였는데 그게 하필 GUI 의 state 대기 타임아웃(`recv_state_blocking` 기본 0.2 s)과
+    #   **같은 값**이라, GUI 가 한 틱이라도 늦으면 정확히 경계에서 소유권이 떨었다
+    #   (증상: 로그에 "정책이 차지 / 슬라이더가 차지"가 반복). 두 임계를 붙여 두면 안 된다.
+    policy_own_s = 1.0
     last_pol_t = float("-inf")
     was_policy = False
     try:

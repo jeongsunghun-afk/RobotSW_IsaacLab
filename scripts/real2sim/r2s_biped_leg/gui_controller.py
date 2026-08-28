@@ -163,6 +163,10 @@ _ROUTE_VALUES_SIM: list[int] = [-1, 0, 1]
 #   사라졌고, 남겨 두면 두 세계의 자세 차가 그대로 실기 명령이 되는 위험만 남는다.
 #   검증 계단은 **sim obs → sim** 과 **real obs → real** 둘뿐이다.
 _ROUTE_ITEMS_REAL: list[str] = ["off (hold)", "action from REAL obs"]
+
+# 배선된 state 출처가 이 횟수만큼 연속으로 무응답이면 blocking 대기에서 뺀다.
+# 3 틱 = 약 0.6 s (출처당 대기 0.2 s) — 일시적 끊김은 견디고 진짜 부재는 빨리 놓아준다.
+_SILENT_TICKS_LIMIT: int = 3
 _ROUTE_VALUES_REAL: list[int] = [-1, 1]
 _ROUTE_INDEX_SIM: dict[int, int] = {-1: 0, 0: 1, 1: 2}
 _ROUTE_INDEX_REAL: dict[int, int] = {-1: 0, 1: 1}
@@ -585,6 +589,8 @@ class PolicyInferenceThread(QThread):
         seq = 0
         prev_mode = 0
         last_state = {r2s_udp.POLICY_SRC_SIM: None, r2s_udp.POLICY_SRC_REAL: None}
+        # 출처별 연속 무응답 틱 수 — `_SILENT_TICKS_LIMIT` 을 넘으면 blocking 대기에서 뺀다.
+        silent_ticks: dict[int, int] = {}
 
         def recv_state_blocking(sock, timeout: float = 0.2):
             """소켓에서 state 하나 blocking 대기 후 latest-wins drain. 없으면 None."""
@@ -649,10 +655,44 @@ class PolicyInferenceThread(QThread):
                         pkt = r2s_udp.unpack_policy_state(d)
                         if pkt is not None:
                             last_state[src] = pkt
+                # ★ 2026-08-28: **침묵한 출처는 blocking 대기에서 뺀다.**
+                #   `recv_state_blocking` 은 출처마다 0.2 s 를 기다린다. 배선된 출처 하나가 죽어
+                #   있으면(예: 실기 브리지 미기동) 매 틱 그 0.2 s 를 통째로 버려서 **살아 있는
+                #   출처까지 같이 느려진다** — 실측으로 정책이 50 Hz → 약 5 Hz 로 떨어졌고,
+                #   sim 쪽에서는 소유권이 정책↔슬라이더로 떨렸다(로그 왕복).
+                #   ⚠ 배선을 끄지 않는다 — 죽은 갈래도 되살아나면 즉시 다시 쓴다. 드레인은 계속
+                #     하므로 첫 패킷이 오는 순간 `silent` 가 풀린다.
                 for src in sorted(needed):
-                    st = recv_state_blocking(socks[src])
+                    if silent_ticks.get(src, 0) >= _SILENT_TICKS_LIMIT:
+                        # 침묵 판정 — 논블로킹으로만 확인하고 넘어간다(이 갈래 때문에 못 멈춘다).
+                        socks[src].setblocking(False)
+                        st = None
+                        while True:
+                            try:
+                                d, _ = socks[src].recvfrom(4096)
+                            except (BlockingIOError, OSError):
+                                break
+                            pkt = r2s_udp.unpack_policy_state(d)
+                            if pkt is not None:
+                                st = pkt
+                        if st is None:
+                            silent_ticks[src] += 1
+                            continue
+                        silent_ticks[src] = 0
+                        print(f"[gui_infer] {_SRC_NAME.get(src, src)} state 복귀 — 다시 대기 대상", flush=True)
+                    else:
+                        st = recv_state_blocking(socks[src])
                     if st is None:
+                        silent_ticks[src] = silent_ticks.get(src, 0) + 1
+                        if silent_ticks[src] == _SILENT_TICKS_LIMIT:
+                            print(
+                                f"[gui_infer] ⚠ {_SRC_NAME.get(src, src)} state 무응답 "
+                                f"{_SILENT_TICKS_LIMIT}틱 — blocking 대기에서 제외한다"
+                                " (배선은 유지, 오면 즉시 복귀). 안 그러면 나머지 갈래까지 느려진다.",
+                                flush=True,
+                            )
                         continue
+                    silent_ticks[src] = 0
                     if st["convention_version"] != _REQUIRED_CONVENTION_VERSION:
                         self.failed.emit(
                             f"coordinate convention mismatch: got v{st['convention_version']}, "

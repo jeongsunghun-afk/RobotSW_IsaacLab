@@ -87,6 +87,11 @@ HOST = "127.0.0.1"
 # 이고 raw↔관절 변환은 브리지(real_runner)가 전담하므로, 관절 좌표를 신고하는 버전만 받는다.
 _REQUIRED_CONVENTION_VERSION: int = 1
 
+# 배선된 state 출처가 이 횟수만큼 연속 무응답이면 blocking 대기에서 뺀다 (:func:`_collect_states`).
+# 3 틱 = 약 0.6 s (출처당 0.2 s) — 일시적 끊김은 견디고 진짜 부재는 빨리 놓아준다.
+_SILENT_TICKS_LIMIT: int = 3
+_silent_ticks: dict[int, int] = {}
+
 
 # ---------------------------------------------------------------------------
 # 정책 로드 (mock env; Isaac 앱 없음) — verify_policy_load.py 로 검증된 경로
@@ -242,9 +247,40 @@ def _collect_states(socks: dict, needed: set, last_state: dict, recv_blocking) -
                 last_state[src] = pkt
     got_any = False
     for src in sorted(needed):
-        st = recv_blocking(socks[src])
+        # ★ 2026-08-28: **침묵한 출처는 blocking 대기에서 뺀다.**
+        #   `recv_blocking` 은 출처마다 0.2 s 를 기다린다. 배선된 출처 하나가 죽어 있으면
+        #   매 틱 그 0.2 s 를 통째로 버려 **살아 있는 출처까지 같이 느려진다** — GUI 쪽 실측으로
+        #   정책이 50 Hz → 약 5 Hz 로 떨어졌다. 배선은 끄지 않는다(드레인은 계속하므로 되살아나면
+        #   즉시 복귀). 같은 수정: `gui_controller.PolicyInferenceThread`.
+        if _silent_ticks.get(src, 0) >= _SILENT_TICKS_LIMIT:
+            socks[src].setblocking(False)
+            st = None
+            while True:
+                try:
+                    data, _ = socks[src].recvfrom(4096)
+                except (BlockingIOError, OSError):
+                    break
+                pkt = unpack_policy_state(data)
+                if pkt is not None:
+                    st = pkt
+            if st is None:
+                _silent_ticks[src] += 1
+                continue
+            _silent_ticks[src] = 0
+            print(f"[policy_runner] {'real' if src == POLICY_SRC_REAL else 'sim'} state 복귀", flush=True)
+        else:
+            st = recv_blocking(socks[src])
         if st is None:
+            _silent_ticks[src] = _silent_ticks.get(src, 0) + 1
+            if _silent_ticks[src] == _SILENT_TICKS_LIMIT:
+                print(
+                    f"[policy_runner] ⚠ {'real' if src == POLICY_SRC_REAL else 'sim'} state 무응답 "
+                    f"{_SILENT_TICKS_LIMIT}틱 — blocking 대기에서 제외(배선 유지, 오면 복귀). "
+                    "안 그러면 나머지 갈래까지 느려진다.",
+                    flush=True,
+                )
             continue
+        _silent_ticks[src] = 0
         ver = st.get("convention_version")
         if ver != _REQUIRED_CONVENTION_VERSION:
             raise SystemExit(
@@ -454,9 +490,13 @@ def main() -> None:
             send_to(sim_act_addr, tgt_sim)
             send_to(real_act_addr, tgt_real)
             seq += 1
-            gravity = torch.tensor(
-                (last_state[src_for_sim] if src_for_sim >= 0 else last_state[src_for_real])["gravity"], device=device
+            # 로깅용 자세 — **state 가 있는 출처**에서 고른다. 배선된 출처가 침묵할 수 있으므로
+            # (`_collect_states` 의 침묵 제외) 고정으로 하나를 짚으면 None 첨자로 죽는다.
+            st_ref = next(
+                (last_state[s] for s in (src_for_sim, src_for_real) if s >= 0 and last_state.get(s) is not None),
+                None,
             )
+            gravity = torch.tensor(st_ref["gravity"] if st_ref is not None else (0.0, 0.0, -1.0), device=device)
             # 1초(50 step)마다 자세 로깅 — grav_z≈-1이면 직립, 0/양수면 기울어짐/전도.
             if seq % 50 == 0:
                 print(
