@@ -753,21 +753,24 @@ class PolicyInferenceThread(QThread):
                     else _hold(r2s_udp.POLICY_SRC_REAL)
                 )
 
+                # ★ 2026-08-28: **자른 값을 보낸다** (`_clamp_art` 주석 참고).
+                #   실기 브리지도 자르지만 그 사실이 이쪽으로 오지 않으므로, 선에 실행 가능한 값만
+                #   흘리고 잘림은 여기서 로그로 남긴다. hip 은 가동폭이 ±0.234 rad 뿐이라
+                #   한계 밖 목표가 그대로 나가면 PD 가 스톱에 밀어붙여 실기가 불안정해진다.
+                tgt_sim, hit_sim = _clamp_art(tgt_sim)
+                tgt_real, hit_real = _clamp_art(tgt_real)
+                if seq % 50 == 0 and (hit_sim or hit_real):
+                    names = sorted({motions.JOINT_NAMES[_LM_FOR_ART[a]] for a in (*hit_sim, *hit_real)})
+                    print(f"[gui_infer] ⚠ 목표 soft limit 클램프: {', '.join(names)}", flush=True)
                 send_to(sim_act_addr, tgt_sim)
                 send_to(real_act_addr, tgt_real)
 
                 # monitor 중계 (action_q=sim 목적지 목표 vs sim q/dq; tau 는 rich state 에 없어 0).
                 st_mon = last_state[r2s_udp.POLICY_SRC_SIM]
                 if st_mon is not None:
-                    # ★ 2026-08-28: **잘린 뒤의 목표**를 보여준다. 목적지 양쪽이 soft limit 으로
-                    #   자르므로(sim=`set_policy_target`, 실기=`real_runner:494`), 자르기 전 값을
-                    #   그리면 **아무도 실행하지 않은 수치**가 트레이스에 남는다 — 한계 밖으로 크게
-                    #   벗어난 목표를 보고 "왜 안 따라가지?" 로 읽게 된다(실제로 그렇게 보였다).
-                    #   `target_lm` 은 이미 leg-major 라 `clamp_to_soft` 의 순서와 맞는다.
-                    #   ⚠ **송신은 자르지 않은 값 그대로** 둔다 — 브리지의 `cmd_clamp_bits` 가
-                    #     "정책이 한계 밖을 요구했다"를 신고하는 진단이라, 여기서 미리 자르면
-                    #     그 신호가 영영 안 켜진다.
-                    target_lm = motions.clamp_to_soft([tgt_sim[a] for a in _ART_FOR_LEGMAJOR])
+                    # `tgt_sim` 은 위에서 이미 `_clamp_art` 로 잘렸다 — 보내는 값과 그리는 값이
+                    # 같아야 트레이스가 "명령한 것 vs 실제"를 정직하게 보여준다.
+                    target_lm = [tgt_sim[a] for a in _ART_FOR_LEGMAJOR]
                     q_lm = [st_mon["q"][a] for a in _ART_FOR_LEGMAJOR]
                     dq_lm = [st_mon["dq"][a] for a in _ART_FOR_LEGMAJOR]
                     mon_sock.sendto(r2s_udp.pack_monitor(seq, target_lm, q_lm, dq_lm, [0.0] * NUM_JOINTS), mon_addr)
@@ -801,6 +804,37 @@ _ART_FOR_LEGMAJOR: list[int] = [0, 2, 4, 6, 1, 3, 5, 7]
 # articulation 인덱스 p ← leg-major 인덱스 — pack_policy_act(articulation 순서 필요)로 실기 fan-out할 때
 # Joint Sliders(leg-major)의 pose를 재배열하는 용도. _ART_FOR_LEGMAJOR의 역순열.
 _LM_FOR_ART: list[int] = [0, 4, 1, 5, 2, 6, 3, 7]
+
+# ★ articulation 순서 soft limit — `motions.SOFT_LIMITS_RAD` 는 leg-major 라 정책 목표(articulation)
+#   에 그대로 쓰면 관절이 뒤바뀐다. 여기서 한 번만 재배열해 둔다.
+_SOFT_LIMITS_ART: list[tuple[float, float]] = [(0.0, 0.0)] * NUM_JOINTS
+for _i, _a in enumerate(_ART_FOR_LEGMAJOR):
+    _SOFT_LIMITS_ART[_a] = motions.SOFT_LIMITS_RAD[_i]
+
+
+def _clamp_art(target) -> tuple[list[float], list[int]]:
+    """articulation 순서 목표를 soft limit 으로 자르고, 잘린 관절 인덱스를 함께 돌려준다.
+
+    ★ **자른 값을 보낸다.** 실기 브리지도 자르지만(`real_runner_bipedleg.cpp:494`) 그 사실이
+      워크스테이션으로 **전송되지 않는다** — `cmd_clamp_bits` 는 브리지 내부 변수라 TELEM 에도
+      없다. 즉 자르기 전 값을 실어 보내면 "무엇이 실제로 실행됐는지"를 이쪽에서 알 길이 없다.
+      선에 실행 가능한 값만 흘리고, 잘렸다는 사실은 여기서 직접 로그로 남긴다.
+
+    Args:
+        target: articulation 순서 관절 목표각 [rad].
+
+    Returns:
+        ``(잘린 목표, 잘린 articulation 인덱스 목록)``.
+    """
+    out, hit = [], []
+    for a, v in enumerate(target):
+        lo, hi = _SOFT_LIMITS_ART[a]
+        c = lo if v < lo else (hi if v > hi else v)
+        if c != v:
+            hit.append(a)
+        out.append(float(c))
+    return out, hit
+
 
 # 단위별 (스텝 후보, 소수자리, 접미사). 스텝은 **표시 단위 기준**이라 deg 에서 0.1/1/10 도가 그대로 나온다.
 _UNIT_SPEC: dict[str, dict] = {
