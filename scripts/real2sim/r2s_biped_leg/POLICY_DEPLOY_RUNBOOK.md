@@ -56,12 +56,21 @@
 ### 2-a. sim 에서 먼저 (실기 없이 전 구간 확인)
 
 ```bash
-# ① r2s sim — 정책 + 슬라이더를 한 프로세스에서 (자유베이스)
-scripts/real2sim/r2s_biped_leg/run_unified_sim.sh
+source scripts/real2sim/r2s_biped_leg/r2s_commands.sh
 
-# ② GUI (system python3 + PyQt5)
-scripts/real2sim/r2s_biped_leg/run_gui_controller.sh
+# ★ 0칸: 공중 고정 — 넘어질 수 없는 상태로 정책을 먼저 본다
+FIX_BASE=1 r2s_bl_sim
+r2s_bl_gui
+
+# 1칸: 자유베이스 — 보행·트립은 여기서 판정한다
+r2s_bl_sim
+r2s_bl_gui
 ```
+
+**0 칸에서 볼 것** — 관절이 의도한 방향으로 의도한 크기로 움직이는가. 부호가 뒤집힌 관절,
+한 관절만 안 움직이는 경우, 토크가 자릿수로 다른 경우가 여기서 드러난다.
+⚠ **여기서 보행 성능·트립을 판정하지 않는다** — 정책이 보는 base 상태가 고정돼 학습 분포 밖이고
+발이 지면에 안 닿아 접촉이 0이다. 기동 시 같은 경고가 출력된다.
 
 `run_unified_sim.sh` 는 CMD(슬라이더)와 POLICY_ACT(정책)를 **한 프로세스**에서 받는다.
 정책이 흐르는 동안은 정책이 로봇을 소유하고(lockstep), 멈추면 슬라이더로 자동 전환된다 —
@@ -71,9 +80,10 @@ RELAX/hold 와 정책 구동을 창 하나에서 할 수 있다.
 `PA_PORT=… PS_PORT=… python _workspace/r2s_unified_lockstep_check.py` (100 action → 회신 100,
 seq 증가 99 = 슬라이더 스텝 미개입).
 
-⚠ `fix_base=False` 이므로 **슬라이더로 크게 움직이면 넘어진다**(자유베이스라 정상).
-공중 고정 슬라이더 작업은 `FIX_BASE=1 run_sim_runner.sh` 로 따로 띄운다.
-정책만 단독으로 돌리던 기존 경로(`run_policy_sim.sh`)도 그대로 남아 있다.
+`FIX_BASE` 는 정책·슬라이더 **양쪽에 함께** 걸린다. 자유베이스(1 칸)에서는 슬라이더로 관절을
+크게 움직이면 넘어지므로, 관절 추종을 눈으로 볼 때도 0 칸(`FIX_BASE=1`)을 쓴다.
+정책만 단독 프로세스로 돌리던 기존 경로(`r2s_bl_psim` + `r2s_bl_prun`)도 그대로 남아 있다 —
+과거 캡처 재현용이다.
 
 GUI 에서:
 1. **Policy 그룹** — 모델 목록 맨 위가 `2026-08-28_09-39-20_gainclamp_ft` 인지 확인
@@ -85,8 +95,8 @@ GUI 에서:
 ### 2-b. 실기 (sim 이 정상일 때만)
 
 ```bash
-# ①·② 는 동일. GUI 만 real_host 를 준다
-scripts/real2sim/r2s_biped_leg/run_gui_controller.sh --real_host 192.168.60.5
+# sim 은 그대로 띄워 둔다(대조용). GUI 만 real_host 를 준다
+r2s_bl_gui --real_host 192.168.60.5
 ```
 
 파이 쪽 선행 조건(`project_bipedleg_real_runner_bridge`):
