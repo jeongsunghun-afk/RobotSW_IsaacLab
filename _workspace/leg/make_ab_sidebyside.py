@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """priv vs history 경로 A/B 램프 두 클립을 좌우로 붙여 한 영상으로 만든다.
 
 왼쪽 = history latent(배포 평가 경로), 오른쪽 = priv latent(학습 롤아웃 경로).
