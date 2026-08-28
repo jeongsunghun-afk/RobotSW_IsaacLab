@@ -66,7 +66,8 @@ parser.add_argument(
     default=False,
     help="Unified mode: CMD(슬라이더)와 POLICY_ACT(정책)를 한 프로세스에서 받는다. 정책이 도착한 "
     "스텝은 lockstep + slew 우회(= --policy_mode 와 동일 경로), 아니면 슬라이더 free-run. "
-    "fix_base 는 강제 False 이므로 슬라이더로 크게 움직이면 넘어진다 — 공중 고정 작업은 --fix_base 로 따로.",
+    "--fix_base 와 함께 쓸 수 있다 — 공중 고정 정책 구동은 넘어질 수 없어 안전 점검의 첫 칸이다 "
+    "(단 base 상태가 학습 분포 밖이고 접촉이 없어 보행 성능 판정에는 못 쓴다).",
 )
 parser.add_argument(
     "--convention_version",
@@ -151,11 +152,20 @@ def main() -> None:
     # parse and override the environment configuration (CONTRACT §5: fix_base toggle)
     env_cfg = parse_env_cfg(TASK_NAME, device=args_cli.device, num_envs=args_cli.num_envs)
     if args_cli.policy_mode or args_cli.unified:
-        # policy/unified: 정책이 자유베이스에서 균형을 잡으므로 fix_base는 강제 False.
         # unified 는 스텝마다 cfg.policy_mode 를 뒤집으므로 여기서는 False 로 시작한다
         # (슬라이더 경로가 기본, 정책 패킷이 오는 스텝만 True).
         env_cfg.policy_mode = args_cli.policy_mode
-        env_cfg.fix_base = False
+        # ★ fix_base 를 강제로 끄지 않는다 — **공중 고정 정책 구동이 안전 사다리의 첫 칸**이다.
+        #   넘어질 수 없는 상태에서 관절 거동·부호·토크를 먼저 보고 자유베이스로 내려간다.
+        env_cfg.fix_base = args_cli.fix_base
+        if args_cli.fix_base:
+            print(
+                "[sim_runner_bipedleg] ⚠ 공중 고정 + 정책 — 안전 점검용이다.\n"
+                "   정책이 보는 base 상태(중력방향·base 속도)가 **고정되어 학습 분포 밖**이고,\n"
+                "   발이 지면에 안 닿아 접촉이 없다. 관절 거동·부호·토크 크기 확인에는 쓰되,\n"
+                "   **보행 성능·트립 판정을 이 모드에서 내리지 말 것** (자유베이스로 다시 잰다).",
+                flush=True,
+            )
     else:
         env_cfg.fix_base = args_cli.fix_base
 
@@ -325,9 +335,12 @@ def _run_unified_loop(env, conv_ver: int) -> None:
     ``cfg.policy_mode`` 를 스텝마다 뒤집어 env 의 두 경로를 그대로 재사용한다
     (``_policy_target`` 은 생성 시점에 zeros 로, reset 에 default 자세로 초기화되므로 항상 유효).
 
-    ⚠ **fix_base 는 False 다** (정책이 자유베이스에서 균형을 잡아야 하므로). 그래서 이 모드에서
-      슬라이더로 관절을 크게 움직이면 **로봇이 넘어진다** — 정상이다. 공중 고정 슬라이더 작업은
-      `--fix_base` 로 따로 띄운다.
+    **fix_base 는 인자를 그대로 따른다.**
+      - 자유베이스(기본): 정책이 균형을 잡는다. 슬라이더로 크게 움직이면 넘어진다 — 정상이다.
+      - ``--fix_base``: 넘어질 수 없다. 정책 구동의 **안전 점검 첫 칸**으로 쓴다 — 관절 거동·부호·
+        토크 크기를 먼저 본다. ⚠ 다만 정책이 보는 base 상태(중력방향·base 속도)가 고정돼
+        **학습 분포 밖**이고 발이 지면에 안 닿아 접촉이 없다.
+        **보행 성능·트립 판정은 이 모드에서 내리지 않는다.**
 
     Args:
         env: gym 환경 (fix_base=False).
@@ -346,7 +359,12 @@ def _run_unified_loop(env, conv_ver: int) -> None:
     print(
         f"[sim_runner_bipedleg] unified mode — CMD {HOST}:{args_cli.cmd_port} + "
         f"POLICY_ACT {HOST}:{args_cli.policy_act_port} (정책 도착 시 lockstep, 아니면 슬라이더 free-run)  "
-        f"convention_version={conv_ver}  ⚠ fix_base=False — 슬라이더로 크게 움직이면 넘어진다",
+        f"convention_version={conv_ver}  "
+        + (
+            "base=공중고정 — 넘어지지 않는다(안전 점검용, 접촉 없음)"
+            if args_cli.fix_base
+            else "⚠ base=자유 — 슬라이더로 크게 움직이면 넘어진다"
+        ),
         flush=True,
     )
 

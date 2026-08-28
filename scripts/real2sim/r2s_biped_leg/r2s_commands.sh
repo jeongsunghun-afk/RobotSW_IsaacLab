@@ -12,9 +12,12 @@
 #     r2s_bl_sim   # 터미널1: sim_runner --unified (conda isaac-6.0)
 #     r2s_bl_gui   # 터미널2: PyQt GUI (순수 UDP, 시스템 python) → Mode를 Policy로, Run 클릭
 #
-#   공중 고정 슬라이더 작업 (관절 추종 확인 등):
-#     FIX_BASE=1 r2s_bl_sim   # position 모드로 폴백 (--fix_base). 자유베이스면 관절을 스텝하는
-#                             # 순간 넘어지므로, 이 용도는 반드시 FIX_BASE=1 이어야 한다.
+#   ★ 안전 점검 (공중 고정 — 넘어질 수 없다):
+#     FIX_BASE=1 r2s_bl_sim   # 정책·슬라이더 모두 공중 고정 상태로 돈다. 실기 전에 관절 거동·
+#                             # 부호·토크 크기를 여기서 먼저 본다. 슬라이더로 관절 추종을 볼
+#                             # 때도 이쪽이다(자유베이스면 스텝하는 순간 넘어진다).
+#                             # ⚠ 접촉이 없고 base 상태가 학습 분포 밖이라 **보행 성능·트립
+#                             #   판정은 자유베이스에서 다시 재야 한다.**
 #
 #   정책만 단독 (구 경로, 과거 캡처 재현용):
 #     r2s_bl_psim  # sim_runner --policy_mode
@@ -24,16 +27,9 @@
 
 _R2S_BL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 기본은 unified(정책+슬라이더 한 프로세스). `FIX_BASE=1` 이면 공중 고정 position 모드로 간다 —
-# unified 는 정책이 균형을 잡아야 해서 fix_base 를 강제 False 로 두므로, 두 요구를 한 프로세스로는
-# 못 만족시킨다(fix_root_link 는 씬 생성 시점 성질이라 런타임 토글이 불가능).
-r2s_bl_sim() {
-    if [ "${FIX_BASE:-0}" != "0" ]; then
-        bash "$_R2S_BL_DIR/run_sim_runner.sh" "$@"      # position: 공중 고정 슬라이더
-    else
-        bash "$_R2S_BL_DIR/run_unified_sim.sh" "$@"     # unified: 정책 lockstep + 슬라이더 free-run
-    fi
-}
+# 항상 unified(정책 lockstep + 슬라이더 free-run 한 프로세스). `FIX_BASE=1` 은 그 안에서
+# base 공중고정으로 전달된다 — 정책을 넘어뜨리지 않고 먼저 보는 **안전 점검 첫 칸**이다.
+r2s_bl_sim() { bash "$_R2S_BL_DIR/run_unified_sim.sh" "$@"; }
 r2s_bl_gui() { bash "$_R2S_BL_DIR/run_gui_controller.sh" "$@"; }    # PyQt GUI (position/policy 공용)
 r2s_bl_psim() { bash "$_R2S_BL_DIR/run_policy_sim.sh" "$@"; }       # policy: sim_runner --policy_mode
 r2s_bl_prun() { bash "$_R2S_BL_DIR/run_policy_runner.sh" "$@"; }    # policy: policy_runner (추론)
