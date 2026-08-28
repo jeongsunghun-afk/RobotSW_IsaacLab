@@ -73,3 +73,26 @@ vx \ yaw                 [-1.5,-0.5)           [-0.5,+0.5)           [+0.5,+1.5)
 
 ★ gallop/bound n=26 — vx 0.17~3.15 (중앙 0.62) · |yaw| 0.23~1.50 (중앙 1.40)
 ```
+
+## 참조 클립: 평균 전진속도 vs 보행 (속도-보행 사다리)
+
+```
+clip                              속도      주파수  보행
+--------------------------------------------------------
+leg_walk_stmr                  0.11m/s   0.96Hz  other
+leg_walk                       0.19m/s   0.88Hz  trot
+leg_walk_turn_mirror_stmr      0.32m/s   0.75Hz  trot
+leg_walk_turn_stmr             0.32m/s   0.94Hz  trot
+leg_walk1_stmr                 0.45m/s   0.96Hz  other
+leg_walk_turn                  0.68m/s   1.25Hz  other
+leg_walk_turn_mirror           0.68m/s   1.23Hz  other
+leg_walk1                      0.94m/s   1.68Hz  other
+leg_trot0                      1.97m/s   2.11Hz  pace
+leg_trot0_mirror               1.97m/s   2.12Hz  pace
+leg_run0                       2.69m/s   2.05Hz  gallop
+leg_run0_mirror                2.69m/s   2.13Hz  gallop
+leg_run1                       3.03m/s   2.58Hz  gallop
+leg_run1_mirror                3.03m/s   2.20Hz  gallop
+```
+
+참조상 gallop 은 2.7 m/s 이상의 걸음인데, 정지 출발 정책은 4.0 에서도 pace 다.
