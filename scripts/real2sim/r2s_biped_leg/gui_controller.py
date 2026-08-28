@@ -533,6 +533,8 @@ class PolicyInferenceThread(QThread):
         self._x_vel = 0.0
         self._yaw = 0.0
         self._act_scale = 1.0
+        # 관절별 자세 오프셋 [rad], articulation 순서 (`_POSE_OFFSET_DEG` 주석 참고).
+        self._pose_offset = list(_POSE_OFFSET_RAD)
         self._stop = False
 
     def set_command(
@@ -556,6 +558,18 @@ class PolicyInferenceThread(QThread):
             self._x_vel = max(X_VEL_RANGE[0], min(X_VEL_RANGE[1], float(x_vel)))
             self._yaw = max(YAW_RANGE[0], min(YAW_RANGE[1], float(yaw)))
             self._act_scale = max(0.0, min(1.0, float(act_scale)))
+
+    def set_pose_offset(self, offset_rad: list[float]) -> None:
+        """관절별 자세 오프셋 갱신 [rad], **articulation 순서**.
+
+        정책 목표에 더한 뒤 soft limit 으로 자른다 — 더하는 순서가 반대면 hip 처럼 가동폭이
+        좁은 축에서 한계를 넘긴다.
+
+        Args:
+            offset_rad: 길이 8, articulation 순서 오프셋 [rad].
+        """
+        with self._lock:
+            self._pose_offset = [float(v) for v in offset_rad]
 
     def request_stop(self) -> None:
         self._stop = True
@@ -628,6 +642,7 @@ class PolicyInferenceThread(QThread):
                     mode = self._mode
                     src_sim, src_real = self._src_for_sim, self._src_for_real
                     x_vel, yaw, act_scale = self._x_vel, self._yaw, self._act_scale
+                    pose_offset = self._pose_offset
 
                 # run 진입(idle→run): 두 갈래 clock/history/prev_action 초기화 + 시동 action.
                 if prev_mode == 0 and mode == 1:
@@ -757,13 +772,18 @@ class PolicyInferenceThread(QThread):
                 #   실기 브리지도 자르지만 그 사실이 이쪽으로 오지 않으므로, 선에 실행 가능한 값만
                 #   흘리고 잘림은 여기서 로그로 남긴다. hip 은 가동폭이 ±0.234 rad 뿐이라
                 #   한계 밖 목표가 그대로 나가면 PD 가 스톱에 밀어붙여 실기가 불안정해진다.
-                tgt_sim, hit_sim = _clamp_art(tgt_sim)
-                tgt_real, hit_real = _clamp_art(tgt_real)
+                # 자세 오프셋 → 클램프 순서다 (`_POSE_OFFSET_DEG` 주석: 뒤에 더하면 한계를 넘긴다).
+                tgt_sim, hit_sim = _clamp_art([v + o for v, o in zip(tgt_sim, pose_offset)])
+                tgt_real, hit_real = _clamp_art([v + o for v, o in zip(tgt_real, pose_offset)])
                 if seq % 50 == 0 and (hit_sim or hit_real):
                     names = sorted({motions.JOINT_NAMES[_LM_FOR_ART[a]] for a in (*hit_sim, *hit_real)})
                     print(f"[gui_infer] ⚠ 목표 soft limit 클램프: {', '.join(names)}", flush=True)
                 send_to(sim_act_addr, tgt_sim)
                 send_to(real_act_addr, tgt_real)
+                # 실기로 보낸 목표를 TELEM 중계가 쓰도록 넘긴다 — monitor.py 가 sim action 과
+                # real action 을 한 창에서 겹쳐 볼 수 있게 한다(둘이 갈라지면 배선/클램프 문제다).
+                if real_act_addr is not None:
+                    _set_last_real_target([tgt_real[a] for a in _ART_FOR_LEGMAJOR])
 
                 # monitor 중계 (action_q=sim 목적지 목표 vs sim q/dq; tau 는 rich state 에 없어 0).
                 st_mon = last_state[r2s_udp.POLICY_SRC_SIM]
@@ -804,6 +824,50 @@ _ART_FOR_LEGMAJOR: list[int] = [0, 2, 4, 6, 1, 3, 5, 7]
 # articulation 인덱스 p ← leg-major 인덱스 — pack_policy_act(articulation 순서 필요)로 실기 fan-out할 때
 # Joint Sliders(leg-major)의 pose를 재배열하는 용도. _ART_FOR_LEGMAJOR의 역순열.
 _LM_FOR_ART: list[int] = [0, 4, 1, 5, 2, 6, 3, 7]
+
+# ★ 정책 목표에 더하는 **자세 오프셋** [deg], articulation 순서. 중력으로 처지는 축을 들어 올린다.
+#   2026-08-28: 공중 고정 상태에서 hip 이 아래로 처져 HL +5° / HR −5° (좌우 미러) 로 보정.
+#   ⚠ 이건 **증상 보정**이지 원인 수정이 아니다. 어느 쪽인지에 따라 진짜 자리가 다르다:
+#     · 실기에서만 처진다  → 영점 문제다. `calib_bipedleg.hpp` 의 `zero_deg` 가 제자리다.
+#     · sim 에서도 처진다  → 중력 대비 hip 강성/보상 부족이다. 게인이나 정책이 제자리다.
+#       (hip armature 0.1390 은 chirp 이 공진대에 못 들어가 **아직 식별되지 않은** 값이다 —
+#        hip 이 유독 말썽인 것이 우연이 아닐 수 있다. rga.py §34-b)
+#   ⚠ 클램프 **전에** 더한다 — hip 가동폭이 ±0.234 rad(±13.4°)뿐이라 나중에 더하면 한계를 넘긴다.
+_POSE_OFFSET_DEG: list[float] = [
+    +5.0,  # art0 HL_hip
+    -5.0,  # art1 HR_hip
+    0.0,  # art2 HL_thigh
+    0.0,  # art3 HR_thigh
+    0.0,  # art4 HL_calf
+    0.0,  # art5 HR_calf
+    0.0,  # art6 HL_foot
+    0.0,  # art7 HR_foot
+]
+_POSE_OFFSET_RAD: list[float] = [math.radians(v) for v in _POSE_OFFSET_DEG]
+# 오프셋 스핀박스 상한 [deg]. 관절 가동폭(hip ±13.4°)보다 넉넉하되 손이 미끄러져도 위험하지
+# 않은 값. 실제 안전은 상한이 아니라 `_clamp_art` 가 보장한다.
+POSE_OFFSET_LIMIT_DEG: float = 15.0
+
+# ★ 정책이 **실기로 보낸 마지막 목표** (leg-major, 클램프·오프셋 반영 후). RealMonitorThread 가
+#   TELEM 중계(9890)에 실어 monitor.py 가 sim action 과 real action 을 한 창에서 보게 한다.
+#   ⚠ 두 스레드가 만지므로 잠금이 필요하다 — GIL 은 리스트 교체를 원자로 만들어 주지만, 여기서
+#     쓰는 건 "가장 최근 것 하나"라 통째로 갈아끼우고 통째로 읽는 규약이면 충분하다.
+_last_real_target_lm: list[float] | None = None
+_last_real_target_lock = threading.Lock()
+
+
+def _set_last_real_target(target_lm: list[float]) -> None:
+    """정책이 실기로 보낸 목표를 기록한다 (leg-major)."""
+    global _last_real_target_lm
+    with _last_real_target_lock:
+        _last_real_target_lm = list(target_lm)
+
+
+def _get_last_real_target() -> list[float]:
+    """TELEM 중계용 최신 실기 목표. 아직 없으면 0 벡터 (구 동작과 동일)."""
+    with _last_real_target_lock:
+        return list(_last_real_target_lm) if _last_real_target_lm is not None else [0.0] * NUM_JOINTS
+
 
 # ★ articulation 순서 soft limit — `motions.SOFT_LIMITS_RAD` 는 leg-major 라 정책 목표(articulation)
 #   에 그대로 쓰면 관절이 뒤바뀐다. 여기서 한 번만 재배열해 둔다.
@@ -966,7 +1030,10 @@ class RealMonitorThread(QThread):
                         if now - last_mon >= mon_relay_dt:
                             last_mon = now
                             mon_seq += 1
-                            tx.sendto(r2s_udp.pack_monitor(mon_seq, [0.0] * NUM_JOINTS, q_lm, dq_lm, tau_lm), mon_addr)
+                            # target 슬롯 = 정책이 **실기로** 보낸 목표(없으면 0 벡터). sim 쪽 중계(9883)의
+                            # target 은 sim 목표라, 두 스트림을 같이 열면 sim/real action 대조가 된다.
+                            tgt_lm = _get_last_real_target()
+                            tx.sendto(r2s_udp.pack_monitor(mon_seq, tgt_lm, q_lm, dq_lm, tau_lm), mon_addr)
                         rec = self._rec  # 로컬 참조 — stop_recording()의 None 교체와의 경합 회피
                         if rec is not None:
                             # ★브리지가 실어 보낸 틱·명령을 **그대로** 담는다 (2026-08-19).
@@ -2246,6 +2313,45 @@ class MainWindow(QMainWindow):
         row_scale.addStretch(1)
         v.addLayout(row_scale)
 
+        # --- 관절별 자세 오프셋 [deg] — 정책 목표에 더한 뒤 soft limit 으로 자른다 -------------
+        v.addWidget(QLabel("Pose offset [deg] — added to the policy target, then clamped:"))
+        self._offset_spins: list[QDoubleSpinBox] = []
+        row_off = QHBoxLayout()
+        for lm in range(NUM_JOINTS):  # 표시는 leg-major — Joint Sliders 와 같은 순서로 읽히게
+            if lm == NUM_JOINTS // 2:  # HL / HR 사이를 띄운다
+                row_off.addSpacing(12)
+            col = QVBoxLayout()
+            lab = QLabel(motions.JOINT_NAMES[lm])
+            lab.setObjectName("subtitleLabel")
+            lab.setAlignment(Qt.AlignHCenter)
+            col.addWidget(lab)
+            sp = QDoubleSpinBox()
+            sp.setRange(-POSE_OFFSET_LIMIT_DEG, POSE_OFFSET_LIMIT_DEG)
+            sp.setDecimals(1)
+            sp.setSingleStep(0.5)
+            sp.setValue(_POSE_OFFSET_DEG[_ART_FOR_LEGMAJOR[lm]])
+            sp.setAlignment(Qt.AlignRight)
+            sp.setKeyboardTracking(False)
+            sp.setToolTip(
+                f"{motions.JOINT_NAMES[lm]} offset. Added to the policy target before the soft-limit\n"
+                "clamp, so it can lift a joint that sags under gravity without ever commanding\n"
+                "past the joint's travel.\n\n"
+                "This compensates a symptom. If only the real robot sags the cause is the zero\n"
+                "calibration (calib_bipedleg.hpp zero_deg); if the sim sags too it is hip stiffness\n"
+                "or the policy itself."
+            )
+            sp.valueChanged.connect(self._on_pose_offset_changed)
+            self._offset_spins.append(sp)
+            col.addWidget(sp)
+            row_off.addLayout(col)
+        row_off.addSpacing(12)
+        btn_off_zero = QPushButton("Zero all")
+        btn_off_zero.setToolTip("Set every joint offset back to 0 deg.")
+        btn_off_zero.clicked.connect(self._on_pose_offset_zero)
+        row_off.addWidget(btn_off_zero)
+        row_off.addStretch(1)
+        v.addLayout(row_off)
+
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("x_vel [m/s] fwd/back:"))
         self._x_vel_spin = QDoubleSpinBox()
@@ -2286,6 +2392,9 @@ class MainWindow(QMainWindow):
             self._policy_thread = PolicyInferenceThread(self._model_path, self._device, self._real_host)
             self._policy_thread.status.connect(self._on_policy_status)
             self._policy_thread.failed.connect(self._on_policy_failed)
+            # 스레드가 늦게 생기므로 **현재 스핀박스 값을 밀어 넣는다** — Run 전에 오프셋을
+            # 만져 둔 경우 그 값이 조용히 버려지지 않게.
+            self._on_pose_offset_changed(0.0)
             self._policy_thread.start()  # run() 진입: 모델 로드 후 idle 루프(action 미송신)
         return self._policy_thread
 
@@ -2356,6 +2465,22 @@ class MainWindow(QMainWindow):
 
     def _on_act_scale_spin(self, val: float) -> None:
         self._set_act_scale(val, from_slider=False)
+
+    def _on_pose_offset_changed(self, _val: float) -> None:
+        """스핀박스(leg-major 표시) → articulation 순서 [rad] 로 옮겨 정책 스레드에 반영."""
+        off = [0.0] * NUM_JOINTS
+        for lm, sp in enumerate(self._offset_spins):
+            off[_ART_FOR_LEGMAJOR[lm]] = math.radians(sp.value())
+        if self._policy_thread is not None:
+            self._policy_thread.set_pose_offset(off)
+
+    def _on_pose_offset_zero(self) -> None:
+        """전 관절 오프셋을 0 으로. 스핀박스 신호가 관절마다 터지지 않게 묶어서 한 번만 반영한다."""
+        for sp in self._offset_spins:
+            sp.blockSignals(True)
+            sp.setValue(0.0)
+            sp.blockSignals(False)
+        self._on_pose_offset_changed(0.0)
 
     def _set_act_scale(self, val: float, *, from_slider: bool) -> None:
         """슬라이더/스핀박스 한쪽을 조용히 맞추고 스레드에 반영한다 (되먹임 루프 방지)."""
