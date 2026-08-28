@@ -154,6 +154,16 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     # 60° 근거: 정상 보행 정책(`nocouple` model_34100)의 기울기는 p99 에서 19.7°다 — 3 배 여유.
     #   넘어진 자세는 84° 였다. 그 사이 어디를 잡아도 되지만 보행 여유를 우선했다.
     # ⚠ 이 값을 바꾸면 task 자체가 달라진다 — 2026-08-26 이전 run 과 학습 곡선 직접 비교 불가.
+    # 목표각을 soft joint limit 으로 자를지 (실기 브리지 `real_runner_bipedleg.cpp:494` 와 동일).
+    # False 로 두면 정책이 한계 밖 목표로 PD 를 포화시켜 **실기에 없는 제어 권한**을 배운다 —
+    # 실측 근거와 기전은 `hind_leg_env._pre_physics_step` 주석 참고.
+    # ⚠ foot 은 벨트로 calf 와 묶여 raw 좌표가 `q_foot + q_calf` 다. 관절별로 자르면 raw 는
+    #   두 한계의 합(HL `[-1.119, +2.329]`, 폭 3.45 rad)까지 갈 수 있다 — foot 단독 폭의 2 배다.
+    #   실기 브리지도 관절별로 자르므로 **좌표 정합은 이걸로 맞다**. 다만 그 raw 범위가 발목
+    #   모터의 실제 가동범위 안인지는 **사양이 없어 미확인**이다(`hindleg_hip_saturation.py` 가
+    #   raw 분포를 찍는다). 사양이 나오면 raw 기준 클램프를 추가할 자리다.
+    clamp_action_to_soft_limits: bool = True
+
     terminate_tilt_deg: float | None = 60.0
     # 몸통 높이 종료 [m] — 기울지 않고 주저앉는 붕괴용. **기본 None**: 위 실측에서 넘어짐의
     #   99.6 %(92.30 중 91.96+0.35)가 기울기 기준만으로 잡혔고, 동적 보행 중 몸통이 얼마나
@@ -317,6 +327,16 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
 
     # 넘어짐 종료 임계 — 근거·측정치는 :class:`HindLegFlatEnvCfg` 의 같은 필드 주석 참고.
     # ``HindLeg-Direct-v0`` 가 쓰는 cfg 가 이쪽이므로 실측도 이 환경에서 났다.
+    # 목표각을 soft joint limit 으로 자를지 (실기 브리지 `real_runner_bipedleg.cpp:494` 와 동일).
+    # False 로 두면 정책이 한계 밖 목표로 PD 를 포화시켜 **실기에 없는 제어 권한**을 배운다 —
+    # 실측 근거와 기전은 `hind_leg_env._pre_physics_step` 주석 참고.
+    # ⚠ foot 은 벨트로 calf 와 묶여 raw 좌표가 `q_foot + q_calf` 다. 관절별로 자르면 raw 는
+    #   두 한계의 합(HL `[-1.119, +2.329]`, 폭 3.45 rad)까지 갈 수 있다 — foot 단독 폭의 2 배다.
+    #   실기 브리지도 관절별로 자르므로 **좌표 정합은 이걸로 맞다**. 다만 그 raw 범위가 발목
+    #   모터의 실제 가동범위 안인지는 **사양이 없어 미확인**이다(`hindleg_hip_saturation.py` 가
+    #   raw 분포를 찍는다). 사양이 나오면 raw 기준 클램프를 추가할 자리다.
+    clamp_action_to_soft_limits: bool = True
+
     terminate_tilt_deg: float | None = 60.0
     terminate_base_height: float | None = None
 

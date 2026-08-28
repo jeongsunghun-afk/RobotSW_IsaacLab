@@ -210,6 +210,22 @@ class HindLegEnv(DirectRLEnv):
         # Advance gait phase by one env-step before reward/obs read this step's value.
         self._gait_phase = (self._gait_phase + self.step_dt / self.cfg.gait_period) % 1.0
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+        if self.cfg.clamp_action_to_soft_limits:
+            # ★ 실기 브리지가 목표를 soft limit 으로 자른다 (`real_runner_bipedleg.cpp:494`,
+            #   잘리면 `cmd_clamp_bits` 로 신고). sim 이 안 자르면 정책은 **실기에서 존재하지 않는
+            #   제어 권한**을 학습한다 — 실측(model_24800, cmd 1.0, 기립 100 %):
+            #     foot 목표의 81.6 % 가 한계 밖, 초과량 p99 2.28 rad (가동폭 1.73 rad 보다 크다)
+            #     hip  목표의 32.0 % 가 한계 밖, 최대 6.89 rad
+            #   관절은 한계에서 멈추므로 추종오차가 **해소되지 않고 남고**, PD 가 그 오차에 비례해
+            #   토크를 계속 낸다. 포화(|τ| ≥ effort_limit) 스텝의 **100 %** 가 한계 밖 목표였다 —
+            #   펌웨어 트립이 요구하는 "넘은 채 50 ms" 가 정확히 이렇게 만들어진다.
+            #   ⇒ 목표각을 토크 포화 스위치로 쓰는 경로를 막고, 배포 경로와 좌표를 맞춘다.
+            #
+            # `soft_joint_pos_limits` 를 쓰는 이유: 하드 한계 × `soft_joint_pos_limit_factor`(0.9)가
+            # `motions.SOFT_LIMITS_RAD` = `calib_bipedleg.hpp` 의 `min_rad/max_rad` 와 정확히 같다
+            # (foot HL `[-0.344, +1.384]`). 상수로 복제하면 자산이 바뀔 때 조용히 어긋난다.
+            soft = self._data_tensor(self._robot.data.soft_joint_pos_limits)
+            self._processed_actions = self._processed_actions.clamp(soft[..., 0], soft[..., 1])
         if self._foot_coupling and self._foot_raw_friction:
             # 관절 좌표 PhysX 마찰 제거는 제어 스텝(50 Hz)마다 1회면 충분하다 — 마찰 계수는 그보다
             # 자주 바뀌지 않는다. 마찰 토크 자체는 _apply_action에서 물리 스텝마다 갱신한다.
