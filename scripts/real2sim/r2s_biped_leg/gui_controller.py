@@ -535,6 +535,8 @@ class PolicyInferenceThread(QThread):
         self._act_scale = 1.0
         # 관절별 자세 오프셋 [rad], articulation 순서 (`_POSE_OFFSET_DEG` 주석 참고).
         self._pose_offset = list(_POSE_OFFSET_RAD)
+        # 정책 실행 기록 — None 이면 미기록. 매 틱 한 행씩 쌓는다(추후 분석용).
+        self._rec: list[tuple] | None = None
         self._stop = False
 
     def set_command(
@@ -558,6 +560,18 @@ class PolicyInferenceThread(QThread):
             self._x_vel = max(X_VEL_RANGE[0], min(X_VEL_RANGE[1], float(x_vel)))
             self._yaw = max(YAW_RANGE[0], min(YAW_RANGE[1], float(yaw)))
             self._act_scale = max(0.0, min(1.0, float(act_scale)))
+
+    def start_recording(self) -> None:
+        """정책 실행 기록 시작 (이전 기록은 버린다)."""
+        with self._lock:
+            self._rec = []
+
+    def stop_recording(self) -> list[tuple]:
+        """기록을 넘기고 멈춘다."""
+        with self._lock:
+            rows = self._rec or []
+            self._rec = None
+        return rows
 
     def set_pose_offset(self, offset_rad: list[float]) -> None:
         """관절별 자세 오프셋 갱신 [rad], **articulation 순서**.
@@ -643,6 +657,7 @@ class PolicyInferenceThread(QThread):
                     src_sim, src_real = self._src_for_sim, self._src_for_real
                     x_vel, yaw, act_scale = self._x_vel, self._yaw, self._act_scale
                     pose_offset = self._pose_offset
+                    rec = self._rec  # 로컬 참조 — stop_recording() 의 None 교체와 경합 회피
 
                 # run 진입(idle→run): 두 갈래 clock/history/prev_action 초기화 + 시동 action.
                 if prev_mode == 0 and mode == 1:
@@ -780,6 +795,34 @@ class PolicyInferenceThread(QThread):
                     print(f"[gui_infer] ⚠ 목표 soft limit 클램프: {', '.join(names)}", flush=True)
                 send_to(sim_act_addr, tgt_sim)
                 send_to(real_act_addr, tgt_real)
+                if rec is not None:
+                    # 분석에 필요한 것만 한 행에 모은다 — 이번 세션에서 실제로 문제가 됐던 축들:
+                    # 두 목적지의 목표(배선/클램프), 두 출처의 상태(갭), 클램프 발동(한계 밖 요구),
+                    # 그리고 그 순간의 명령·권한·오프셋(재현에 필요).
+                    st_s = last_state[r2s_udp.POLICY_SRC_SIM]
+                    st_r = last_state[r2s_udp.POLICY_SRC_REAL]
+                    rec.append(
+                        (
+                            time.monotonic(),
+                            seq,
+                            float(phase),
+                            float(x_vel),
+                            float(yaw),
+                            float(act_scale),
+                            list(tgt_sim),
+                            list(tgt_real),
+                            list(st_s["q"]) if st_s else None,
+                            list(st_s["dq"]) if st_s else None,
+                            list(st_s["gravity"]) if st_s else None,
+                            list(st_r["q"]) if st_r else None,
+                            list(st_r["dq"]) if st_r else None,
+                            list(st_r["gravity"]) if st_r else None,
+                            sorted(set(hit_sim)),
+                            sorted(set(hit_real)),
+                            list(pose_offset),
+                        )
+                    )
+
                 # 실기로 보낸 목표를 TELEM 중계가 쓰도록 넘긴다 — monitor.py 가 sim action 과
                 # real action 을 한 창에서 겹쳐 볼 수 있게 한다(둘이 갈라지면 배선/클램프 문제다).
                 if real_act_addr is not None:
@@ -2345,6 +2388,16 @@ class MainWindow(QMainWindow):
             col.addWidget(sp)
             row_off.addLayout(col)
         row_off.addSpacing(12)
+        self._rec_btn = QPushButton("Record")
+        self._rec_btn.setCheckable(True)
+        self._rec_btn.setToolTip(
+            "Record this policy run for later analysis.\n"
+            "Saves both destinations' targets, both sources' states, which joints hit the soft-limit\n"
+            "clamp, and the command/authority/offset at each tick, to data/bipedleg_gui/policy_*.npz.\n"
+            "Real torque comes from the TELEM stream when the Real Robot Monitor is connected."
+        )
+        self._rec_btn.toggled.connect(self._on_policy_record_toggled)
+        row_off.addWidget(self._rec_btn)
         btn_off_zero = QPushButton("Zero all")
         btn_off_zero.setToolTip("Set every joint offset back to 0 deg.")
         btn_off_zero.clicked.connect(self._on_pose_offset_zero)
@@ -2473,6 +2526,91 @@ class MainWindow(QMainWindow):
             off[_ART_FOR_LEGMAJOR[lm]] = math.radians(sp.value())
         if self._policy_thread is not None:
             self._policy_thread.set_pose_offset(off)
+
+    def _on_policy_record_toggled(self, on: bool) -> None:
+        """정책 실행 기록 토글. 켜면 정책 스레드(+연결돼 있으면 TELEM)를 함께 기록한다."""
+        th = self._policy_thread
+        if on:
+            if th is None:
+                self._rec_btn.setChecked(False)
+                self._status_label.setText("Record: start the policy first")
+                return
+            th.start_recording()
+            if self._rm_thread is not None and self._rm_thread.isRunning():
+                self._rm_thread.start_recording()  # 실기 tau 는 TELEM 에만 있다
+            self._rec_btn.setText("Recording…")
+            self._status_label.setText("Recording policy run")
+            return
+        self._rec_btn.setText("Record")
+        rows = th.stop_recording() if th is not None else []
+        telem = self._rm_thread.stop_recording() if self._rm_thread is not None else []
+        self._save_policy_recording(rows, telem)
+
+    def _save_policy_recording(self, rows: list, telem: list) -> None:
+        """정책 실행 기록을 npz 로 저장한다.
+
+        상태가 없는 틱은 그 자리만 NaN 으로 둔다 — 행을 버리면 시간 격자가 깨져서, 나중에
+        "언제부터 출처가 조용했나"를 못 읽는다.
+        """
+        if not rows:
+            self._status_label.setText("Record: no samples - nothing saved")
+            return
+        import numpy as np  # 시스템 numpy — GUI 기동 경로에 불필요해 지연 임포트
+
+        def _col(idx: int, width: int):
+            out = np.full((len(rows), width), np.nan, dtype=np.float32)
+            for r, row in enumerate(rows):
+                if row[idx] is not None:
+                    out[r] = row[idx]
+            return out
+
+        def _mask(idx: int):
+            out = np.zeros((len(rows), NUM_JOINTS), dtype=bool)
+            for r, row in enumerate(rows):
+                for a in row[idx]:
+                    out[r, a] = True
+            return out
+
+        out_dir = os.path.join(_REPO_ROOT, "data", "bipedleg_gui")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, time.strftime("policy_%Y%m%d_%H%M%S.npz"))
+        arrays = {
+            "t": np.asarray([r[0] for r in rows], dtype=np.float64),
+            "seq": np.asarray([r[1] for r in rows], dtype=np.int64),
+            "phase": np.asarray([r[2] for r in rows], dtype=np.float32),
+            "x_vel": np.asarray([r[3] for r in rows], dtype=np.float32),
+            "yaw": np.asarray([r[4] for r in rows], dtype=np.float32),
+            "act_scale": np.asarray([r[5] for r in rows], dtype=np.float32),
+            "target_sim": _col(6, NUM_JOINTS),
+            "target_real": _col(7, NUM_JOINTS),
+            "q_sim": _col(8, NUM_JOINTS),
+            "dq_sim": _col(9, NUM_JOINTS),
+            "gravity_sim": _col(10, 3),
+            "q_real": _col(11, NUM_JOINTS),
+            "dq_real": _col(12, NUM_JOINTS),
+            "gravity_real": _col(13, 3),
+            "clamped_sim": _mask(14),
+            "clamped_real": _mask(15),
+            "pose_offset": _col(16, NUM_JOINTS),
+            # ★ 순서 규약을 파일에 박아 둔다 — leg-major 와 헷갈리면 관절이 뒤바뀐 채 분석된다.
+            "joint_order": np.asarray(
+                ["HL_hip", "HR_hip", "HL_thigh", "HR_thigh", "HL_calf", "HR_calf", "HL_foot", "HR_foot"]
+            ),
+            "order_note": np.asarray("articulation order; motions.JOINT_NAMES is leg-major"),
+        }
+        if telem:
+            # TELEM 은 leg-major·**채널 좌표 tau**다. 변환하지 않고 그대로 두되 규약을 적어 둔다.
+            arrays["telem_t"] = np.asarray([r[0] for r in telem], dtype=np.float64)
+            arrays["telem_q_lm"] = np.asarray([r[1] for r in telem], dtype=np.float32)
+            arrays["telem_dq_lm"] = np.asarray([r[2] for r in telem], dtype=np.float32)
+            arrays["telem_tau_lm_channel"] = np.asarray([r[3] for r in telem], dtype=np.float32)
+            arrays["telem_note"] = np.asarray("leg-major order; tau is CHANNEL coords (joint = tau * gear_k)")
+        np.savez_compressed(out_path, **arrays)
+        n_clamp = int(arrays["clamped_real"].any(axis=1).sum())
+        self._status_label.setText(
+            f"Saved {len(rows)} ticks -> {os.path.relpath(out_path, _REPO_ROOT)}  (real clamped on {n_clamp} ticks)"
+        )
+        print(f"[gui] policy 기록 저장: {out_path}  ({len(rows)} tick, TELEM {len(telem)})", flush=True)
 
     def _on_pose_offset_zero(self) -> None:
         """전 관절 오프셋을 0 으로. 스핀박스 신호가 관절마다 터지지 않게 묶어서 한 번만 반영한다."""

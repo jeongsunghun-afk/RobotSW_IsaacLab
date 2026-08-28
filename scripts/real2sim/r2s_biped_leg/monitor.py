@@ -112,7 +112,10 @@ class MonitorWindow(QMainWindow):
         # 발행측 seq(20ms/틱)로 재구성한다 — 원격 X11 등으로 이벤트 루프가 막혀 패킷이 몰려
         # 들어와도 샘플 간격이 정확히 유지된다 (도착 시각 방식은 backlog가 세로선으로 뭉친다).
         self._buf: collections.deque = collections.deque(maxlen=BUF_MAXLEN)
-        # (seq, real_q, real_dq, real_tau) — REAL_MON_PORT 중계, action 없음.
+        # (seq, real_act, real_q, real_dq, real_tau) — REAL_MON_PORT 중계.
+        # ★2026-08-28: target 슬롯에 **정책이 실기로 보낸 목표**가 실린다(gui_controller). 예전엔
+        #   0 이라 버렸는데, 이제 sim action 과 real action 을 한 창에서 대조할 수 있다 —
+        #   둘이 갈라지면 배선이나 클램프 문제다.
         self._real_buf: collections.deque = collections.deque(maxlen=BUF_MAXLEN)
         # (최신 seq, 그 도착 wall 시각) — 스트림이 멈추면 곡선이 왼쪽으로 흘러가게 하는 기준점.
         self._anchor: tuple[int, float] | None = None
@@ -227,6 +230,11 @@ class MonitorWindow(QMainWindow):
             lines["sim"] = plot.plot([], [], pen=pg.mkPen(_C_SIM, width=1.4), name=self._label)
             if self._show_real:
                 lines["real"] = plot.plot([], [], pen=pg.mkPen(_C_REAL, width=1.4), name="real")
+                if row == 0:
+                    # 실기로 나간 목표 — real 과 같은 색의 점선이라 "이 명령 → 이 결과"로 읽힌다.
+                    lines["real_action"] = plot.plot(
+                        [], [], pen=pg.mkPen(_C_REAL, width=1.2, style=Qt.DotLine), name="real action"
+                    )
             # 화면 픽셀 폭 기준 자동 다운샘플('peak'=구간 극값 보존) — 원격 X11에서 그리기 왕복량 절감.
             for line in lines.values():
                 line.setDownsampling(auto=True, method="peak")
@@ -281,7 +289,8 @@ class MonitorWindow(QMainWindow):
                 m = r2s_udp.unpack_monitor(data)
                 if m is None:
                     continue
-                # real 중계는 action_q=0(무의미) — sim_q/sim_dq/sim_tau 필드에 실기 q/dq/tau가 담긴다.
+                # real 중계는 sim_q/sim_dq/sim_tau 필드에 실기 q/dq/tau 가 담기고,
+                # action_q 에는 **정책이 실기로 보낸 목표**가 담긴다(2026-08-28 이전엔 0).
                 # ⚠ tau 만 좌표가 다르다: 브리지가 tau 를 변환 없이 통과시켜 **채널기준**인데 sim 은
                 #   관절기준(applied_torque)이라, 그대로 겹쳐 그리면 서로 다른 자로 잰 값을 비교하게
                 #   된다(calf 1.5배·foot 1.2배 + calf 전치항). 관절 좌표로 올려서 담는다.
@@ -289,7 +298,11 @@ class MonitorWindow(QMainWindow):
                 #   관절 선택(i) 뒤에 하면 계산이 불가능하다.
                 tau_joint = r2s_udp.channel_tau_to_joint(m["sim_tau"], self._gain_exponent)
                 self._real_anchor = self._append_seq(
-                    self._real_buf, self._real_anchor, m["seq"], (m["sim_q"][i], m["sim_dq"][i], tau_joint[i]), now
+                    self._real_buf,
+                    self._real_anchor,
+                    m["seq"],
+                    (m["action_q"][i], m["sim_q"][i], m["sim_dq"][i], tau_joint[i]),
+                    now,
                 )
 
     @staticmethod
@@ -373,21 +386,22 @@ class MonitorWindow(QMainWindow):
         if self._show_action:
             q_cols.append((self._buf, self._anchor, 1))  # action q
         if self._show_real:
-            q_cols.append((self._real_buf, self._real_anchor, 1))  # real q
+            q_cols.append((self._real_buf, self._real_anchor, 2))  # real q
+            q_cols.append((self._real_buf, self._real_anchor, 1))  # real action (실기로 보낸 목표)
         r = _yrange(*q_cols)
         if r:
             self._axes[0].setYRange(r[0] * scale, r[1] * scale, padding=0)
 
         tau_cols = [(self._buf, self._anchor, 4)]  # sim tau
         if self._show_real:
-            tau_cols.append((self._real_buf, self._real_anchor, 3))  # real tau
+            tau_cols.append((self._real_buf, self._real_anchor, 4))  # real tau
         r = _yrange(*tau_cols)
         if r:
             self._axes[1].setYRange(r[0], r[1], padding=0)  # tau 는 단위 토글 영향 없음
 
         dq_cols = [(self._buf, self._anchor, 3)]  # sim dq
         if self._show_real:
-            dq_cols.append((self._real_buf, self._real_anchor, 2))  # real dq
+            dq_cols.append((self._real_buf, self._real_anchor, 3))  # real dq
         r = _yrange(*dq_cols)
         if r:
             self._axes[2].setYRange(r[0] * scale, r[1] * scale, padding=0)
@@ -419,9 +433,10 @@ class MonitorWindow(QMainWindow):
         self._set_line(self._lines[1].get("sim"), self._buf, self._anchor, 4, now)
         self._set_line(self._lines[2].get("sim"), self._buf, self._anchor, 3, now, scale)
         if self._show_real:
-            self._set_line(self._lines[0].get("real"), self._real_buf, self._real_anchor, 1, now, scale)
-            self._set_line(self._lines[1].get("real"), self._real_buf, self._real_anchor, 3, now)
-            self._set_line(self._lines[2].get("real"), self._real_buf, self._real_anchor, 2, now, scale)
+            self._set_line(self._lines[0].get("real"), self._real_buf, self._real_anchor, 2, now, scale)
+            self._set_line(self._lines[0].get("real_action"), self._real_buf, self._real_anchor, 1, now, scale)
+            self._set_line(self._lines[1].get("real"), self._real_buf, self._real_anchor, 4, now)
+            self._set_line(self._lines[2].get("real"), self._real_buf, self._real_anchor, 3, now, scale)
 
         if (now - self._last_rescale) >= RESCALE_PERIOD_S:
             self._last_rescale = now
@@ -444,8 +459,11 @@ class MonitorWindow(QMainWindow):
             act = f"action q={aq * scale:+.3f}{uq}   " if self._show_action else ""
             parts.append(f"{act}{self._label} q={sq * scale:+.3f}{uq} dq={sdq * scale:+.2f}{udq} τ={stau:+.2f}")
         if has_real:
-            _, rq, rdq, rtau = self._real_buf[-1]
-            parts.append(f"real q={rq * scale:+.3f}{uq} dq={rdq * scale:+.2f}{udq} τ={rtau:+.2f}")
+            _, ra, rq, rdq, rtau = self._real_buf[-1]
+            parts.append(
+                f"real action q={ra * scale:+.3f}{uq}   "
+                f"real q={rq * scale:+.3f}{uq} dq={rdq * scale:+.2f}{udq} τ={rtau:+.2f}"
+            )
         self._value_label.setText("   ".join(parts))
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override signature)
