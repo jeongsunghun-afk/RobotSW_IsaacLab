@@ -40,7 +40,10 @@ import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
 
 RUNS = Path(__file__).resolve().parents[1] / "logs" / "rsl_rl" / "hindLeg_history_direct"
-ARMS = {"termfix_reflIcap": "*_termfix_reflIcap", "termfix_only_transpose": "*_termfix_only_transpose"}
+# 기본 감시 대상. `--arms` 로 바꾼다 — arm 이름이 바뀌었는데 여기가 그대로면 감시기는
+# **죽은 구 run 을 보고 "프로세스 소멸"을 외친다**(실제로 한 번 그랬다).
+ARMS: dict[str, str] = {}  # main() 에서 --arms 로 채운다
+DEFAULT_ARMS = ("termfix_reflIcap", "termfix_only_transpose")
 WARMUP = 200
 
 
@@ -75,7 +78,14 @@ def main() -> None:
     ap.add_argument("--stall_min", type=float, default=25.0, help="iter 정체 판정 [min].")
     ap.add_argument("--spike", type=float, default=4.0, help="value loss 급등 배수.")
     ap.add_argument("--drop", type=float, default=0.35, help="reward/step 급락 비율 (running max 대비).")
+    ap.add_argument(
+        "--arms", type=str, nargs="+", default=list(DEFAULT_ARMS),
+        help="감시할 `--run_name` 들. ★arm 을 새로 띄웠으면 **반드시 같이 갱신**한다 — "
+        "기본값 그대로 두면 이미 끝난 구 run 을 보고 'crashed' 를 보고한다.",
+    )
     args = ap.parse_args()
+    global ARMS
+    ARMS = {a: f"*_{a}" for a in args.arms}
 
     pending = sorted(args.milestones)
     last_iter: dict[str, int] = {}

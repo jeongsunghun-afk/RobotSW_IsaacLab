@@ -75,7 +75,9 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 
 TERM_KEYS = ("foot_coupling", "foot_transpose", "foot_raw_friction", "foot_reflected_inertia")
 # 채널→관절 변환비. 펌웨어 임계는 채널 기준이라 관절 기준 임계 = 15 × gear_k.
-GEAR_K = {"calf": 1.5, "foot": 1.2}
+# ⚠ hip·thigh 의 k 는 1.0 이라 **관절 기준 임계가 가장 낮다**(15.0 < foot 18.0 < calf 22.5).
+#   k≠1 축에만 눈이 가서 빠뜨리기 쉬운데, 트립은 네 종류 모두에서 걸릴 수 있다.
+GEAR_K = {"hip": 1.0, "thigh": 1.0, "calf": 1.5, "foot": 1.2}
 
 
 def run_lengths(mask: torch.Tensor) -> torch.Tensor:
@@ -147,7 +149,11 @@ def main() -> None:
 
         u = env.unwrapped
         robot = u._robot
-        joint_ids = {"calf": u._calf_ids, "foot": u._foot_ids}
+        # 네 종류 전부 본다 — 관절명으로 찾는다(env 가 들고 있는 것은 calf/foot 뿐이다).
+        joint_ids = {}
+        for kind in GEAR_K:
+            ids, _ = robot.find_joints(f".*_{kind}_joint", preserve_order=True)
+            joint_ids[kind] = ids
         cos_thr = math.cos(math.radians(args_cli.tilt_deg))
         dt_ctrl = float(u.cfg.sim.dt) * int(u.cfg.decimation)
         need = max(1, math.ceil(args_cli.trip_ms / 1000.0 / dt_ctrl))
@@ -163,7 +169,7 @@ def main() -> None:
         for cmd_x in args_cli.cmd_x:
             cmd = torch.zeros_like(u._commands)
             cmd[:, 0] = cmd_x
-            rec: dict[str, list[torch.Tensor]] = {"calf": [], "foot": [], "gz": [], "vx": []}
+            rec: dict[str, list[torch.Tensor]] = {k: [] for k in (*GEAR_K, "gz", "vx")}
             with torch.inference_mode():
                 for i in range(args_cli.steps):
                     u._commands[:] = cmd
@@ -182,7 +188,7 @@ def main() -> None:
             print(f"\n{'=' * 92}\n[cmd vx = {cmd_x:.2f}  act_scale {args_cli.act_scale:.2f}]"
                   f"  기립 스텝 {float(up.float().mean()) * 100:.1f} %"
                   f"  실제 vx {vx:6.3f} m/s  달성률 {vx / cmd_x * 100 if cmd_x else float('nan'):5.0f} %")
-            for nm in ("calf", "foot"):
+            for nm in GEAR_K:
                 tau = R[nm]
                 flat = tau[up]  # 걷는 스텝만 — 넘어진 뒤의 토크는 실기에서 재현할 상황이 아니다
                 t, n, j = tau.shape
