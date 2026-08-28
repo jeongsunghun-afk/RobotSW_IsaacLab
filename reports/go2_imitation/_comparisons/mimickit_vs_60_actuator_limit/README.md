@@ -1028,16 +1028,36 @@ baseline 은 **양봉**(41% 가 1.7 에서 달리고 나머지는 주저앉아 m
 `49 + 84 + 1 = 134` 로 정확히 닫힌다. → **`amp_joint_tan_norm` arm 착수**
 (`2026-08-27_10-54-18_ampTanNorm_stock`, per-step 49 → **109**).
 
-### 17-d. ⚠ 참조 모션 각속도에 yaw 랩 결함 — **전 AMP run 에 들어가 있었다**
+### 17-d. ⚠ 참조 모션 회전 파라미터화 결함 — **전 AMP run 에 들어가 있었다**
 
 disc 스모크에서 expert 값 범위가 `[−353, 41]` 로 나와 추적했다.
 
+★★ **[2026-08-28 정정] 처음 적은 원인 규정("yaw 를 unwrap 하지 않는다")은 틀렸다.**
+pkl 의 `frames[:, 3:6]` 은 roll/pitch/yaw 가 **아니라 exponential map**(axis × angle)이다
+(변환기 `quat_to_exp_map` 이 `w >= 0` 을 강제해 최단호로 만든다). 구 코드는 이를 **euler 로
+해석**하고 있었다 — unwrap 누락이 아니라 **회전 파라미터화 자체가 틀린 것**이고, 그래서 영향이
+각속도에 그치지 않는다.
+
 ```
-motion_lib.py:445   euler_rates = _finite_diff(root_euler, dt)   # yaw 를 unwrap 하지 않는다
+구 코드   root_quat = _euler_to_quat_wxyz(root_exp_map)          # exp-map 을 euler 로 읽음
+          ang_vel   = _euler_rates_to_body_angvel(...)           # 그걸 다시 euler-rate 로 미분
+현재 코드 root_quat = _exp_map_to_quat_wxyz(root_exp_map)
+          ang_vel   = _quat_body_ang_vel(root_quat, dt)          # 쿼터니언 차분 + double-cover 처리
 ```
 
-`go2_walk_turn` 과 그 mirror 에 **yaw 랩이 1 회씩** 있고, 그 프레임에서 `Δyaw ≈ 2π` 가 그대로
-미분돼 각속도가 **373.4 rad/s** 로 튄다(실제 2.26). `2π × 60 fps = 377.0` 과 일치한다.
+회전각이 작으면 exp-map ≈ euler 라 17 개 클립에서는 오차가 묻혔고, **크게 도는 `go2_walk_turn`
+에서만** 크게 벌어졌다 — 그래서 오래 안 보였다:
+
+```
+                  |회전각| max     root_quat 오차 p50     p99      max   [deg]
+go2_walk_turn           179.7             1.45          11.94    12.08
+go2_walk2                34.6             0.58           2.62     2.79
+go2_walk                  7.7             0.07           0.24     0.24
+전체                                       0.32           9.25    12.1
+```
+
+각도가 π 를 넘는 지점에서 `w >= 0` 강제 때문에 표현이 **반대축으로 점프**하고, 그 ~2π 불연속을
+그대로 미분해 각속도가 **373.4 rad/s** 로 튄다(실제 2.26).
 
 정규화가 이를 전 구간에 퍼뜨린다 — `ppo_amp.py:187` 이
 `update_normalization(cat([expert, policy]))` 라 expert 가 통계에 들어간다:
@@ -1052,11 +1072,99 @@ np.unwrap 적용            0.586    1.006     0.544      13.6
 → **disc 가 보는 expert yaw rate 가 실제의 5% 로 눌린다.** 2628 프레임 중 2 개(0.08%)의 결과다.
 pitch 도 64% 로 눌린다.
 
-⚠ **이것이 4 m/s 천장의 원인일 가능성은 낮다** — 눌리는 것이 주로 yaw 인데 고속 전이는 pitch 축
-문제이고, 같은 데이터로 lerp 0.8 은 잘 열린다. 그래도 실재하는 결함이다.
+★ 수정된 코드로 다시 재면 스파이크가 사라진다(제안했던 `np.unwrap` 보다 나은 수정이다):
 
-**지금 고치지 않는다.** 지금 도는 `ampTanNorm` arm 이 이전 arm 들과 같은 expert 분포를 써야
-단일 변수 비교가 성립한다. 별도 arm(`np.unwrap` 적용)으로 돌릴 것.
+```
+                       std       wx      wy       wz     |max|
+구 코드(euler-rate)          0.526   1.572   10.280     373.4
+현재 코드(quat 차분)          0.446   1.003    0.544       4.3
+```
+
+⚠ **4 m/s 천장의 원인일 가능성은 여전히 낮다** — 눌리던 것이 주로 yaw 인데 고속 전이는 pitch 축
+문제이고, 같은 데이터로 lerp 0.8 은 잘 열렸다. §18 의 실측도 이 예상과 맞는다.
 
 원자료: `metrics/ramp_tannorm/stock_40000/` · 요약 `metrics/mimickit_align_summary.md`
 · 위상 `metrics/gait_phase.md`
+
+---
+
+## 18. (2026-08-28) disc tan-norm + 회전 수정 (`ampTanNorm_rotfix_stock`) — 40k 에서 천장 안 열림
+
+### 18-a. 이 run 은 **단일 변수가 아니다**
+
+`ampTanNorm_stock`(§17-c 로 띄운 것)은 iteration **7426** 에서 멈췄고, 08-27 14:52 에
+`ampTanNorm_rotfix_stock` 이 새로 시작됐다. `motion_lib.py` 가 그 10 분 전(14:42)에 수정됐고
+이 run 의 `git/IsaacLab-6.0.diff` 에 그 파일이 들어 있다. 즉 **두 가지가 동시에 바뀌었다**:
+
+1. disc 관절 각도 tan-norm (per-step 49 → **109**)
+2. 참조 모션 **회전 파라미터화 수정** (§17-d) — expert 분포가 이전 arm 전부와 다르다
+
+★ 이기든 지든 **어느 쪽 덕/탓인지 이 run 만으로는 못 가른다.** 가르려면
+`amp_joint_tan_norm=false` + rotfix 만 켠 arm 이 하나 필요하다.
+
+설정 확인: `amp_joint_tan_norm: true` / `amp_observation_space: 109` /
+`joint_pos_tan_norm: false` / `observation_space: 42` / `task_reward_lerp: 0.5` /
+`schedule: adaptive` / `use_pace_params: false`.
+
+### 18-b. 40k 램프 — 같은 체크포인트끼리
+
+```
+       arm @40000 |     cmd 1.5     cmd 2.0     cmd 2.5     cmd 3.0     cmd 3.5     cmd 4.0
+         baseline |  1.109( 98)  1.315( 98)  1.389( 94)  0.686( 41)  0.180(  0)  0.037(  0)
+         const LR |  1.139( 92)  1.406( 94)  1.567( 94)  1.672( 94)  0.594(  3)  0.051(  0)
+  policy tan-norm |  1.101( 91)  1.324( 86)  1.379( 86)  1.306(  0)  0.395(  0)  0.125(  0)
+ disc tn + rotfix |  1.105( 91)  1.331( 91)  1.449( 88)  1.379( 28)  0.248(  0)  0.033(  0)
+```
+
+`cmd 3.5`·`4.0` **0%**. `cmd 3.0` 은 median 1.379 로 baseline(0.686)보다 높지만 달성률 28% 로
+낮다 — §17-a 의 policy tan-norm 과 같은 **양봉 vs 뭉침** 구도이고, 우열은 한 점으로 판정하지 않는다.
+`cmd 4.0` 걸음 품질은 붕괴 모드가 아니다(`base_h` 0.265, flip 10.1 Hz, cap 8%) — 안 달릴 뿐이다.
+
+### 18-c. ★★ 전이 없음 — style 0.5 는 이제 **7/7** 이다
+
+```
+[disc tn+rotfix 40k]  cmd    vx      FL-FR    FL-RL    FL-RR     Hz   gait
+                      2.0  1.331     0.50     0.53     0.03    2.33  trot
+                      2.5  1.449     0.50     0.52     0.03    2.33  trot
+                      3.0  1.379     0.50     0.54     0.03    2.33  trot
+```
+
+대각 위상차가 0.03 으로 끝까지 붙어 있다. (`cmd 3.5`·`4.0` 의 "pace" 판정은 R 0.27~0.57 로
+env 간 위상이 흩어진 상태 — 걷지 못하고 있는 것이지 보행 종류가 아니다.)
+
+**§17-d 수정이 천장을 열지 못했다.** 예상대로다 — 그 결함이 누르던 것은 주로 yaw 채널인데
+고속 전이는 pitch 축 문제다.
+
+### 18-d. disc 는 포화하지 않았다 (같은 iter 끼리)
+
+입력이 490 → 1090 이라 disc 하이퍼파라미터의 실효 강도가 움직였을 수 있어 확인했다:
+
+```
+분리도 (expert−policy)     1000     5000    15000    25000    35000    43000
+baseline                +0.5710  +0.4163  +0.3648  +0.3582  +0.3469  +0.3450
+rotfix                  +0.5356  +0.4328  +0.3818  +0.3708  +0.3691  +0.3576
+```
+
+두 곡선이 붙어 있다 → `lerp` 0.5 의 의미가 유지된다. 이 arm 은 조용히 `noamp` 쪽으로 흘러간
+다른 실험이 아니다.
+
+⚠ 다만 **LR 은 다르다** — baseline 은 바닥에서 벗어나는데(15k 3.4e-5, 43k 5.1e-5) rotfix 는
+전 구간 **1e-5 에 고정**이다. 붕괴는 없지만(ep_len 972) 고정 std arm 을 죽인 것과 같은 패턴이므로
+기록해 둔다.
+
+### 18-e. 정리 — style 0.5 에서 시도한 것
+
+| arm | 바꾼 것 | `cmd 3.5` | 보행 |
+|---|---|---:|---|
+| baseline | — | 0% | trot |
+| vel_err_scale 1.0 | 보상 스케일 | 0% | trot |
+| push off | 외란 | 0% | trot |
+| vel1 + nopush | 둘 다 | 0% | trot |
+| const LR | 옵티마이저 스케줄 | 9% | trot |
+| policy tan-norm | 정책 관측 표현 | 0% | trot |
+| **disc tan-norm + rotfix** | **판별기 관측 표현 + 참조 회전** | **0%** | **trot** |
+
+일곱 arm 이 서로 다른 축을 건드렸는데 전부 같은 자리다. `lerp` 를 올리는 것만이 열린다.
+
+원자료: `metrics/ramp_amptn_rotfix/stock_40000/` · `metrics/mimickit_align_summary.md`
+· `metrics/gait_phase.md`
