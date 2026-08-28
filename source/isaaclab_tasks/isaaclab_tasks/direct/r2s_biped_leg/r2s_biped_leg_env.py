@@ -258,7 +258,15 @@ class R2SBipedLegEnv(DirectRLEnv):
         t = torch.as_tensor(target_q, device=self.device, dtype=torch.float32)
         if t.dim() == 1:
             t = t.unsqueeze(0).expand(self.num_envs, -1)
-        self._policy_target.copy_(t)
+        # ★ 2026-08-28: soft limit 으로 자른다 — **실기 브리지가 자르기 때문이다**
+        #   (`real_runner_bipedleg.cpp:494`, 잘리면 `cmd_clamp_bits` 로 신고).
+        #   안 자르면 이 배포 리허설이 학습 env(`hind_leg_env` 의 `clamp_action_to_soft_limits`)
+        #   와도, 실기와도 다른 제3의 플랜트가 된다 — 정책이 한계 밖 목표로 PD 를 포화시키는
+        #   경로가 여기서만 살아 있게 된다(그 기전은 hind_leg_env `_pre_physics_step` 주석 참조).
+        #   하드 한계 × `soft_joint_pos_limit_factor` 가 `motions.SOFT_LIMITS_RAD` 와 같은 값이라
+        #   상수 복제 없이 자산에서 읽는다.
+        soft = self._data_tensor(self.robot.data.soft_joint_pos_limits)
+        self._policy_target.copy_(t.clamp(soft[..., 0], soft[..., 1]))
 
     def get_policy_state(self) -> dict:
         """policy_runner용 rich state (numpy, num_envs==1 가정).

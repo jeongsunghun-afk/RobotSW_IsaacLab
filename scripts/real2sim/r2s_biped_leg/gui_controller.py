@@ -752,7 +752,15 @@ class PolicyInferenceThread(QThread):
                 # monitor 중계 (action_q=sim 목적지 목표 vs sim q/dq; tau 는 rich state 에 없어 0).
                 st_mon = last_state[r2s_udp.POLICY_SRC_SIM]
                 if st_mon is not None:
-                    target_lm = [tgt_sim[a] for a in _ART_FOR_LEGMAJOR]
+                    # ★ 2026-08-28: **잘린 뒤의 목표**를 보여준다. 목적지 양쪽이 soft limit 으로
+                    #   자르므로(sim=`set_policy_target`, 실기=`real_runner:494`), 자르기 전 값을
+                    #   그리면 **아무도 실행하지 않은 수치**가 트레이스에 남는다 — 한계 밖으로 크게
+                    #   벗어난 목표를 보고 "왜 안 따라가지?" 로 읽게 된다(실제로 그렇게 보였다).
+                    #   `target_lm` 은 이미 leg-major 라 `clamp_to_soft` 의 순서와 맞는다.
+                    #   ⚠ **송신은 자르지 않은 값 그대로** 둔다 — 브리지의 `cmd_clamp_bits` 가
+                    #     "정책이 한계 밖을 요구했다"를 신고하는 진단이라, 여기서 미리 자르면
+                    #     그 신호가 영영 안 켜진다.
+                    target_lm = motions.clamp_to_soft([tgt_sim[a] for a in _ART_FOR_LEGMAJOR])
                     q_lm = [st_mon["q"][a] for a in _ART_FOR_LEGMAJOR]
                     dq_lm = [st_mon["dq"][a] for a in _ART_FOR_LEGMAJOR]
                     mon_sock.sendto(r2s_udp.pack_monitor(seq, target_lm, q_lm, dq_lm, [0.0] * NUM_JOINTS), mon_addr)
