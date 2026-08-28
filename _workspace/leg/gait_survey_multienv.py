@@ -33,6 +33,12 @@ parser.add_argument("--n_envs", type=int, default=4096)
 parser.add_argument("--dur_s", type=float, default=8.0, help="기록 길이 [s]")
 parser.add_argument("--out_dir", type=str, default="_workspace/leg/gait_survey")
 parser.add_argument(
+    "--log_style",
+    action="store_true",
+    help="AMP 판별자 보상을 env 별로 함께 기록한다. 고속에서 gallop 과 pace 의 점수를 비교하면 "
+    "'판별자가 두 걸음을 구분 못 한다' 와 '구분은 하는데 정책이 우물을 못 넘는다' 가 갈린다.",
+)
+parser.add_argument(
     "--all_stand",
     action="store_true",
     help="모든 env 를 정지 자세에서 리셋(`rel_stand_envs=1.0`). 램프 평가의 `--force_stand` 와 같은 "
@@ -108,11 +114,20 @@ vxc = torch.zeros(total_steps, N, device=base.device)
 yawc = torch.zeros(total_steps, N, device=base.device)
 hgt = torch.zeros(total_steps, N, device=base.device)
 elen = torch.zeros(total_steps, N, device=base.device)
+style = torch.zeros(total_steps, N, device=base.device) if args_cli.log_style else None
+disc = getattr(getattr(runner, "alg", None), "discriminator", None)
+if args_cli.log_style and disc is None:
+    raise SystemExit("판별자를 못 찾았다 — runner.alg.discriminator 경로 확인 필요")
 
 with torch.inference_mode():
     for step in range(total_steps):
         actions = policy(obs)
-        obs = env.step(actions)[0]
+        _step = env.step(actions)
+        obs = _step[0]
+        if style is not None:
+            # extras 는 step 반환의 마지막 원소. amp_obs 는 env 가 채워 준다.
+            extras = _step[-1]
+            style[step] = disc.compute_amp_reward(extras["amp_obs"].to(disc.device)).view(-1)
         d = base._robot.data
         jpos[step] = d.joint_pos.to(torch.float16)
         vxc[step] = base._lin_vel_cmd[:, 0]
@@ -131,6 +146,7 @@ np.savez_compressed(
     height=hgt.cpu().numpy(),
     ep_len=elen.cpu().numpy(),
     joint_names=np.array(base._robot.data.joint_names),
+    style=(style.cpu().numpy() if style is not None else np.zeros(0)),
     dt=dt,
     checkpoint=args_cli.checkpoint,
 )
