@@ -51,18 +51,32 @@ r2s_bl_prun() { bash "$_R2S_BL_DIR/run_policy_runner.sh" "$@"; }    # policy: po
 #   DISPLAY=:78 python3 "$_R2S_BL_DIR/monitor.py"
 #   r2s_bl_vnc stop
 #
-# ⚠ `-SecurityTypes None` 이라 **반드시 -localhost yes** 여야 한다(SSH 터널 경유 전제).
+# ⚠ **항상 -localhost yes** 로 연다(SSH 터널 경유 전제). 밖으로 열지 않는다.
+#   비밀번호는 `~/.vnc/passwd` 를 쓴다 — macOS 기본 "화면 공유"가 붙으려면 암호 방식(VncAuth)
+#   이어야 한다(암호 없는 세션은 붙다 튕긴다). 없거나 잊었으면 `vncpasswd` 로 새로 만든다.
 _R2S_BL_VNC_DISPLAY="${R2S_VNC_DISPLAY:-:78}"
 r2s_bl_vnc() {
+    local port="59${_R2S_BL_VNC_DISPLAY#:}"
     case "${1:-start}" in
         start)
+            if [ ! -s "$HOME/.vnc/passwd" ]; then
+                echo "먼저 VNC 비밀번호를 만든다:  vncpasswd" >&2
+                return 1
+            fi
+            # ★ 전용 xstartup 을 쓴다 — 기본 `~/.vnc/xstartup` 은 3초 안에 스스로 끝난다
+            #   (vnc_xstartup.sh 주석 참고). 남의 공용 설정을 고치지 않기 위해 분리했다.
             tigervncserver -localhost yes -geometry "${R2S_VNC_GEOM:-1600x1000}" \
-                -SecurityTypes None "$_R2S_BL_VNC_DISPLAY" || return 1
-            echo "VNC up on $_R2S_BL_VNC_DISPLAY  (port 59${_R2S_BL_VNC_DISPLAY#:})"
-            echo "  맥에서: ssh -N -L 59${_R2S_BL_VNC_DISPLAY#:}:localhost:59${_R2S_BL_VNC_DISPLAY#:} \$USER@$(hostname -I | awk '{print $1}')"
-            echo "  그 다음: DISPLAY=$_R2S_BL_VNC_DISPLAY r2s_bl_gui"
+                -SecurityTypes VncAuth -PasswordFile "$HOME/.vnc/passwd" \
+                -xstartup "$_R2S_BL_DIR/vnc_xstartup.sh" \
+                "$_R2S_BL_VNC_DISPLAY" || return 1
+            echo
+            echo "VNC up on $_R2S_BL_VNC_DISPLAY (port $port). 맥에서 순서대로:"
+            echo "  1) ssh -N -L $port:localhost:$port $USER@$(hostname -I | awk '{print $1}')"
+            echo "  2) Finder → 이동 → 서버에 연결 → vnc://localhost:$port   (~/.vnc/passwd 비번)"
+            echo "  3) 뜬 화면 안의 터미널에서:  DISPLAY=$_R2S_BL_VNC_DISPLAY r2s_bl_gui"
             ;;
         stop) tigervncserver -kill "$_R2S_BL_VNC_DISPLAY" ;;
-        *) echo "usage: r2s_bl_vnc [start|stop]" >&2; return 2 ;;
+        status) tigervncserver -list ;;
+        *) echo "usage: r2s_bl_vnc [start|stop|status]" >&2; return 2 ;;
     esac
 }
