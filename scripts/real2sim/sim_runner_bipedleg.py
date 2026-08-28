@@ -61,6 +61,14 @@ parser.add_argument(
     "and publish rich state (q,dq,gravity) on POLICY_STATE_PORT. Free base (fix_base forced False).",
 )
 parser.add_argument(
+    "--unified",
+    action="store_true",
+    default=False,
+    help="Unified mode: CMD(슬라이더)와 POLICY_ACT(정책)를 한 프로세스에서 받는다. 정책이 도착한 "
+    "스텝은 lockstep + slew 우회(= --policy_mode 와 동일 경로), 아니면 슬라이더 free-run. "
+    "fix_base 는 강제 False 이므로 슬라이더로 크게 움직이면 넘어진다 — 공중 고정 작업은 --fix_base 로 따로.",
+)
+parser.add_argument(
     "--convention_version",
     type=int,
     default=None,
@@ -136,9 +144,11 @@ def main() -> None:
     """Run the UDP <-> Isaac Sim biped-leg bridge loop (latest-wins, non-blocking recv)."""
     # parse and override the environment configuration (CONTRACT §5: fix_base toggle)
     env_cfg = parse_env_cfg(TASK_NAME, device=args_cli.device, num_envs=args_cli.num_envs)
-    if args_cli.policy_mode:
-        # policy 모드: 정책이 자유베이스에서 균형을 잡으므로 fix_base는 강제 False.
-        env_cfg.policy_mode = True
+    if args_cli.policy_mode or args_cli.unified:
+        # policy/unified: 정책이 자유베이스에서 균형을 잡으므로 fix_base는 강제 False.
+        # unified 는 스텝마다 cfg.policy_mode 를 뒤집으므로 여기서는 False 로 시작한다
+        # (슬라이더 경로가 기본, 정책 패킷이 오는 스텝만 True).
+        env_cfg.policy_mode = args_cli.policy_mode
         env_cfg.fix_base = False
     else:
         env_cfg.fix_base = args_cli.fix_base
@@ -153,13 +163,16 @@ def main() -> None:
     env = gym.make(TASK_NAME, cfg=env_cfg)
     env.reset()
 
-    if args_cli.policy_mode:
+    if args_cli.policy_mode or args_cli.unified:
         conv_ver = (
             args_cli.convention_version
             if args_cli.convention_version is not None
             else _policy_state_convention_version(env_cfg)
         )
-        _run_policy_loop(env, conv_ver)
+        if args_cli.unified:
+            _run_unified_loop(env, conv_ver)
+        else:
+            _run_policy_loop(env, conv_ver)
     else:
         _run_position_loop(env)
 
@@ -259,6 +272,164 @@ def _run_position_loop(env) -> None:
                 rate_n, overrun_n, rate_t0 = 0, 0, now
     finally:
         recv_sock.close()
+        send_sock.close()
+        env.close()
+
+
+def _drain_cmd(env, recv_sock) -> dict | None:
+    """CMD 큐를 비우고 **최신 하나**만 돌려준다. PLANT(R2PP) 는 도착 즉시 적용한다."""
+    last = None
+    while True:
+        try:
+            data, _ = recv_sock.recvfrom(4096)
+        except (BlockingIOError, OSError):
+            break
+        cmd = unpack_cmd(data)
+        if cmd is not None:
+            last = cmd
+            continue
+        pl = unpack_plant(data)
+        if pl is not None:
+            env.unwrapped.set_plant_params(pl["mode"], pl["armature"], pl["viscous"], pl["coulomb"])
+            print(
+                "[sim_runner_bipedleg] plant → stock cfg 복원"
+                if pl["mode"] == 0
+                else "[sim_runner_bipedleg] plant → PACE 적용",
+                flush=True,
+            )
+    return last
+
+
+def _run_unified_loop(env, conv_ver: int) -> None:
+    """CMD(슬라이더)와 POLICY_ACT(정책)를 **한 프로세스**에서 받는다.
+
+    두 모드를 합치되, 갈라져 있던 이유였던 두 성질은 **그대로 지킨다** —
+    합쳐서 문제가 됐던 것은 "한 프로세스"가 아니라 이 둘을 잃는 것이었다.
+
+    ① **lockstep** — POLICY_ACT 하나당 정확히 1 env.step. 학습의 "1 action = 1 step" 불변식이다.
+       자유 구동으로 돌렸을 때 sim 62.5 Hz vs 정책 50 Hz 의 홉별 지연으로 **발 오차 264 mm** 가
+       났고 lockstep 으로 10~14 mm 가 됐다 (project_r2s_sim_runner_free_run_desync).
+    ② **slew/faithful PD 우회** — 정책 목표는 `set_policy_target` 으로 직접 들어간다.
+       live 경로(slew limiter + GUI 게인 write)를 태우면 배포 리허설이 **학습과 다른 경로**가 된다.
+
+    분기 규칙 — **정책이 흐르는 동안은 정책이 로봇을 소유한다**:
+
+    ``POLICY_ACT`` 가 도착하면 그 스텝은 정책 경로(lockstep). 타임아웃이면 슬라이더 경로
+    (free-run 페이싱 + live PD). 정책이 멈추면 자동으로 슬라이더로 넘어간다.
+    ``cfg.policy_mode`` 를 스텝마다 뒤집어 env 의 두 경로를 그대로 재사용한다
+    (``_policy_target`` 은 생성 시점에 zeros 로, reset 에 default 자세로 초기화되므로 항상 유효).
+
+    ⚠ **fix_base 는 False 다** (정책이 자유베이스에서 균형을 잡아야 하므로). 그래서 이 모드에서
+      슬라이더로 관절을 크게 움직이면 **로봇이 넘어진다** — 정상이다. 공중 고정 슬라이더 작업은
+      `--fix_base` 로 따로 띄운다.
+
+    Args:
+        env: gym 환경 (fix_base=False).
+        conv_ver: POLICY_STATE 에 실을 좌표 규약 버전.
+    """
+    cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cmd_sock.bind((HOST, args_cli.cmd_port))
+    cmd_sock.setblocking(False)
+    pol_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    pol_sock.bind((HOST, POLICY_ACT_PORT))
+    # 짧은 타임아웃 — 정책이 없으면 슬라이더 경로가 제때 돌아야 한다(step_dt 20ms 보다 짧게).
+    pol_sock.settimeout(0.005)
+    send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    state_addr = (HOST, args_cli.state_port)
+
+    print(
+        f"[sim_runner_bipedleg] unified mode — CMD {HOST}:{args_cli.cmd_port} + "
+        f"POLICY_ACT {HOST}:{POLICY_ACT_PORT} (정책 도착 시 lockstep, 아니면 슬라이더 free-run)  "
+        f"convention_version={conv_ver}  ⚠ fix_base=False — 슬라이더로 크게 움직이면 넘어진다",
+        flush=True,
+    )
+
+    ieff = env.unwrapped.get_joint_ieff().numpy()
+    zero_action = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
+    seq = 0
+    period = float(env.unwrapped.step_dt)
+    next_t = time.monotonic()
+    # ★ 정책 소유 창 — 마지막 POLICY_ACT 이후 이 시간 안에는 **타임아웃에도 step 하지 않는다**.
+    #   이게 없으면 정책 50 Hz(20 ms) 사이에 5 ms 타임아웃이 3 번 터져 슬라이더 경로가 끼어들고,
+    #   결과적으로 정책 1 action 당 4 step 이 돌아 **lockstep 불변식이 조용히 깨진다**.
+    #   `_run_policy_loop` 가 타임아웃에 step 없이 continue 하는 것과 같은 취지다.
+    policy_own_s = 0.2
+    last_pol_t = float("-inf")
+    was_policy = False
+    try:
+        while simulation_app.is_running():
+            # --- 정책 패킷 우선 확인 (최대 5ms 대기 후 latest-wins 배수) ---
+            act, src = None, None
+            try:
+                data, src = pol_sock.recvfrom(4096)
+                act = unpack_policy_act(data)
+            except (TimeoutError, OSError):
+                pass
+            if act is not None:
+                pol_sock.setblocking(False)
+                while True:
+                    try:
+                        d2, s2 = pol_sock.recvfrom(4096)
+                    except (BlockingIOError, OSError):
+                        break
+                    a2 = unpack_policy_act(d2)
+                    if a2 is not None:
+                        act, src = a2, s2
+                pol_sock.settimeout(0.005)
+
+            # 슬라이더 CMD 는 정책이 돌든 말든 **항상 배수**한다 — 안 비우면 큐가 쌓이고,
+            # 정책이 멈춘 순간 오래된 명령이 한꺼번에 적용된다.
+            last_cmd = _drain_cmd(env, cmd_sock)
+
+            now = time.monotonic()
+            if act is not None and src is not None:
+                # ── 정책 경로: lockstep, slew/faithful PD 우회 ──
+                if not was_policy:
+                    print("[sim_runner_bipedleg] → 정책이 로봇을 소유 (lockstep)", flush=True)
+                    was_policy = True
+                last_pol_t = now
+                env.unwrapped.cfg.policy_mode = True
+                env.unwrapped.set_policy_target(act["target_q"])
+                with torch.inference_mode():
+                    env.step(zero_action)  # 정확히 1 step
+                st_p = env.unwrapped.get_policy_state()
+                send_sock.sendto(
+                    pack_policy_state(seq, st_p["q"], st_p["dq"], st_p["gravity"], convention_version=conv_ver),
+                    (src[0], POLICY_STATE_PORT),
+                )
+                next_t = time.monotonic()  # 정책이 페이싱을 소유한다 — 벽시계 예산을 리싱크
+            elif now - last_pol_t < policy_own_s:
+                # 정책이 아직 소유 중인데 이번 폴에는 안 왔다 — **step 하지 않는다**(lockstep 보존).
+                continue
+            else:
+                if was_policy:
+                    print("[sim_runner_bipedleg] → 정책 정지, 슬라이더로 전환 (free-run)", flush=True)
+                    was_policy = False
+                # ── 슬라이더 경로: live PD + free-run 페이싱 ──
+                env.unwrapped.cfg.policy_mode = False
+                if last_cmd is not None:
+                    env.unwrapped.set_setpoint(
+                        last_cmd["q"], last_cmd["dq"], last_cmd["kp"], last_cmd["kd"], last_cmd["tau"]
+                    )
+                with torch.inference_mode():
+                    env.step(zero_action)
+                next_t += period
+                delay = next_t - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    next_t = time.monotonic()
+
+            # GUI 표시는 어느 경로든 살아 있어야 한다 (startup latch 가 state 발행을 전제한다).
+            st = env.unwrapped.get_lowstate()
+            sim_time = float(env.unwrapped.episode_length_buf[0].item()) * env.unwrapped.step_dt
+            send_sock.sendto(pack_state(seq, sim_time, st["q"], st["dq"], st["ddq"], st["tau_est"]), state_addr)
+            if seq % 50 == 0:
+                send_sock.sendto(pack_ieff(seq, ieff), state_addr)
+            seq += 1
+    finally:
+        cmd_sock.close()
+        pol_sock.close()
         send_sock.close()
         env.close()
 
