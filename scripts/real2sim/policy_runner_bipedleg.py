@@ -360,7 +360,11 @@ def main() -> None:
     sim_state_sock.bind((HOST, POLICY_STATE_PORT))
     sim_state_sock.setblocking(False)
     real_state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # real state 수신 (seam)
-    real_state_sock.bind((HOST, REAL_STATE_PORT))
+    # ★ 2026-08-28: **전 인터페이스** — 실기(파이)에서 오는 소켓이다. `HOST`(127.0.0.1) 로 묶으면
+    #   `192.168.60.x → 192.168.60.1:9888` 이 영영 도달하지 못해 real 갈래가 obs 를 못 받고
+    #   `_hold()` 로 폴백한다(증상: "action 이 실기로 안 간다" — 실제로는 수신이 막힌 것).
+    #   같은 수정: `gui_controller.PolicyInferenceThread`. sim 쪽은 로컬이라 `HOST` 가 맞다.
+    real_state_sock.bind(("", REAL_STATE_PORT))
     real_state_sock.setblocking(False)
     act_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # action 송신 (sim + real)
     sim_act_addr = (HOST, POLICY_ACT_PORT)

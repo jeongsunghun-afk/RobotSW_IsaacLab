@@ -577,7 +577,14 @@ class PolicyInferenceThread(QThread):
         sim_state_sock.bind((HOST, r2s_udp.POLICY_STATE_PORT))
         sim_state_sock.setblocking(False)
         real_state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # real state 수신 (seam)
-        real_state_sock.bind((HOST, r2s_udp.REAL_STATE_PORT))
+        # ★ 2026-08-28: **전 인터페이스로 연다** — 이건 실기(파이)에서 오는 소켓이다.
+        #   `HOST`(127.0.0.1)로 바인딩하면 루프백에만 붙어서 `192.168.60.x → 192.168.60.1:9888`
+        #   패킷이 **영영 도달하지 못한다**. 그러면 real 갈래가 obs 를 못 받아 `targets[REAL]` 이
+        #   비고, 배선이 REAL 이어도 `_hold()` 로 폴백해 **제자리 자세만 나간다** — 증상은
+        #   "action 이 실기로 전달이 안 된다"로 보이지만 송신은 정상이고 수신이 막힌 것이다.
+        #   같은 파일의 TELEM 소켓(`rx.bind(("", REAL_TELEM_PORT))`)이 이미 이 규약이다.
+        #   ⚠ sim 쪽(`sim_state_sock`)은 로컬이므로 `HOST` 로 좁혀 두는 것이 맞다.
+        real_state_sock.bind(("", r2s_udp.REAL_STATE_PORT))
         real_state_sock.setblocking(False)
         act_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # action 송신 (sim + real)
         mon_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # monitor 중계 (action vs sim)
