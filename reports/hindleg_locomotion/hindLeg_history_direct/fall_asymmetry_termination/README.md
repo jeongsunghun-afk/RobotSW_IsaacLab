@@ -766,7 +766,7 @@ foot 단독 가동폭 1.92 rad
 ## 9-g. 재학습 (진행 중)
 
 ```
-2026-08-28_09-39-20_gainclamp_ft    27800 → 39800 (12000 iter)
+2026-08-28_09-39-20_gainclamp_ft    27800 → 39799 완주
   게인   calf 112.5/11.25 · foot 28.8/7.2   (gear² 환산)
   클램프 soft joint limits
   출발   gainfix_ft/model_27800 (게인만 반영된 200 iter)
