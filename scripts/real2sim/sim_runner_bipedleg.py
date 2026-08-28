@@ -77,6 +77,12 @@ parser.add_argument(
 )
 parser.add_argument("--cmd_port", type=int, default=CMD_PORT, help="UDP port to receive motor commands on.")
 parser.add_argument("--state_port", type=int, default=STATE_PORT, help="UDP port to send sim state to.")
+# 정책 seam 포트도 인자로 뺀다 — 상수로 두면 이미 돌고 있는 세션 옆에 두 번째 sim 을 못 띄운다
+# (bind 충돌로 즉사). 검정용으로도, sim 두 개를 나란히 비교할 때도 필요하다.
+parser.add_argument("--policy_act_port", type=int, default=POLICY_ACT_PORT, help="UDP port to receive POLICY_ACT on.")
+parser.add_argument(
+    "--policy_state_port", type=int, default=POLICY_STATE_PORT, help="UDP port to send POLICY_STATE to."
+)
 parser.add_argument(
     "--render_decimation",
     type=int,
@@ -331,7 +337,7 @@ def _run_unified_loop(env, conv_ver: int) -> None:
     cmd_sock.bind((HOST, args_cli.cmd_port))
     cmd_sock.setblocking(False)
     pol_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    pol_sock.bind((HOST, POLICY_ACT_PORT))
+    pol_sock.bind((HOST, args_cli.policy_act_port))
     # 짧은 타임아웃 — 정책이 없으면 슬라이더 경로가 제때 돌아야 한다(step_dt 20ms 보다 짧게).
     pol_sock.settimeout(0.005)
     send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -339,7 +345,7 @@ def _run_unified_loop(env, conv_ver: int) -> None:
 
     print(
         f"[sim_runner_bipedleg] unified mode — CMD {HOST}:{args_cli.cmd_port} + "
-        f"POLICY_ACT {HOST}:{POLICY_ACT_PORT} (정책 도착 시 lockstep, 아니면 슬라이더 free-run)  "
+        f"POLICY_ACT {HOST}:{args_cli.policy_act_port} (정책 도착 시 lockstep, 아니면 슬라이더 free-run)  "
         f"convention_version={conv_ver}  ⚠ fix_base=False — 슬라이더로 크게 움직이면 넘어진다",
         flush=True,
     )
@@ -395,7 +401,7 @@ def _run_unified_loop(env, conv_ver: int) -> None:
                 st_p = env.unwrapped.get_policy_state()
                 send_sock.sendto(
                     pack_policy_state(seq, st_p["q"], st_p["dq"], st_p["gravity"], convention_version=conv_ver),
-                    (src[0], POLICY_STATE_PORT),
+                    (src[0], args_cli.policy_state_port),
                 )
                 next_t = time.monotonic()  # 정책이 페이싱을 소유한다 — 벽시계 예산을 리싱크
             elif now - last_pol_t < policy_own_s:
@@ -445,13 +451,13 @@ def _run_policy_loop(env, conv_ver: int) -> None:
         conv_ver: STATE 에 실을 좌표 규약 버전 — :func:`_policy_state_convention_version` 참조.
     """
     recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    recv_sock.bind((HOST, POLICY_ACT_PORT))
+    recv_sock.bind((HOST, args_cli.policy_act_port))
     recv_sock.settimeout(0.1)  # action 대기(blocking) — 없으면 step하지 않고 upright reset 유지
     send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     print(
-        f"[sim_runner_bipedleg] policy mode (lockstep) — UDP listening on {HOST}:{POLICY_ACT_PORT}, "
-        f"sending rich state to sender:{POLICY_STATE_PORT}  (convention_version={conv_ver})",
+        f"[sim_runner_bipedleg] policy mode (lockstep) — UDP listening on {HOST}:{args_cli.policy_act_port}, "
+        f"sending rich state to sender:{args_cli.policy_state_port}  (convention_version={conv_ver})",
         flush=True,
     )
 
@@ -487,7 +493,7 @@ def _run_policy_loop(env, conv_ver: int) -> None:
             # 이번 step 결과 rich state를 action 발신자(policy_runner)에게 회신
             st = env.unwrapped.get_policy_state()
             packet = pack_policy_state(seq, st["q"], st["dq"], st["gravity"], convention_version=conv_ver)
-            send_sock.sendto(packet, (src[0], POLICY_STATE_PORT))
+            send_sock.sendto(packet, (src[0], args_cli.policy_state_port))
             seq += 1
     finally:
         recv_sock.close()

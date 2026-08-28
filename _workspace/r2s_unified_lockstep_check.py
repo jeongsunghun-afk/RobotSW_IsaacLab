@@ -16,12 +16,12 @@ import r2s_udp as U
 N = 100
 tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-rx.bind(("127.0.0.1", U.POLICY_STATE_PORT))
+rx.bind(("127.0.0.1", int(__import__("os").environ.get("PS_PORT", U.POLICY_STATE_PORT))))
 rx.settimeout(2.0)
 target = [0.0] * 8
 got, seqs = 0, []
 for i in range(N):
-    tx.sendto(U.pack_policy_act(i, target), ("127.0.0.1", U.POLICY_ACT_PORT))
+    tx.sendto(U.pack_policy_act(i, target), ("127.0.0.1", int(__import__("os").environ.get("PA_PORT", U.POLICY_ACT_PORT))))
     try:
         d, _ = rx.recvfrom(4096)
         st = U.unpack_policy_state(d)
