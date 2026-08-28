@@ -56,12 +56,24 @@
 ### 2-a. sim 에서 먼저 (실기 없이 전 구간 확인)
 
 ```bash
-# ① r2s sim — policy mode, 자유베이스
-scripts/real2sim/r2s_biped_leg/run_policy_sim.sh
+# ① r2s sim — 정책 + 슬라이더를 한 프로세스에서 (자유베이스)
+scripts/real2sim/r2s_biped_leg/run_unified_sim.sh
 
 # ② GUI (system python3 + PyQt5)
 scripts/real2sim/r2s_biped_leg/run_gui_controller.sh
 ```
+
+`run_unified_sim.sh` 는 CMD(슬라이더)와 POLICY_ACT(정책)를 **한 프로세스**에서 받는다.
+정책이 흐르는 동안은 정책이 로봇을 소유하고(lockstep), 멈추면 슬라이더로 자동 전환된다 —
+RELAX/hold 와 정책 구동을 창 하나에서 할 수 있다.
+
+★ **lockstep 은 유지된다** — POLICY_ACT 하나당 `env.step` 정확히 1 회. 검정:
+`PA_PORT=… PS_PORT=… python _workspace/r2s_unified_lockstep_check.py` (100 action → 회신 100,
+seq 증가 99 = 슬라이더 스텝 미개입).
+
+⚠ `fix_base=False` 이므로 **슬라이더로 크게 움직이면 넘어진다**(자유베이스라 정상).
+공중 고정 슬라이더 작업은 `FIX_BASE=1 run_sim_runner.sh` 로 따로 띄운다.
+정책만 단독으로 돌리던 기존 경로(`run_policy_sim.sh`)도 그대로 남아 있다.
 
 GUI 에서:
 1. **Policy 그룹** — 모델 목록 맨 위가 `2026-08-28_09-39-20_gainclamp_ft` 인지 확인
