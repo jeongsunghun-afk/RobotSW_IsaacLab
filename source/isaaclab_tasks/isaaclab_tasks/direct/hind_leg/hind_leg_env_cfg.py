@@ -452,24 +452,27 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     # events
     events: EventCfg = EventCfg()
 
-    # robot
-    # PD 게인은 실기팀 지정 운용값(2026-08-12, motions.py DEFAULT_KP/KD·real_runner calib_bipedleg.hpp와
-    # 동일: hip 100/5, thigh 50/5, calf 50/5, foot 20/5)으로 덮어쓴다 — 실기 드라이버 kd 클램프가 [0,5]라
-    # rga.py 기본값(hip kd 6.0 등)은 그대로 배포할 수 없다. 학습-배포 게인 일치가 sim2real 전제.
-    robot: ArticulationCfg = HIND_LEG_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot",
-        actuators={
-            "legs": HIND_LEG_CFG.actuators["legs"].replace(
-                stiffness={
-                    ".*_hip_joint": 100.0,
-                    ".*_thigh_joint": 50.0,
-                    ".*_calf_joint": 50.0,
-                    ".*_foot_joint": 20.0,
-                },
-                damping={".*": 5.0},
-            )
-        },
-    )
+    # robot — 게인은 `rga.py` HIND_LEG_CFG 를 그대로 쓴다 (`r2s_biped_leg_env_cfg.py` 와 동일).
+    #
+    # ⚠ 2026-08-28 이전에는 여기서 게인을 hip 100/5 · thigh 50/5 · calf 50/5 · foot 20/5 로
+    #   **덮어썼다**. 의도는 "학습-배포 게인 일치"였고 그 자체는 맞지만 **좌표가 틀렸다**:
+    #   그 값들은 실기 드라이버가 받는 **채널** 게인이고, 채널·관절이 같은 수여야 일치가 아니라
+    #   `kp_joint = k²·kp_ch` 로 환산해야 같은 물리다(k = hip·thigh 1.0 / calf 1.5 / foot 1.2).
+    #   HIND_LEG_CFG 가 2026-08-18 에 그 환산을 반영해 calf 112.5/11.25 · foot 28.8/7.2 이 됐는데,
+    #   이 override 의 주석 날짜가 08-12 로 **엿새 앞서** 갱신되지 않은 채 남아 있었다.
+    #
+    #   결과 ① 같은 저장소의 두 sim 이 다른 플랜트를 썼다 — r2s/sysid 는 112.5, RL 학습은 50.
+    #   결과 ② 정책이 실기에서 **2.25 배 단단한 무릎**(발목 1.44 배)을 만난다.
+    #   결과 ③ ★가장 나쁜 것 — `randomize_coupled_plant_scale` 의 표본 범위가 통째로 어긋난다.
+    #        그 term 은 지수 불확실성을 베르누이 `s ∈ {1/k, 1}` 로 뽑고 여기에 `u∈[0.75,1.5]` 를
+    #        곱하는데, **base 가 환산값이라는 전제**로 설계됐다. base 50 이면 calf 표본은
+    #        `[25.0, 75.0]` 이라 실제값 112.5 가 **상한 밖**이다 — 학습 내내 한 번도 안 뽑힌다.
+    #        base 112.5 면 `[56.25, 168.75]` 로 112.5 를 품고 n=1 가설(75)까지 덮는다.
+    #
+    #   ⚠ 구 주석의 "드라이버 kd 클램프 [0,5] 때문에 rga.py 기본값(hip kd 6.0)은 배포 불가"는
+    #     이제 성립하지 않는다. 08-18 환산 후 hip kd 는 5.0(=채널 5 × 1.0²)이고, calf 11.25 ·
+    #     foot 7.2 는 **채널 5 의 관절 이미지**일 뿐 전송값이 아니다.
+    robot: ArticulationCfg = HIND_LEG_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.005, track_air_time=True
     )
