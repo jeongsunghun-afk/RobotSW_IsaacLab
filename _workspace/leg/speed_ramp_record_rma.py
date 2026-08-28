@@ -103,6 +103,14 @@ parser.add_argument(
     default="init",
     help="유지할 heading. 'init'=첫 스텝의 heading, 또는 숫자(world yaw [rad])",
 )
+parser.add_argument(
+    "--yaw_rate_cmd",
+    type=float,
+    default=None,
+    help="일정한 yaw rate 명령 [rad/s]. 주면 heading 보정 대신 이 값을 그대로 내보내 **선회 주행**을 "
+    "재현한다(학습 범위 `yaw_vel_min/max` 로 clip). 램프는 원래 직진 전용이라 선회 명령을 낼 수 "
+    "없었는데, 학습 명령 분포에는 yaw 가 들어 있어 그 조건에서만 나오는 거동을 못 봤다.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 args_cli.headless = True
@@ -370,7 +378,10 @@ with torch.inference_mode():
         # 명령은 학습 시 노출된 yaw rate 범위로 clip 해 정책을 OOD 로 밀지 않는다.
         yaw_ang = current_yaw()
         yaw_err = wrap_to_pi(HEADING_TARGET - yaw_ang)
-        if args_cli.heading_hold:
+        if args_cli.yaw_rate_cmd is not None:
+            # 선회 주행 재현 — heading 보정보다 우선한다(둘은 서로 싸운다).
+            yaw_cmd = float(np.clip(args_cli.yaw_rate_cmd, YAW_CMD_MIN, YAW_CMD_MAX))
+        elif args_cli.heading_hold:
             raw = args_cli.heading_kp * yaw_err + args_cli.heading_ki * yaw_err_int
             yaw_cmd = float(np.clip(raw, YAW_CMD_MIN, YAW_CMD_MAX))
             # anti-windup: 명령이 포화된 상태에서 오차가 같은 방향이면 적분을 멈춘다.
