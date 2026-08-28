@@ -432,6 +432,11 @@ class LegImitationTrackingEnv(DirectRLEnv):
             stand_ids = env_ids[is_stand]
             rsi_ids = env_ids[~is_stand]
 
+        # ★ 속도 명령을 **RSI 앞에서** 재샘플링한다. `rsi_match_command` 가 켜지면 초기 클립을 명령
+        # 속도에 맞춰 골라야 하므로 명령이 먼저 있어야 한다. `_resample_steering` 은 로봇 상태에
+        # 의존하지 않는 순수 난수 샘플링이라 순서를 앞당겨도 안전하다(버퍼 초기화 — 불변규칙 §3).
+        self._resample_steering(env_ids)  # type: ignore[arg-type]
+
         # IsaacLab 3.0: partial-env writes use the *_index API with keyword args.
         # root_state[:, 7:] 는 (RSI 경로에서) 이미 COM 기준으로 보정해 두었다.
         if len(rsi_ids) > 0:
@@ -445,9 +450,6 @@ class LegImitationTrackingEnv(DirectRLEnv):
             self._robot.write_root_link_pose_to_sim_index(root_pose=root_state[:, :7], env_ids=stand_ids)
             self._robot.write_root_com_velocity_to_sim_index(root_velocity=root_state[:, 7:], env_ids=stand_ids)
             self._robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel, env_ids=stand_ids)
-
-        # 속도 명령 재샘플링 (버퍼 초기화 — 불변규칙 §3)
-        self._resample_steering(env_ids)  # type: ignore[arg-type]
 
         # NOTE: amp_observation_buffer는 _reset_strategy_rsi 내부에서 RSI 데이터로 채워짐.
         # 여기서 0으로 덮어쓰지 않음 — 덮어쓰면 RSI 효과가 완전히 사라짐.
@@ -466,7 +468,13 @@ class LegImitationTrackingEnv(DirectRLEnv):
     def _reset_strategy_rsi(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reference State Initialization — 모션 데이터로 초기화."""
         n = len(env_ids)
-        motion_ids = self._motion_lib.sample_motions(n)
+        if self.cfg.rsi_match_command:
+            # 명령 속도에 가까운 클립에서 시작한다. 명령은 이 함수 호출 **전에** 재샘플링돼 있다.
+            motion_ids = self._motion_lib.sample_motions_near_speed(
+                self._lin_vel_cmd[env_ids, 0].abs(), self.cfg.rsi_match_temperature
+            )
+        else:
+            motion_ids = self._motion_lib.sample_motions(n)
         start = "start" in self.cfg.reset_strategy
         if start:
             times = torch.zeros(n, device=self.device)

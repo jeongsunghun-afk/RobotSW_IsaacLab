@@ -92,6 +92,14 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
     # rel_stand_envs 비율만큼 정지(default_pos+noise, root 속도 0)로 리셋 → 정지 출발·저속 안정 학습.
     reset_strategy: str = "random"  # "random" | "random_start" | "random_stand"
     rel_stand_envs: float = 0.1  # reset_strategy 에 "stand" 포함 시 정지 리셋할 env 비율
+
+    # RSI 클립을 **명령 속도에 맞춰** 고른다. 기본 RSI 는 클립과 명령을 독립적으로 뽑아, gallop 자세로
+    # 시작했는데 명령이 0.5 이거나 walk 자세인데 명령이 3.2 인 조합이 생긴다. 그 결과 걸음 종류가
+    # 명령과 결합되지 않고 초기 자세가 고른 걸음이 에피소드 내내 잠긴다(참조에는 속도-보행 사다리가
+    # 있는데도 정책이 재현하지 못한다).
+    # ★ 명령 분포는 바뀌지 않는다 — 바뀌는 것은 초기 자세 선택뿐이다.
+    rsi_match_command: bool = False
+    rsi_match_temperature: float = 0.5  # 매칭 무름 [m/s]. 작을수록 최근접에 가깝다.
     stand_reset_joint_noise: float = 0.1  # 정지 리셋 시 관절 위치 noise 진폭 [rad]
     # 속도 command deadzone: |vx cmd| <= 이 값이면 0 으로 클램프 [m/s] (0.0=OFF). 저속서 default 유지 유도.
     cmd_deadzone: float = 0.0

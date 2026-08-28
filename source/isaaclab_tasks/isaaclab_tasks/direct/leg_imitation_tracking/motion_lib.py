@@ -461,6 +461,8 @@ class LegMotionLib:
         self._motion_num_frames = torch.tensor(num_frames_arr, dtype=torch.long, device=device)
         self._motion_lengths = torch.tensor(motion_lengths, dtype=torch.float32, device=device)
         self._motion_weights = torch.tensor(w, dtype=torch.float32, device=device)
+        # `motion_mean_speeds` 는 모션마다 파이썬 루프를 도므로 리셋마다 부르면 비싸다. 첫 호출에 캐시.
+        self._cached_mean_speeds: torch.Tensor | None = None
 
         # 각 모션의 플랫 배열 내 시작 인덱스
         start_idx = np.zeros(len(clips), dtype=np.int64)
@@ -514,6 +516,36 @@ class LegMotionLib:
             step = torch.linalg.norm(pos_xy[1:] - pos_xy[:-1], dim=-1) * fps
             speeds.append(step.mean())
         return torch.stack(speeds)
+
+    def sample_motions_near_speed(self, target_speeds: torch.Tensor, temperature: float = 0.5) -> torch.Tensor:
+        """명령 속도에 **가까운 속도의 클립**을 확률적으로 고른다.
+
+        RSI 는 원래 명령과 무관하게 클립을 뽑는다. 그래서 gallop 자세로 시작했는데 명령이 0.5 이거나
+        walk 자세인데 명령이 3.2 인 조합이 생기고, 걸음 종류가 명령과 결합되지 않은 채 남는다.
+
+        ★ 명령 분포는 건드리지 않는다 — 여기서 바꾸는 것은 **초기 자세 선택뿐**이다. 명령을 데이터
+        쪽으로 끌어당기면 그게 곧 분포 왜곡이므로 하지 않는다.
+
+        하드 최근접 대신 softmax 를 쓰는 이유: 결정적 매핑이면 정책이 "이 속도=이 클립"에 과적합하고
+        속도축에 불연속이 생긴다. 온도 `temperature` [m/s] 가 매칭의 무름을 정한다.
+
+        기존 `_motion_weights` 를 곱해 둔다 — mirror 쌍 균형과 `command_uniform` 설정이 보존된다
+        (같은 속도의 쌍은 softmax 항이 동일하므로 상대 비율이 유지된다).
+
+        Args:
+            target_speeds: [N] 각 env 의 명령 속도 [m/s]
+            temperature: 매칭 무름 [m/s]. 작을수록 최근접에 가깝다.
+
+        Returns:
+            motion_ids: [N] int64
+        """
+        if self._cached_mean_speeds is None:
+            self._cached_mean_speeds = self.motion_mean_speeds.to(self._device)
+        speeds: torch.Tensor = self._cached_mean_speeds  # [M]
+        tau = max(float(temperature), 1e-6)
+        logits = -(speeds[None, :] - target_speeds[:, None].to(speeds.device)).abs() / tau
+        w = self._motion_weights[None, :] * torch.softmax(logits, dim=-1)
+        return torch.multinomial(w, num_samples=1).squeeze(-1)
 
     def set_motion_weights_command_uniform(self, vel_max: float) -> torch.Tensor:
         """샘플링 가중치를 재설정해 expert 속도 분포가 U[0, vel_max] 에 근사하도록 만든다.
