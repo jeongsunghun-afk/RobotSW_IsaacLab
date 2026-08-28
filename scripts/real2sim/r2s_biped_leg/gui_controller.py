@@ -69,6 +69,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -151,6 +152,20 @@ ACTION_SCALE: float = 0.25
 GAIT_PERIOD: float = 0.6  # s
 STEP_DT: float = 0.02  # s (decimation 4 / 200 Hz) → 50 Hz control
 DEFAULT_JOINT_POS: list[float] = [0.0] * NUM_JOINTS  # hind_leg USD default 전부 0
+
+# --- 정책 루프 타이밍 (2026-08-28 실기 캡처 분석에서 나온 상수들) ---
+#   `reports/real2sim/_comparisons/bipedleg_policy_capture_20260828/`
+#   실측: 루프가 50 Hz 가 아니라 **34.96 Hz** 로 돌고 있었고, 그 결과 gait clock 이 설계
+#   1.667 Hz 대비 1.164 Hz(0.70배)로 흘렀다. 원인은 sim/real state 를 **직렬로** blocking
+#   대기한 것 — 틱 주기가 18.83 ms / 36.12 ms 이봉이고 그 차이 17.29 ms 가 정확히 50 Hz
+#   한 주기다(루프가 브리지의 50 Hz 격자와 맞물리지 못해 맥놀이).
+STATE_WAIT_S: float = 0.2  # 한 틱에서 state 를 기다리는 **총** 예산 (출처별이 아니라 합계)
+# gait clock 을 벽시계로 전진시킬 때 한 틱에 허용하는 최대 dt. stall(실측 최대 10.6 s)에서
+# phase 가 통째로 돌아버리지 않게 막는다. 정상 틱(20 ms)에는 영향이 없다.
+PHASE_MAX_DT: float = 0.06  # s (= 3 × STEP_DT)
+# monitor x축 격자. monitor.py 는 `seq × SAMPLE_PERIOD_S(0.02)` 로 x 를 복원하므로, 발행측이
+# seq 를 **벽시계 20 ms 격자 인덱스**로 실어야 두 스트림(sim/real)이 같은 자를 쓴다.
+MONITOR_GRID_S: float = 0.02
 # 배선 콤보: 표시 문자열 ↔ POLICY_SRC_* 값
 # sim 목적지: 세 가지 다 고를 수 있다.
 #   real obs → sim 은 **미러링**이다 — 실기가 폐루프를 도는 동안 같은 obs 로 sim 몸이 어떻게
@@ -173,6 +188,79 @@ _ROUTE_INDEX_REAL: dict[int, int] = {-1: 0, 1: 1}
 
 # 로깅용 이름 (-1=OFF)
 _SRC_NAME: dict[int, str] = {-1: "OFF", 0: "simobs", 1: "realobs"}
+
+
+def collect_states_concurrent(socks, needed, last_state, silent_ticks, drain, wait_budget_s, selector=select.select):
+    """한 틱 분의 state 를 모은다 — 배선된 출처들을 **동시에** 기다린다.
+
+    종전에는 출처마다 차례로 blocking 대기해서 한 틱 비용이 출처 수만큼 **합산**됐다. 실측
+    (``reports/real2sim/_comparisons/bipedleg_policy_capture_20260828/``)으로 정책 루프가
+    34.96 Hz 까지 떨어졌고, 틱 주기가 18.83 ms / 36.12 ms 이봉이며 그 차이 17.29 ms 가 정확히
+    50 Hz 한 주기였다 — 루프가 브리지의 50 Hz 격자와 맞물리지 못해 생긴 맥놀이다. ``select`` 로
+    바꾸면 비용이 합이 아니라 **최댓값**이 된다.
+
+    소비하지 않는 출처도 드레인한다 — 안 하면 소켓 버퍼가 쌓이고, OFF hold 가 참조하는 실측
+    ``q`` 가 낡은 값으로 굳는다.
+
+    ``silent_ticks`` 를 제자리에서 갱신한다. ``_SILENT_TICKS_LIMIT`` 을 넘긴 출처는 **대기
+    집합에서만** 빠지고 드레인은 계속되므로, 첫 패킷이 오는 순간 즉시 복귀한다.
+
+    Args:
+        socks: 출처 → 소켓. 논블로킹이어야 한다.
+        needed: 이번 틱에 실제로 소비하는 출처 집합.
+        last_state: 출처 → 마지막 state. 소비하지 않는 출처는 여기에 바로 반영된다.
+        silent_ticks: 출처 → 연속 무응답 틱 수. 제자리에서 갱신된다.
+        drain: 소켓 하나를 논블로킹 latest-wins 드레인하는 호출가능 객체.
+        wait_budget_s: 이 틱에서 대기에 쓰는 **총** 예산 [s]. 출처별이 아니라 합계다.
+        selector: ``select.select`` 호환 함수. 테스트에서 주입한다.
+
+    Returns:
+        ``(fresh, newly_silent, recovered)`` — ``fresh`` 는 이번 틱에 새로 받은 출처의 state,
+        ``newly_silent`` 는 이번 틱에 침묵 한계에 막 도달한 출처, ``recovered`` 는 침묵하다
+        돌아온 출처.
+    """
+    fresh: dict = {}
+    for src, sk in socks.items():
+        pkt = drain(sk)
+        if pkt is None:
+            continue
+        if src in needed:
+            fresh[src] = pkt
+        else:
+            last_state[src] = pkt
+
+    src_by_sock = {sk: src for src, sk in socks.items()}
+    waiting = {s for s in needed if s not in fresh and silent_ticks.get(s, 0) < _SILENT_TICKS_LIMIT}
+    deadline = time.monotonic() + wait_budget_s
+    while waiting:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            break
+        try:
+            ready = selector([socks[s] for s in waiting], [], [], remain)[0]
+        except OSError:
+            break
+        if not ready:
+            break
+        for sk in ready:
+            pkt = drain(sk)
+            if pkt is not None:
+                src = src_by_sock[sk]
+                fresh[src] = pkt
+                waiting.discard(src)
+
+    newly_silent, recovered = [], []
+    for src in sorted(needed):
+        if src in fresh:
+            if silent_ticks.get(src, 0) >= _SILENT_TICKS_LIMIT:
+                recovered.append(src)
+            silent_ticks[src] = 0
+        else:
+            silent_ticks[src] = silent_ticks.get(src, 0) + 1
+            if silent_ticks[src] == _SILENT_TICKS_LIMIT:
+                newly_silent.append(src)
+    return fresh, newly_silent, recovered
+
 
 X_VEL_RANGE: tuple[float, float] = (-0.5, 2.0)
 YAW_RANGE: tuple[float, float] = (-0.5, 0.5)
@@ -623,19 +711,21 @@ class PolicyInferenceThread(QThread):
         default_np = branches[r2s_udp.POLICY_SRC_SIM].default.cpu().numpy()
         seq = 0
         prev_mode = 0
+        # gait clock 을 벽시계로 전진시키기 위한 직전 틱 시각 (run 진입 때 None 으로 리셋).
+        last_tick_t: float | None = None
+        # 루프 페이서 기준점 / monitor x축 격자 기준점 (run 진입 때 재설정).
+        next_t = time.monotonic()
+        mon_t0 = next_t
         last_state = {r2s_udp.POLICY_SRC_SIM: None, r2s_udp.POLICY_SRC_REAL: None}
         # 출처별 연속 무응답 틱 수 — `_SILENT_TICKS_LIMIT` 을 넘으면 blocking 대기에서 뺀다.
         silent_ticks: dict[int, int] = {}
 
-        def recv_state_blocking(sock, timeout: float = 0.2):
-            """소켓에서 state 하나 blocking 대기 후 latest-wins drain. 없으면 None."""
-            sock.settimeout(timeout)
-            try:
-                data, _ = sock.recvfrom(4096)
-            except (TimeoutError, OSError):
-                return None
-            latest = r2s_udp.unpack_policy_state(data)
-            sock.setblocking(False)
+        # 출처 ↔ 소켓 (불변).
+        socks = {r2s_udp.POLICY_SRC_SIM: sim_state_sock, r2s_udp.POLICY_SRC_REAL: real_state_sock}
+
+        def drain_state(sock):
+            """논블로킹 latest-wins drain. 대기하지 않는다 — 없으면 None."""
+            latest = None
             while True:
                 try:
                     d, _ = sock.recvfrom(4096)
@@ -664,6 +754,8 @@ class PolicyInferenceThread(QThread):
                     for b in branches.values():
                         b.reset()
                     phase = 0.0
+                    last_tick_t = None  # 첫 틱은 dt 대신 공칭 STEP_DT 를 쓴다
+                    next_t = mon_t0 = time.monotonic()  # 페이서·monitor 격자 원점 재설정
                     last_state[r2s_udp.POLICY_SRC_SIM] = last_state[r2s_udp.POLICY_SRC_REAL] = None
                     send_to(sim_act_addr, default_np)
                     send_to(real_act_addr, default_np)
@@ -677,59 +769,23 @@ class PolicyInferenceThread(QThread):
                 # ── 1) 소비되는 출처의 state 만 대기한다 ───────────────────────────────
                 #     쓰지도 않는 real 을 기다리면 real 이 조용할 때 sim 까지 멈춘다.
                 needed = {v for v in (src_sim, src_real) if v >= 0}
-                socks = {r2s_udp.POLICY_SRC_SIM: sim_state_sock, r2s_udp.POLICY_SRC_REAL: real_state_sock}
+                # ★ 2026-08-28(2차): 출처들을 **동시에** 기다린다 (종전엔 직렬 합산이었다).
+                #   근거·수치는 `collect_states_concurrent` docstring 참고.
+                fresh, newly_silent, recovered = collect_states_concurrent(
+                    socks, needed, last_state, silent_ticks, drain_state, STATE_WAIT_S
+                )
+                for src in newly_silent:
+                    print(
+                        f"[gui_infer] ⚠ {_SRC_NAME.get(src, src)} state 무응답 "
+                        f"{_SILENT_TICKS_LIMIT}틱 — 대기 대상에서 제외한다"
+                        " (배선은 유지, 오면 즉시 복귀). 안 그러면 나머지 갈래까지 느려진다.",
+                        flush=True,
+                    )
+                for src in recovered:
+                    print(f"[gui_infer] {_SRC_NAME.get(src, src)} state 복귀 — 다시 대기 대상", flush=True)
+
                 got_any = False
-                # 소비하지 않는 출처도 **드레인은 한다** — 안 하면 소켓 버퍼가 쌓이고,
-                # OFF hold 가 참조하는 실측 q 가 낡은 값으로 굳는다.
-                for src, sk in socks.items():
-                    if src in needed:
-                        continue
-                    while True:
-                        try:
-                            d, _ = sk.recvfrom(4096)
-                        except (BlockingIOError, OSError):
-                            break
-                        pkt = r2s_udp.unpack_policy_state(d)
-                        if pkt is not None:
-                            last_state[src] = pkt
-                # ★ 2026-08-28: **침묵한 출처는 blocking 대기에서 뺀다.**
-                #   `recv_state_blocking` 은 출처마다 0.2 s 를 기다린다. 배선된 출처 하나가 죽어
-                #   있으면(예: 실기 브리지 미기동) 매 틱 그 0.2 s 를 통째로 버려서 **살아 있는
-                #   출처까지 같이 느려진다** — 실측으로 정책이 50 Hz → 약 5 Hz 로 떨어졌고,
-                #   sim 쪽에서는 소유권이 정책↔슬라이더로 떨렸다(로그 왕복).
-                #   ⚠ 배선을 끄지 않는다 — 죽은 갈래도 되살아나면 즉시 다시 쓴다. 드레인은 계속
-                #     하므로 첫 패킷이 오는 순간 `silent` 가 풀린다.
-                for src in sorted(needed):
-                    if silent_ticks.get(src, 0) >= _SILENT_TICKS_LIMIT:
-                        # 침묵 판정 — 논블로킹으로만 확인하고 넘어간다(이 갈래 때문에 못 멈춘다).
-                        socks[src].setblocking(False)
-                        st = None
-                        while True:
-                            try:
-                                d, _ = socks[src].recvfrom(4096)
-                            except (BlockingIOError, OSError):
-                                break
-                            pkt = r2s_udp.unpack_policy_state(d)
-                            if pkt is not None:
-                                st = pkt
-                        if st is None:
-                            silent_ticks[src] += 1
-                            continue
-                        silent_ticks[src] = 0
-                        print(f"[gui_infer] {_SRC_NAME.get(src, src)} state 복귀 — 다시 대기 대상", flush=True)
-                    else:
-                        st = recv_state_blocking(socks[src])
-                    if st is None:
-                        silent_ticks[src] = silent_ticks.get(src, 0) + 1
-                        if silent_ticks[src] == _SILENT_TICKS_LIMIT:
-                            print(
-                                f"[gui_infer] ⚠ {_SRC_NAME.get(src, src)} state 무응답 "
-                                f"{_SILENT_TICKS_LIMIT}틱 — blocking 대기에서 제외한다"
-                                " (배선은 유지, 오면 즉시 복귀). 안 그러면 나머지 갈래까지 느려진다.",
-                                flush=True,
-                            )
-                        continue
-                    silent_ticks[src] = 0
+                for src, st in sorted(fresh.items()):
                     if st["convention_version"] != _REQUIRED_CONVENTION_VERSION:
                         self.failed.emit(
                             f"coordinate convention mismatch: got v{st['convention_version']}, "
@@ -764,7 +820,16 @@ class PolicyInferenceThread(QThread):
                     b.advance(raw_action)  # 자기 prev_action 갱신 (phase 는 아래에서 공유 전진)
                     # act_scale: 정책 권한 [0,1]. 0 이면 default(중립), 1 이면 학습 그대로.
                     targets[src] = (act_scale * ACTION_SCALE * raw_action + b.default).cpu().numpy()
-                phase = (phase + STEP_DT / GAIT_PERIOD) % 1.0
+                # ★ 2026-08-28(2차): gait clock 을 **벽시계 dt** 로 전진시킨다.
+                #   종전에는 틱당 고정 `STEP_DT` 였다. 틱이 20 ms 를 못 지키면 보행 주파수가
+                #   그대로 느려진다 — 실측 1.164 Hz(설계 1.667 Hz 의 0.70배)였고, 그 비율이
+                #   틱 비율 34.96/50 과 정확히 일치했다. 다리는 벽시계로 움직이므로 벽시계가
+                #   기준이다. `PHASE_MAX_DT` 로 stall(최대 10.6 s 관측) 때 phase 가 통째로
+                #   돌아가는 것만 막는다. 정상 20 ms 틱에서는 종전과 동일한 값이 된다.
+                now_tick = time.monotonic()
+                tick_dt = STEP_DT if last_tick_t is None else min(now_tick - last_tick_t, PHASE_MAX_DT)
+                last_tick_t = now_tick
+                phase = (phase + tick_dt / GAIT_PERIOD) % 1.0
 
                 # ── 3) 목적지별 배선 ──────────────────────────────────────────────────
                 #     OFF(-1) 는 미송신이 아니라 **그 목적지 실측 q 로 hold** 다 (docstring 참고).
@@ -836,7 +901,17 @@ class PolicyInferenceThread(QThread):
                     target_lm = [tgt_sim[a] for a in _ART_FOR_LEGMAJOR]
                     q_lm = [st_mon["q"][a] for a in _ART_FOR_LEGMAJOR]
                     dq_lm = [st_mon["dq"][a] for a in _ART_FOR_LEGMAJOR]
-                    mon_sock.sendto(r2s_udp.pack_monitor(seq, target_lm, q_lm, dq_lm, [0.0] * NUM_JOINTS), mon_addr)
+                    # ★ 2026-08-28(2차): 중계 seq 는 **틱 카운터가 아니라 벽시계 20 ms 격자
+                    #   인덱스**다. monitor.py 는 `seq × SAMPLE_PERIOD_S(0.02)` 로 x 를 복원하는데,
+                    #   틱 카운터를 실으면 루프가 50 Hz 가 아닐 때 sim 곡선만 압축돼 그려진다
+                    #   (실측 34.96 Hz → 10 s 창 왼쪽 끝에서 real 과 3.01 s 어긋났다). 실기 중계
+                    #   (`REAL_MON_PORT`)는 이미 벽시계 게이트라, 이걸 격자로 바꿔야 **두 스트림이
+                    #   같은 자**를 쓴다. 20 ms 안에 두 번 오면 seq 가 같아져 monitor 가 뒤엣것을
+                    #   버리는데, 그게 곧 의도한 데시메이션이다.
+                    mon_seq_sim = int((now_tick - mon_t0) / MONITOR_GRID_S)
+                    mon_sock.sendto(
+                        r2s_udp.pack_monitor(mon_seq_sim, target_lm, q_lm, dq_lm, [0.0] * NUM_JOINTS), mon_addr
+                    )
                 seq += 1
 
                 # 1초(50 step)마다 로깅 — grav_z≈-1 이면 직립. 두 갈래가 다 살아 있으면 **발산량**도 낸다.
@@ -850,13 +925,29 @@ class PolicyInferenceThread(QThread):
                             - np.asarray(targets[r2s_udp.POLICY_SRC_SIM], dtype=float)
                         )
                         div = f"  |Δaction| mean={d.mean():.4f} max={d.max():.4f} rad"
+                    # t 는 **벽시계**다 — `seq × STEP_DT` 로 찍으면 루프가 느려졌을 때 로그가
+                    # 그 사실을 숨긴다(그래서 34.96 Hz 를 오래 못 봤다). rate 도 같이 낸다.
+                    elapsed = now_tick - mon_t0
                     print(
-                        f"[gui_infer] t={seq * STEP_DT:5.1f}s  grav_z={gz:+.2f}  phase={phase:.2f}  "
+                        f"[gui_infer] t={elapsed:5.1f}s  rate={seq / elapsed if elapsed > 0 else 0.0:4.1f}Hz  "
+                        f"grav_z={gz:+.2f}  phase={phase:.2f}  "
                         f"x_vel={x_vel:+.2f} yaw={yaw:+.2f} act_scale={act_scale:.2f}  "
                         f"sim←{_SRC_NAME[src_sim]} real←{_SRC_NAME[src_real]}{div}",
                         flush=True,
                     )
                     self.status.emit(gz, float(phase), float(x_vel), float(yaw))
+
+                # ── 페이서 ───────────────────────────────────────────────────────────
+                #   ★ 2026-08-28(2차): 루프를 20 ms 격자에 물린다. select 로 대기 비용을 줄여도
+                #   페이서가 없으면 루프가 브리지의 50 Hz 격자와 맥놀이하며 주기가 이봉으로
+                #   흩어진다(18.83/36.12 ms 실측). lockstep 은 유지된다 — sim state 를 받고
+                #   action 을 보낸 **뒤** 남은 시간만 잔다.
+                next_t += STEP_DT
+                delay = next_t - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                elif delay < -STEP_DT:
+                    next_t = time.monotonic()  # 한 주기 이상 밀렸으면 리싱크(누적 드리프트 방지)
         finally:
             for s in (sim_state_sock, real_state_sock, act_sock, mon_sock):
                 s.close()
