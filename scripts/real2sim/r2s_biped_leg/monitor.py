@@ -70,6 +70,9 @@ RECV_PERIOD_S: float = 0.005  # UDP drain 주기
 RESCALE_PERIOD_S: float = 1.0
 Y_MIN_SPAN: float = 0.2  # y축 최소 폭 — 정지 중 노이즈가 화면 가득 확대되는 것을 막는다
 BUF_MAXLEN: int = 1200  # WINDOW_S × 발행율(50Hz) 여유
+# 이 시간 이상 조용했다가 낮은 seq 로 돌아오면 UDP 재정렬이 아니라 **발행측 재시작**으로 본다.
+# (`_append_seq` 주석 참고 — seq 크기만으로 판정하면 화면이 빈 채로 굳는 경우가 있었다.)
+STALE_RESET_S: float = 1.0
 
 _C_ACTION = "#f0a020"
 _C_SIM = "#4f9dfb"
@@ -241,6 +244,15 @@ class MonitorWindow(QMainWindow):
             self._axes.append(plot)
             self._lines.append(lines)
         self._axes[-1].setLabel("bottom", "time [s] (0 = now)")
+
+        # ★ 2026-08-28: **빈 화면에 이유를 적는다.**
+        #   창 안에 그릴 점이 하나도 없으면 배경(#1c1e26)만 남아 "까만 화면"으로 보이는데,
+        #   그게 (a) 발행측이 안 보내는 중인지 (b) X11 이 안 그려 주는 중인지 구분이 안 됐다.
+        #   이 배너가 보이면 그리기는 살아 있는 것이다 — 원인은 데이터 쪽이다.
+        self._empty_note = pg.TextItem("", color="#8b90a8", anchor=(0.5, 0.5))
+        self._empty_note.setPos(-WINDOW_S * 0.5, 0.0)
+        self._axes[0].addItem(self._empty_note, ignoreBounds=True)
+
         self._update_axis_labels()
 
     def _update_axis_labels(self) -> None:
@@ -315,11 +327,18 @@ class MonitorWindow(QMainWindow):
         UDP 재정렬로 보고 버린다 (x 단조 유지).
         """
         if anchor is not None:
-            last_seq = anchor[0]
+            last_seq, last_t = anchor
             if seq <= last_seq:
-                if seq > last_seq - BUF_MAXLEN:
+                # ★ 2026-08-28: **시간으로 먼저 판정한다.** seq 크기만 보면, 짧게 돌다 멈춘
+                #   발행측이 다시 켜졌을 때(새 seq 가 0 근처, 직전 last_seq < BUF_MAXLEN) 새
+                #   패킷이 전부 "재정렬"로 버려져 화면이 최대 BUF_MAXLEN 만큼 빈 채로 굳는다.
+                #   한동안 조용했다가 낮은 seq 로 돌아왔다면 그건 재정렬이 아니라 재시작이다.
+                if now - last_t > STALE_RESET_S:
+                    buf.clear()
+                elif seq > last_seq - BUF_MAXLEN:
                     return anchor  # 재정렬/중복 — 버린다
-                buf.clear()  # 발행측 재시작
+                else:
+                    buf.clear()  # seq 가 크게 뒤로 — 발행측 재시작
         buf.append((seq, *values))
         return (seq, now)
 
@@ -406,6 +425,39 @@ class MonitorWindow(QMainWindow):
         if r:
             self._axes[2].setYRange(r[0] * scale, r[1] * scale, padding=0)
 
+    def _stream_note(self, name: str, buf, anchor, now: float) -> str | None:
+        """이 스트림이 왜 안 그려지는지 한 줄. 정상(창 안에 점이 있음)이면 None.
+
+        ⚠ 반환 문자열은 **화면에 그려지므로 영어여야 한다** — Xvfb 에 CJK 폰트가 없어 한글은
+        녹화·스크린샷에서 □ 로 깨진다.
+        """
+        if anchor is None:
+            return f"{name}: no packets received"
+        age = now - anchor[1]
+        if not buf or age > WINDOW_S:
+            return f"{name}: silent for {age:.0f}s (publisher stopped / not engaged)"
+        return None
+
+    def _update_empty_note(self, now: float) -> None:
+        """창 안에 그릴 점이 하나도 없을 때 **이유를 화면에 적는다**.
+
+        배경이 어두워서 빈 플롯이 "까만 화면"으로 보이는데, 이 배너가 뜬다는 것 자체가 그리기
+        경로는 살아 있다는 뜻이다 — 그러면 원인은 X11 이 아니라 데이터 쪽이다.
+        """
+        notes = [self._stream_note(self._label, self._buf, self._anchor, now)]
+        if self._show_real:
+            notes.append(self._stream_note("real", self._real_buf, self._real_anchor, now))
+        live = [n for n in notes if n is None]
+        if live:  # 하나라도 정상이면 배너를 감춘다
+            self._empty_note.setText("")
+            return
+        # 영어 고정 — Xvfb 에 CJK 폰트가 없다 (`feedback_gui_text_english`).
+        self._empty_note.setText(
+            "NO DATA IN WINDOW\n"
+            + "\n".join(n for n in notes if n)
+            + "\nRendering is alive - this is a stream problem, not the window."
+        )
+
     def _set_line(self, line, buf, anchor, col: int, now: float, scale: float = 1.0) -> None:
         if line is None:
             return
@@ -441,6 +493,8 @@ class MonitorWindow(QMainWindow):
         if (now - self._last_rescale) >= RESCALE_PERIOD_S:
             self._last_rescale = now
             self._rescale_axes()
+
+        self._update_empty_note(now)
 
         # pyqtgraph 는 setData/setYRange 가 곧 갱신 트리거 — 명시적 draw 호출 불필요.
         self._update_value_label()

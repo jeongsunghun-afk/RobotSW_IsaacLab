@@ -33,3 +33,36 @@ r2s_bl_sim() { bash "$_R2S_BL_DIR/run_unified_sim.sh" "$@"; }
 r2s_bl_gui() { bash "$_R2S_BL_DIR/run_gui_controller.sh" "$@"; }    # PyQt GUI (position/policy 공용)
 r2s_bl_psim() { bash "$_R2S_BL_DIR/run_policy_sim.sh" "$@"; }       # policy: sim_runner --policy_mode
 r2s_bl_prun() { bash "$_R2S_BL_DIR/run_policy_runner.sh" "$@"; }    # policy: policy_runner (추론)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# r2s_bl_vnc — SSH X11 포워딩 대신 **VNC 세션**에서 GUI/monitor 를 띄운다.
+#
+# 왜: 이 워크스테이션에 붙는 클라이언트가 XQuartz(macOS)이고 `DISPLAY=localhost:N` 즉 SSH
+#   X11 포워딩이다. 이 조합의 알려진 증상이 (a) 창이 까맣게만 보이고 (b) 렉이 심한 것이다.
+#   포워딩이 untrusted(`ssh -X`)면 **20분 타임아웃** 뒤 X 요청이 거부돼 창이 죽는다.
+#   VNC 는 렌더를 워크스테이션의 진짜 X 서버에서 하고 화면만 보내므로 둘 다 해결된다.
+#   세션이 남아 있어 SSH 가 끊겨도 GUI 가 안 죽는다(학습·실기 구동 중엔 이게 크다).
+#
+# 쓰는 법:
+#   r2s_bl_vnc start      # :78 에 세션 생성 (localhost 바인딩)
+#   # 맥에서:  ssh -N -L 5978:localhost:5978 lgb@<이 머신>
+#   #          그 뒤 VNC 뷰어로 localhost:5978 접속 (macOS 기본 "화면 공유" 앱도 됨)
+#   DISPLAY=:78 r2s_bl_gui        # GUI 를 VNC 쪽에 띄운다
+#   DISPLAY=:78 python3 "$_R2S_BL_DIR/monitor.py"
+#   r2s_bl_vnc stop
+#
+# ⚠ `-SecurityTypes None` 이라 **반드시 -localhost yes** 여야 한다(SSH 터널 경유 전제).
+_R2S_BL_VNC_DISPLAY="${R2S_VNC_DISPLAY:-:78}"
+r2s_bl_vnc() {
+    case "${1:-start}" in
+        start)
+            tigervncserver -localhost yes -geometry "${R2S_VNC_GEOM:-1600x1000}" \
+                -SecurityTypes None "$_R2S_BL_VNC_DISPLAY" || return 1
+            echo "VNC up on $_R2S_BL_VNC_DISPLAY  (port 59${_R2S_BL_VNC_DISPLAY#:})"
+            echo "  맥에서: ssh -N -L 59${_R2S_BL_VNC_DISPLAY#:}:localhost:59${_R2S_BL_VNC_DISPLAY#:} \$USER@$(hostname -I | awk '{print $1}')"
+            echo "  그 다음: DISPLAY=$_R2S_BL_VNC_DISPLAY r2s_bl_gui"
+            ;;
+        stop) tigervncserver -kill "$_R2S_BL_VNC_DISPLAY" ;;
+        *) echo "usage: r2s_bl_vnc [start|stop]" >&2; return 2 ;;
+    esac
+}

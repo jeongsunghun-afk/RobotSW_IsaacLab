@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """GUI 정책 실행 기록(`data/bipedleg_gui/policy_*.npz`)의 타이밍·클램프·sim2real 갭 분석.
 
 이 세션의 실기 실험에서 사용자가 보고한 두 증상을 데이터로 판정하기 위해 만들었다.

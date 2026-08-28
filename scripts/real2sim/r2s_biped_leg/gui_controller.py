@@ -755,7 +755,12 @@ class PolicyInferenceThread(QThread):
                         b.reset()
                     phase = 0.0
                     last_tick_t = None  # 첫 틱은 dt 대신 공칭 STEP_DT 를 쓴다
-                    next_t = mon_t0 = time.monotonic()  # 페이서·monitor 격자 원점 재설정
+                    next_t = time.monotonic()  # 페이서 원점만 재설정
+                    # ⚠ `mon_t0` 는 **여기서 리셋하지 않는다.** monitor.py 의 `_append_seq` 는
+                    #   seq 역행을 UDP 재정렬로 보고 버린다(BUF_MAXLEN 이내면 clear 도 안 한다).
+                    #   engage 마다 격자 원점을 당기면 seq 가 0 근처로 되돌아가, 직전 세션이
+                    #   짧았을 경우 새 패킷이 통째로 버려져 화면이 한동안 빈다.
+                    #   스레드 수명 동안 단조 증가시켜야 한다.
                     last_state[r2s_udp.POLICY_SRC_SIM] = last_state[r2s_udp.POLICY_SRC_REAL] = None
                     send_to(sim_act_addr, default_np)
                     send_to(real_act_addr, default_np)

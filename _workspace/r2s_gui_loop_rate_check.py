@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """GUI 정책 루프의 타이밍 수정을 검정한다 (Isaac·torch·Qt 불필요).
 
 2026-08-28 실기 캡처에서 드러난 세 가지를 각각 판정한다
