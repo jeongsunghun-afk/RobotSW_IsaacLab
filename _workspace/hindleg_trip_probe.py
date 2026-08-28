@@ -46,6 +46,13 @@ parser.add_argument(
 parser.add_argument("--trip_ms", type=float, default=50.0, help="래치까지 필요한 지속 시간 [ms].")
 parser.add_argument("--tilt_deg", type=float, default=50.0, help="넘어짐 판정 기울기 [deg] — 걷는 스텝만 센다.")
 parser.add_argument(
+    "--real_gains", action="store_true",
+    help="★ 실기가 실제로 만들 관절 게인(`rga.py` HIND_LEG_CFG 의 gear² 환산값)으로 바꿔 잰다. "
+    "학습 env(`hind_leg_env_cfg.py`)는 채널값을 관절 게인으로 그대로 써서 calf 50 / foot 20 인데, "
+    "실기는 같은 채널값이 관절에서 calf 112.5 / foot 28.8 로 나타난다 — 즉 **정책이 실기에서 만날 무릎은 "
+    "학습보다 2.25 배 단단하다**. 이 플래그가 그 배포 조건을 재현한다(정책엔 분포 밖).",
+)
+parser.add_argument(
     "--act_scale", type=float, default=1.0,
     help="정책 action 에 곱하는 배율 [0~1]. 배포 GUI 의 action scale 과 같은 자리다 — 트립을 "
     "피하려고 이 값을 낮췄을 때 **토크가 실제로 얼마나 내려가고 속도를 얼마나 잃는지** 잰다. "
@@ -107,6 +114,22 @@ def main() -> None:
             env_cfg.foot_reflected_inertia_cap = None if m.group(1) == "null" else float(m.group(1))
     cap = getattr(env_cfg, "foot_reflected_inertia_cap", None)
     print(f"[probe] 적용: {{{', '.join(f'{k}={getattr(env_cfg, k)}' for k in TERM_KEYS)}}}  cap={cap}")
+
+    if args_cli.real_gains:
+        # 실기 채널 게인 100/50/50/20 · kd 5 를 관절 공간으로 환산한 값 (kp_joint = k^2 * kp_ch).
+        # 출처는 `rga.py` HIND_LEG_CFG (2026-08-18). 학습 env 는 이 환산 없이 채널값을 그대로 쓴다.
+        env_cfg.robot.actuators["legs"] = env_cfg.robot.actuators["legs"].replace(
+            stiffness={
+                ".*_hip_joint": 100.0, ".*_thigh_joint": 50.0,
+                ".*_calf_joint": 112.5, ".*_foot_joint": 28.8,
+            },
+            damping={
+                ".*_hip_joint": 5.0, ".*_thigh_joint": 5.0,
+                ".*_calf_joint": 11.25, ".*_foot_joint": 7.2,
+            },
+        )
+        print("[probe] ★ --real_gains: calf kp 50→112.5 (kd 5→11.25) · foot kp 20→28.8 (kd 5→7.2)")
+        print("[probe]   = 같은 채널 게인이 실기 관절에서 나타나는 값. 정책엔 **학습 분포 밖**이다.")
 
     with launch_simulation(env_cfg, args_cli):
         env = gym.make(args_cli.task, cfg=env_cfg)
