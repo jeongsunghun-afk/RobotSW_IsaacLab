@@ -75,7 +75,8 @@ if args_cli.run_params:
         saved = yaml.unsafe_load(f)
     for k in ("lin_vel_x_min", "lin_vel_x_max", "lin_vel_y_min", "lin_vel_y_max",
               "yaw_vel_min", "yaw_vel_max", "motion_file", "motion_weight_mode",
-              "vel_err_scale", "reset_strategy", "rel_stand_envs", "cmd_deadzone"):
+              "vel_err_scale", "reset_strategy", "rel_stand_envs", "cmd_deadzone",
+              "rsi_match_command", "rsi_match_temperature"):
         if k in saved and hasattr(env_cfg, k):
             setattr(env_cfg, k, saved[k])
 
@@ -112,6 +113,9 @@ N = args_cli.n_envs
 jpos = torch.zeros(total_steps, N, base._robot.data.joint_pos.shape[1], dtype=torch.float16, device=base.device)
 vxc = torch.zeros(total_steps, N, device=base.device)
 yawc = torch.zeros(total_steps, N, device=base.device)
+# 실제로 낸 전진속도. 참조상 gallop 은 2.7 m/s 이상의 걸음이라, 명령만 보면 "3.0 을 시켰는데
+# 1.8 밖에 못 내는 중" 인 표본을 고속 칸에 넣어 지도를 흐린다.
+vxa = torch.zeros(total_steps, N, device=base.device)
 hgt = torch.zeros(total_steps, N, device=base.device)
 elen = torch.zeros(total_steps, N, device=base.device)
 style = torch.zeros(total_steps, N, device=base.device) if args_cli.log_style else None
@@ -132,6 +136,7 @@ with torch.inference_mode():
         jpos[step] = d.joint_pos.to(torch.float16)
         vxc[step] = base._lin_vel_cmd[:, 0]
         yawc[step] = base._yaw_vel_cmd
+        vxa[step] = d.root_lin_vel_b[:, 0]
         hgt[step] = d.body_pos_w[:, base.ref_body_index, 2]
         elen[step] = base.episode_length_buf
 
@@ -143,6 +148,7 @@ np.savez_compressed(
     jpos=jpos.cpu().numpy(),
     vx_cmd=vxc.cpu().numpy(),
     yaw_cmd=yawc.cpu().numpy(),
+    vx_act=vxa.cpu().numpy(),
     height=hgt.cpu().numpy(),
     ep_len=elen.cpu().numpy(),
     joint_names=np.array(base._robot.data.joint_names),

@@ -99,6 +99,30 @@ def main() -> int:
             line += f"{gl:.0f}% / {pc:.0f}% (n={len(labs)})".rjust(22)
         print(line)
 
+    # 선회를 합쳐 **명령 속도 축만** 본다. "속도가 오르면 걸음이 바뀌는가" 는 이 한 줄짜리 축의
+    # 단조성 문제라, 격자로 흩뿌리면 오히려 안 보인다. 실제 낸 속도를 나란히 찍어, 명령만 높고
+    # 실제로는 못 내는 칸을 구별할 수 있게 한다.
+    vxa_e = np.asarray(d["vx_act"]).mean(axis=0) if "vx_act" in d.files else None
+    print("\n[명령 속도축 — 선회 합산]")
+    hdr2 = f"{'vx cmd':>14s}{'n':>7s}{'gallop%':>9s}{'pace%':>8s}{'trot%':>8s}{'stand%':>8s}"
+    if vxa_e is not None:
+        hdr2 += f"{'실제 vx':>10s}"
+    print(hdr2)
+    print("-" * len(hdr2))
+    for i in range(len(args.vx_bins) - 1):
+        lo, hi = args.vx_bins[i], args.vx_bins[i + 1]
+        m = keep & (vx_e >= lo) & (vx_e < hi)
+        labs = [x for x in labels[m] if x != "-"]
+        if not labs:
+            continue
+        c, n = Counter(labs), len(labs)
+        row = (f"[{lo:.1f},{hi:.1f})".rjust(14) + f"{n:7d}"
+               f"{100 * (c['gallop'] + c['bound']) / n:9.1f}{100 * c['pace'] / n:8.1f}"
+               f"{100 * c['trot'] / n:8.1f}{100 * c['stand'] / n:8.1f}")
+        if vxa_e is not None:
+            row += f"{np.median(vxa_e[m]):10.2f}"
+        print(row)
+
     labs_all = [x for x in labels[keep] if x != "-"]
     print(f"\n[전체 분포] n={len(labs_all)}")
     for k, v in Counter(labs_all).most_common():
