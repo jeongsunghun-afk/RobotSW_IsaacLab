@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """monitor.py `_append_seq` 의 발행측 재시작 처리를 검정한다 (디스플레이 불필요).
 
 증상: 발행측이 짧게 돌다 멈췄다가 다시 켜지면 새 seq 가 0 근처로 돌아오는데, 종전 코드는

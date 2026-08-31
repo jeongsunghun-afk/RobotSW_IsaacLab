@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """monitor.py 가 실제로 곡선을 그리는지 / 빈 화면에 이유를 적는지 창을 띄워 확인한다.
 
 Xvfb 로 돌리므로 **앱 쪽 렌더 경로만** 검정한다 — 원격 X11 전송 문제는 여기서 재현되지 않는다.
