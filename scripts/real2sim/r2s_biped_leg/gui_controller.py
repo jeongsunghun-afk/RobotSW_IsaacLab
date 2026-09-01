@@ -481,10 +481,25 @@ _SM_MOTION_DONE = 75  # publisher→UI: 비반복 재생이 마지막 프레임�
 # ⚠ 불리언 플래그가 아니라 **중심 값 자체**를 싣는다 — publisher 에 분기가 없고, 캡처에 기록되는
 #   중심이 실제로 쓰인 값과 항상 일치한다(끄면 CHIRP_CENTER 가 그대로 들어가 종전과 동일).
 _SM_CHIRP_CENTER = 76  # 76..83
-_SM_FRAMES = 84  # 84..: 시퀀스/모션 프레임 버퍼 (MAX_FRAMES × 8)
+# 84..100: sim 리치 STATE(`pack_state`: q,dq,ddq,tau_est) 중 정책 캡처에 필요한 두 블록.
+# publisher 프로세스가 STATE_PORT 에서 받아 여기 되쓰고, 정책 스레드가 매 틱 읽어 캡처에 싣는다.
+# ★왜 이 경로인가 — 정책이 받는 POLICY_STATE(85 B)에는 **토크 채널이 없다**(q/dq/gravity 뿐).
+#   그래서 sim 토크는 이 리치 스트림으로만 온다. 포트를 새로 열지 않는 이유는 publisher 가 이미
+#   STATE_PORT 를 bind 하고 있어 두 번 bind 할 수 없기 때문이다.
+# ⚠ **수신 시각을 같이 싣는다.** 값만 두면 sim 이 죽어도 마지막 값이 그대로 남아 "살아 있는
+#   데이터"처럼 기록된다 — 실기 IMU 폴백에서 이미 겪은 실패 양식이다(정책은 IMU 사망과 직립을
+#   구분할 수 없었다). 소비자가 아니라 **생산자가** 신선도를 판정한다.
+#   근거: reports/real2sim/_comparisons/bipedleg_sensor_pipeline_20260901/README.md §6
+_SM_SIM_TAU = 84  # 84..91: sim tau_est [N·m], **leg-major**
+_SM_SIM_DDQ = 92  # 92..99: sim ddq [rad/s²], **leg-major**
+_SM_SIM_RICH_T = 100  # 마지막 리치 STATE 수신 시각 (time.monotonic). 0 = 한 번도 못 받음
+_SM_FRAMES = 101  # 101..: 시퀀스/모션 프레임 버퍼 (MAX_FRAMES × 8)
 # 4096/50 = 81.9s. 모션 클립 재생이 진입 보간(1.5s) + 클립/배속 + 루프 bridge 를 한 버퍼에 담고,
 # 0.25배속이면 클립이 4배로 늘어난다 (trot0 3.48s → 13.9s = 697프레임). 구 512로는 모자란다.
 MAX_FRAMES = 4096
+# sim 리치 STATE 가 이 시간보다 묵으면 캡처에 NaN 을 남긴다. sim 은 50 Hz(20 ms) 로 보내므로
+# 10 틱 여유다 — 렌더 스톨은 넘기고 프로세스 사망은 잡는 폭.
+_SIM_RICH_STALE_S: float = 0.2
 _SM_LEN = _SM_FRAMES + MAX_FRAMES * NUM_JOINTS
 
 _STYLESHEET: str = """
@@ -607,11 +622,14 @@ class PolicyInferenceThread(QThread):
     status = pyqtSignal(float, float, float, float)
     failed = pyqtSignal(str)
 
-    def __init__(self, model_path: str, device: str, real_host: str | None = None, parent=None) -> None:
+    def __init__(self, model_path: str, device: str, real_host: str | None = None, shared=None, parent=None) -> None:
         super().__init__(parent)
         self._model_path = model_path
         self._device = device
         self._real_host = real_host
+        # publisher 프로세스가 되쓰는 공유메모리. sim 리치 STATE(tau/ddq)를 캡처에 싣기 위한 것뿐이라
+        # None 이어도 정책은 정상 동작하고 그 두 열만 NaN 이 된다.
+        self._shared = shared
         self._lock = threading.Lock()
         self._mode = 0  # 0=idle, 1=run
         # ★ 2026-08-27: 목적지별 obs 출처. -1=OFF(중립 유지) · 0=sim obs · 1=real obs.
@@ -810,6 +828,7 @@ class PolicyInferenceThread(QThread):
                 #     안 내보내는 갈래를 멈추면 배선을 바꾸는 순간 history 가 튄다.
                 cmd_vec = torch.tensor([x_vel, 0.0, yaw], device=device)
                 targets: dict[int, object] = {}
+                raw_actions: dict[int, object] = {}  # 기록용 — 오프셋·클램프 이전의 정책 원본 출력
                 for src, b in branches.items():
                     st = last_state[src]
                     if st is None:
@@ -824,6 +843,7 @@ class PolicyInferenceThread(QThread):
                         raw_action = model(obs_policy.unsqueeze(0), hist.unsqueeze(0))[0]  # (8,)
                     b.advance(raw_action)  # 자기 prev_action 갱신 (phase 는 아래에서 공유 전진)
                     # act_scale: 정책 권한 [0,1]. 0 이면 default(중립), 1 이면 학습 그대로.
+                    raw_actions[src] = raw_action.cpu().numpy()
                     targets[src] = (act_scale * ACTION_SCALE * raw_action + b.default).cpu().numpy()
                 # ★ 2026-08-28(2차): gait clock 을 **벽시계 dt** 로 전진시킨다.
                 #   종전에는 틱당 고정 `STEP_DT` 였다. 틱이 20 ms 를 못 지키면 보행 주파수가
@@ -853,6 +873,10 @@ class PolicyInferenceThread(QThread):
                     else _hold(r2s_udp.POLICY_SRC_REAL)
                 )
 
+                # 기록용 — 목적지별로 고른 **정책 원본 출력**. OFF(-1) 는 정책이 아니라 실측 q hold 라 None 이다.
+                raw_sim = raw_actions.get(src_sim) if src_sim >= 0 else None
+                raw_real = raw_actions.get(src_real) if src_real >= 0 else None
+
                 # ★ 2026-08-28: **자른 값을 보낸다** (`_clamp_art` 주석 참고).
                 #   실기 브리지도 자르지만 그 사실이 이쪽으로 오지 않으므로, 선에 실행 가능한 값만
                 #   흘리고 잘림은 여기서 로그로 남긴다. hip 은 가동폭이 ±0.234 rad 뿐이라
@@ -866,6 +890,20 @@ class PolicyInferenceThread(QThread):
                 send_to(sim_act_addr, tgt_sim)
                 send_to(real_act_addr, tgt_real)
                 if rec is not None:
+                    # sim 토크·가속도 — publisher 가 리치 STATE 에서 되쓴 값. **leg-major 로 들어와
+                    # articulation 으로 재배열**해서 나머지 `*_sim` 열과 순서를 맞춘다(한 캡처 안에
+                    # 두 규약이 섞이면 관절이 뒤바뀐 채 분석된다).
+                    tau_sim_row = ddq_sim_row = None
+                    if self._shared is not None:
+                        with self._shared.get_lock():
+                            rich_t = self._shared[_SM_SIM_RICH_T]
+                            fresh = rich_t > 0.0 and (time.monotonic() - rich_t) <= _SIM_RICH_STALE_S
+                            if fresh:
+                                tau_lm_s = [self._shared[_SM_SIM_TAU + i] for i in range(NUM_JOINTS)]
+                                ddq_lm_s = [self._shared[_SM_SIM_DDQ + i] for i in range(NUM_JOINTS)]
+                        if fresh:
+                            tau_sim_row = [tau_lm_s[_LM_FOR_ART[p]] for p in range(NUM_JOINTS)]
+                            ddq_sim_row = [ddq_lm_s[_LM_FOR_ART[p]] for p in range(NUM_JOINTS)]
                     # 분석에 필요한 것만 한 행에 모은다 — 이번 세션에서 실제로 문제가 됐던 축들:
                     # 두 목적지의 목표(배선/클램프), 두 출처의 상태(갭), 클램프 발동(한계 밖 요구),
                     # 그리고 그 순간의 명령·권한·오프셋(재현에 필요).
@@ -890,6 +928,15 @@ class PolicyInferenceThread(QThread):
                             sorted(set(hit_sim)),
                             sorted(set(hit_real)),
                             list(pose_offset),
+                            # ★ 2026-09-01: 정책 **원본 출력**. 위 target_* 은 오프셋·클램프를 거친
+                            #   뒤라 "정책이 무엇을 원했나"를 담지 못한다. 08-28 캡처에서 hip 이
+                            #   93~100 % 클램프되어 그 축만 복원 불가능했다(한쪽 경계만 나온다) —
+                            #   하필 문제가 된 축이 가장 안 보이는 구조였다.
+                            #   근거: reports/real2sim/_comparisons/bipedleg_policy_capture_20260828/
+                            list(raw_sim) if raw_sim is not None else None,
+                            list(raw_real) if raw_real is not None else None,
+                            tau_sim_row,
+                            ddq_sim_row,
                         )
                     )
 
@@ -1409,6 +1456,10 @@ def publisher_process_main(shared, stop_flag, real_host: str | None = None, rec_
                     with shared.get_lock():
                         for i in range(NUM_JOINTS):
                             shared[_SM_MEASURED_Q + i] = st["q"][i]
+                            # 정책 캡처용 — 이 스트림에만 있는 채널(토크·가속도). leg-major 그대로 둔다.
+                            shared[_SM_SIM_TAU + i] = st["tau_est"][i]
+                            shared[_SM_SIM_DDQ + i] = st["ddq"][i]
+                        shared[_SM_SIM_RICH_T] = latest_state_t
                         shared[_SM_MEASURED_VALID] = 1.0
                     continue
                 ie = r2s_udp.unpack_ieff(data)
@@ -2538,7 +2589,9 @@ class MainWindow(QMainWindow):
         if not self._policy_available or self._model_path is None:
             return None
         if self._policy_thread is None:
-            self._policy_thread = PolicyInferenceThread(self._model_path, self._device, self._real_host)
+            self._policy_thread = PolicyInferenceThread(
+                self._model_path, self._device, self._real_host, shared=self._shared
+            )
             self._policy_thread.status.connect(self._on_policy_status)
             self._policy_thread.failed.connect(self._on_policy_failed)
             # 스레드가 늦게 생기므로 **현재 스핀박스 값을 밀어 넣는다** — Run 전에 오프셋을
@@ -2688,11 +2741,23 @@ class MainWindow(QMainWindow):
             "clamped_sim": _mask(14),
             "clamped_real": _mask(15),
             "pose_offset": _col(16, NUM_JOINTS),
+            # 정책 원본 출력 (오프셋·클램프 이전). 목적지 배선이 OFF 인 틱은 NaN 이다.
+            "raw_action_sim": _col(17, NUM_JOINTS),
+            "raw_action_real": _col(18, NUM_JOINTS),
+            # sim 전용 채널 — POLICY_STATE 에 없어 리치 STATE 스트림에서 온다. 0.2 s 이상 묵었으면 NaN.
+            "tau_sim": _col(19, NUM_JOINTS),
+            "ddq_sim": _col(20, NUM_JOINTS),
             # ★ 순서 규약을 파일에 박아 둔다 — leg-major 와 헷갈리면 관절이 뒤바뀐 채 분석된다.
             "joint_order": np.asarray(
                 ["HL_hip", "HR_hip", "HL_thigh", "HR_thigh", "HL_calf", "HR_calf", "HL_foot", "HR_foot"]
             ),
             "order_note": np.asarray("articulation order; motions.JOINT_NAMES is leg-major"),
+            # 복원식을 파일에 박아 둔다 — 소비자가 소스 상수를 찾아볼 필요가 없게.
+            "action_scale": np.asarray(ACTION_SCALE, dtype=np.float32),
+            "default_joint_pos": np.asarray(DEFAULT_JOINT_POS, dtype=np.float32),
+            "action_note": np.asarray(
+                "target = clip(act_scale*action_scale*raw_action + default_joint_pos + pose_offset, soft_limits)"
+            ),
         }
         if telem:
             # TELEM 은 leg-major·**채널 좌표 tau**다. 변환하지 않고 그대로 두되 규약을 적어 둔다.
@@ -2700,6 +2765,12 @@ class MainWindow(QMainWindow):
             arrays["telem_q_lm"] = np.asarray([r[1] for r in telem], dtype=np.float32)
             arrays["telem_dq_lm"] = np.asarray([r[2] for r in telem], dtype=np.float32)
             arrays["telem_tau_lm_channel"] = np.asarray([r[3] for r in telem], dtype=np.float32)
+            # ★ 아래 셋은 2026-08-19 에 브리지가 실어 보내기 시작했고 `_rec` 에도 쌓이고 있었지만
+            #   저장부가 r[0..3] 만 꺼내 **조용히 버려지고 있었다**. 시간축 복원(telem_tick)과
+            #   "목표가 잘렸다"(clamp_mask)가 여기 있다.
+            arrays["telem_tick"] = np.asarray([r[4] for r in telem], dtype=np.uint32)
+            arrays["telem_cmd_q_lm"] = np.asarray([r[5] for r in telem], dtype=np.float32)
+            arrays["telem_clamp_mask"] = np.asarray([r[6] for r in telem], dtype=np.uint32)
             arrays["telem_note"] = np.asarray("leg-major order; tau is CHANNEL coords (joint = tau * gear_k)")
         np.savez_compressed(out_path, **arrays)
         n_clamp = int(arrays["clamped_real"].any(axis=1).sum())
