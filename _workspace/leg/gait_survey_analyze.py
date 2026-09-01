@@ -102,7 +102,10 @@ def main() -> int:
     # 선회를 합쳐 **명령 속도 축만** 본다. "속도가 오르면 걸음이 바뀌는가" 는 이 한 줄짜리 축의
     # 단조성 문제라, 격자로 흩뿌리면 오히려 안 보인다. 실제 낸 속도를 나란히 찍어, 명령만 높고
     # 실제로는 못 내는 칸을 구별할 수 있게 한다.
-    vxa_e = np.asarray(d["vx_act"]).mean(axis=0) if "vx_act" in d.files else None
+    # ★ 분류 창(`sl`)에서만 평균낸다. 롤아웃 전체로 평균내면, 명령이 도중에 바뀌는 설정
+    # (`resample_command_in_episode`)에서 **바뀌기 전 속도까지 섞여** 엉뚱한 값이 된다
+    # (실제로 cmd 0~0.5 칸에 1.06 m/s 가 찍혔다 — 직전까지 빠르게 달리던 구간이 섞인 것).
+    vxa_e = np.asarray(d["vx_act"])[sl].mean(axis=0) if "vx_act" in d.files else None
     print("\n[명령 속도축 — 선회 합산]")
     hdr2 = f"{'vx cmd':>14s}{'n':>7s}{'gallop%':>9s}{'pace%':>8s}{'trot%':>8s}{'stand%':>8s}"
     if vxa_e is not None:
