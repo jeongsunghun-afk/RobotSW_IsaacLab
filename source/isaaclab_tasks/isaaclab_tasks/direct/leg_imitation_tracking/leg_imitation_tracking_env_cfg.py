@@ -114,6 +114,12 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
     yaw_vel_max: float = 1.5  # yaw rate 최대 [rad/s]
     tar_change_time_min: float = 4.0  # 목표 명령 변경 최소 주기 [s]
     tar_change_time_max: float = 7.0  # 목표 명령 변경 최대 주기 [s]
+    # 에피소드 **도중** 위 주기마다 명령을 다시 뽑을지. False 면 리셋 때 뽑은 명령을 끝까지 유지한다.
+    # ★ 2026-08-29 이전에는 타이머를 갱신하는 메서드가 호출되지 않아 `tar_change_time_*` 이 죽은
+    # 설정이었고, 사실상 항상 False 였다(4096 env·8 s 실측: 명령이 바뀐 env 0/4091). 그래서 정책은
+    # "달리는 중 명령이 바뀌는" 상황을 겪은 적이 없고, 속도에 따른 보행 전환(pace→gallop)을 학습할
+    # 신호가 없었다. 기존 run 을 그대로 재현할 수 있도록 기본값은 False 로 두고 opt-in 으로 켠다.
+    resample_command_in_episode: bool = False
 
     # ── 보상 가중치 ─────────────────────────────────────────────
     # Task reward = lin_vel_reward_w * lin_vel_reward + yaw_vel_reward_w * yaw_vel_reward

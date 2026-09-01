@@ -76,7 +76,8 @@ if args_cli.run_params:
     for k in ("lin_vel_x_min", "lin_vel_x_max", "lin_vel_y_min", "lin_vel_y_max",
               "yaw_vel_min", "yaw_vel_max", "motion_file", "motion_weight_mode",
               "vel_err_scale", "reset_strategy", "rel_stand_envs", "cmd_deadzone",
-              "rsi_match_command", "rsi_match_temperature"):
+              "rsi_match_command", "rsi_match_temperature", "resample_command_in_episode",
+              "tar_change_time_min", "tar_change_time_max"):
         if k in saved and hasattr(env_cfg, k):
             setattr(env_cfg, k, saved[k])
 

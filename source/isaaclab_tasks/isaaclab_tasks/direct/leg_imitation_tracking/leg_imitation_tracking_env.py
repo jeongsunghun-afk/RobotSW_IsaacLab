@@ -203,8 +203,24 @@ class LegImitationTrackingEnv(DirectRLEnv):
         self._actions = actions.clone()
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
 
-    def _post_physics_step(self):
-        # 목표 속도 타이머 업데이트
+    def _resample_steering_on_timer(self):
+        """`tar_change_time` 이 지난 env 의 속도 명령을 다시 뽑는다.
+
+        ★ 이 메서드는 원래 `_post_physics_step()` 이라는 이름이었고 **한 번도 호출되지 않았다**
+        — `DirectRLEnv.step()` 에 그런 훅이 없다(`_pre_physics_step`/`_apply_action`/`_get_dones`/
+        `_get_rewards`/`_reset_idx`/`_get_observations` 뿐). 그래서 `tar_change_time_min/max` 는
+        죽은 설정이었고 명령은 리셋 때 한 번 뽑혀 **에피소드 내내 고정**됐다(4096 env·8 s 실측:
+        명령이 바뀐 env 0/4091). 정책이 "달리는 중 명령 변화"를 겪은 적이 없어 속도에 따른
+        보행 전환을 학습할 신호가 아예 없었다.
+
+        살아 있는 `_get_rewards()` 끝에서 부른다 — 그 step 의 보상은 **옛 명령**으로 계산되고
+        이어지는 `_get_observations()` 가 **새 명령**을 싣는다. `_get_dones()` 에서 부르면 보상이
+        한 step 어긋난 명령으로 계산된다.
+
+        기본값은 OFF(`resample_command_in_episode=False`)라 기존 run 의 재현성은 유지된다.
+        """
+        if not self.cfg.resample_command_in_episode:
+            return
         self._tar_timer -= self.step_dt
         change_mask = self._tar_timer <= 0.0
         if change_mask.any():
@@ -322,6 +338,9 @@ class LegImitationTrackingEnv(DirectRLEnv):
         self._episode_sums["lin_vel_reward"] += lin_vel_reward
         self._episode_sums["yaw_vel_reward"] += yaw_vel_reward
         self._episode_sums["torque_penalty"] += torque_penalty
+
+        # 보상을 옛 명령으로 다 쓴 뒤에 명령을 갱신한다 — 다음 관측이 새 명령을 싣는다.
+        self._resample_steering_on_timer()
 
         return reward
 
