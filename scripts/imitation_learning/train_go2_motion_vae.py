@@ -321,9 +321,16 @@ class MotionVAE(nn.Module):
     #: x_prev 중 속도 성분 (lin_vel, ang_vel, joint_vel). 이 블록이 있으면 decoder 가
     #: x[t] ~= x[t-1] + v*dt 로 외삽할 수 있어 z 를 읽을 이유가 없어진다.
     VEL_IDX = list(range(7, 13)) + list(range(37, 49))
+    #: VEL_IDX 의 여집합 — base_height(0:1) + rot6d(1:7) + foot_pos(13:25) + joint_pos(25:37).
+    POSE_IDX = list(range(0, 7)) + list(range(13, 37))
 
     def decode(
-        self, x_prev: torch.Tensor, z: torch.Tensor, cond_dropout: float = 0.0, vel_dropout: float = 0.0
+        self,
+        x_prev: torch.Tensor,
+        z: torch.Tensor,
+        cond_dropout: float = 0.0,
+        vel_dropout: float = 0.0,
+        pose_dropout: float = 0.0,
     ) -> torch.Tensor:
         if cond_dropout > 0.0 and self.training:
             keep = (torch.rand(len(x_prev), 1, device=x_prev.device) >= cond_dropout).float()
@@ -332,6 +339,10 @@ class MotionVAE(nn.Module):
             keep = (torch.rand(len(x_prev), 1, device=x_prev.device) >= vel_dropout).float()
             x_prev = x_prev.clone()
             x_prev[:, self.VEL_IDX] = x_prev[:, self.VEL_IDX] * keep
+        if pose_dropout > 0.0 and self.training:
+            keep = (torch.rand(len(x_prev), 1, device=x_prev.device) >= pose_dropout).float()
+            x_prev = x_prev.clone()
+            x_prev[:, self.POSE_IDX] = x_prev[:, self.POSE_IDX] * keep
         h0 = torch.cat([x_prev, z], -1)  # [B, dec_in]
         gate = F.softmax(self.gate(h0), dim=-1)  # [B, E]
         h = F.elu(torch.einsum("bi,eih->beh", h0, self.expert_w1) + self.expert_b1)
@@ -340,7 +351,12 @@ class MotionVAE(nn.Module):
         return (gate.unsqueeze(-1) * out).sum(1)
 
     def forward(
-        self, x_ctx: torch.Tensor, x_curr: torch.Tensor, cond_dropout: float = 0.0, vel_dropout: float = 0.0
+        self,
+        x_ctx: torch.Tensor,
+        x_curr: torch.Tensor,
+        cond_dropout: float = 0.0,
+        vel_dropout: float = 0.0,
+        pose_dropout: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """``x_ctx`` 는 [B, (w-1)*X_DIM]. 디코더는 그중 **마지막 프레임만** 조건으로 받는다."""
         mu, aux = self.encode(x_ctx, x_curr)
@@ -351,7 +367,7 @@ class MotionVAE(nn.Module):
             # eval 에서는 샘플링하지 않고 평균방향 mu 를 그대로 쓴다 — gauss 경로가
             # eval 에서 mu 를 쓰는 것과 맞춰야 G0/G1 을 두 분포 사이에서 비교할 수 있다.
             z = vmf_rsample(mu, aux) if self.training else mu
-        return self.decode(x_prev, z, cond_dropout, vel_dropout), mu, aux
+        return self.decode(x_prev, z, cond_dropout, vel_dropout, pose_dropout), mu, aux
 
 
 # ──────────────────────────────────────────────────────────────
@@ -559,6 +575,14 @@ def main() -> None:
         "z 를 읽게 만든다. cond_dropout 과 달리 자세 조건은 유지된다.",
     )
     p.add_argument(
+        "--pose_dropout",
+        type=float,
+        default=0.0,
+        help="decoder 조건에서 **자세 블록만** 확률적으로 0 (vel_dropout 의 여집합). "
+        "디코더는 x_prev 에서 자세를 그대로 베껴 쓸 수 있어 z 가 자세를 담을 유인이 "
+        "없다 — 그 지름길을 끊는다. cond_dropout 과 달리 속도 조건은 유지된다.",
+    )
+    p.add_argument(
         "--cond_dropout",
         type=float,
         default=0.0,
@@ -757,7 +781,7 @@ def main() -> None:
         for i in range(0, len(perm), args.batch):
             idx = perm[i : i + args.batch]
             a, b = tr_p[idx], tr_c[idx]
-            xh, mu, lv = model(a, b, args.cond_dropout, args.vel_dropout)
+            xh, mu, lv = model(a, b, args.cond_dropout, args.vel_dropout, args.pose_dropout)
             rec = F.mse_loss(xh, b)
             kl = kl_term(mu, lv)
             loss = rec + args.beta * kl
@@ -780,7 +804,7 @@ def main() -> None:
                 ar_rec = 0.0
                 for k in range(args.ar_len):
                     tgt = win[:, w - 1 + k]
-                    xh_k, mu_k, lv_k = model(ctx, tgt, args.cond_dropout, args.vel_dropout)
+                    xh_k, mu_k, lv_k = model(ctx, tgt, args.cond_dropout, args.vel_dropout, args.pose_dropout)
                     ar_rec = ar_rec + F.mse_loss(xh_k, tgt) + args.beta * kl_term(mu_k, lv_k)
                     if args.lambda_speed > 0.0:
                         # AR 절반에도 같은 손실을 건다 — 한쪽만 걸면 반쪽짜리다.

@@ -164,6 +164,19 @@ class LatentStyleCfg:
     #: 정지 판별이 유지됐다(``static`` 1.000 · ``cat_stand`` 0.970).
     window_n: int = 8
 
+    #: 창 통계량. ``"diag"`` 는 대각 가우시안(구 기본값), ``"full"`` 은 전체 공분산이다.
+    #:
+    #: ★ 2026-09-01: ``"diag"`` 는 **"떠는 정지"를 expert 보다 좋게 친다**. 정책이 실제로 만든
+    #: 상태를 negative 로 넣어 잰 clip AUROC 가 **0.139** 였다 (0.5 미만 = 가짜를 더 expert 답다고
+    #: 본다). 같은 정책의 결정적 버전은 0.942 라, 바뀐 것은 **행동 노이즈 하나**인데 뒤집힌다.
+    #: 대각판이 차원 간 상관을 버리기 때문이다. ``"full"`` 은 같은 창 형태로 그 상관까지 보고
+    #: 같은 배터리에서 0.845 를 낸다 (11개 negative 최솟값 0.579 로 전 후보 중 최고).
+    style_statistic: str = "diag"
+
+    #: ``style_statistic="full"`` 의 창 공분산 수축계수. ``None`` 이면 참조 통계의 값.
+    #: 창 길이 N=8 < latent 18 이라 표본 공분산이 특이하므로 대각 참조 쪽으로 수축한다.
+    full_shrink: float | None = None
+
     #: 보상 민감도 [1/nat]. ``None`` 이면 참조 통계가 expert ``D_e`` 분포에서 정한 값을 쓴다
     #: (권장). ★ Phase 2 검증 §5 의 ``c_kl=0.01`` 은 ``d_step`` 기준값이라 여기 쓰면 안 된다.
     c_kl: float | None = None

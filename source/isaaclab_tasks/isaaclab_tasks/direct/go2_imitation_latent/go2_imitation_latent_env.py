@@ -229,8 +229,29 @@ class Go2ImitationLatentEnv(DirectRLEnv):
         self._var_ref = _ref["var_ref"].to(self.device)
         self._var_floor = float(_ref["var_floor"])
         # cfg 가 None 이면 참조 통계가 데이터에서 정한 값을 쓴다(권장).
-        self._c_kl = float(lat.c_kl) if lat.c_kl is not None else float(_ref["c_kl"])
-        self._kl_offset = float(lat.kl_offset) if lat.kl_offset is not None else float(_ref["offset"])
+        # 창 통계량 선택 — "full" 은 차원 간 상관까지 본다 (cfg 주석의 0.139 vs 0.845 참조)
+        self._stat = str(getattr(lat, "style_statistic", "diag"))
+        if self._stat not in ("diag", "full"):
+            raise ValueError(f"style_statistic 은 'diag' 또는 'full' 이어야 한다: {self._stat!r}")
+        if self._stat == "full":
+            if "cov_ref" not in _ref:
+                raise KeyError(
+                    "ref_stats 에 'cov_ref' 가 없다 — build_go2_latent_ref_stats.py 를 다시 돌려야 한다. "
+                    "(구 파일로 full 을 켜면 조용히 diag 로 떨어지는 것을 막는다)"
+                )
+            _cov = _ref["cov_ref"].to(self.device)
+            _L = torch.linalg.cholesky(_cov)
+            self._inv_ref = torch.cholesky_inverse(_L)
+            self._logdet_ref = float(2.0 * torch.log(torch.diagonal(_L)).sum())
+            self._diag_ref = torch.diag(self._var_ref)
+            self._full_shrink = (
+                float(lat.full_shrink) if lat.full_shrink is not None else float(_ref["full_shrink"])
+            )
+            _c_def, _o_def = float(_ref["c_kl_full"]), float(_ref["offset_full"])
+        else:
+            _c_def, _o_def = float(_ref["c_kl"]), float(_ref["offset"])
+        self._c_kl = float(lat.c_kl) if lat.c_kl is not None else _c_def
+        self._kl_offset = float(lat.kl_offset) if lat.kl_offset is not None else _o_def
         self._window_n = int(lat.window_n)
 
         # 전이 쌍 간격 [s] — 인코더 학습 설정이 정한다. policy dt 의 정수배가 아니므로 보간한다.
@@ -244,7 +265,7 @@ class Go2ImitationLatentEnv(DirectRLEnv):
             f" → x_vae 링버퍼 깊이 {_depth} (보간 가중치 {self._x_lag_frac:.4f})"
         )
         print(
-            f"[Go2ImitationLatentEnv] window_n {self._window_n} · c_kl {self._c_kl:.5f} ·"
+            f"[Go2ImitationLatentEnv] stat {self._stat} · window_n {self._window_n} · c_kl {self._c_kl:.5f} ·"
             f" offset {self._kl_offset:.4f} nat · 참조 train 세션 {len(_ref['train_sessions'])}개"
         )
 
@@ -955,12 +976,27 @@ class Go2ImitationLatentEnv(DirectRLEnv):
         self._z_window = torch.where(pushable[:, None, None], shifted, self._z_window)
         self._z_count = torch.where(pushable, torch.clamp(self._z_count + 1, max=self._window_n), self._z_count)
 
-        # 창 marginal KL (대각 닫힌형)
+        # 창 marginal KL
         mu_e = self._z_window.mean(dim=1)
-        var_e = self._z_window.var(dim=1, unbiased=False).clamp(min=self._var_floor)
-        d_e = 0.5 * (
-            torch.log(self._var_ref / var_e) + (var_e + (mu_e - self._mu_ref).pow(2)) / self._var_ref - 1.0
-        ).sum(dim=-1)
+        if self._stat == "full":
+            # 전체 공분산 닫힌형. N=8 < D=18 이라 표본 공분산은 특이하므로 대각 참조로 수축한다.
+            wc = self._z_window - mu_e.unsqueeze(1)
+            cov_e = wc.transpose(1, 2) @ wc / self._window_n
+            cov_e = (1.0 - self._full_shrink) * cov_e + self._full_shrink * self._diag_ref
+            dmu = mu_e - self._mu_ref
+            _sign, logdet_e = torch.linalg.slogdet(cov_e)
+            d_e = 0.5 * (
+                torch.einsum("ij,bji->b", self._inv_ref, cov_e)
+                + torch.einsum("bi,ij,bj->b", dmu, self._inv_ref, dmu)
+                - self._z_window.shape[-1]
+                + self._logdet_ref
+                - logdet_e
+            )
+        else:
+            var_e = self._z_window.var(dim=1, unbiased=False).clamp(min=self._var_floor)
+            d_e = 0.5 * (
+                torch.log(self._var_ref / var_e) + (var_e + (mu_e - self._mu_ref).pow(2)) / self._var_ref - 1.0
+            ).sum(dim=-1)
 
         ready = self._z_count >= self._window_n
         self._latent_kl = torch.where(ready, d_e, torch.zeros_like(d_e))

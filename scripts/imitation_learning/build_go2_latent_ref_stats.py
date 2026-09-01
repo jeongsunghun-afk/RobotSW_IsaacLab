@@ -106,6 +106,10 @@ def main() -> None:
     )
     p.add_argument("--out", default=None, help="기본값은 체크포인트 옆의 latent_ref_stats.pt")
     p.add_argument("--window_n", type=int, default=8, help="env 별 시간창 길이 (전이 쌍 수)")
+    p.add_argument("--cov_reg", type=float, default=1e-4,
+                   help="참조 전체 공분산의 대각 정칙화 (Cholesky 안정성).")
+    p.add_argument("--full_shrink", type=float, default=0.20,
+                   help="창 공분산 수축계수. N<D 라 표본 공분산이 특이하다.")
     p.add_argument("--var_floor", type=float, default=1e-4)
     p.add_argument("--max_windows", type=int, default=200000)
     p.add_argument("--seed", type=int, default=0)
@@ -200,6 +204,36 @@ def main() -> None:
     for name, d in (("p50", q["p50"]), ("p75", q["p75"]), ("p95", q["p95"])):
         print(f"    expert {name} (D_e {d:7.3f}) → r_style {float(np.exp(-c_kl * (d - q['p50']))):.4f}")
 
+    # ── 2b) 전체 공분산 판 (`style_statistic="full"`) ──────────
+    # 대각판은 차원 간 상관을 버려서 "떠는 정지"를 expert 보다 좋게 친다
+    # (2026-09-01 배터리: 정책_정지(노이즈) AUROC 0.139). 전체 공분산은 같은 창 형태로
+    # 그 상관까지 본다 (같은 배터리 0.845, 11개 negative 최솟값 0.579 로 최고).
+    cov_ref = torch.from_numpy(np.cov(z_ref.cpu().numpy().T)).float().to(dev)
+    cov_ref = cov_ref + args.cov_reg * torch.eye(enc.latent_dim, device=dev)
+    L = torch.linalg.cholesky(cov_ref)
+    inv_ref = torch.cholesky_inverse(L)
+    logdet_ref = float(2.0 * torch.log(torch.diagonal(L)).sum())
+    diag_ref = torch.diag(var_ref)
+    d_f = []
+    for i in range(0, len(win), 8192):
+        zw = z_ref[win[i : i + 8192]]
+        mu_w = zw.mean(dim=1)
+        wc = zw - mu_w.unsqueeze(1)
+        cov_w = wc.transpose(1, 2) @ wc / zw.shape[1]
+        cov_w = (1.0 - args.full_shrink) * cov_w + args.full_shrink * diag_ref
+        dmu = mu_w - mu_ref
+        _sg, ldw = torch.linalg.slogdet(cov_w)
+        tr_term = torch.einsum("ij,bji->b", inv_ref, cov_w)
+        maha = torch.einsum("bi,ij,bj->b", dmu, inv_ref, dmu)
+        d_f.append(0.5 * (tr_term + maha - enc.latent_dim + logdet_ref - ldw))
+    d_f_t = torch.cat(d_f)
+    qf = {f"p{k}": float(torch.quantile(d_f_t, k / 100.0)) for k in (1, 5, 25, 50, 75, 95, 99)}
+    iqr_f = max(qf["p75"] - qf["p50"], 1e-6)
+    c_kl_full = float(-np.log(0.9) / iqr_f)
+    print(f"[D_e full] expert 창 분위수 " + " · ".join(f"{k} {v:.3f}" for k, v in qf.items()))
+    print(f"[보정 full] shrink {args.full_shrink} · offset {qf['p50']:.3f} nat · "
+          f"p75-p50 {iqr_f:.3f} → c_kl {c_kl_full:.5f}")
+
     out = args.out or os.path.join(os.path.dirname(args.ckpt), "latent_ref_stats.pt")
     torch.save(
         {
@@ -212,6 +246,13 @@ def main() -> None:
             "d_e_quantiles": q,
             "c_kl": c_kl,
             "offset": q["p50"],
+            # 전체 공분산 판 — env 가 `style_statistic="full"` 일 때 쓴다
+            "cov_ref": cov_ref.cpu(),
+            "cov_reg": float(args.cov_reg),
+            "full_shrink": float(args.full_shrink),
+            "d_e_full_quantiles": qf,
+            "c_kl_full": c_kl_full,
+            "offset_full": qf["p50"],
             "n_pairs": int(len(z_ref)),
             "n_windows": int(len(d_e_t)),
             "stride": stride,
