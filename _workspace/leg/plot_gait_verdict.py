@@ -106,8 +106,13 @@ def _gallop_high(path: str) -> float:
     return float(_gallop_by_speed(path)[0][HIGH_BIN])
 
 
-def _transition(path: str, win_s: float = 2.0):
-    """저속→고속 명령 변경 표본에서 (전환한 수, 전환 가능했던 수)."""
+def _transition(path: str, win_s: float = 2.0, up: bool = True):
+    """명령 변경 표본에서 (전환한 수, 전환 가능했던 수).
+
+    `up=True` 는 저속→고속(pace 가 gallop 이 되어야 하는 쪽 — 이 실험이 원하는 전환),
+    `up=False` 는 고속→저속(gallop 이 pace 가 되어야 하는 쪽)이다. 아래쪽 방향은
+    프로브가 실제로 전환을 감지할 수 있음을 보이는 양성 대조 역할을 한다.
+    """
     d = np.load(path, allow_pickle=True)
     jpos = np.asarray(d["jpos"], dtype=np.float32)
     vxc, hgt, elen = np.asarray(d["vx_cmd"]), np.asarray(d["height"]), np.asarray(d["ep_len"])
@@ -141,13 +146,19 @@ def _transition(path: str, win_s: float = 2.0):
             continue
         if (np.diff(elen[k - w : k + w, e]) < 0).any() or (hgt[k - w : k + w, e] < FALL_H).any():
             continue
-        if not (float(c[k - 1]) <= LO_MAX and float(c[k]) >= HI_MIN):
+        lo_hi = float(c[k - 1]) <= LO_MAX and float(c[k]) >= HI_MIN
+        hi_lo = float(c[k - 1]) >= HI_MIN and float(c[k]) <= LO_MAX
+        if not (lo_hi if up else hi_lo):
             continue
         a, b = lab(pre_sl, e), lab(post_sl, e)
-        if a == "-" or b == "-" or a in ("gallop", "bound"):
+        if a == "-" or b == "-":
+            continue
+        # "바뀔 수 있었던" 표본만 분모로 센다 — 이미 목표 걸음이면 전환할 게 없다.
+        want = up  # 저속→고속이면 gallop 이 되어야, 고속→저속이면 pace 가 되어야 한다
+        if (a in ("gallop", "bound")) == want:
             continue
         elig += 1
-        moved += b in ("gallop", "bound")
+        moved += (b in ("gallop", "bound")) == want
     return moved, elig
 
 
@@ -218,23 +229,29 @@ def main() -> int:
     if args.transition:
         ax = axes[ax_i]
         ax_i += 1
-        labels, pct, note = [], [], []
+        labels, up_pct, dn_pct, up_nt, dn_nt = [], [], [], [], []
         for s in args.transition:
             label, path = _spec(s)
-            moved, elig = _transition(path)
+            mu, eu = _transition(path, up=True)
+            md, ed = _transition(path, up=False)
             labels.append(label)
-            pct.append(100 * moved / elig if elig else np.nan)
-            note.append(f"{moved}/{elig}" if elig else "no samples\n(command never changes)")
-            print(f"[transition] {label:28s} {note[-1]}")
+            up_pct.append(100 * mu / eu if eu else 0.0)
+            dn_pct.append(100 * md / ed if ed else 0.0)
+            up_nt.append(f"{mu}/{eu}" if eu else "no samples")
+            dn_nt.append(f"{md}/{ed}" if ed else "no samples")
+            print(f"[transition] {label:24s} up {up_nt[-1]:>9s}   down {dn_nt[-1]:>9s}")
         x = np.arange(len(labels))
-        ax.bar(x, [0 if np.isnan(p) else p for p in pct], 0.5, color="#457b9d")
-        for xi, (p, nt) in enumerate(zip(pct, note)):
-            ax.text(xi, 2, nt, ha="center", fontsize=8, va="bottom")
+        ax.bar(x - 0.19, up_pct, 0.38, color="#d1495b", label="low -> high cmd:\nbecame gallop")
+        ax.bar(x + 0.19, dn_pct, 0.38, color="#457b9d", label="high -> low cmd:\nbecame pace")
+        for xi in range(len(labels)):
+            ax.text(xi - 0.19, up_pct[xi] + 2, up_nt[xi], ha="center", fontsize=7.5)
+            ax.text(xi + 0.19, dn_pct[xi] + 2, dn_nt[xi], ha="center", fontsize=7.5)
         ax.set_xticks(x)
         ax.set_xticklabels(labels, fontsize=8.5)
-        ax.set_ylabel("switched pace -> gallop [%]")
+        ax.set_ylabel("gait followed the command [%]")
         ax.set_title("Does gait follow a mid-episode\ncommand change?", fontsize=11)
         ax.set_ylim(0, 100)
+        ax.legend(fontsize=7)
         ax.grid(alpha=0.3, axis="y")
 
     fig.suptitle(args.title, fontsize=13)
