@@ -25,6 +25,14 @@ parser.add_argument("--ramp_s", type=float, default=2.0, help="단계 사이 명
 parser.add_argument("--out_dir", type=str, default="_workspace/leg/selfcol_ramp_out")
 parser.add_argument("--vx_max", type=float, default=4.0, help="사다리꼴 명령 최고 속도 [m/s] (0.5 단위 램프의 정점)")
 parser.add_argument(
+    "--vx_const",
+    type=float,
+    default=None,
+    help="사다리꼴 대신 **이 속도 하나를 처음부터** 명령한다 [m/s]. 램프는 0 에서 출발해 초반 3 s 를 "
+    "저속으로 보내므로 참조 run 프레임에서 시작해도 gallop 이 그 사이 무너진다(RSI 출발 8/8 pace). "
+    "고속 attractor 를 눈으로 보려면 이 옵션으로 처음부터 고속을 줘야 한다. `--hold_s` 가 길이가 된다.",
+)
+parser.add_argument(
     "--no_video",
     action="store_true",
     help="mp4 녹화를 건너뛴다(npz 만 저장). 렌더가 램프의 지배적 비용이라 수십 배 빨라지므로 "
@@ -145,9 +153,15 @@ from pxr import Gf  # noqa: E402
 _PERSP_PATH = "/OmniverseKit_Persp"
 
 TASK = "Leg-Imitation-Tracking-RMA-v0"
-# vx 명령 프로파일 [m/s]: 0→vx_max 상승 후 vx_max→0 하강 (0.5 단위)
-_up = [round(0.5 * i, 1) for i in range(int(round(args_cli.vx_max / 0.5)) + 1)]
-VX_PROFILE = _up + _up[-2::-1]
+if args_cli.vx_const is not None:
+    # 한 속도만 처음부터 끝까지. 램프는 명령을 0 에서 시작해 3 s 를 버티게 하는데, 그 사이에
+    # gallop 초기조건(참조 run 프레임)이 무너져 pace 로 주저앉는다 — RSI 출발로 8 회를 돌려도
+    # gallop 이 한 번도 안 나온 이유다. 고속 명령을 처음부터 주면 그 attractor 를 볼 수 있다.
+    VX_PROFILE = [args_cli.vx_const]
+else:
+    # vx 명령 프로파일 [m/s]: 0→vx_max 상승 후 vx_max→0 하강 (0.5 단위)
+    _up = [round(0.5 * i, 1) for i in range(int(round(args_cli.vx_max / 0.5)) + 1)]
+    VX_PROFILE = _up + _up[-2::-1]
 
 os.makedirs(args_cli.out_dir, exist_ok=True)
 
@@ -159,6 +173,21 @@ env_cfg = parse_env_cfg(TASK, device="cuda:0", num_envs=1)
 # (예: 소스 기본 motion_file=merged_leg_pkl / reset_strategy=random(RSI, 움직이는 상태에서 시작))
 _RESTORE_KEYS = (
     "motion_file",
+    # ★ 클립 **가중치**까지 복원해야 한다. 소스 기본은 "length"(길이 비례)라 긴 walk 클립이
+    # 지배하므로, command_uniform 으로 학습한 run 을 재면 RSI 가 학습과 다른 클립 분포에서
+    # 뽑힌다. 실제로 이게 빠져 있던 동안 RSI 출발 램프가 14/14 pace 로 나왔다 — 같은
+    # 체크포인트를 4096 env 서베이로 재면 고속에서 68.2% 가 gallop 인데도 그랬다.
+    "motion_weight_mode",
+    # RSI 클립을 명령 속도에 맞추는 옵션. 빠지면 매칭이 꺼진 env 를 재게 된다.
+    "rsi_match_command",
+    "rsi_match_temperature",
+    # 에피소드 도중 명령 재샘플링. 램프는 명령을 직접 덮어쓰지만, 이 값이 다르면 정책이
+    # 학습된 조건과 다른 env 에서 평가된다.
+    "resample_command_in_episode",
+    "tar_change_time_min",
+    "tar_change_time_max",
+    # 보상 스케일은 롤아웃 동역학을 바꾸지 않지만, npz 에 기록돼 사후 대조에 쓰인다.
+    "vel_err_scale",
     "reset_strategy",
     "rel_stand_envs",
     "rel_rest_init",

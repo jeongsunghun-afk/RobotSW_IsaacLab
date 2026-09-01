@@ -173,17 +173,38 @@ def _post_physics_step(self):
 → **(c) 확정.** 걸음을 고르는 것은 여전히 초기 자세이고, 매칭은 "초기 자세와 명령의 상관"을
 만들었을 뿐 **전환 능력을 만들지 않았다.** 격자의 68.2% 는 초기화 artifact 다.
 
-램프도 같은 말을 한다 — 8 회 반복 × 2 팔 × (정지/RSI 출발) 전부:
+**정지 출발** 램프도 같은 말을 한다 — 8 회 반복 × 2 팔:
 
 ```
 run              cmd0.5   cmd1.0   cmd1.5   cmd2.0   cmd2.5   cmd3.0
 baseline stand      -        -     pace 8/8 pace 8/8 pace 8/8 pace 8/8
 rsimatch stand      -     other 5/8 pace 7/8 pace 8/8 pace 8/8 pace 8/8
-baseline RSI        -        -     pace 8/8 pace 8/8 pace 8/8 pace 8/8
-rsimatch RSI        -        -     pace 7/8 pace 8/8 pace 8/8 pace 8/8
 ```
 
-**32 롤아웃 전부, 모든 명령에서 pace.** 바뀌는 것은 주파수뿐(2.10 → 2.32 Hz).
+바뀌는 것은 주파수뿐(2.10 → 2.32 Hz).
+
+### ⚠️ 정정 — RSI 출발 램프 결과는 폐기했다 (도구 버그)
+
+같은 표의 "RSI 출발" 두 행(16 롤아웃)도 전부 pace 로 나왔었는데, **그건 정책이 아니라 도구
+때문이었다.** `speed_ramp_record_rma.py` 의 `_RESTORE_KEYS` 에 **`motion_weight_mode` 가
+빠져 있었다.** 소스 기본값이 `length`(길이 비례)라 긴 walk 클립이 지배하고, RSI 가 학습
+(`command_uniform`)과 **다른 클립 분포**에서 뽑혔다. `rsi_match_command` 도 빠져 있어 매칭이
+꺼진 채로 쟀다.
+
+같은 체크포인트를 고정 명령 3.0 · RSI 출발로 6 회 돌린 결과:
+
+| `_RESTORE_KEYS` | 결과 |
+|---|---|
+| 수정 전 (`motion_weight_mode` 누락) | **0/6 gallop** (14 연속 pace) |
+| 수정 후 | **4/6 gallop** |
+
+→ ★ **정지 출발 행과 ⑤ 의 결정적 대조는 영향이 없다.** `--force_stand` 는 `rel_stand_envs=1.0`
+이라 RSI 경로 자체를 안 타고, 68.2% vs 0.0% 는 `gait_survey_multienv.py`(이 키를 복원한다)로
+잰 값이다. 영향받은 것은 RSI 출발 램프 16 롤아웃뿐이며 그 행은 위 표에서 뺐다.
+
+★ 추가로 알게 된 것: **램프는 명령을 0 에서 시작하므로 gallop 초기조건이 초반 3 s 에 무너진다.**
+클립 분포를 고쳐도 사다리꼴 램프로는 gallop 이 안 나오고, `--vx_const 3.0` 처럼 **처음부터 고속을
+줘야** 보인다. 램프가 gallop attractor 를 못 보는 이유는 `--force_stand` 만이 아니었다.
 
 ⚠️ 이 램프는 `--hold_s 4.0 --vx_max 3.2` 라 기존 판정 프로토콜(hold 3.0 / vx_max 4.0)과 다르다.
 총 76 s 로 길어져 heading 적분 오차가 쌓이고, `ramp_fall_probe` 가 이를 "FALL" 로 읽는다
@@ -221,7 +242,31 @@ RSI 와 명령이 독립이라서가 아니라, ④ 대로 **에피소드 중 �
 걸음이 pace→gallop 으로 따라 바뀌는 비율. 이번 팔에서 이 값이 오르면 **전환이 실재**하는 것이고,
 그때 비로소 정지 출발 램프에서도 사다리가 나와야 한다.
 
+## 그림
+
+![RSI 매칭 판정 — 속도 선택성 · 초기자세 대조 · 전환 프로브](figures/gait_verdict_rsimatch.png)
+
+왼쪽이 이 처방이 성공처럼 보이게 만든 그림이고, 가운데가 그것을 뒤집는 대조다. 오른쪽은
+명령이 안 바뀌는 두 팔에는 표본이 아예 없다는 것을 보여준다(④).
+
+## 영상 (추적 카메라, model_30000, 고정 명령 3.0 m/s)
+
+같은 정책·같은 명령(3.0 m/s)에서 **초기 자세만** 다른 두 개체다.
+
+| 파일 | 출발 | 실제 보행 |
+|---|---|---|
+| `videos/const30_reference_start_GALLOP.mp4` | 참조 프레임(RSI) | **gallop** 2.26 Hz |
+| `videos/const30_standing_start_PACE.mp4` | 정지 기립 | **pace** 2.36 Hz |
+| `videos/ramp_chase_rsimatch30k_stand.mp4` | 정지 기립, 0→3.2 사다리꼴 램프 | 전 구간 **pace** |
+
+⚠️ 캡션 근거: 세 클립 모두 `gait_classify.py` 로 분류해 확인했다. RSI 출발은 6 회 중 4 회가
+gallop 이므로 위 개체는 대표값이지 100% 가 아니다 — 나머지 2 회는 pace 였다.
+정지 출발은 4096 env 에서 gallop 0.0% 라 pace 가 곧 전형이다.
+
 ## 산출물
 
+- `figures/gait_verdict_rsimatch.png` — 위 3 패널 (`_workspace/leg/plot_gait_verdict.py`, npz 직접 읽음)
 - `metrics/gait_survey_ab.md` — 체크포인트별 4096 env 조사 원자료
+- `metrics/*.npz` — 위 영상들의 상태 기록(캡션 검증용)
 - `_workspace/leg/gait_transition_probe.py` — 명령 변경 전후 걸음 비교(④ 를 발견한 도구)
+- `_workspace/leg/plot_gait_verdict.py` — 판정 그림 생성기(판정마다 재실행)
