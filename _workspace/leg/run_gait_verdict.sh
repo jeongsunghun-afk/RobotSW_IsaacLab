@@ -39,9 +39,21 @@ PY=$CONDA_PREFIX/bin/python
 unset DISPLAY   # DISPLAY 가 있으면 headless 여도 GLX 를 잡으려다 GLXBadFBConfig 로 죽는다
 
 srv() { # gpu dur extra out
-  CUDA_VISIBLE_DEVICES=$1 ./isaaclab.sh -p $W/gait_survey_multienv.py \
-    --checkpoint "$CKPT" --run_params "$PARAMS" --n_envs $N_ENVS --dur_s $2 $3 \
-    --out_dir "$W/$4" > "$LOG/$4.log" 2>&1
+  # 다른 학습이 GPU 를 쓰고 있으면 PhysX 가 할당에 실패한다. 조용히 죽으면 뒤의 그림 단계가
+  # FileNotFoundError 로 넘어져 판정 한 벌이 통째로 날아가므로(실제로 2회), 절반씩 줄여 재시도한다.
+  local n=$N_ENVS
+  while [ "$n" -ge 512 ]; do
+    if CUDA_VISIBLE_DEVICES=$1 ./isaaclab.sh -p $W/gait_survey_multienv.py \
+         --checkpoint "$CKPT" --run_params "$PARAMS" --n_envs "$n" --dur_s $2 $3 \
+         --out_dir "$W/$4" > "$LOG/$4.log" 2>&1 && [ -f "$W/$4/gait_survey.npz" ]; then
+      [ "$n" -ne "$N_ENVS" ] && echo "    ! $4: $N_ENVS 실패 → $n env 로 측정 (표본 감소)"
+      return 0
+    fi
+    n=$((n / 2))
+    echo "    ! $4: 할당 실패, $n env 로 재시도"
+  done
+  echo "    !! $4: 512 env 로도 실패 — 이 판정은 불완전하다" >&2
+  return 1
 }
 vid() { # gpu extra out
   CUDA_VISIBLE_DEVICES=$1 ./isaaclab.sh -p $W/speed_ramp_record_rma.py \
