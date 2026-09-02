@@ -62,6 +62,8 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_mul
 
+from isaaclab_tasks.direct.amp_command_condition import AMPCommandConditionMixin
+
 from .go2_imitation_tracking_env_cfg import (
     PACE_ARMATURE,
     PACE_COULOMB,
@@ -72,7 +74,7 @@ from .go2_imitation_tracking_env_cfg import (
 from .motion_lib import Go2MotionLib
 
 
-class Go2ImitationTrackingEnv(DirectRLEnv):
+class Go2ImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
     """Go2 AMP + body-frame 속도추종 Imitation 환경 (RMA + estimator 아키텍처).
 
     Policy proprio (42-dim — priv_explicit로 분리한 root 속도 항은 제외):
@@ -141,7 +143,11 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
             motion_files = pkl_files
         else:
             motion_files = [motion_file]
-        self._motion_lib = Go2MotionLib(motion_files=motion_files, device=self.device)
+        # `weights=None` 이면 MotionLib 이 **길이 비례**로 뽑는다. MimicKit 은 dataset YAML 에서
+        # 전 클립에 `weight: 1.0` 을 줘 **클립 균등**으로 뽑으므로, 대조하려면 여기서 넘겨야 한다
+        # (`motion_uniform_weights` docstring 참조 — 고속 클립 `go2_run2` 가 2.09 배 차이난다).
+        motion_weights = [1.0] * len(motion_files) if self.cfg.motion_uniform_weights else None
+        self._motion_lib = Go2MotionLib(motion_files=motion_files, device=self.device, weights=motion_weights)
 
         # ── body / joint 인덱스 ──────────────────────────────────
         self.ref_body_index = self._robot.data.body_names.index(self.cfg.reference_body)
@@ -198,6 +204,8 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         self.amp_observation_size = self.cfg.num_amp_observations * (
             self.cfg.amp_observation_space + (2 if self.cfg.include_rel_track_obs else 0)
         )
+        # 조건부 disc: 조건 열(+valid) 을 obs 끝에 붙인다 (mode="none" 이면 0).
+        self.amp_observation_size += self._init_amp_condition()
         self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
         self.amp_observation_buffer = torch.zeros(
             (self.num_envs, self.cfg.num_amp_observations, _AMP_BASE_DIM),
@@ -378,7 +386,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         final_amp_obs = torch.cat([base_amp, rot_tan_norm], dim=-1)  # [N, H, 49]
 
         self.extras = {
-            "amp_obs": final_amp_obs.view(self.num_envs, -1).clone(),
+            "amp_obs": self._append_amp_cond(final_amp_obs.view(self.num_envs, -1), self._policy_amp_cond()).clone(),
             # terminal step에서 러너가 post-reset RSI obs 대신 이 값으로 amp_reward 계산
             "terminal_amp_obs": self._terminal_amp_obs.clone(),
         }
@@ -488,6 +496,17 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        # ★ `_post_physics_step` 은 `DirectRLEnv` 의 훅이 **아니다** — 정의만 해 두면 아무도 부르지
+        #   않는다. 6.0 마이그레이션에서 이 사실이 누락돼 명령 재샘플과 push 외란이 **한 번도 돌지
+        #   않았다**(`tar_change_time_*` 2~7 s 는 dead config 였고, 명령은 20 s 에피소드 내내 고정).
+        #   `_get_dones` 가 물리 step 직후 처음 불리는 훅이라 여기에 건다 —
+        #   `go2_pedipulation_env.py` 와 `skeleton_wtw_env.py` 가 쓰는 것과 같은 우회다.
+        #
+        # ⚠ 되살리면 **push 외란도 같이 살아난다**(같은 메서드 안에 있다). 그것까지 한꺼번에 켜면
+        #   변수가 둘이 되므로, 명령 축만 보려면 실행 시 `env.dr.push_robot=false` 를 명시할 것.
+        #   기존 `nopush_stock` arm 의 "무효과" 는 push-off 를 **push-없음**과 비교한 것이었다.
+        self._post_physics_step()
+
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         if self.cfg.early_termination:
@@ -584,7 +603,9 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         rot_tan_norm_t = _apply_root_rot_tan_norm(terminal_quat_buf, n, self.cfg.num_amp_observations)  # [n, H, 6]
         final_terminal_amp_obs = torch.cat([base_terminal, rot_tan_norm_t], dim=-1)  # [n, H, 49]
 
-        self._terminal_amp_obs[env_ids] = final_terminal_amp_obs.view(n, -1)
+        self._terminal_amp_obs[env_ids] = self._append_amp_cond(
+            final_terminal_amp_obs.view(n, -1), self._policy_amp_cond(env_ids)
+        )
         # ────────────────────────────────────────────────────────────────────────
 
         self._robot.reset(env_ids)
@@ -1030,6 +1051,9 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         motion_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """레퍼런스 모션 AMP 관측값 수집. (상대 궤적 피처 + R4 root_rot_tan_norm 포함)"""
+        if motion_ids is None:
+            # 조건부 disc 라벨을 위해 클립 id 를 여기서 뽑아 들고 있는다.
+            motion_ids = self._motion_lib.sample_motions(num_samples)
         amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(num_samples, current_times, motion_ids)
         curr_root_quat = quat_hist[:, 0, :]  # [N, 4]
         n_hist = self.cfg.num_amp_observations
@@ -1053,7 +1077,7 @@ class Go2ImitationTrackingEnv(DirectRLEnv):
         rot_tan_norm = _apply_root_rot_tan_norm(quat_hist, num_samples, n_hist)  # [N, H, 6]
         final_amp_obs = torch.cat([base_amp, rot_tan_norm], dim=-1)  # [N, H, 49]
 
-        return final_amp_obs.view(num_samples, self.amp_observation_size)
+        return self._append_amp_cond(final_amp_obs.view(num_samples, -1), self._expert_amp_cond(motion_ids))
 
     def get_amp_observations(self, num_samples: int) -> torch.Tensor:
         """Runner가 Discriminator 업데이트 시 호출하는 Expert 관측 샘플러."""

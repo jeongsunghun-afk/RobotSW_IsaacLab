@@ -131,4 +131,17 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         disc_reward_type="bce",  # "ls_gan" | "bce" (MimicKit 방식) — ablation: ls_gan→bce
         disc_logit_reg_type="weight",  # "logit" | "weight" (MimicKit 방식) — ablation: logit→weight
         disc_norm_clip=10.0,  # None | 10.0 (MimicKit 방식) — ablation: None→10.0
+        # ── 조건부 discriminator (env `amp_cond_mode` 와 짝) ──────
+        # amp_cond_dim 은 러너가 env.amp_cond_dim 에서 읽어 넣는다 (여기 적지 않는다).
+        amp_cond_dropout=0.1,  # disc 학습 시 조건을 지우는 행 비율 (무조건부 경로 동시 학습)
+        amp_cond_reward_blend=0.0,  # 보상에 무조건부 평가를 섞는 비율 (0=조건부만)
+        # ── Discriminator 구조 ──────────────────────────────────
+        # "mlp"   : 기존 AMPDiscriminator (BCE / LS-GAN / WGAN + GP + logit reg)
+        # "drail" : 확산 discriminator (LaCoLoco/DRAIL). bce/bce 전용, GP·logit reg 없음.
+        disc_arch="mlp",  # "mlp" | "drail"
+        drail_hidden_dims=[256, 256, 256, 256],
+        drail_activation="elu",
+        drail_diffusion_steps=1000,
+        drail_label_dim=10,
+        drail_sample_strategy="antithetic",  # "antithetic" | "uniform" | "constant"
     )

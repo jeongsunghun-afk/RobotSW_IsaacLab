@@ -5,10 +5,21 @@
 
 import os
 import time
+
 import torch
 from tensordict import TensorDict
 
 from rsl_rl.algorithms import PPOAMP, PPOAMPBase
+
+
+def _env_amp_cond_dim(env) -> int:
+    """Env 가 내는 ``amp_cond_dim`` (AMP obs 끝의 조건 열 수). 없으면 0."""
+    for obj in (getattr(env, "unwrapped", None), env):
+        if obj is not None and hasattr(obj, "amp_cond_dim"):
+            return int(obj.amp_cond_dim)
+    return 0
+
+
 from rsl_rl.modules import ActorCritic, ActorCriticRMA, resolve_symmetry_config
 from rsl_rl.modules.estimator import Estimator
 from rsl_rl.runners.on_policy_runner_parkour import OnPolicyRunnerParkour
@@ -60,6 +71,8 @@ class OnPolicyRunnerAMP(OnPolicyRunnerParkour):
             amp_cfg["amp_observation_space"] = self.env.unwrapped.amp_observation_space.shape[0]
         elif hasattr(self.env, "amp_observation_space"):
             amp_cfg["amp_observation_space"] = self.env.amp_observation_space.shape[0]
+        # 조건부 disc: env 가 AMP obs 끝에 붙인 조건 열 수 (없으면 0 = 기존 무조건부).
+        amp_cfg["amp_cond_dim"] = _env_amp_cond_dim(self.env)
 
         # Estimator 빌드: estimator_cfg가 있을 때만 빌드하여 PPOAMP에 주입한다.
         # - actor는 배포 시 실제 lin_vel을 측정할 수 없으므로 estimator 추정값을 써야 한다.
@@ -338,6 +351,8 @@ class OnPolicyRunnerAMPBase(OnPolicyRunnerAMP):
             amp_cfg["amp_observation_space"] = self.env.unwrapped.amp_observation_space.shape[0]
         elif hasattr(self.env, "amp_observation_space"):
             amp_cfg["amp_observation_space"] = self.env.amp_observation_space.shape[0]
+        # 조건부 disc: env 가 AMP obs 끝에 붙인 조건 열 수 (없으면 0 = 기존 무조건부).
+        amp_cfg["amp_cond_dim"] = _env_amp_cond_dim(self.env)
 
         alg = PPOAMPBase(
             actor_critic, storage, device=self.device, amp_cfg=amp_cfg, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg

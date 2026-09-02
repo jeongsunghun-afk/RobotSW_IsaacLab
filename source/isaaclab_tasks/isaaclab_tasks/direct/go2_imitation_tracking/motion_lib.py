@@ -283,6 +283,7 @@ class Go2MotionLib:
         num_frames_list: list[int] = []
         fps_list: list[float | np.ndarray] = []
 
+        self._motion_names = [os.path.splitext(os.path.basename(path))[0] for path in motion_files]
         for path in motion_files:
             assert os.path.isfile(path), f"파일이 존재하지 않습니다: {path}"
             rp, rq, lv, av, dp, dv, fp, fps = self._load_pkl(path)
@@ -323,6 +324,8 @@ class Go2MotionLib:
         self._motion_num_frames = torch.tensor(num_frames_arr, dtype=torch.long, device=device)
         self._motion_lengths = torch.tensor(motion_lengths, dtype=torch.float32, device=device)
         self._motion_weights = torch.tensor(w, dtype=torch.float32, device=device)
+        # `motion_mean_speeds` 는 모션마다 파이썬 루프를 도므로 리셋마다 부르면 비싸다. 첫 호출에 캐시.
+        self._cached_mean_speeds: torch.Tensor | None = None
 
         # 각 모션의 플랫 배열 내 시작 인덱스
         start_idx = np.zeros(len(motion_files), dtype=np.int64)
@@ -334,6 +337,98 @@ class Go2MotionLib:
         print(f"[Go2MotionLib] 총 {num_motions}개 모션, {total_len:.2f}s 로드 완료")
 
     # ── 공개 인터페이스 ────────────────────────────────────────────
+
+    @property
+    def motion_names(self) -> list[str]:
+        """모션 클립 이름 (확장자 제외). 인덱스는 가중치/속도 배열과 같은 순서."""
+        return list(self._motion_names)
+
+    @property
+    def motion_mean_speeds(self) -> torch.Tensor:
+        """모션별 평균 수평 속도 [m/s], shape [num_motions], float.
+
+        root 위치의 프레임 간 차분으로 계산한다(world frame xy 평면). leg motion_lib 와 같은 정의라
+        두 task 의 속도 라벨을 같은 자로 잰다.
+        """
+        speeds = []
+        for i in range(len(self._motion_lengths)):
+            s = int(self._motion_start_idx[i])
+            n = int(self._motion_num_frames[i])
+            pos_xy = self._frame_root_pos[s : s + n, :2]
+            fps = (n - 1) / float(self._motion_lengths[i])
+            step = torch.linalg.norm(pos_xy[1:] - pos_xy[:-1], dim=-1) * fps
+            speeds.append(step.mean())
+        return torch.stack(speeds)
+
+    @property
+    def motion_mean_yaw_rates(self) -> torch.Tensor:
+        """모션별 평균 yaw 각속도 [rad/s] (body frame z, 부호 유지), shape [num_motions], float.
+
+        미러 클립은 부호가 뒤집히므로 좌우 짝은 크기가 같고 부호가 반대다.
+        """
+        rates = []
+        for i in range(len(self._motion_lengths)):
+            s = int(self._motion_start_idx[i])
+            n = int(self._motion_num_frames[i])
+            rates.append(self._frame_ang_vel[s : s + n, 2].mean())
+        return torch.stack(rates)
+
+    def sample_motions_near_speed(self, target_speeds: torch.Tensor, temperature: float = 0.5) -> torch.Tensor:
+        """명령 속도에 가까운 속도의 클립을 확률적으로 고른다 (leg motion_lib 와 동일한 정의).
+
+        softmax(-|speed - target| / temperature) 에 기존 `_motion_weights` 를 곱해 뽑는다.
+
+        Args:
+            target_speeds: [N] 각 env 의 명령 속도 [m/s]
+            temperature: 매칭 무름 [m/s]. 작을수록 최근접에 가깝다.
+
+        Returns:
+            motion_ids: [N] int64
+        """
+        if self._cached_mean_speeds is None:
+            self._cached_mean_speeds = self.motion_mean_speeds.to(self._device)
+        speeds: torch.Tensor = self._cached_mean_speeds  # [M]
+        tau = max(float(temperature), 1e-6)
+        logits = -(speeds[None, :] - target_speeds[:, None].to(speeds.device)).abs() / tau
+        w = self._motion_weights[None, :] * torch.softmax(logits, dim=-1)
+        return torch.multinomial(w, num_samples=1).squeeze(-1)
+
+    def set_motion_weights_command_uniform(self, vel_max: float) -> torch.Tensor:
+        """샘플링 가중치를 재설정해 expert 속도 분포가 U[0, vel_max] 에 근사하도록 만든다.
+
+        각 모션에 속도축 상의 최근접 셀 폭을 가중치로 준다(leg motion_lib 와 동일). 같은 속도의
+        모션(mirror 쌍)은 셀을 균등 분할한다.
+
+        Args:
+            vel_max: 명령 선속도 상한 [m/s]. 보통 env cfg 의 `lin_vel_x_max`.
+
+        Returns:
+            재설정된 정규화 가중치, shape [num_motions], float.
+        """
+        speeds = self.motion_mean_speeds
+        order = torch.argsort(speeds)
+        sorted_speeds = speeds[order].clamp(0.0, vel_max)
+
+        mids = 0.5 * (sorted_speeds[1:] + sorted_speeds[:-1])
+        lo = torch.cat([sorted_speeds.new_zeros(1), mids])
+        hi = torch.cat([mids, sorted_speeds.new_full((1,), vel_max)])
+        cell = (hi - lo).clamp(min=0.0)
+
+        w_sorted = cell.clone()
+        i = 0
+        while i < len(sorted_speeds):
+            j = i
+            while j + 1 < len(sorted_speeds) and torch.isclose(sorted_speeds[j + 1], sorted_speeds[i], atol=1e-4):
+                j += 1
+            if j > i:
+                w_sorted[i : j + 1] = w_sorted[i : j + 1].sum() / (j - i + 1)
+            i = j + 1
+
+        w = torch.empty_like(w_sorted)
+        w[order] = w_sorted
+        w = w.clamp(min=1e-6)
+        self._motion_weights = (w / w.sum()).to(self._device)
+        return self._motion_weights
 
     def sample_motions(self, n: int) -> torch.Tensor:
         """가중치 기반 모션 ID 샘플링.

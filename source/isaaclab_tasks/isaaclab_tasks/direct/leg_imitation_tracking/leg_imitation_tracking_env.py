@@ -49,11 +49,13 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import convert_quat, quat_apply, quat_apply_inverse, quat_mul
 
+from isaaclab_tasks.direct.amp_command_condition import AMPCommandConditionMixin
+
 from .leg_imitation_tracking_env_cfg import LegImitationTrackingEnvCfg
 from .motion_lib import LegMotionLib
 
 
-class LegImitationTrackingEnv(DirectRLEnv):
+class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
     """Leg(17-DOF 4족+허리) AMP + body-frame 속도추종 Imitation 환경.
 
     Policy observation (63-dim):
@@ -129,6 +131,8 @@ class LegImitationTrackingEnv(DirectRLEnv):
         self.amp_observation_size = self.cfg.num_amp_observations * (
             self.cfg.amp_observation_space + (2 if self.cfg.include_rel_track_obs else 0)
         )
+        # 조건부 disc: 조건 열(+valid) 을 obs 끝에 붙인다 (mode="none" 이면 0).
+        self.amp_observation_size += self._init_amp_condition()
         self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
         self.amp_observation_buffer = torch.zeros(
             (self.num_envs, self.cfg.num_amp_observations, _AMP_BASE_DIM),
@@ -294,7 +298,7 @@ class LegImitationTrackingEnv(DirectRLEnv):
         final_amp_obs = torch.cat([base_amp, rot_tan_norm], dim=-1)  # [N, H, 59]
 
         self.extras = {
-            "amp_obs": final_amp_obs.view(self.num_envs, -1).clone(),
+            "amp_obs": self._append_amp_cond(final_amp_obs.view(self.num_envs, -1), self._policy_amp_cond()).clone(),
             # terminal step에서 러너가 post-reset RSI obs 대신 이 값으로 amp_reward 계산
             "terminal_amp_obs": self._terminal_amp_obs.clone(),
         }
@@ -436,7 +440,9 @@ class LegImitationTrackingEnv(DirectRLEnv):
         rot_tan_norm_t = _apply_root_rot_tan_norm(terminal_quat_buf, n, self.cfg.num_amp_observations)  # [n, H, 6]
         final_terminal_amp_obs = torch.cat([base_terminal, rot_tan_norm_t], dim=-1)  # [n, H, 59]
 
-        self._terminal_amp_obs[env_ids] = final_terminal_amp_obs.view(n, -1)
+        self._terminal_amp_obs[env_ids] = self._append_amp_cond(
+            final_terminal_amp_obs.view(n, -1), self._policy_amp_cond(env_ids)
+        )
         # ────────────────────────────────────────────────────────────────────────
 
         self._robot.reset(env_ids)
@@ -664,6 +670,9 @@ class LegImitationTrackingEnv(DirectRLEnv):
         motion_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """레퍼런스 모션 AMP 관측값 수집. (상대 궤적 피처 + R4 root_rot_tan_norm 포함)"""
+        if motion_ids is None:
+            # 조건부 disc 라벨을 위해 클립 id 를 여기서 뽑아 들고 있는다.
+            motion_ids = self._motion_lib.sample_motions(num_samples)
         amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(num_samples, current_times, motion_ids)
         curr_root_quat = quat_hist[:, 0, :]  # [N, 4]
         n_hist = self.cfg.num_amp_observations
@@ -687,7 +696,7 @@ class LegImitationTrackingEnv(DirectRLEnv):
         rot_tan_norm = _apply_root_rot_tan_norm(quat_hist, num_samples, n_hist)  # [N, H, 6]
         final_amp_obs = torch.cat([base_amp, rot_tan_norm], dim=-1)  # [N, H, 59]
 
-        return final_amp_obs.view(num_samples, self.amp_observation_size)
+        return self._append_amp_cond(final_amp_obs.view(num_samples, -1), self._expert_amp_cond(motion_ids))
 
     def get_amp_observations(self, num_samples: int) -> torch.Tensor:
         """Runner가 Discriminator 업데이트 시 호출하는 Expert 관측 샘플러."""

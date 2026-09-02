@@ -242,6 +242,19 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     motion_file: str = MOTION_FILES_DIR
     reference_body: str = "base"
 
+    #: 참조 모션 샘플링을 **클립 균등**으로 할지 여부 (AMP expert 배치 + RSI 리셋 양쪽에 적용).
+    #:
+    #: ``False`` (기본)면 :class:`~.motion_lib.Go2MotionLib` 의 기본값인 **길이 비례** 가중치가
+    #: 쓰인다. ``True`` 면 클립마다 같은 확률로 뽑는다 — MimicKit 의 dataset YAML 이 전 클립에
+    #: ``weight: 1.0`` 을 주는 것과 같은 동작이다.
+    #:
+    #: ★ 이 값이 왜 문제가 되는가: `smr_mirror_pkl` 18 클립 중 3.2 m/s 위를 담은 것은
+    #: ``go2_run2`` 하나뿐인데, 하필 그게 1.167 s 로 가장 짧다. 길이 비례는 짧을수록 벌하므로
+    #: 유일한 고속 증거가 5.33 % 로 깎인다(클립 균등이면 11.11 %). 반대로 trot 계열은
+    #: 31.51 % → 22.22 % 로 줄어든다. 자세한 실측은
+    #: ``reports/go2_imitation/_comparisons/mimickit_vs_60_actuator_limit/README.md`` §20.
+    motion_uniform_weights: bool = False
+
     # 항상 RSI (Reference State Initialization) 사용
     reset_strategy: str = "random"  # "random" | "random_start"
 
@@ -257,6 +270,15 @@ class Go2ImitationTrackingEnvCfg(DirectRLEnvCfg):
     yaw_vel_max: float = 1.0  # yaw rate 최대 (rad/s)
     tar_change_time_min: float = 2.0  # 목표 명령 변경 최소 주기 (s)
     tar_change_time_max: float = 7.0  # 목표 명령 변경 최대 주기 (s)
+
+    # ── 명령 조건부 discriminator ─────────────────────────────────
+    #: AMP obs 끝에 붙일 조건. "none" 이면 기존 무조건부 D 와 같다.
+    #:   "speed"     : [ |v_cmd| / v_max , valid ]                    (+2 열)
+    #:   "speed_yaw" : [ |v_cmd| / v_max , yaw_cmd / yaw_max , valid ] (+3 열)
+    #: expert 샘플은 클립 평균 속도/yaw 로 라벨한다. 러너가 ``env.amp_cond_dim`` 을 읽어 disc 에 넘긴다.
+    amp_cond_mode: str = "none"  # "none" | "speed" | "speed_yaw"
+    amp_cond_v_max: float | None = None  # 정규화 상한 [m/s]. None → lin_vel_x_max
+    amp_cond_yaw_max: float | None = None  # 정규화 상한 [rad/s]. None → max(|yaw_vel_min|, |yaw_vel_max|)
 
     # ── 정지/재출발 학습 (2026-07-31) ────────────────────────────
     # 배경: 이 정책은 **한 번 서면 재출발하지 못했다**(64 env 중 2~4개만 성공, 행동 경로

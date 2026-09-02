@@ -121,6 +121,15 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
     # 신호가 없었다. 기존 run 을 그대로 재현할 수 있도록 기본값은 False 로 두고 opt-in 으로 켠다.
     resample_command_in_episode: bool = False
 
+    # ── 명령 조건부 discriminator ─────────────────────────────────
+    #: AMP obs 끝에 붙일 조건. "none" 이면 기존 무조건부 D 와 같다.
+    #:   "speed"     : [ |v_cmd| / v_max , valid ]                    (+2 열)
+    #:   "speed_yaw" : [ |v_cmd| / v_max , yaw_cmd / yaw_max , valid ] (+3 열)
+    #: expert 샘플은 클립 평균 속도/yaw 로 라벨한다. 러너가 ``env.amp_cond_dim`` 을 읽어 disc 에 넘긴다.
+    amp_cond_mode: str = "none"  # "none" | "speed" | "speed_yaw"
+    amp_cond_v_max: float | None = None  # 정규화 상한 [m/s]. None → lin_vel_x_max
+    amp_cond_yaw_max: float | None = None  # 정규화 상한 [rad/s]. None → max(|yaw_vel_min|, |yaw_vel_max|)
+
     # ── 보상 가중치 ─────────────────────────────────────────────
     # Task reward = lin_vel_reward_w * lin_vel_reward + yaw_vel_reward_w * yaw_vel_reward
     lin_vel_reward_w: float = 0.7  # 선속도 추종 가중치

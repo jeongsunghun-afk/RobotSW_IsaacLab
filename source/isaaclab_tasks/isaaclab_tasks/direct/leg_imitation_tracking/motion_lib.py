@@ -517,6 +517,19 @@ class LegMotionLib:
             speeds.append(step.mean())
         return torch.stack(speeds)
 
+    @property
+    def motion_mean_yaw_rates(self) -> torch.Tensor:
+        """모션별 평균 yaw 각속도 [rad/s] (body frame z, 부호 유지), shape [num_motions], float.
+
+        미러 클립은 부호가 뒤집히므로 좌우 짝은 크기가 같고 부호가 반대다.
+        """
+        rates = []
+        for i in range(len(self._motion_lengths)):
+            s = int(self._motion_start_idx[i])
+            n = int(self._motion_num_frames[i])
+            rates.append(self._frame_ang_vel[s : s + n, 2].mean())
+        return torch.stack(rates)
+
     def sample_motions_near_speed(self, target_speeds: torch.Tensor, temperature: float = 0.5) -> torch.Tensor:
         """명령 속도에 **가까운 속도의 클립**을 확률적으로 고른다.
 
