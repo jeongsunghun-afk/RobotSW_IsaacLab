@@ -135,6 +135,12 @@ class HindLegEnv(DirectRLEnv):
         # 넘어짐 종료 임계 (:meth:`_get_dones` 참고). cos 는 한 번만 계산한다.
         tilt = getattr(self.cfg, "terminate_tilt_deg", None)
         self._tilt_cos_limit = math.cos(math.radians(tilt)) if tilt is not None else 1.0
+        # ★ 목표 클램프 발동률 계측 (2026-09-02). 실기에서 hip 목표가 93~100 % 클램프되는 것이
+        #   관측됐는데(08-28 캡처), sim 에서도 같은 비율이면 **정책은 hip 제어 권한을 잃은 채로
+        #   학습된 것**이다. 그 사실이 학습 로그에 남지 않으면 다음에도 못 본다.
+        #   `Episode_Clamp/<joint>` = 그 관절 목표가 soft limit 으로 잘린 스텝의 비율.
+        self._clamp_cnt = torch.zeros(self.num_envs, self._robot.num_joints, device=self.device)
+        self._clamp_steps = torch.zeros(self.num_envs, device=self.device)
         # 리셋 초기 상태 노이즈 (cfg 주석 참고). None/0 이면 종전 동작(고정 초기 자세).
         jn = getattr(self.cfg, "reset_joint_pos_noise", 0.0)
         rp = getattr(self.cfg, "reset_base_rp_noise_deg", 0.0)
@@ -231,7 +237,11 @@ class HindLegEnv(DirectRLEnv):
             # `motions.SOFT_LIMITS_RAD` = `calib_bipedleg.hpp` 의 `min_rad/max_rad` 와 정확히 같다
             # (foot HL `[-0.344, +1.384]`). 상수로 복제하면 자산이 바뀔 때 조용히 어긋난다.
             soft = self._data_tensor(self._robot.data.soft_joint_pos_limits)
-            self._processed_actions = self._processed_actions.clamp(soft[..., 0], soft[..., 1])
+            clamped = self._processed_actions.clamp(soft[..., 0], soft[..., 1])
+            # 잘린 관절을 센다 — 클램프 **전후가 다른** 스텝이 곧 "정책이 한계 밖을 요구한" 스텝이다.
+            self._clamp_cnt += (clamped != self._processed_actions).float()
+            self._clamp_steps += 1.0
+            self._processed_actions = clamped
         if self._foot_coupling and self._foot_raw_friction:
             # 관절 좌표 PhysX 마찰 제거는 제어 스텝(50 Hz)마다 1회면 충분하다 — 마찰 계수는 그보다
             # 자주 바뀌지 않는다. 마찰 토크 자체는 _apply_action에서 물리 스텝마다 갱신한다.
@@ -681,6 +691,15 @@ class HindLegEnv(DirectRLEnv):
             self._episode_sums[key][env_ids] = 0.0
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
+        if self.cfg.clamp_action_to_soft_limits:
+            # 에피소드 평균 클램프 비율 — 분모는 그 env 가 실제로 돈 스텝 수다(리셋 직후 0 방지).
+            # `self.extras["log"]` 에 직접 넣는다: 아래 `extras` 는 종료 통계용으로 새로 비워진다.
+            steps = self._clamp_steps[env_ids].clamp(min=1.0).unsqueeze(-1)
+            rate = (self._clamp_cnt[env_ids] / steps).mean(dim=0)
+            for j, name in enumerate(self._robot.joint_names):
+                self.extras["log"][f"Episode_Clamp/{name}"] = rate[j].item()
+            self._clamp_cnt[env_ids] = 0.0
+            self._clamp_steps[env_ids] = 0.0
         extras = dict()
         extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
