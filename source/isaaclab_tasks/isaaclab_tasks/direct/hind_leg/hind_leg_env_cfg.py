@@ -19,7 +19,7 @@ from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 ##
 # Pre-defined configs
 ##
-from isaaclab_assets.robots.rga import HIND_LEG_CFG  # isort: skip
+from isaaclab_assets.robots.rga import FLAT_HIND_LEG_CFG, HIND_LEG_CFG  # isort: skip
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
 
 
@@ -232,11 +232,11 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     curriculum_step = 0.05
     command_cfg = {
         "lin_vel_x_range": [0.0, 1.0],
-        "lin_vel_y_range": [-0.0, 0.0],
+        "lin_vel_y_range": [-0.5, 0.5],
         "ang_vel_range": [-0.5, 0.5],
     }
     lin_vel_x_range = [0.0, 1.0]
-    lin_vel_y_range = [-0.0, 0.0]
+    lin_vel_y_range = [-0.5, 0.5]
     ang_vel_range = [-0.5, 0.5]
 
 
@@ -364,11 +364,11 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     curriculum_step = 0.05
     command_cfg = {
         "lin_vel_x_range": [-0.5, 2.0],
-        "lin_vel_y_range": [-0.0, 0.0],
+        "lin_vel_y_range": [-0.5, 0.5],
         "ang_vel_range": [-0.5, 0.5],
     }
     lin_vel_x_range = [-0.5, 2.0]
-    lin_vel_y_range = [-0.0, 0.0]
+    lin_vel_y_range = [-0.5, 0.5]
     ang_vel_range = [-0.5, 0.5]
 
 
@@ -408,3 +408,50 @@ class HindLegRoughEnvCfg(HindLegFlatEnvCfg):
 
     # reward scales (override from flat config)
     flat_orientation_reward_scale = 0.0
+
+
+@configclass
+class HindLegFlatFootEnvCfg(HindLegHistoryEnvCfg):
+    """평발(2점 접촉) 변형 — 로봇만 FLAT_HIND_LEG_CFG로 교체, 나머지(obs/action/reward/command)는 동일."""
+
+    robot: ArticulationCfg = FLAT_HIND_LEG_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
+    # --- Reward rebalance #1 (plateau fix, 2026-07-24): make WALKING pay more than STANDING ---
+    # Diagnosis: gait_stance (~1.02) dominated the return; robot stood on 2 feet for the bonus.
+    # --- Reward rebalance #2 (clean-gait fix, 2026-07-27): keep walking, add rhythmic stepping ---
+    # Diagnosis: rebalance #1 broke the plateau but the gait is shuffly/irregular (feet drag, no
+    #   clean alternating swing). Fix: strengthen the phase-scheduled swing-clearance term and the
+    #   feet-air-time term (the two drivers of clean stepping) + a moderate smoothness bump, while
+    #   KEEPING lin_vel high (3.0) so it does not revert to standing. All are attribute overrides in
+    #   this FlatFoot subclass only -- the point-foot task (HindLegHistoryEnvCfg) is untouched, and
+    #   every term already exists in hind_leg_env.py (no env.py edit, fully backward-compatible).
+    lin_vel_reward_scale = 3.0        # base 1.0 -> 3.0: 3x boost on velocity tracking            [kept from #1]
+    lin_vel_tracking_sigma = 0.25     # base 0.1 -> 0.25: wider exp kernel -> gradient toward moving [kept from #1]
+    rel_standing_envs: float = 0.05   # base 0.1 -> 0.05: fewer forced-standing envs               [kept from #1]
+    # Gait-shaping (rhythmic-stepping drivers) -- strengthened in #2:
+    gait_stance_reward_scale = 0.8    # #1 set 0.5 (from base 1.0); #2 -> 0.8 (anchor stance foot on schedule)
+    gait_swing_reward_scale = 1.5     # base 1.0 -> 1.5: reward lifting the SWING foot to clearance (kills drag/shuffle)
+    feet_air_time_reward_scale = 1.0  # base 0.5 -> 1.0: classic clean-stepping term (air-time > 0.2s, cmd-gated)
+    # Smoothness -- strengthened in #2 (kept moderate so it does not suppress stepping into a shuffle):
+    action_rate_reward_scale = -0.005 # base -0.001 -> -0.005: penalise jittery action changes
+    # foot_slip (-0.15), joint_accel (-2.5e-7) and self-collision (FLAT_HIND_LEG_CFG) all kept as-is.
+    # --- Reward rebalance #3 (limp fix, 2026-07-27): symmetric, flat-footed gait ---
+    # Measured limp @ vx~0.2: one foot (HR) plants FLAT and hogs stance (~79%), the other (HL)
+    # TOE-WALKS (heel raised 0.10-0.15 m) with only ~52% stance. Root cause: gait_stance rewards
+    # stance-contact per foot but NOTHING penalises a foot for staying in contact through its own
+    # SWING phase, and no term constrains foot pitch → one foot can park in stance while the other
+    # toe-walks, both locally optimal. Two new penalties (both instantaneous, no reset buffer; gated
+    # behind cfg attrs via getattr in env.py so the point-foot task HindLegHistoryEnvCfg is unaffected):
+    gait_swing_contact_reward_scale = -1.0  # penalise contact during scheduled swing → forces BOTH feet
+    #                                         to lift on their 50/50 antiphase schedule (fixes lopsided duty)
+    flat_foot_reward_scale = -15.0          # penalise heel-above-toe gap (m) while loaded → heel+toe both
+    #                                         down = flat foot; kills the toe-walking foot
+    # Commands: forward, achievable, no ambiguous near-zero walk speed (explicit stop handled by rel_standing_envs)
+    command_cfg = {
+        "lin_vel_x_range": [0.1, 0.3],   # was [-0.5, 2.0]: min 0.3 (no ambiguous ~0), max 1.0 (reachable)
+        "lin_vel_y_range": [-0.3, 0.3],  # was [-0.5, 0.5]
+        "ang_vel_range": [-0.5, 0.5],
+    }
+    lin_vel_x_range = [0.1, 0.3]
+    lin_vel_y_range = [-0.3, 0.3]
+    ang_vel_range = [-0.5, 0.5]

@@ -22,7 +22,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import ContactSensor, RayCaster
 
 from .quad17_env_cfg import Quad17VelocityEnvCfg
 
@@ -65,6 +65,93 @@ class Quad17Env(DirectRLEnv):
             cfg.terrain_curriculum = _tc_env not in ("0", "false", "False", "no")
             if cfg.terrain_curriculum:
                 cfg.gap_terrain = True  # curriculum extends the gap builder; enable it so one var suffices
+
+        # -- EARLY env-var override: QUAD17_TERRAIN_KIND (gap trenches vs ascending stairs) --
+        # Same early block / same reason as QUAD17_TERRAIN_CURRICULUM: the terrain BUILDER runs inside
+        # super().__init__() (_setup_scene -> _build_gap_terrain), so the kind must be fixed BEFORE it.
+        #   "gap"   => transverse-trench curriculum (default). "stair" => _build_stair_terrain_curriculum.
+        # Stairs reuse the terrain-level curriculum lanes, so selecting "stair" force-enables the curriculum
+        # (and the gap builder it hangs off), exactly as QUAD17_TERRAIN_CURRICULUM=1 force-enables gap_terrain
+        # — so a SINGLE env-var (QUAD17_TERRAIN_KIND=stair) is sufficient. Unknown values are ignored (keep
+        # the cfg default). Default "gap" leaves terrain_curriculum/gap_terrain untouched => unchanged behaviour.
+        _tk_env = _os.environ.get("QUAD17_TERRAIN_KIND", "").strip().lower()
+        if _tk_env in ("gap", "stair"):
+            cfg.terrain_kind = _tk_env
+        if cfg.terrain_kind == "stair":
+            cfg.terrain_curriculum = True
+            cfg.gap_terrain = True
+            # Stairs are slow-climb terrain: pin the forward-vx command to [0.2, 0.4] (= the stair TAMOLS
+            # cache grid) for BOTH the baseline (heightmap-RL) AND DTC (full-TAMOLS), so the two configs
+            # sample the IDENTICAL command distribution (removes the vx-range confound). The gap command
+            # wiring below reads gap_lin_vel_x_range for every stair run (vy/yaw already 0), so this single
+            # override covers both configs. Stair mode only; the gap/flat default range is left unchanged.
+            cfg.gap_lin_vel_x_range = [0.2, 0.4]
+
+        # -- EARLY env-var override: QUAD17_USE_TAMOLS_CACHE (ablation: TAMOLS cache vs Raibert footholds) --
+        # Same early block / same string parsing as QUAD17_TERRAIN_CURRICULUM above, so it takes effect for
+        # the whole run. Mutating cfg here propagates because DirectRLEnv stores it as self.cfg during
+        # super().__init__(); the _regen_footholds() branch keys off cfg.use_tamols_cache, so forcing it off
+        # routes footholds through the procedural Raibert path instead of the offline TAMOLS cache.
+        #   "0"/"false"/"no" => force cfg.use_tamols_cache off (Raibert); else => force on; unset => cfg default (True).
+        # ORTHOGONAL to QUAD17_TERRAIN_CURRICULUM: this only picks the foothold SOURCE, the terrain var picks
+        # the terrain BUILDER. Ablation QUAD17_USE_TAMOLS_CACHE=0 + QUAD17_TERRAIN_CURRICULUM=1 composes to
+        # adaptive terrain curriculum ON + Raibert footholds (cache OFF). obs stays 101 (foothold obs block is
+        # still populated, just from the Raibert path) — no dim change, checkpoint-compatible.
+        _tcache_env = _os.environ.get("QUAD17_USE_TAMOLS_CACHE", "").strip()
+        if _tcache_env != "":
+            cfg.use_tamols_cache = _tcache_env not in ("0", "false", "False", "no")
+
+        # -- EARLY env-var override: QUAD17_FULL_TAMOLS (footholds-on-treads + base-Z-rise STAIR plan) --
+        # The DTC-ON variant for the 3D (stair) test: load + TRACK the deployed stair TAMOLS cache
+        # (tamols_stair_cache/) instead of the gap cache. Same early block / string parsing as the toggles
+        # above so it fixes cfg before super().__init__(). Forces cfg.use_tamols_cache on; the STAIR cache
+        # path is actually selected below ONLY when terrain_kind=="stair" (else this is a no-op — the gap
+        # cache / Raibert path is unchanged). Default unset/"0" => OFF => behaviour byte-for-byte (obs=101,
+        # gap cache on gaps). Full-TAMOLS adds two things vs footholds-only: footholds re-anchored ONTO the
+        # actual treads (world_z = terrain height under the foothold xy) + a base-Z reference that rises up
+        # the stairs (base_pose_track gains a z term). Pair with QUAD17_TERRAIN_KIND=stair (+ QUAD17_HEIGHTMAP=1).
+        _ft_env = _os.environ.get("QUAD17_FULL_TAMOLS", "").strip()
+        _full_tamols_req = _ft_env not in ("", "0", "false", "False", "no")
+        if _full_tamols_req:
+            cfg.use_tamols_cache = True  # full-TAMOLS forces the cache path on (stair cache selected below)
+
+        # -- EARLY env-var overrides: QUAD17_HEIGHTMAP / QUAD17_FOOTHOLD_OBS (obs-composition toggles) --
+        # BOTH must be processed before super().__init__() because they change (a) whether the height
+        # scanner is created in _setup_scene and (b) the policy-obs width, which DirectRLEnv reads from
+        # cfg.observation_space when it builds the gym space (and this env reads from cfg.num_prio_obs to
+        # size the RMA history buffer). Mutating cfg here propagates (DirectRLEnv stores it as self.cfg).
+        # Same string parsing as the toggles above:
+        #   QUAD17_HEIGHTMAP=1     => cfg.use_heightmap on  (append the 187-ray height scan to the obs)
+        #   QUAD17_FOOTHOLD_OBS=0  => cfg.foothold_obs  off (EXCLUDE the 28 + 12 foothold/IK obs block)
+        # cfg.foothold_obs is the EXISTING foothold-in-obs toggle (reused, not duplicated): turning it off
+        # removes ONLY the obs block — the foothold-tracking reward / buffers still run — giving a clean
+        # heightmap-only baseline with no foothold guidance in the observation. Combos:
+        #   default (unset)          -> 61 proprio+clock + 28 + 12 foothold          = 101 (byte-for-byte)
+        #   QUAD17_HEIGHTMAP=1 QUAD17_FOOTHOLD_OBS=0 -> 61 + 187 heightmap            = 248
+        #   QUAD17_HEIGHTMAP=1 (foothold default on) -> 61 + 187 + 28 + 12           = 288
+        _hm_env = _os.environ.get("QUAD17_HEIGHTMAP", "").strip()
+        if _hm_env != "":
+            cfg.use_heightmap = _hm_env not in ("0", "false", "False", "no")
+        _fo_env = _os.environ.get("QUAD17_FOOTHOLD_OBS", "").strip()
+        if _fo_env != "":
+            cfg.foothold_obs = _fo_env not in ("0", "false", "False", "no")
+        # Recompute the policy-obs width from the ACTIVE toggles so the gym space / RMA history width match
+        # the _get_observations concatenation exactly. Mirrors the cfg class-body computation and is
+        # idempotent on the defaults (recomputes 101 -> 101), so the default path stays byte-for-byte.
+        cfg.num_heights = cfg.num_height_rays if cfg.use_heightmap else 0
+        _nprio = 3 + 3 + cfg.action_space * 3
+        if cfg.timing_parameter:
+            _nprio += 1
+        if cfg.clock_inputs:
+            _nprio += 4
+        if cfg.use_heightmap:
+            _nprio += cfg.num_heights  # height-scan block (appended after the clock, before footholds)
+        if cfg.foothold_obs:
+            _nprio += cfg.num_foothold_targets * 4 * 3 + 4
+            if cfg.foothold_ik_obs:
+                _nprio += 4 * cfg.foothold_ik_joints_per_leg
+        cfg.num_prio_obs = _nprio
+        cfg.observation_space = _nprio
 
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -191,8 +278,22 @@ class Quad17Env(DirectRLEnv):
         self._tamols_loaded = False
         self._gap_near_edges_x: torch.Tensor | None = None  # populated after gap wiring below (needs _gap)
         self._gap_widths: torch.Tensor | None = None  # per-gap width, index-aligned with _gap_near_edges_x
-        if bool(self.cfg.use_tamols_cache):
+        # The offline TAMOLS cache is a GAP plan (gap-width/gap-distance indexed); it does not apply to the
+        # stair curriculum (a stair cache is future work, keyed on _stair_step_height). Skip the load in
+        # stair mode so _tamols_loaded stays False and _regen_footholds uses the Raibert path over stairs.
+        if bool(self.cfg.use_tamols_cache) and self.cfg.terrain_kind != "stair":
             self._load_tamols_cache()
+
+        # -- DTC full-TAMOLS (stair) cache: footholds-on-treads + base-Z-rise plan (QUAD17_FULL_TAMOLS) --
+        # Parallel to the gap cache above but for the ascending-stair 3D test: loads tamols_stair_cache/
+        # (footholds/base/contacts) and tracks it. Active ONLY when the toggle is on AND terrain is stair;
+        # otherwise both flags stay False and _regen_footholds keeps the gap-cache / Raibert path exactly
+        # as before (byte-for-byte). _full_tamols additionally gates the base-Z reward term (_get_rewards).
+        self._stair_tamols_loaded = False
+        self._full_tamols = False
+        if _full_tamols_req and bool(self.cfg.use_tamols_cache) and self.cfg.terrain_kind == "stair":
+            self._load_tamols_stair_cache()
+            self._full_tamols = self._stair_tamols_loaded
 
         # Eval-only foothold diagnostics (NOT zeroed on episode reset) for the ablation gate (Step 8).
         # Purely diagnostic — never added to the reward, never in obs — so they do not affect training
@@ -234,7 +335,14 @@ class Quad17Env(DirectRLEnv):
         # the first (full) reset out of the promote/demote logic (no valid prior spawn anchor yet). Default
         # OFF => every curriculum branch below is skipped and the env behaves byte-for-byte as before.
         self._terrain_curriculum = self._gap and bool(self.cfg.terrain_curriculum)
+        # STAIR variant of the terrain-level curriculum: same lanes/promotion/spawn machinery, ascending
+        # stairs instead of trenches (see cfg.terrain_kind and _build_stair_terrain_curriculum). Only
+        # meaningful together with the curriculum (stairs reuse its lanes); False => every gap path below.
+        self._stair = self._terrain_curriculum and self.cfg.terrain_kind == "stair"
         self._terrain_level = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # Per-env stair tread rise (m), refreshed from the env's level in _reset_idx (stair mode); zero in
+        # gap/flat mode. Exposed for the terrain-tracking base-height reference and a future stair TAMOLS cache.
+        self._stair_step_height = torch.zeros(self.num_envs, device=self.device)
         self._terrain_curric_started = False
         # Per-episode forward spawn offset (m): shifts the robot's phase relative to the static trench
         # pattern each reset so it cannot memorize a fixed body-relative gap schedule. Re-randomized in
@@ -245,7 +353,11 @@ class Quad17Env(DirectRLEnv):
             # Trench field geometry was built in _setup_scene; _gap_surface_z (strip-top world z) and
             # _strip_centers_x (sorted world-x of every strip center, for the foothold snap) are set there.
             # Raise the base-height target and the command distribution for the crossing test.
-            self.cfg.base_height_target = self.cfg.base_height_target + self._gap_surface_z
+            if not self._stair:
+                # Flat gap surface: a constant lift is exact. Stairs rise as the robot climbs, so their
+                # base-height target is terrain-relative (added per-env in _get_rewards via
+                # _stair_terrain_height_under_base), not a constant here — leave the nominal ~0.52 target.
+                self.cfg.base_height_target = self.cfg.base_height_target + self._gap_surface_z
             self.cfg.command_cfg = {
                 "lin_vel_x_range": list(self.cfg.gap_lin_vel_x_range),  # forward vx only
                 "lin_vel_y_range": [0.0, 0.0],
@@ -305,6 +417,10 @@ class Quad17Env(DirectRLEnv):
                 f"cache_width_grid=[{float(self._tamols_width[0]):.2f},{float(self._tamols_width[-1]):.2f}]"
             )
 
+        # NOTE: stair-mode forward-vx command is pinned to [0.2, 0.4] for BOTH baseline and DTC in the early
+        # __init__ block (cfg.gap_lin_vel_x_range override), applied uniformly by the gap command wiring —
+        # so there is no per-config command block here (avoids the vx-range confound).
+
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(self.cfg.penalzied_body_names)
 
         # Ablation gate (Step 8): QUAD17_FOOTHOLD_ABLATE = "" | "zero" | "scramble". Set at eval time
@@ -338,8 +454,18 @@ class Quad17Env(DirectRLEnv):
 
         foothold_dim = self.cfg.num_foothold_targets * 4 * 3 + 4 if self.cfg.foothold_obs else 0
         ik_dim = 4 * self._ik_joints_per_leg if (self.cfg.foothold_obs and self.cfg.foothold_ik_obs) else 0
+        # Heightmap: verify the live sensor's ray count matches the analytic num_heights folded into the
+        # obs dim (a mismatch would silently corrupt every obs concat / the RMA history width).
+        height_dim = 0
+        if self.cfg.use_heightmap:
+            height_dim = self._height_scanner.data.ray_hits_w.shape[1]
+            assert height_dim == self.cfg.num_heights, (
+                f"[quad17][HM] live height-scan ray count {height_dim} != cfg.num_heights "
+                f"{self.cfg.num_heights}; check height_scan_size/resolution vs the GridPattern"
+            )
         print(
             f"[quad17][P2] observation_space={self.cfg.observation_space} num_prio_obs={self.cfg.num_prio_obs} "
+            f"use_heightmap={self.cfg.use_heightmap} height_dim(+{height_dim}) "
             f"foothold_obs={self.cfg.foothold_obs} foothold_dim(+{foothold_dim}) "
             f"ik_obs={self.cfg.foothold_ik_obs} ik_dim(+{ik_dim}) "
             f"ablate='{self._foothold_ablate or 'none'}' lin_vel_scale={self.cfg.lin_vel_reward_scale}"
@@ -350,6 +476,12 @@ class Quad17Env(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
+        # Heightmap RayCaster (terrain perception) — created ONLY when use_heightmap is on so the default
+        # path adds no sensor (byte-for-byte scene). Its prim_path is the rigid BODY /Robot/Base/Base
+        # (NOT the /Robot/Base Xform) — the GPU physics-view body path avoids a per-step CPU readback.
+        if self.cfg.use_heightmap:
+            self._height_scanner = RayCaster(self.cfg.height_scanner)
+            self.scene.sensors["height_scanner"] = self._height_scanner
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
@@ -410,9 +542,13 @@ class Quad17Env(DirectRLEnv):
         stored for the foothold snap so the reference targets EXACTLY match the physical strips.
         """
         # Adaptive terrain-LEVEL curriculum: hand off to the per-level lane builder (kept as a separate
-        # method so THIS spatial-ramp body stays byte-for-byte identical when the toggle is off).
+        # method so THIS spatial-ramp body stays byte-for-byte identical when the toggle is off). The stair
+        # variant reuses the same lane/promotion machinery but builds ascending stairs (see cfg.terrain_kind).
         if bool(self.cfg.terrain_curriculum):
-            self._build_gap_terrain_curriculum()
+            if self.cfg.terrain_kind == "stair":
+                self._build_stair_terrain_curriculum()
+            else:
+                self._build_gap_terrain_curriculum()
             return
         import os as _os
 
@@ -621,6 +757,115 @@ class Quad17Env(DirectRLEnv):
             f"promote>{self.cfg.promote_frac:.2f}*len demote<{self.cfg.demote_frac:.2f}*len"
         )
 
+    def _build_stair_terrain_curriculum(self):
+        """Build the adaptive terrain-LEVEL STAIR field: ``num_terrain_levels`` ascending corridors as +y ROWS.
+
+        Parallel to ``_build_gap_terrain_curriculum`` (identical lane layout / pitch / promotion machinery),
+        but each level is an ASCENDING STAIRCASE instead of a trench field. Level 0 is FLAT (the corridor is
+        just the z=0 ground plane, no treads); level L>0 lays ``n_steps`` raised tread boxes of fixed depth
+        ``stair_step_depth`` (run, along +x), each rising ``step_h = L/(num_levels-1) * stair_step_height_max``
+        above the previous — so a robot spawns on the flat spawn strip at the lane base (z=0) and climbs. Each
+        tread is a FULL-HEIGHT box resting on the z=0 plane (extents ``(step_depth, lane_width, top_z)``),
+        exactly the way the gap builder makes its strips solid columns — so the RayCaster heightmap
+        (``mesh_prim_paths=["/World/ground"]``) sees the rising tread tops and the physics/contact use real
+        colliders. Geometry is ONE concatenated trimesh imported under ``/World/ground`` (shared, not cloned).
+
+        Stores the per-level step-height table (``_stair_level_step_height``, shape (L,)) so each env's step
+        height can be indexed by its ``_terrain_level`` (see _reset_idx -> per-env ``_stair_step_height``) for
+        the terrain-tracking base-height reference and a future stair TAMOLS cache lookup. Reuses the gap
+        curriculum's spawn/promotion/logging fields so those code paths work unchanged over stairs:
+        ``_gap_surface_z`` (= lane base z, 0.0, the spawn z-offset), ``_level_origin_xy`` (lane spawn origin),
+        ``_corridor_len`` (promotion threshold).
+        """
+        import trimesh
+
+        step_depth = float(self.cfg.stair_step_depth)
+        sh_max = float(self.cfg.stair_step_height_max)
+        num_levels = max(1, int(self.cfg.num_terrain_levels))
+        corridor_len = float(self.cfg.terrain_curriculum_corridor_len)
+        lane_pitch = float(self.cfg.terrain_curriculum_lane_pitch)
+        lane_width = max(1.5, lane_pitch - 1.0)  # y-band each lane occupies (leave a gutter between lanes)
+        plat_len = 2.0  # flat spawn strip so all 4 feet (~0.6 m wheelbase) start on solid ground
+        x_plat0 = -1.0  # spawn strip spans [x_plat0, x_plat0 + plat_len]; spawn at its center (x=0)
+        spawn_x = x_plat0 + 0.5 * plat_len  # 0.0 (on the flat spawn strip)
+        x_stair0 = x_plat0 + plat_len  # 1.0; treads begin just past the spawn strip
+        n_steps = max(1, int(corridor_len // step_depth))  # treads per lane across the corridor
+        base_top = 0.0  # lane base / spawn-strip surface = the z=0 ground plane; treads rise above it
+
+        boxes: list = []
+        level_step_h: list = []
+        for lvl in range(num_levels):
+            y_lane = float(lvl * lane_pitch)
+            frac = 0.0 if num_levels <= 1 else lvl / (num_levels - 1)
+            step_h = frac * sh_max
+            level_step_h.append(step_h)
+            if step_h < 1e-4:  # FLAT lane (level 0): the z=0 plane already provides the ground, no treads
+                continue
+            for k in range(n_steps):  # ascending treads: tread k top at (k+1)*step_h, full-height box on plane
+                top_z = base_top + (k + 1) * step_h
+                b = trimesh.creation.box(extents=(step_depth, lane_width, top_z))
+                b.apply_translation((x_stair0 + (k + 0.5) * step_depth, y_lane, 0.5 * top_z))
+                boxes.append(b)
+        if boxes:  # (only a fully-flat config — e.g. num_levels==1 — produces no treads)
+            mesh = trimesh.util.concatenate(boxes)
+            self._terrain.import_mesh("stair_treads", mesh)
+
+        # per-level step-height table (indexable by _terrain_level for the per-env _stair_step_height buffer).
+        self._stair_level_step_height = torch.tensor(level_step_h, dtype=torch.float, device=self.device)  # (L,)
+        # stair-profile scalars for _stair_terrain_height_under_base (terrain-tracking base-height reference).
+        self._stair_x0 = float(x_stair0)
+        self._stair_step_depth = float(step_depth)
+        self._stair_base_top = float(base_top)
+        self._stair_n_steps = int(n_steps)
+
+        # -------- reuse the gap-curriculum spawn / promotion / logging fields (so their paths just work) --------
+        self._gap_surface_z = base_top  # 0.0; lane base surface for the spawn z-offset (stairs rise above it)
+        self._corridor_len = corridor_len
+        self._gap_corridor_len = corridor_len  # __init__ gap banner compat
+        self._gap_curric_ramp = 0.0
+        self._gap_n_corridors = num_levels
+        # Banner/Raibert-fallback alias: _strip_centers_x must be non-empty; stairs have no strips -> a stub.
+        self._strip_centers_x = torch.tensor([spawn_x, spawn_x + step_depth], dtype=torch.float, device=self.device)
+        origins = np.stack(
+            [np.full(num_levels, spawn_x, dtype=np.float64), np.arange(num_levels, dtype=np.float64) * lane_pitch],
+            axis=1,
+        )  # (L, 2) lane spawn origin (spawn_x, lane_y)
+        self._level_origin_xy = torch.tensor(origins, dtype=torch.float, device=self.device)
+        print(
+            f"[quad17][stair][curriculum] built {num_levels} difficulty lanes (rows along +y, pitch "
+            f"{lane_pitch:.2f}m, lane_w {lane_width:.2f}m): level 0 FLAT -> level {num_levels - 1} step_h "
+            f"{sh_max:.3f}m | step_depth={step_depth:.2f}m n_steps={n_steps} corridor_len={corridor_len:.2f}m "
+            f"spawn_x={spawn_x:.2f} stairs_x0={x_stair0:.2f} base_top={base_top:.2f} surface_z={base_top:.3f} "
+            f"promote>{self.cfg.promote_frac:.2f}*len demote<{self.cfg.demote_frac:.2f}*len"
+        )
+
+    def _stair_terrain_height_at_x(self, x: torch.Tensor) -> torch.Tensor:
+        """Stair-tread surface height (world z) under world-x ``x`` (any shape whose leading dim is env N).
+
+        Generalizes ``_stair_terrain_height_under_base`` to an arbitrary query x (e.g. a re-anchored
+        foothold x), using each env's per-env ``_stair_step_height`` broadcast over the trailing query dims.
+        Ascending staircase: the lane base / spawn strip sits at ``_stair_base_top`` and tread k (0-indexed,
+        depth ``_stair_step_depth``) rises another step height above it. Steps climbed at x =
+        ``floor((x - _stair_x0)/step_depth) + 1`` clamped ``[0, _stair_n_steps]`` (0 on the flat spawn strip,
+        capped at the top tread); tread surface z = ``_stair_base_top + n_up * step_height``.
+        """
+        n_up = torch.clamp(
+            torch.floor((x - self._stair_x0) / self._stair_step_depth) + 1.0, min=0.0, max=float(self._stair_n_steps)
+        )
+        sh = self._stair_step_height
+        while sh.dim() < x.dim():
+            sh = sh.unsqueeze(-1)  # broadcast the per-env step height over the trailing query dims
+        return self._stair_base_top + n_up * sh
+
+    def _stair_terrain_height_under_base(self) -> torch.Tensor:
+        """Per-env stair-tread surface height (world z) directly under each robot's base (stair mode).
+
+        Thin wrapper over ``_stair_terrain_height_at_x`` at the base world-x — the terrain-tracking
+        reference for the base-height reward (so climbing does not accrue a spurious height penalty) and,
+        under full-TAMOLS, the base-Z reference added to ``base_pose_track``.
+        """
+        return self._stair_terrain_height_at_x(self._robot.data.root_link_pos_w[:, 0])  # (N,)
+
     def _snap_x_to_strip(self, x: torch.Tensor) -> torch.Tensor:
         """Snap x (any shape) to the nearest solid-strip center (from ``_strip_centers_x``).
 
@@ -730,6 +975,24 @@ class Quad17Env(DirectRLEnv):
             out = out[torch.randperm(n, device=self.device)]
         return out
 
+    def _height_scan_obs(self) -> torch.Tensor:
+        """Heightmap terrain-perception block (DTC heightmap-RL enabler; mirrors direct/parkour).
+
+        The RayCaster casts ``num_heights`` (187) vertical rays on a GridPattern (0.1 m over 1.6 x 1.0 m)
+        from ~20 m above the base and reports ``ray_hits_w[..., 2]`` = the terrain height at each cell. The
+        per-ray obs is the RELATIVE height ``base_z - hit_z`` (larger over a trench, smaller over a strip),
+        clipped to ``[-clip, clip]``. NOTE: unlike parkour — which used ``height_scanner.data.pos_w[:, 2]``
+        (the sensor origin, which includes the +20 m offset, making its channel a dead ~1.0) — this uses the
+        ROBOT BASE z (``root_link_pos_w``) so the values are meaningful terrain relief. A missed ray returns
+        inf (=> +/-clip after the clip) and a first-frame ray can be NaN, so nan_to_num keeps the block
+        finite before it reaches the policy (the downstream global obs sanitize is a second guard).
+        """
+        base_z = self._robot.data.root_link_pos_w[:, 2].unsqueeze(1)  # (N, 1) robot base world z
+        hit_z = self._height_scanner.data.ray_hits_w[..., 2]  # (N, num_heights) terrain z per ray
+        clip = float(self.cfg.height_scan_clip)
+        heights = (base_z - hit_z).clip(-clip, clip)  # (N, num_heights) relative height, clipped
+        return torch.nan_to_num(heights, nan=0.0, posinf=clip, neginf=-clip)
+
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
         clock_obs = self._clock_obs()
@@ -744,6 +1007,7 @@ class Quad17Env(DirectRLEnv):
                     self._robot.data.joint_vel,  # 17
                     self._actions,  # 17
                     clock_obs if self.cfg.clock_inputs else None,  # 4
+                    self._height_scan_obs() if self.cfg.use_heightmap else None,  # num_heights (187) if on
                     self._foothold_obs() if self.cfg.foothold_obs else None,  # 28 (+12 IK if foothold_ik_obs)
                 )
                 if tensor is not None
@@ -831,10 +1095,24 @@ class Quad17Env(DirectRLEnv):
             and self._tamols_gapd.numel() == n_gapd
         )
 
-        # Cache-leg (FL,FR,RL,RR) -> env sole-slot permutation. Cache leg signs (base frame, +x fwd/+y
-        # left): FL=(+,+) FR=(+,-) RL=(-,+) RR=(-,-). For each env sole slot read the sign of its nominal
-        # base-frame offset and map to the matching cache index; _cache2sole[i] = cache leg feeding env
-        # sole slot i, so ``local_fh[:, _cache2sole]`` reorders a cache-order plan into sole order.
+        # Cache-leg (FL,FR,RL,RR) -> env sole-slot permutation (shared with the stair cache; see helper).
+        self._cache2sole = self._build_cache2sole()  # (4,) env sole slot -> cache leg
+        self._tamols_loaded = True
+        print(
+            f"[quad17][tamols] loaded offline foothold cache: fh{tuple(self._tamols_fh.shape)} "
+            f"vx={meta['vx_vals']} width={meta['width_vals']} "
+            f"gapd[{float(self._tamols_gapd[0]):.3f}..{float(self._tamols_gapd[-1]):.3f}] "
+            f"cache2sole(sole->cache)={self._cache2sole.tolist()}"
+        )
+
+    def _build_cache2sole(self) -> torch.Tensor:
+        """Cache-leg (FL,FR,RL,RR) -> env sole-slot permutation (shared by the gap and stair caches).
+
+        Cache leg signs (base frame, +x fwd / +y left): FL=(+,+) FR=(+,-) RL=(-,+) RR=(-,-). For each env
+        sole slot read the sign of its nominal base-frame offset and map to the matching cache index; the
+        result[i] = cache leg feeding env sole slot i, so ``local_fh[:, result]`` reorders a cache-order
+        (FL,FR,RL,RR) plan into the env's sole order. Requires ``_nominal_foot_offset`` (built in __init__).
+        """
         sign2cache = {(1, 1): 0, (1, -1): 1, (-1, 1): 2, (-1, -1): 3}  # (sgn x, sgn y) -> FL,FR,RL,RR
         c2s = []
         for i in range(4):
@@ -842,13 +1120,61 @@ class Quad17Env(DirectRLEnv):
             sy = 1 if float(self._nominal_foot_offset[i, 1]) >= 0.0 else -1
             c2s.append(sign2cache[(sx, sy)])
         assert sorted(c2s) == [0, 1, 2, 3], f"[quad17][tamols] _cache2sole {c2s} is not a valid permutation"
-        self._cache2sole = torch.tensor(c2s, device=self.device, dtype=torch.long)  # (4,)
-        self._tamols_loaded = True
+        return torch.tensor(c2s, device=self.device, dtype=torch.long)  # (4,)
+
+    def _load_tamols_stair_cache(self):
+        """Load the offline STAIR TAMOLS cache (footholds-on-treads + base-Z-rise plan; DTC full-TAMOLS).
+
+        Reads ``tamols_stair_cache/{meta.json,footholds.bin,base.bin,contacts.bin}`` next to this file.
+          * footholds.bin float32 [n_vx, n_step_h, 4, 3] -> ``_stair_fh``; foot order FL,FR,RL,RR, LOCAL
+            frame (base start origin, +x fwd), foot xyz RELATIVE to the base tread z (front z ~ +step_h up
+            to the next tread, rear z ~ 0). Only the xy is re-anchored; the tread z is read from the terrain
+            profile at lookup (``_stair_terrain_height_at_x``), so the target lands on the ACTUAL tread.
+          * base.bin float32 [n_vx, n_step_h, n_samp, 12] -> ``_stair_base`` ([pose6, vel6]; pose z relative
+            to z0, rises over the horizon). Loaded for reference; the base-Z reward uses the terrain profile
+            (simpler/robust), not this trajectory.
+          * contacts.bin float32 [n_vx, n_step_h, n_samp, 4] -> ``_stair_contacts`` (loaded; the fixed trot
+            clock is kept for v1 — the cache contacts ~ a fixed trot).
+        Axis grids ``_stair_vx`` / ``_stair_sh``; reuses ``_build_cache2sole`` for the leg permutation. All
+        tensors are STATIC (no per-episode state), so nothing needs re-initializing in _reset_idx. Missing
+        dir -> stay off (``_stair_tamols_loaded`` False) and the caller keeps the Raibert path.
+        """
+        import json
+        import os as _os
+
+        cache_dir = _os.path.join(_os.path.dirname(__file__), "tamols_stair_cache")
+        meta_path = _os.path.join(cache_dir, "meta.json")
+        fh_path = _os.path.join(cache_dir, "footholds.bin")
+        if not (_os.path.isfile(meta_path) and _os.path.isfile(fh_path)):
+            print(f"[quad17][tamols][stair] cache not found under {cache_dir}; keeping Raibert footholds")
+            return
+        with open(meta_path) as f:
+            meta = json.load(f)
+        n_vx, n_sh, n_samp = int(meta["n_vx"]), int(meta["n_step_h"]), int(meta["n_samp"])
+        fh_shape = tuple(meta["footholds_shape"])  # [n_vx, n_step_h, 4, 3]
+        assert fh_shape == (n_vx, n_sh, 4, 3), f"[quad17][tamols][stair] unexpected footholds_shape {fh_shape}"
+        fh = np.fromfile(fh_path, dtype=np.float32).reshape(fh_shape)
+        self._stair_fh = torch.tensor(fh, device=self.device, dtype=torch.float)  # (n_vx,n_sh,4,3)
+        self._stair_vx = torch.tensor(meta["vx_vals"], device=self.device, dtype=torch.float)  # (n_vx,)
+        self._stair_sh = torch.tensor(meta["step_h_vals"], device=self.device, dtype=torch.float)  # (n_sh,)
+        assert self._stair_vx.numel() == n_vx and self._stair_sh.numel() == n_sh
+        # base + contacts (optional): base-Z uses the terrain profile; the fixed trot clock keeps contacts.
+        base_path = _os.path.join(cache_dir, "base.bin")
+        if _os.path.isfile(base_path):
+            base_shape = tuple(meta["base_shape"])  # [n_vx, n_step_h, n_samp, 12]
+            base = np.fromfile(base_path, dtype=np.float32).reshape(base_shape)
+            self._stair_base = torch.tensor(base, device=self.device, dtype=torch.float)  # (n_vx,n_sh,n_samp,12)
+        con_path = _os.path.join(cache_dir, "contacts.bin")
+        if _os.path.isfile(con_path):
+            con_shape = tuple(meta["contacts_shape"])  # [n_vx, n_step_h, n_samp, 4]
+            con = np.fromfile(con_path, dtype=np.float32).reshape(con_shape)
+            self._stair_contacts = torch.tensor(con, device=self.device, dtype=torch.float)  # (n_vx,n_sh,n_samp,4)
+        self._cache2sole = self._build_cache2sole()  # (4,) env sole slot -> cache leg (same permutation)
+        self._stair_tamols_loaded = True
         print(
-            f"[quad17][tamols] loaded offline foothold cache: fh{tuple(self._tamols_fh.shape)} "
-            f"vx={meta['vx_vals']} width={meta['width_vals']} "
-            f"gapd[{float(self._tamols_gapd[0]):.3f}..{float(self._tamols_gapd[-1]):.3f}] "
-            f"cache2sole(sole->cache)={c2s}"
+            f"[quad17][tamols][stair] loaded stair cache: fh{tuple(self._stair_fh.shape)} "
+            f"vx={meta['vx_vals']} step_h={meta['step_h_vals']} n_samp={n_samp} "
+            f"cache2sole(sole->cache)={self._cache2sole.tolist()}"
         )
 
     def _next_gap_dist(self, base_x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -953,6 +1279,55 @@ class Quad17Env(DirectRLEnv):
         self._foothold_target2 = torch.where(m3, tgt2, self._foothold_target2)
         self._target_age = torch.where(mask, torch.zeros_like(self._target_age), self._target_age)
 
+    def _lookup_tamols_stair_footholds(self, mask: torch.Tensor):
+        """Re-anchor foothold targets from the STAIR TAMOLS cache with the footholds landed ON the treads.
+
+        ``mask``: (N, 4) bool. Index the cache by the nearest cached forward-vx (to the command) and the
+        nearest cached step height (to the per-env ``_stair_step_height``), gather the 4-foot LOCAL plan,
+        reorder cache(FL,FR,RL,RR) -> sole order, and re-anchor xy to the CURRENT base pose (world_xy =
+        base_xy + Rz(yaw) * local_xy). The target z is NOT the cache's base-relative z; it is the ACTUAL
+        tread surface under the re-anchored foothold xy (``_stair_terrain_height_at_x``), so front feet land
+        on the higher next tread and rear feet on the current tread exactly where the terrain provides it.
+        ``target2`` looks one tread depth further up the stairs. Writes the same _foothold_target /
+        _foothold_target2 / _stance_pos / _target_age buffers under the identical per-foot where-mask.
+        """
+        if not bool(torch.any(mask)):
+            return
+        n = self.num_envs
+        sole_pos_w = self._robot.data.body_pos_w[:, self._sole_body_ids, :]  # (N,4,3)
+        base_pos = self._robot.data.root_link_pos_w  # (N,3)
+        yaw_q = math_utils.yaw_quat(self._robot.data.root_quat_w)  # (N,4)
+
+        # 2-axis lookup: nearest cached forward-vx and nearest cached step height (per-env stair rise).
+        vx = self._commands[:, 0]
+        vx_idx = torch.argmin(torch.abs(vx[:, None] - self._stair_vx[None, :]), dim=1)  # (N,)
+        sh_idx = torch.argmin(torch.abs(self._stair_step_height[:, None] - self._stair_sh[None, :]), dim=1)  # (N,)
+
+        local_fh = self._stair_fh[vx_idx, sh_idx]  # (N,4,3) cache order (FL,FR,RL,RR)
+        local_fh = local_fh[:, self._cache2sole, :].contiguous()  # (N,4,3) sole order
+
+        # re-anchor xy to world: base_xy + Rz(yaw) @ local_xy (rotate a z=0 copy, add base pos).
+        fh_xy0 = local_fh.clone()
+        fh_xy0[..., 2] = 0.0
+        yaw_q_e = yaw_q[:, None, :].expand(-1, 4, -1).reshape(-1, 4)
+        off_w = math_utils.quat_apply(yaw_q_e, fh_xy0.reshape(-1, 3)).reshape(n, 4, 3)  # (N,4,3), z~0
+        tgt1 = base_pos[:, None, :] + off_w
+        # one-stride look-ahead: one tread depth further forward (up the stairs), base frame.
+        stride_b = torch.zeros(n, 3, device=self.device)
+        stride_b[:, 0] = float(self._stair_step_depth)
+        stride_w = math_utils.quat_apply(yaw_q, stride_b)  # (N,3)
+        tgt2 = tgt1 + stride_w[:, None, :]
+
+        # foot target z = the ACTUAL tread surface under each re-anchored foothold xy (terrain profile).
+        tgt1[..., 2] = self._stair_terrain_height_at_x(tgt1[..., 0])  # (N,4)
+        tgt2[..., 2] = self._stair_terrain_height_at_x(tgt2[..., 0])  # (N,4)
+
+        m3 = mask.unsqueeze(-1)
+        self._stance_pos = torch.where(m3, sole_pos_w, self._stance_pos)
+        self._foothold_target = torch.where(m3, tgt1, self._foothold_target)
+        self._foothold_target2 = torch.where(m3, tgt2, self._foothold_target2)
+        self._target_age = torch.where(mask, torch.zeros_like(self._target_age), self._target_age)
+
     def _regen_footholds(self, mask: torch.Tensor):
         """Re-anchor foothold targets for the masked (env, foot) entries from the CURRENT base pose.
 
@@ -969,6 +1344,9 @@ class Quad17Env(DirectRLEnv):
         offline TAMOLS lookup instead (terrain-derived gap-straddling footholds); the Raibert body below
         is kept intact for an A/B comparison (toggle off / cache missing => this path).
         """
+        if self.cfg.use_tamols_cache and self._stair_tamols_loaded:
+            self._lookup_tamols_stair_footholds(mask)  # DTC full-TAMOLS stair plan (footholds on treads)
+            return
         if self.cfg.use_tamols_cache and self._tamols_loaded:
             self._lookup_tamols_footholds(mask)
             return
@@ -991,8 +1369,10 @@ class Quad17Env(DirectRLEnv):
         raibert = (0.5 * self.cfg.foothold_T_stance * v_cmd_w)[:, None, :]  # (N,1,3), z~0
 
         # Gap test provides the "must read obs" pressure via the terrain, so the decorrelation jitter is
-        # disabled (the strip snap below is itself a command-decorrelated nonlinear function of pose).
-        jxy, jz = (0.0, 0.0) if self._gap else (self.cfg.foothold_jitter_xy, self.cfg.foothold_jitter_z)
+        # disabled (the strip snap below is itself a command-decorrelated nonlinear function of pose). Stairs
+        # have no strips to snap to, so they take the flat Raibert path (jitter on, no snap, foot z = sole z).
+        _snap_gap = self._gap and not self._stair
+        jxy, jz = (0.0, 0.0) if _snap_gap else (self.cfg.foothold_jitter_xy, self.cfg.foothold_jitter_z)
         j1 = torch.empty(n, 4, 3, device=self.device)
         j1[..., 0].uniform_(-jxy, jxy)
         j1[..., 1].uniform_(-jxy, jxy)
@@ -1006,7 +1386,7 @@ class Quad17Env(DirectRLEnv):
         tgt1[..., 2] = sole_pos_w[..., 2] + j1[..., 2]  # foot target z = ground (sole z), not base z
         tgt2 = tgt1 + raibert + j2  # one more Raibert step ahead
 
-        if self._gap:
+        if _snap_gap:
             # SNAP each target x to the nearest solid-strip center so the reference foothold is always
             # on physically solid ground; a foot that tracks it stays out of the trenches. z -> strip top.
             tgt1[..., 0] = self._snap_x_to_strip(tgt1[..., 0])
@@ -1071,6 +1451,10 @@ class Quad17Env(DirectRLEnv):
         target_h = getattr(self.cfg, "base_height_target", None)
         if target_h is None:
             target_h = self._robot.data.default_root_state[:, 2]
+        if self._stair:
+            # Stairs rise under the robot as it climbs, so track the tread height under the base (per-env)
+            # instead of a scalar surface — otherwise climbing accrues a spurious base-height penalty.
+            target_h = self._stair_terrain_height_under_base() + target_h
         base_height = torch.square(self._robot.data.root_link_pos_w[:, 2] - target_h)
         # termination = base contact
         termination = torch.any(
@@ -1151,6 +1535,14 @@ class Quad17Env(DirectRLEnv):
         base_x = self._robot.data.root_link_pos_w[:, 0]  # (N,)
         ref_x, ref_y = self._base_ref_xy()
         base_pose_err2 = (base_x - ref_x) ** 2 + (self._robot.data.root_link_pos_w[:, 1] - ref_y) ** 2  # (N,)
+        if self._full_tamols:
+            # full-TAMOLS (stair): ALSO track base Z to a climbing reference — this is the "full" part of
+            # the plan (vs footholds-only): base_pose_track now tells the policy to RAISE the base up the
+            # stairs, not just advance in xy. Robust ref = tread surface under the base + nominal base height
+            # (0.52); terrain-derived, so it rises exactly as the robot climbs (the cache base-z trajectory
+            # is loaded but not needed here). Default OFF => this term is absent => base_pose_track unchanged.
+            z_ref = self._stair_terrain_height_under_base() + self.cfg.base_height_target  # (N,)
+            base_pose_err2 = base_pose_err2 + (self._robot.data.root_link_pos_w[:, 2] - z_ref) ** 2
         base_pose_track = torch.exp(-base_pose_err2 / self.cfg.base_pose_track_sigma)  # (N,) in (0,1]
 
         # -------- (DTC linear term) forward-progress reward: constant forward gradient --------
@@ -1259,6 +1651,10 @@ class Quad17Env(DirectRLEnv):
         # then the spawn below places it in the (possibly new) level's lane. No-op when the toggle is off.
         if self._terrain_curriculum:
             self._update_terrain_levels(env_ids)
+            if self._stair:
+                # Refresh each env's tread rise from its (possibly promoted/demoted) level; drives the
+                # terrain-tracking base-height reference and a future stair TAMOLS cache lookup.
+                self._stair_step_height[env_ids] = self._stair_level_step_height[self._terrain_level[env_ids]]
         # reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]

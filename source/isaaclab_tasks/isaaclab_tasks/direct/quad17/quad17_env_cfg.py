@@ -18,7 +18,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
@@ -218,6 +218,19 @@ class Quad17VelocityEnvCfg(DirectRLEnvCfg):
     # forward-only command for the gap test (must cross trenches); applied in Quad17Env.__init__.
     gap_lin_vel_x_range = [0.4, 0.8]
 
+    # -- Terrain KIND selector: gap trenches vs ascending stairs (3D-terrain DTC test) --
+    # "gap"   => the transverse-trench curriculum above (DEFAULT; byte-for-byte the current behaviour).
+    # "stair" => _build_stair_terrain_curriculum: the SAME num_terrain_levels +y lanes / per-env
+    #            _terrain_level / promote-demote / spawn-in-lane machinery, but every level L is an
+    #            ASCENDING STAIRCASE instead of a trench field — level 0 = FLAT, level L step rise =
+    #            L/(num_terrain_levels-1) * stair_step_height_max at a fixed tread depth stair_step_depth.
+    #            Stairs reuse the curriculum lanes, so they take effect only with terrain_curriculum=True;
+    #            env-var QUAD17_TERRAIN_KIND=stair force-enables the curriculum (exactly as
+    #            QUAD17_TERRAIN_CURRICULUM=1 force-enables gap_terrain). Default "gap" => obs/behaviour unchanged.
+    terrain_kind: str = "gap"  # "gap" | "stair"
+    stair_step_height_max = 0.15  # m; step rise at the hardest lane (level n-1); level 0 = flat (0 rise)
+    stair_step_depth = 0.35  # m; fixed tread depth (run) along +x for every stair level
+
     # -- DTC Eq1 base-pose (position) tracking reward (anti-hesitation) --
     # Fixes the "stand still on the spawn platform to avoid gaps" local optimum: velocity tracking
     # alone is too weak to beat fall-avoidance, so the robot hesitates (track_lin_vel≈0.13, epLen 999,
@@ -239,19 +252,37 @@ class Quad17VelocityEnvCfg(DirectRLEnvCfg):
     progress_fail_dist = 1.5  # m behind the reference before the episode is terminated
     progress_reward_scale = 1.0  # linear forward-velocity progress reward (bounded, ungameable)
 
+    # -- Heightmap terrain perception (RayCaster height scanner; mirrors direct/parkour) --
+    # When ON, a GridPattern RayCaster reads the terrain under/ahead of the base and its per-ray
+    # relative heights (base_z - hit_z, clipped) are appended to the policy obs. Default OFF => the
+    # sensor is NOT even created (see Quad17Env._setup_scene) and the obs is byte-for-byte unchanged
+    # (obs=101). Env-var QUAD17_HEIGHTMAP=1 flips it on early in __init__ (before the scene / obs-dim
+    # are built). See Quad17Env._height_scan_obs and the height_scanner field below.
+    use_heightmap: bool = False
+    height_scan_resolution = 0.1  # m; GridPattern cell size (parkour value)
+    height_scan_size = [1.6, 1.0]  # m; [x, y] extent -> (1.6/0.1+1) x (1.0/0.1+1) = 17 x 11 = 187 rays
+    height_scan_offset = (0.375, 0.0, 20.0)  # base-frame sensor offset (x fwd; z high so rays cast down)
+    height_scan_clip = 1.0  # relative height clipped to [-clip, +clip] (parkour uses 1.0)
+    # ray count from the GridPattern arange (x in [-0.8, 0.8] step 0.1 -> 17, y in [-0.5, 0.5] -> 11).
+    num_height_rays = (int(round(height_scan_size[0] / height_scan_resolution)) + 1) * (
+        int(round(height_scan_size[1] / height_scan_resolution)) + 1
+    )
+    num_heights = num_height_rays if use_heightmap else 0  # obs dims added when the scanner is on
+
     # policy obs width: projected_gravity(3) + commands(3) + [joint_pos-def, joint_vel, actions] (3*action_space)
     num_prio_obs = 3 + 3 + action_space * 3
     if timing_parameter:
         num_prio_obs += 1
     if clock_inputs:
         num_prio_obs += 4  # trot clock: (sin,cos) for each of the 2 diagonal phase groups
+    if use_heightmap:
+        num_prio_obs += num_heights  # RayCaster height-scan block (187 rays), appended after the clock
     if foothold_obs:
         # 2 targets x 4 feet x 3 (body-frame xyz) = 24, plus 4 per-foot target ages = 28
         num_prio_obs += num_foothold_targets * 4 * 3 + 4
         if foothold_ik_obs:
             num_prio_obs += 4 * foothold_ik_joints_per_leg  # +12 IK desired-joint block
 
-    num_heights = 0
     num_priv = 6 if priv_explicit else 0
     num_friction = 1 if friction_terrain else 31
     num_priv_latent = 4 + num_friction if priv_latent else 0
@@ -313,6 +344,23 @@ class Quad17VelocityEnvCfg(DirectRLEnvCfg):
     # find_matching_prims matches a single path segment per ".*", so the pattern must reach that depth.
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/Base/.*", history_length=3, update_period=0.005, track_air_time=True
+    )
+
+    # -- Heightmap RayCaster (terrain perception) — instantiated ONLY when use_heightmap=True (see env) --
+    # ★CRITICAL prim_path: attach to the rigid BODY /Robot/Base/Base, NOT the grouping Xform /Robot/Base.
+    # The quad USD nests every link under an extra "Base" Xform, so the base RIGID body is /Robot/Base/Base
+    # (same depth the contact sensor's /Robot/Base/.* reaches). Attaching a RayCaster to the /Robot/Base
+    # Xform (no rigid body) forces a per-step CPU physics readback that measured 41 s/iter vs 2.4 s/iter on
+    # the GPU physics-view rigid-body path. GridPattern 0.1 m over [1.6, 1.0] m => 17 x 11 = 187 vertical
+    # rays; ray_alignment="yaw" so the map rotates with heading only. mesh = /World/ground (plane + any
+    # gap strips imported under it). The field is harmless when use_heightmap is off (never instantiated).
+    height_scanner: RayCasterCfg = RayCasterCfg(
+        prim_path="/World/envs/env_.*/Robot/Base/Base",
+        offset=RayCasterCfg.OffsetCfg(pos=height_scan_offset),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(resolution=height_scan_resolution, size=height_scan_size),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
     )
 
     # reward scales

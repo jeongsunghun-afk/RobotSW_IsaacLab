@@ -88,6 +88,11 @@ class HindLegParkourPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
+class HindLegFlatFootPPORunnerCfg(HindLegParkourPPORunnerCfg):
+    experiment_name = "hindLeg_flat_foot_direct"
+
+
+@configclass
 class HindLegRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 1500

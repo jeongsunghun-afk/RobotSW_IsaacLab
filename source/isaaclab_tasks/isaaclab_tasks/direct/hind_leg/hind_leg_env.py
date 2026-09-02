@@ -9,8 +9,11 @@ import gymnasium as gym
 import torch
 
 import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.markers import VisualizationMarkers
+from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.sensors import ContactSensor, RayCaster
 
 from .hind_leg_env_cfg import HindLegFlatEnvCfg, HindLegRoughEnvCfg
@@ -70,6 +73,8 @@ class HindLegEnv(DirectRLEnv):
                 "gait_stance",
                 "gait_swing",
                 "foot_slip",
+                "gait_swing_contact",
+                "flat_foot",
             ]
         }
         # Get specific body indices
@@ -90,6 +95,22 @@ class HindLegEnv(DirectRLEnv):
         # Sole rest-z is captured lazily on the first _get_rewards call (body_pos_w not valid in __init__).
         # It is a flat-ground constant, reset-invariant, so it is NOT initialized in _reset_idx.
         self._sole_rest_z: torch.Tensor | None = None
+
+        # Flat-foot (anti-toe-walk) geometry — only resolved when the FlatFoot task enables it
+        # (flat_foot_reward_scale != 0). Point-foot robots may lack "*_foot_link" heel bodies, so the
+        # lookup is gated to keep those tasks unaffected. heel = "*_foot_link" origin; toe = sole
+        # ("*_foot_contact_link") position + a fixed local offset (from measure_feet.py / stance_view.py).
+        self._flat_foot_scale = getattr(self.cfg, "flat_foot_reward_scale", 0.0)
+        if self._flat_foot_scale != 0.0:
+            self._heel_body_ids, heel_names = self._robot.find_bodies(".*_foot_link")
+            assert len(self._heel_body_ids) == 2, (
+                f"flat_foot reward expects exactly 2 '*_foot_link' heel bodies, got {len(self._heel_body_ids)}: {heel_names}"
+            )
+            # Heel/sole must share [HL, HR] leg-order so per-foot heel/toe pairs correctly.
+            assert [n.split("/")[-1].split("_")[0] for n in heel_names] == [
+                n.split("/")[-1].split("_")[0] for n in sole_body_names
+            ], f"Heel vs sole leg-order mismatch — heel: {heel_names}, sole: {sole_body_names}"
+            self._toe_local_offset = torch.tensor([0.0168, 0.0, -0.0461], device=self.device)
 
         # Gait phase clock ∈ [0, 1) — one scalar per env, advances each step by step_dt / gait_period.
         # Initialized to zero here; _reset_idx randomizes it per-episode for decorrelation.
@@ -233,7 +254,7 @@ class HindLegEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         # linear velocity tracking
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1)
-        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.1)
+        lin_vel_error_mapped = torch.exp(-lin_vel_error / getattr(self.cfg, "lin_vel_tracking_sigma", 0.1))
         # yaw rate tracking
         yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
         yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.1)
@@ -324,6 +345,28 @@ class HindLegEnv(DirectRLEnv):
         sole_vel_xy = torch.norm(self._robot.data.body_lin_vel_w[:, self._sole_body_ids, :2], dim=-1)  # (N, n_feet)
         slip_pen = torch.sum(contact_filt.float() * sole_vel_xy**2, dim=1)  # (N,) ≥ 0; scale < 0 → penalty
 
+        # (D) Contact-during-scheduled-swing penalty (scale < 0) — SYMMETRY / phase-clock enforcement.
+        # Each foot must LIFT during its scheduled swing half-cycle. Without this a foot can park in
+        # stance through its swing phase (only forfeiting gait_swing, no penalty) → the observed
+        # lopsided duty (one foot hogging stance). Uses the command-gated E_swing so standing is exempt.
+        gait_swing_contact = torch.sum(E_swing * contact_filt.float(), dim=1)  # (N,) ∈ [0, 2]
+
+        # (E) Flat-foot / anti-toe-walk penalty (scale < 0) — penalise the HEEL being raised above the
+        # TOE while that foot bears load (contact). Drives heel+toe both down (flat) during stance,
+        # directly targeting a toe-walking foot. Geometry matches measure_feet.py.
+        if self._flat_foot_scale != 0.0:
+            heel_z = self._robot.data.body_pos_w[:, self._heel_body_ids, 2]  # (N, n_feet) heel world-z
+            sole_pos = self._robot.data.body_pos_w[:, self._sole_body_ids, :]  # (N, n_feet, 3)
+            sole_quat = self._robot.data.body_quat_w[:, self._sole_body_ids, :]  # (N, n_feet, 4)
+            toe_off_w = math_utils.quat_apply(
+                sole_quat, self._toe_local_offset.expand(self.num_envs, len(self._sole_body_ids), 3)
+            )  # (N, n_feet, 3)
+            toe_z = sole_pos[..., 2] + toe_off_w[..., 2]  # (N, n_feet)
+            heel_up = torch.clamp(heel_z - toe_z, min=0.0)  # (N, n_feet) heel above toe → toe-walk
+            flat_foot_pen = torch.sum(heel_up * contact_filt.float(), dim=1)  # (N,) ≥ 0; scale < 0 → penalty
+        else:
+            flat_foot_pen = torch.zeros(self.num_envs, device=self.device)
+
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
             "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
@@ -341,6 +384,10 @@ class HindLegEnv(DirectRLEnv):
             "gait_stance": gait_stance * self.cfg.gait_stance_reward_scale * self.step_dt,
             "gait_swing": gait_swing * self.cfg.gait_swing_reward_scale * self.step_dt,
             "foot_slip": slip_pen * self.cfg.foot_slip_reward_scale * self.step_dt,
+            "gait_swing_contact": gait_swing_contact
+            * getattr(self.cfg, "gait_swing_contact_reward_scale", 0.0)
+            * self.step_dt,
+            "flat_foot": flat_foot_pen * getattr(self.cfg, "flat_foot_reward_scale", 0.0) * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         self.curriculum_rew_buf += reward
@@ -452,3 +499,43 @@ class HindLegEnv(DirectRLEnv):
         # 일부 env는 정지(standing) 명령으로 강제 → 정책이 cmd=0 평형을 학습하게 함
         standing = torch.rand(len(env_ids), device=self.device) < self.cfg.rel_standing_envs
         self._commands[env_ids[standing], :] = 0.0
+
+    # -- Debug visualization (명령/실측 속도 화살표) ------------------------------------
+    # DirectRLEnv 부모가 set_debug_vis/콜백 등록 인프라를 제공하므로, 아래 오버라이드만
+    # 추가하면 됨. 렌더링(뷰포트/WebRTC) 시에만 콜백이 발화하므로 headless 학습엔 무영향.
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        if debug_vis:
+            if not hasattr(self, "goal_vel_visualizer"):
+                self.goal_vel_visualizer = VisualizationMarkers(
+                    GREEN_ARROW_X_MARKER_CFG.replace(prim_path="/Visuals/Command/velocity_goal")
+                )
+                self.current_vel_visualizer = VisualizationMarkers(
+                    BLUE_ARROW_X_MARKER_CFG.replace(prim_path="/Visuals/Command/velocity_current")
+                )
+            self.goal_vel_visualizer.set_visibility(True)
+            self.current_vel_visualizer.set_visibility(True)
+        else:
+            if hasattr(self, "goal_vel_visualizer"):
+                self.goal_vel_visualizer.set_visibility(False)
+                self.current_vel_visualizer.set_visibility(False)
+
+    def _debug_vis_callback(self, event):
+        if not self._robot.is_initialized:
+            return
+        base_pos_w = self._robot.data.root_pos_w.clone()
+        base_pos_w[:, 2] += 0.5
+        vel_des_arrow_scale, vel_des_arrow_quat = self._resolve_xy_velocity_to_arrow(self._commands[:, :2])
+        vel_arrow_scale, vel_arrow_quat = self._resolve_xy_velocity_to_arrow(self._robot.data.root_lin_vel_b[:, :2])
+        self.goal_vel_visualizer.visualize(base_pos_w, vel_des_arrow_quat, vel_des_arrow_scale)
+        self.current_vel_visualizer.visualize(base_pos_w, vel_arrow_quat, vel_arrow_scale)
+
+    def _resolve_xy_velocity_to_arrow(self, xy_velocity):
+        default_scale = self.goal_vel_visualizer.cfg.markers["arrow"].scale
+        arrow_scale = torch.tensor(default_scale, device=self.device).repeat(xy_velocity.shape[0], 1)
+        arrow_scale[:, 0] *= torch.linalg.norm(xy_velocity, dim=1) * 3.0
+        heading_angle = torch.atan2(xy_velocity[:, 1], xy_velocity[:, 0])
+        zeros = torch.zeros_like(heading_angle)
+        arrow_quat = math_utils.quat_from_euler_xyz(zeros, zeros, heading_angle)
+        base_quat_w = self._robot.data.root_quat_w
+        arrow_quat = math_utils.quat_mul(base_quat_w, arrow_quat)
+        return arrow_scale, arrow_quat

@@ -59,8 +59,10 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import json
 import os
 import os as _os
+import socket
 import sys as _sys
 import time
 
@@ -213,6 +215,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # ★연속 재생(teleop 관찰용): EPISODE_LEN_S 설정 시 에피소드 길이 오버라이드 → 타임아웃 리셋 방지
+    if os.environ.get("EPISODE_LEN_S") and hasattr(env_cfg, "episode_length_s"):
+        env_cfg.episode_length_s = float(os.environ["EPISODE_LEN_S"])
+        print(f"[연속모드] episode_length_s = {env_cfg.episode_length_s}s (타임아웃 리셋 사실상 없음)")
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -385,6 +392,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[reward-publisher] init failed: {_exc}; continuing without publisher.")
             _reward_publisher = None
 
+    # ★UDP 원격 teleop: TELEOP_PORT 설정 시 외부 GUI 명령 수신
+    _teleop_sock = None
+    _teleop_cmd = {"v": 0.0, "vy": 0.0, "w": 0.0}
+    if os.environ.get("TELEOP_PORT"):
+        _teleop_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _teleop_sock.setblocking(False)
+        _teleop_sock.bind(("0.0.0.0", int(os.environ["TELEOP_PORT"])))
+        print(f"[teleop] UDP 수신 대기 :{os.environ['TELEOP_PORT']}")
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -404,10 +420,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env.unwrapped._commands[:, 12] = stance_width_cmd
                 env.unwrapped._commands[:, 13] = stance_length_cmd
             elif hasattr(env.unwrapped, "_commands"):
-                # command 기반 task: 기본 전진 명령
-                env.unwrapped._commands[:, 0] = 1.0
-                env.unwrapped._commands[:, 1] = 0.0
-                env.unwrapped._commands[:, 2] = 0.0
+                if _teleop_sock is not None:
+                    try:
+                        while True:  # 최신 패킷까지 drain
+                            _data, _ = _teleop_sock.recvfrom(2048)
+                            _teleop_cmd = json.loads(_data.decode())
+                    except BlockingIOError:
+                        pass
+                    except Exception:
+                        pass
+                    env.unwrapped._commands[:, 0] = float(_teleop_cmd.get("v", 0.0))
+                    env.unwrapped._commands[:, 1] = float(_teleop_cmd.get("vy", 0.0))
+                    env.unwrapped._commands[:, 2] = float(_teleop_cmd.get("w", 0.0))
+                else:
+                    # command 기반 task: 기본 전진 명령
+                    env.unwrapped._commands[:, 0] = 1.0
+                    env.unwrapped._commands[:, 1] = 0.0
+                    env.unwrapped._commands[:, 2] = 0.0
             # Go2Recovery 등 _commands 없는 task는 위 블록 모두 스킵 (no-op)
 
             if args_cli.task[:10] == "R_Skeleton":
