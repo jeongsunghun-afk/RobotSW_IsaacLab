@@ -24,6 +24,11 @@ PARAMS=$RUN/params/env.yaml
 W=_workspace/leg
 D=reports/leg_imitation/_comparisons/cmdchg_in_episode_command
 LOG=${SCRATCH:-/tmp}/gait_verdict_$TAG
+# 학습이 도는 GPU 를 피해야 한다 — 기본 0,1,2 이지만 GA/GB/GC 로 덮어쓸 수 있다.
+GA=${GA:-0}; GB=${GB:-1}; GC=${GC:-2}
+# 프로브 창 길이. 명령 재샘플 주기가 짧으면(예: 4 s) 창 안에 변경이 여러 번 들어오는데,
+# 프로브는 변경마다 표본을 만들므로 길수록 표본이 많다. 단 에피소드 길이를 넘기면 안 된다.
+PROBE_DUR=${PROBE_DUR:-10}
 mkdir -p "$LOG" "$D/figures" "$D/videos" "$D/metrics"
 
 export CONDA_PREFIX=/home/user/miniconda3/envs/isaac-6.0
@@ -42,13 +47,13 @@ vid() { # gpu extra out
 }
 
 echo ">>> [1/3] 4096 env 조사 3종 + 영상"
-( srv 0 8  ""             "gv_${TAG}_rsi"
-  srv 0 10 ""             "gv_${TAG}_tr" ) &
-( srv 1 8  "--all_stand"  "gv_${TAG}_stand"
-  vid 1 "--vx_const 3.0 --hold_s 8.0 --ramp_s 0 --force_stand" "${TAG}_stand" ) &
-( vid 2 "--vx_const 3.0 --hold_s 8.0 --ramp_s 0" "${TAG}_rsi_a"
-  vid 2 "--vx_const 3.0 --hold_s 8.0 --ramp_s 0" "${TAG}_rsi_b"
-  vid 2 "--vx_max 3.2 --hold_s 3.0 --ramp_s 2.0 --force_stand" "${TAG}_ramp" ) &
+( srv $GA 8          ""            "gv_${TAG}_rsi"
+  srv $GA $PROBE_DUR "" "gv_${TAG}_tr" ) &
+( srv $GB 8 "--all_stand" "gv_${TAG}_stand"
+  vid $GB "--vx_const 3.0 --hold_s 8.0 --ramp_s 0 --force_stand" "${TAG}_stand" ) &
+( vid $GC "--vx_const 3.0 --hold_s 8.0 --ramp_s 0" "${TAG}_rsi_a"
+  vid $GC "--vx_const 3.0 --hold_s 8.0 --ramp_s 0" "${TAG}_rsi_b"
+  vid $GC "--vx_max 3.2 --hold_s 3.0 --ramp_s 2.0 --force_stand" "${TAG}_ramp" ) &
 wait
 
 echo ">>> [2/3] 그림"

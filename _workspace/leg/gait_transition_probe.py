@@ -66,36 +66,37 @@ def probe(path: str, win_s: float) -> None:
     up, down, kept = [], [], 0
     for e in range(N):
         c = vxc[:, e]
-        # 명령 변경 지점 — 창 두 개가 통째로 들어갈 만큼 안쪽이어야 한다
+        # ★ env 하나에서 **변경마다** 표본을 만든다. 예전에는 "변경이 정확히 1회" 인 env 만 썼는데,
+        # 재샘플 주기를 4 s 로 줄이면 한 창에 변경이 여러 번 들어와 표본이 전부 버려진다.
+        # 각 변경의 앞뒤 창 안에서 명령이 또 움직이지 않는지는 아래 std 검사가 이미 보장한다.
         jumps = np.flatnonzero(np.abs(np.diff(c)) > 1e-3) + 1
         jumps = jumps[(jumps >= w) & (jumps <= T - w)]
-        if len(jumps) != 1:
-            continue
-        k = int(jumps[0])
-        pre_sl, post_sl = slice(k - w, k), slice(k, k + w)
-        # 창 안에서 명령이 또 움직이거나, 리셋을 걸치거나, 넘어졌으면 버린다
-        if c[pre_sl].std() > 1e-3 or c[post_sl].std() > 1e-3:
-            continue
-        if (np.diff(elen[k - w : k + w, e]) < 0).any():
-            continue
-        if (hgt[k - w : k + w, e] < FALL_H).any():
-            continue
-        lo, hi = float(c[k - 1]), float(c[k])
-        if lo <= LO_MAX and hi >= HI_MIN:
-            bucket = up
-        elif lo >= HI_MIN and hi <= LO_MAX:
-            bucket = down
-        else:
-            continue
-        pre = _label({lg: jpos[pre_sl, e, idx[lg]] for lg in LEGS}, fs)
-        post = _label({lg: jpos[post_sl, e, idx[lg]] for lg in LEGS}, fs)
-        if pre == "-" or post == "-":
-            continue
-        kept += 1
-        bucket.append((lo, hi, pre, post))
+        for k in jumps.tolist():
+            k = int(k)
+            pre_sl, post_sl = slice(k - w, k), slice(k, k + w)
+            # 창 안에서 명령이 또 움직이거나, 리셋을 걸치거나, 넘어졌으면 버린다
+            if c[pre_sl].std() > 1e-3 or c[post_sl].std() > 1e-3:
+                continue
+            if (np.diff(elen[k - w : k + w, e]) < 0).any():
+                continue
+            if (hgt[k - w : k + w, e] < FALL_H).any():
+                continue
+            lo, hi = float(c[k - 1]), float(c[k])
+            if lo <= LO_MAX and hi >= HI_MIN:
+                bucket = up
+            elif lo >= HI_MIN and hi <= LO_MAX:
+                bucket = down
+            else:
+                continue
+            pre = _label({lg: jpos[pre_sl, e, idx[lg]] for lg in LEGS}, fs)
+            post = _label({lg: jpos[post_sl, e, idx[lg]] for lg in LEGS}, fs)
+            if pre == "-" or post == "-":
+                continue
+            kept += 1
+            bucket.append((lo, hi, pre, post))
 
     print(f"\n===== {path}")
-    print(f"명령 변경이 정확히 1회 + 앞뒤 {win_s}s 창이 온전한 표본: {kept}개 "
+    print(f"앞뒤 {win_s}s 창이 온전한 명령 변경 표본: {kept}개 "
           f"(저속→고속 {len(up)} · 고속→저속 {len(down)})")
 
     for tag, rows, want in (("저속→고속", up, True), ("고속→저속", down, False)):

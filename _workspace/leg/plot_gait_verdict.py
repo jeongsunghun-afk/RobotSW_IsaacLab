@@ -136,29 +136,29 @@ def _transition(path: str, win_s: float = 2.0, up: bool = True):
     moved = elig = 0
     for e in range(N):
         c = vxc[:, e]
+        # 변경마다 표본을 만든다 — 재샘플 주기가 짧으면 한 창에 변경이 여러 번 들어오는데,
+        # "정확히 1회" 로 거르면 그런 run 의 표본이 통째로 사라진다(4 s 주기에서 전멸).
         j = np.flatnonzero(np.abs(np.diff(c)) > 1e-3) + 1
-        j = j[(j >= w) & (j <= T - w)]
-        if len(j) != 1:
-            continue
-        k = int(j[0])
-        pre_sl, post_sl = slice(k - w, k), slice(k, k + w)
-        if c[pre_sl].std() > 1e-3 or c[post_sl].std() > 1e-3:
-            continue
-        if (np.diff(elen[k - w : k + w, e]) < 0).any() or (hgt[k - w : k + w, e] < FALL_H).any():
-            continue
-        lo_hi = float(c[k - 1]) <= LO_MAX and float(c[k]) >= HI_MIN
-        hi_lo = float(c[k - 1]) >= HI_MIN and float(c[k]) <= LO_MAX
-        if not (lo_hi if up else hi_lo):
-            continue
-        a, b = lab(pre_sl, e), lab(post_sl, e)
-        if a == "-" or b == "-":
-            continue
-        # "바뀔 수 있었던" 표본만 분모로 센다 — 이미 목표 걸음이면 전환할 게 없다.
-        want = up  # 저속→고속이면 gallop 이 되어야, 고속→저속이면 pace 가 되어야 한다
-        if (a in ("gallop", "bound")) == want:
-            continue
-        elig += 1
-        moved += (b in ("gallop", "bound")) == want
+        for k in j[(j >= w) & (j <= T - w)].tolist():
+            k = int(k)
+            pre_sl, post_sl = slice(k - w, k), slice(k, k + w)
+            if c[pre_sl].std() > 1e-3 or c[post_sl].std() > 1e-3:
+                continue
+            if (np.diff(elen[k - w : k + w, e]) < 0).any() or (hgt[k - w : k + w, e] < FALL_H).any():
+                continue
+            lo_hi = float(c[k - 1]) <= LO_MAX and float(c[k]) >= HI_MIN
+            hi_lo = float(c[k - 1]) >= HI_MIN and float(c[k]) <= LO_MAX
+            if not (lo_hi if up else hi_lo):
+                continue
+            a, b = lab(pre_sl, e), lab(post_sl, e)
+            if a == "-" or b == "-":
+                continue
+            # "바뀔 수 있었던" 표본만 분모로 센다 — 이미 목표 걸음이면 전환할 게 없다.
+            want = up  # 저속→고속이면 gallop 이 되어야, 고속→저속이면 pace 가 되어야 한다
+            if (a in ("gallop", "bound")) == want:
+                continue
+            elig += 1
+            moved += (b in ("gallop", "bound")) == want
     return moved, elig
 
 
