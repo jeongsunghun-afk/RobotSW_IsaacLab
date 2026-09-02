@@ -51,12 +51,21 @@ def main():
         "foot_coupling", "foot_transpose", "foot_raw_friction", "foot_reflected_inertia",
         "foot_reflected_inertia_cap",  # ★ 캡도 run 마다 다르다 — termsON 은 캡 없이 학습됐다
         "terminate_tilt_deg",
+        "reset_joint_pos_noise", "reset_base_rp_noise_deg",
     )
+    # 이 키들은 부재 = 0 이다 (아래 NOISE_KEYS 처리 참고).
+    NOISE_KEYS = ("reset_joint_pos_noise", "reset_base_rp_noise_deg")
     if yml.exists():
         text = yml.read_text()
         for k in keys:
             m = re.search(rf"^{k}:\s*(true|false|null|[0-9.]+)\s*$", text, re.MULTILINE)
             if m is None:
+                # ★ 리셋 초기 상태 노이즈(2026-09-02 추가)도 run 마다 다르다. 이 키가 env.yaml 에 **없으면**
+                #   그 run 은 노이즈 이전에 학습된 것이므로 **0 으로 강제**한다 — 소스 기본값(0.1/5.0)을 그대로
+                #   두면 옛 체크포인트를 자기가 본 적 없는 초기분포에서 재게 되어 A/B 가 cross-condition 이 된다.
+                #   (같은 함정: project_ramp_uses_source_cfg_not_run_params)
+                if k in NOISE_KEYS:
+                    setattr(env_cfg, k, 0.0)
                 continue
             v = m.group(1)
             if v in ("true", "false"):

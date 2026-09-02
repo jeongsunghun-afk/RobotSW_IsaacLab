@@ -170,6 +170,29 @@ class HindLegFlatEnvCfg(DirectRLEnvCfg):
     #   내려가는지는 아직 안 쟀다. 안 잰 임계로 정상 동작을 끊을 위험이 더 크다.
     terminate_base_height: float | None = None
 
+    # ------------------------------------------------------------------
+    # 리셋 초기 상태 노이즈 (2026-09-02)
+    #
+    # 종전에는 **모든 에피소드가 완전히 같은 자세에서 시작**했다 — 전 관절 정확히 0, base 는
+    # 정확히 직립. 그래서 정책이 초기 천이 구간을 단 하나의 상태에서만 배웠다.
+    #
+    # ★왜 지금 넣는가. 실기 배포에서 이 갭이 그대로 드러났다. 공중 고정 캡처(08-28)에서
+    #   HL_hip 은 중력으로 처져 **+0.042 ~ +0.167 rad** 에 앉아 있었다 — 학습이 한 번도 본 적
+    #   없는 시작 자세이고, 그 편차가 아래 기본값 0.1 rad 를 고른 근거다.
+    #   근거: reports/real2sim/_comparisons/bipedleg_policy_capture_20260828/README.md §3
+    #
+    # ⚠ **EventCfg 로 옮기지 말 것.** `DirectRLEnv._reset_idx` 가 reset 이벤트를 적용한 **뒤**
+    #   이 env 의 `_reset_idx` 가 `write_joint_state_to_sim_index` 로 관절 상태를 덮어쓴다
+    #   (`direct_rl_env.py:671-677` → `hind_leg_env.py` 의 write 호출). 이벤트로 넣으면 조용히
+    #   지워진다. 그래서 write 직전에 인라인으로 섞는다.
+    #
+    # 관절 노이즈는 soft limit 으로 자른다 — hip 은 가동폭이 ±0.234 rad 뿐이라 자르지 않으면
+    # 절반 가까이가 한계 밖 초기 자세가 된다.
+    # 0.0 또는 None 이면 종전 동작(노이즈 없음)이다.
+    # ------------------------------------------------------------------
+    reset_joint_pos_noise: float = 0.1  # 관절각 균등노이즈 반폭 [rad] (soft limit 으로 클램프)
+    reset_base_rp_noise_deg: float = 5.0  # base roll/pitch 균등노이즈 반폭 [deg]. yaw 는 안 흔든다
+
     priv_explicit = False
     priv_latent = False
     ang_vel = False
@@ -339,6 +362,29 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
 
     terminate_tilt_deg: float | None = 60.0
     terminate_base_height: float | None = None
+
+    # ------------------------------------------------------------------
+    # 리셋 초기 상태 노이즈 (2026-09-02) — HindLegFlatEnvCfg 와 **값 일치 필수**
+    #
+    # 종전에는 **모든 에피소드가 완전히 같은 자세에서 시작**했다 — 전 관절 정확히 0, base 는
+    # 정확히 직립. 그래서 정책이 초기 천이 구간을 단 하나의 상태에서만 배웠다.
+    #
+    # ★왜 지금 넣는가. 실기 배포에서 이 갭이 그대로 드러났다. 공중 고정 캡처(08-28)에서
+    #   HL_hip 은 중력으로 처져 **+0.042 ~ +0.167 rad** 에 앉아 있었다 — 학습이 한 번도 본 적
+    #   없는 시작 자세이고, 그 편차가 아래 기본값 0.1 rad 를 고른 근거다.
+    #   근거: reports/real2sim/_comparisons/bipedleg_policy_capture_20260828/README.md §3
+    #
+    # ⚠ **EventCfg 로 옮기지 말 것.** `DirectRLEnv._reset_idx` 가 reset 이벤트를 적용한 **뒤**
+    #   이 env 의 `_reset_idx` 가 `write_joint_state_to_sim_index` 로 관절 상태를 덮어쓴다
+    #   (`direct_rl_env.py:671-677` → `hind_leg_env.py` 의 write 호출). 이벤트로 넣으면 조용히
+    #   지워진다. 그래서 write 직전에 인라인으로 섞는다.
+    #
+    # 관절 노이즈는 soft limit 으로 자른다 — hip 은 가동폭이 ±0.234 rad 뿐이라 자르지 않으면
+    # 절반 가까이가 한계 밖 초기 자세가 된다.
+    # 0.0 또는 None 이면 종전 동작(노이즈 없음)이다.
+    # ------------------------------------------------------------------
+    reset_joint_pos_noise: float = 0.1  # 관절각 균등노이즈 반폭 [rad] (soft limit 으로 클램프)
+    reset_base_rp_noise_deg: float = 5.0  # base roll/pitch 균등노이즈 반폭 [deg]. yaw 는 안 흔든다
 
     priv_explicit = True
     priv_latent = True

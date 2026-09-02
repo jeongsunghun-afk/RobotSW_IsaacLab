@@ -15,6 +15,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, RayCaster
+from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 
 from .hind_leg_env_cfg import FOOT_LINK_INERTIA_KGM2, HindLegFlatEnvCfg, HindLegRoughEnvCfg
 
@@ -134,6 +135,11 @@ class HindLegEnv(DirectRLEnv):
         # 넘어짐 종료 임계 (:meth:`_get_dones` 참고). cos 는 한 번만 계산한다.
         tilt = getattr(self.cfg, "terminate_tilt_deg", None)
         self._tilt_cos_limit = math.cos(math.radians(tilt)) if tilt is not None else 1.0
+        # 리셋 초기 상태 노이즈 (cfg 주석 참고). None/0 이면 종전 동작(고정 초기 자세).
+        jn = getattr(self.cfg, "reset_joint_pos_noise", 0.0)
+        rp = getattr(self.cfg, "reset_base_rp_noise_deg", 0.0)
+        self._reset_joint_noise = float(jn) if jn else 0.0
+        self._reset_base_rp_noise = math.radians(float(rp)) if rp else 0.0
         if self._foot_coupling:
             self._calf_ids, _ = self._robot.find_joints(["HL_calf_joint", "HR_calf_joint"], preserve_order=True)
             self._foot_ids, _ = self._robot.find_joints(["HL_foot_joint", "HR_foot_joint"], preserve_order=True)
@@ -641,10 +647,29 @@ class HindLegEnv(DirectRLEnv):
         if self.cfg.history_observation:
             self.obs_history_buf[env_ids, :, :] = 0.0
         # Reset robot state
-        joint_pos = self._robot.data.default_joint_pos[env_ids]
-        joint_vel = self._robot.data.default_joint_vel[env_ids]
-        default_root_state = self._robot.data.default_root_state[env_ids]
+        joint_pos = self._data_tensor(self._robot.data.default_joint_pos)[env_ids].clone()
+        joint_vel = self._data_tensor(self._robot.data.default_joint_vel)[env_ids].clone()
+        default_root_state = self._data_tensor(self._robot.data.default_root_state)[env_ids].clone()
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+
+        # ── 초기 상태 노이즈 (cfg 주석 참고) ────────────────────────────────────────────
+        # ⚠ EventCfg 로 옮기면 조용히 지워진다 — reset 이벤트는 `super()._reset_idx()` 안에서
+        #   적용되고, 그 뒤 아래 write 가 관절 상태를 통째로 덮어쓴다.
+        n = len(env_ids)
+        if self._reset_joint_noise > 0.0:
+            noise = (torch.rand_like(joint_pos) * 2.0 - 1.0) * self._reset_joint_noise
+            joint_pos = joint_pos + noise
+            # hip 은 가동폭이 ±0.234 rad 뿐이라 자르지 않으면 초기 자세가 한계 밖으로 나간다.
+            soft = self._data_tensor(self._robot.data.soft_joint_pos_limits)[env_ids]
+            joint_pos = torch.clamp(joint_pos, soft[..., 0], soft[..., 1])
+        if self._reset_base_rp_noise > 0.0:
+            rp = (torch.rand(n, 2, device=self.device) * 2.0 - 1.0) * self._reset_base_rp_noise
+            zeros = torch.zeros(n, device=self.device)
+            # (x, y, z, w) 규약 — `quat_from_euler_xyz` · `quat_mul` 둘 다 xyzw 다.
+            # 델타를 **왼쪽**에 곱해 월드 축 기준으로 기울인다(기본 자세가 항등이라 순서는
+            # 현재 무해하지만, 자산에 `rot=` 가 생기면 이쪽이 맞는 쪽이다).
+            delta = quat_from_euler_xyz(rp[:, 0], rp[:, 1], zeros)
+            default_root_state[:, 3:7] = quat_mul(delta, default_root_state[:, 3:7])
         self._robot.write_root_pose_to_sim_index(root_pose=default_root_state[:, :7], env_ids=env_ids)
         self._robot.write_root_velocity_to_sim_index(root_velocity=default_root_state[:, 7:], env_ids=env_ids)
         self._robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel, env_ids=env_ids)

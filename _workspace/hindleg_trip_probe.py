@@ -78,6 +78,8 @@ TERM_KEYS = ("foot_coupling", "foot_transpose", "foot_raw_friction", "foot_refle
 # ⚠ hip·thigh 의 k 는 1.0 이라 **관절 기준 임계가 가장 낮다**(15.0 < foot 18.0 < calf 22.5).
 #   k≠1 축에만 눈이 가서 빠뜨리기 쉬운데, 트립은 네 종류 모두에서 걸릴 수 있다.
 GEAR_K = {"hip": 1.0, "thigh": 1.0, "calf": 1.5, "foot": 1.2}
+# 리셋 초기 상태 노이즈 — env.yaml 에 없으면 0(노이즈 이전 run)으로 본다.
+NOISE_KEYS = ("reset_joint_pos_noise", "reset_base_rp_noise_deg")
 
 
 def run_lengths(mask: torch.Tensor) -> torch.Tensor:
@@ -114,8 +116,19 @@ def main() -> None:
         m = re.search(r"^foot_reflected_inertia_cap:\s*(null|[0-9.]+)\s*$", text, re.MULTILINE)
         if m:
             env_cfg.foot_reflected_inertia_cap = None if m.group(1) == "null" else float(m.group(1))
+        for k in NOISE_KEYS:
+            # ★ 리셋 초기 상태 노이즈(2026-09-02 추가)도 run 마다 다르다. 이 키가 env.yaml 에 **없으면**
+            #   그 run 은 노이즈 이전에 학습된 것이므로 **0 으로 강제**한다 — 소스 기본값(0.1/5.0)을 그대로
+            #   두면 옛 체크포인트를 자기가 본 적 없는 초기분포에서 재게 되어 A/B 가 cross-condition 이 된다.
+            #   (같은 함정: project_ramp_uses_source_cfg_not_run_params)
+            m = re.search(rf"^{k}:\s*([0-9.]+)\s*$", text, re.MULTILINE)
+            setattr(env_cfg, k, float(m.group(1)) if m else 0.0)
+    else:
+        for k in NOISE_KEYS:
+            setattr(env_cfg, k, 0.0)
     cap = getattr(env_cfg, "foot_reflected_inertia_cap", None)
-    print(f"[probe] 적용: {{{', '.join(f'{k}={getattr(env_cfg, k)}' for k in TERM_KEYS)}}}  cap={cap}")
+    noise = ", ".join(f"{k}={getattr(env_cfg, k, None)}" for k in NOISE_KEYS)
+    print(f"[probe] 적용: {{{', '.join(f'{k}={getattr(env_cfg, k)}' for k in TERM_KEYS)}}}  cap={cap}  {noise}")
 
     if args_cli.real_gains:
         # 실기 채널 게인 100/50/50/20 · kd 5 를 관절 공간으로 환산한 값 (kp_joint = k^2 * kp_ch).
