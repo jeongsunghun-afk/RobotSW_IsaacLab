@@ -670,9 +670,12 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
         motion_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """레퍼런스 모션 AMP 관측값 수집. (상대 궤적 피처 + R4 root_rot_tan_norm 포함)"""
+        expert_cond = None
         if motion_ids is None:
-            # 조건부 disc 라벨을 위해 클립 id 를 여기서 뽑아 들고 있는다.
-            motion_ids = self._motion_lib.sample_motions(num_samples)
+            # 조건부 disc: 클립 id 와 조건 라벨을 함께 뽑는다 (`amp_cond_expert_sampling` 참조).
+            motion_ids, expert_cond = self._sample_expert_motions(num_samples)
+        elif self.amp_cond_dim > 0:
+            expert_cond = self._expert_amp_cond(motion_ids)
         amp_obs_buf, root_pos_hist, quat_hist = self._compute_reference_buffers(num_samples, current_times, motion_ids)
         curr_root_quat = quat_hist[:, 0, :]  # [N, 4]
         n_hist = self.cfg.num_amp_observations
@@ -696,7 +699,7 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
         rot_tan_norm = _apply_root_rot_tan_norm(quat_hist, num_samples, n_hist)  # [N, H, 6]
         final_amp_obs = torch.cat([base_amp, rot_tan_norm], dim=-1)  # [N, H, 59]
 
-        return self._append_amp_cond(final_amp_obs.view(num_samples, -1), self._expert_amp_cond(motion_ids))
+        return self._append_amp_cond(final_amp_obs.view(num_samples, -1), expert_cond)
 
     def get_amp_observations(self, num_samples: int) -> torch.Tensor:
         """Runner가 Discriminator 업데이트 시 호출하는 Expert 관측 샘플러."""

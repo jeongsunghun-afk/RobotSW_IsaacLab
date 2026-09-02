@@ -129,6 +129,11 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
     amp_cond_mode: str = "none"  # "none" | "speed" | "speed_yaw"
     amp_cond_v_max: float | None = None  # 정규화 상한 [m/s]. None → lin_vel_x_max
     amp_cond_yaw_max: float | None = None  # 정규화 상한 [rad/s]. None → max(|yaw_vel_min|, |yaw_vel_max|)
+    #: expert 조건 라벨 방식. "command_matched"(기본): 조건을 정책 명령 분포에서 뽑고 그 속도에 가까운 클립을
+    #: 고른다(조건 주변분포 일치). "clip_mean": 클립 평균 속도 라벨 — 이산값이라 D 가 조건만으로 real/fake 를
+    #: 가를 수 있어 style 보상이 죽는다(2026-09-02 실측). 비교용으로만 남긴다.
+    amp_cond_expert_sampling: str = "command_matched"  # "command_matched" | "clip_mean"
+    amp_cond_match_temperature: float = 0.5  # command_matched 의 클립 매칭 온도 [m/s]
 
     # ── 보상 가중치 ─────────────────────────────────────────────
     # Task reward = lin_vel_reward_w * lin_vel_reward + yaw_vel_reward_w * yaw_vel_reward

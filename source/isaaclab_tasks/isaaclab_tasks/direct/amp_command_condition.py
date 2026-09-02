@@ -87,6 +87,44 @@ class AMPCommandConditionMixin:
             valid = torch.where(st.unsqueeze(-1), torch.zeros_like(valid), valid)
         return torch.cat([cond, valid], dim=-1)
 
+    def _sample_expert_motions(self, num_samples: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """expert 배치의 (motion_ids, cond) 를 뽑는다.
+
+        ``amp_cond_expert_sampling``:
+          * ``"clip_mean"``       — 클립을 가중치로 뽑고 라벨은 클립 평균 속도. ⚠ 라벨이 클립 수만큼의 **이산값**이라
+            정책 쪽 연속 명령과 주변분포가 달라, D 가 조건 열만 보고도 real/fake 를 가를 수 있다(2026-09-02 실측:
+            D(e) 0.94 로 시작해 style 보상이 1/3 로 죽고 σ 가 발산).
+          * ``"command_matched"`` — 조건을 **정책 명령과 같은 분포**(U[lin_vel_x_min, lin_vel_x_max], yaw 는
+            U[yaw_vel_min, yaw_vel_max])에서 먼저 뽑고, 그 속도에 가까운 클립을 `sample_motions_near_speed`
+            (softmax, 온도 ``amp_cond_match_temperature``, 기존 가중치 곱)로 고른 뒤 라벨을 **뽑은 명령값**으로 붙인다.
+            조건 주변분포가 정책과 같아져 D 는 kinematics–조건 정합성으로만 판별해야 한다.
+        조건 모드가 꺼져 있으면 (sample_motions, None).
+        """
+        lib = self._motion_lib  # type: ignore[attr-defined]
+        if self.amp_cond_dim == 0:
+            return lib.sample_motions(num_samples), None
+        cfg = self.cfg  # type: ignore[attr-defined]
+        mode = getattr(cfg, "amp_cond_expert_sampling", "command_matched")
+        if mode == "clip_mean":
+            ids = lib.sample_motions(num_samples)
+            return ids, self._expert_amp_cond(ids)
+        if mode != "command_matched":
+            raise ValueError(f"amp_cond_expert_sampling 은 'clip_mean' | 'command_matched' 중 하나여야 한다: {mode}")
+        dev = self._motion_cond.device
+        speed = torch.rand(num_samples, device=dev) * (float(cfg.lin_vel_x_max) - float(cfg.lin_vel_x_min)) + float(
+            cfg.lin_vel_x_min
+        )
+        ids = lib.sample_motions_near_speed(speed, temperature=float(getattr(cfg, "amp_cond_match_temperature", 0.5)))
+        cols = [speed]
+        if self._amp_cond_values_dim >= 2:
+            yaw = torch.rand(num_samples, device=dev) * (float(cfg.yaw_vel_max) - float(cfg.yaw_vel_min)) + float(
+                cfg.yaw_vel_min
+            )
+            cols.append(yaw)
+        cond = torch.stack(cols, dim=-1) / self._amp_cond_scale
+        valid = torch.ones(num_samples, 1, dtype=torch.float32, device=dev)
+        return ids.to(dev), torch.cat([cond, valid], dim=-1)
+
     def _expert_amp_cond(self, motion_ids: torch.Tensor) -> torch.Tensor | None:
         """expert 샘플의 조건 열 ``[n, cond_dim]`` (클립 평균 라벨, valid=1)."""
         if self.amp_cond_dim == 0:

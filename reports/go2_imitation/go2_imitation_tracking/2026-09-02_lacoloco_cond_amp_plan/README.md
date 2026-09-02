@@ -227,3 +227,40 @@ python scripts/reinforcement_learning/rsl_rl/train.py --task Go2-Imitation-Track
 
 1. GPU 가 비면 leg 2×2(`{mlp,drail}×{none,speed}`, 같은 시드·같은 데이터·`velscale15_ds14_wcmd_vmax32` 베이스) 착수 → `reports/leg_imitation/_comparisons/cond_disc_speed/`.
 2. "라벨 섞기" 게이트 스크립트: 학습된 disc 에 expert 배치의 조건을 뒤섞어 넣어 real 확률이 떨어지는지 (조건을 실제로 쓰는지) 확인.
+
+---
+
+## 10. 1차 학습 실패와 원인 확정 — 조건 라벨 누설 (2026-09-02 17:44~18:20)
+
+### 증상 (같은 iter, tensorboard 실측)
+
+| run | iter | noise_std | mean_R | amp(style) | lin_vel | D(expert) | D(policy) |
+|---|---|---|---|---|---|---|---|
+| 기준선 `{mlp, none}` | 10000 | **0.402** | 653.7 | **21.2** | 44.8 | 0.81 | 0.19 |
+| run A `mlp+speed` (clip_mean) | 10000 | **6.880** | 501.5 | 6.8 | 44.4 | 0.94 | 0.07 |
+| run B `drail+speed` (clip_mean) | 4000 | **3.234** | 434.0 | 1.7 | 42.6 | 0.99 | 0.01 |
+
+두 조건부 run 모두 σ 가 단조 발산(기준선은 0.62→0.40 수렴)하고 style 보상이 1/3·1/10 로 죽었다. 속도 추종 보상은 셋 다 같으므로 차이는 판별기 쪽이다. 사용자 결정으로 두 run 을 17:5x 에 중단.
+
+### 원인 (검증됨 — `scripts/imitation_learning/check_cond_disc_leak.py`, run A `model_10000`, expert 4096 샘플)
+
+| expert 라벨 | D(expert) |
+|---|---|
+| clip_mean (학습 라벨, 고유값 **9개**) | 0.935 |
+| shuffled (라벨을 배치 안에서 뒤섞음) | 0.753 |
+| **uniform (정책처럼 U[0,1] 연속값)** | **0.270** |
+| matched (command_matched 샘플링) | 0.360 |
+| dropped (조건 제거) | 0.897 |
+
+kinematics–조건 정합성의 기여는 0.935→0.753 의 0.18 뿐이고, 라벨 **값 분포**만으로 0.935→0.270 이 갈린다. 정책 쪽 조건은 연속 균등분포, expert 쪽은 클립 평균이라 9개 이산값 — 판별기는 "이 속도의 걸음인가"가 아니라 "라벨이 격자값인가"를 배웠다. 조건 dropout 10% 는 무조건부 경로(0.897)는 살렸지만 누설은 못 막았고, GP 를 조건 열에서 뺀 것은 이 방향의 날카로움을 방치했다. σ 발산은 style gradient 가 평평해져 entropy 보너스만 남은 하류 증상이다(latentKL 60k 와 같은 모양).
+
+### 처방 (구현, 기본값 승격)
+
+`env.amp_cond_expert_sampling="command_matched"`: expert 배치마다 조건 `c ~ U[lin_vel_x_min, lin_vel_x_max]`(yaw 는 U[yaw_min, yaw_max])를 **먼저** 뽑고, `sample_motions_near_speed(c, τ=amp_cond_match_temperature=0.5)` 로 클립을 고른 뒤 라벨을 `c` 로 붙인다. 조건의 주변분포가 정책과 정확히 같아져 D 는 kinematics–조건 정합성으로만 판별해야 한다(8월 설계검토의 "속도 기반 확률적 real 샘플링"). `clip_mean` 은 비교용으로만 남긴다. 구현: `amp_command_condition.py` `_sample_expert_motions()`, 두 env 의 `collect_reference_motions`.
+
+### 재착수 (18:19)
+
+- run A' `mlp+speed+matched`: `logs/rsl_rl/leg_imitation_tracking_rma/2026-09-02_18-1*_condmatch_cmdchg4s_ep20_velscale15_ds14_wcmd_vmax32` (GPU3)
+- run B' `drail+speed+matched`: `…_condmatch_drail_cmdchg4s_ep20_velscale15_ds14_wcmd_vmax32` (GPU1)
+- 기준선과 단일변수 비교를 지키기 위해 `schedule` 은 기준선과 같은 adaptive 로 두었다. σ 가 다시 발산하면 그때 `agent.algorithm.schedule=fixed` 를 건다.
+- 게이트: 5k 에서 leak 스크립트 재실행 — `uniform ≈ matched` 이고 σ 가 0.4 대로 수렴해야 통과.
