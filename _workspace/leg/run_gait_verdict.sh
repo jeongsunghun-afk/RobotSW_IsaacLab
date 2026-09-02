@@ -29,6 +29,9 @@ GA=${GA:-0}; GB=${GB:-1}; GC=${GC:-2}
 # 프로브 창 길이. 명령 재샘플 주기가 짧으면(예: 4 s) 창 안에 변경이 여러 번 들어오는데,
 # 프로브는 변경마다 표본을 만들므로 길수록 표본이 많다. 단 에피소드 길이를 넘기면 안 된다.
 PROBE_DUR=${PROBE_DUR:-10}
+# 표집 env 수. 기본 4096 이지만 다른 학습이 GPU 를 쓰고 있으면 PhysX 할당이 실패한다
+# (실제로 학습 3개가 도는 중 4096 이 OOM 났다). 줄이면 표본이 줄 뿐 지표 정의는 같다.
+N_ENVS=${N_ENVS:-4096}
 mkdir -p "$LOG" "$D/figures" "$D/videos" "$D/metrics"
 
 export CONDA_PREFIX=/home/user/miniconda3/envs/isaac-6.0
@@ -37,7 +40,7 @@ unset DISPLAY   # DISPLAY 가 있으면 headless 여도 GLX 를 잡으려다 GLX
 
 srv() { # gpu dur extra out
   CUDA_VISIBLE_DEVICES=$1 ./isaaclab.sh -p $W/gait_survey_multienv.py \
-    --checkpoint "$CKPT" --run_params "$PARAMS" --n_envs 4096 --dur_s $2 $3 \
+    --checkpoint "$CKPT" --run_params "$PARAMS" --n_envs $N_ENVS --dur_s $2 $3 \
     --out_dir "$W/$4" > "$LOG/$4.log" 2>&1
 }
 vid() { # gpu extra out
