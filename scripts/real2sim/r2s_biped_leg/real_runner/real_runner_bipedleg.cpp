@@ -8,7 +8,7 @@
  *   policy_runner ◀──POLICY_STATE("R2PS", 9888)── real_runner ◀──SHM── 모터상태 + IMU
  *
  * ★좌표 규약 (2026-08-14, TELEM convention_version=1):
- *   UDP seam 양쪽은 **관절(모델) 좌표**만 주고받는다. 채널각↔관절각 변환(감속비 오설정 보정
+ *   UDP seam 양쪽은 **관절(모델) 좌표**만 주고받는다. 채널각↔관절각 변환(외부 기어단 비율
  *   `gear` + foot↔calf 커플링 해제)은 **이 브리지가 하드웨어 경계에서 한 번만** 한다.
  *   ⇒ 워크스테이션(policy_runner·GUI·env)에 raw 좌표가 존재해서는 안 된다.
  *   변환 지점은 motor_deg_to_joint / motor_dps_to_joint / joint_to_motor_deg 셋뿐이다.
@@ -67,7 +67,7 @@ constexpr double kStepDtSec = 0.020;      // STATE 회신 페이싱 = 학습 STE
 // ⚠ 2026-08-19 이전에는 TELEM 이 kStepDtSec 게이트 안에 있어 50 Hz 였고, 캡처의 t_real 이
 //   48.1~48.7 Hz 로 기록됐다. 그 해상도로는 chirp 을 5 Hz 로 올렸을 때 선형보간 오차가
 //   진폭의 5.2 % 에 달해(= 현재 잔차 RMS 전체와 맞먹음) armature 를 식별할 수 없다.
-//   200 Hz 면 0.31 % 로 떨어진다. 근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe
+//   200 Hz 면 0.31 % 로 떨어진다. 근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe
 //   README §23-j.
 // ★이 값을 kStepDtSec 과 엮지 말 것 — STATE 는 policy_runner 가 lockstep 이라 20 ms 가
 //   50 Hz 정책 클록을 소유한다. 빠르게 만들면 gait clock 이 자유질주한다.
@@ -90,7 +90,7 @@ double now_sec() {
 }
 
 // sim 좌표(raw각) [rad] → 실기 채널각 [deg].  RL_INTERFACE.md §1: q_ch = q_raw·sign·gear + offset
-// gear 는 드라이버 감속비 오설정 보정(§4) — offset(zero_deg)은 채널각 단위라 **곱한 뒤** 더한다.
+// gear 는 외부 기어단 비율(§4, 총감속비/7) — offset(zero_deg)은 채널각 단위라 **곱한 뒤** 더한다.
 float sim_to_motor_deg(int m, float q_rad) {
     return MOTOR_CALIB[m].sign * q_rad * DEF_RAD2DEG * MOTOR_CALIB[m].gear + MOTOR_CALIB[m].zero_deg;
 }
@@ -681,6 +681,17 @@ int main(int argc, char** argv) {
             // ── 시간축·명령 에코 (2026-08-19) ────────────────────────────────────────────
             tm.telem_tick = telem_tick++;
             tm.valid_mask |= (cmd_clamp_bits & 0xFFu) << 16;  // bit16+p = 목표가 잘렸다
+            // 채널각 원값 — 영점 캘리브레이션용. 변환 없이 그대로 싣는다(모터 순서).
+            {
+                bool all_ch = true;
+                for (int m = 0; m < NUM_MOTORS; m++) {
+                    tm.ch_deg[m] = static_cast<float>(motor_stt[m].fPosition);
+                    all_ch = all_ch && stt_valid[m];
+                }
+                if (all_ch) {
+                    tm.valid_mask |= (1u << 25);  // ch_deg 유효 (8축 전부)
+                }
+            }
             if (cmd_sent) {
                 tm.valid_mask |= (1u << 24);  // cmd_q 유효
                 // 실제 전송값(float16 반영)을 q 와 **같은 변환**으로 관절 좌표에 올린다 —

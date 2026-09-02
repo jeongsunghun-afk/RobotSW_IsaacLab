@@ -11,7 +11,8 @@ Isaac Sim은 띄우지 않는다 (torch만 필요).
 
 하는 일 (``convert_capture_to_pt.py``(go2)의 biped_leg 판):
 
-0. **좌표 규약 판별 + 채널→관절 각도 보정** — 드라이버 감속비 오설정(전 축 7:1 가정)으로 **규약 0**
+0. **좌표 규약 판별 + 채널→관절 각도 보정** — 외부 기어단(드라이버는 내장 7:1 까지만
+   본다, RL_INTERFACE §4)으로 **규약 0**
    캡처는 calf·foot 각도가 각각 1.5·1.2배 부풀려져 있다. 그런 캡처만 ``GEAR_K``로 나눠 관절 단위로
    옮긴다. 다른 모든 단계보다 먼저 온다 — 커플링 coef 가 감속비 이후 공간의 계수라서다.
 
@@ -76,7 +77,9 @@ COUPLED_CALF_FOOT = ((2, 3), (6, 7))
 # foot↔calf 커플링 계수 — 벨트가 무릎을 건너므로 raw = q_foot + coef·q_calf 다.
 # 브리지 `calib_bipedleg.hpp FOOT_CALF_COEF` 와 값 일치 필수 (RL_INTERFACE.md §1, 실기 실측 +1).
 FOOT_CALF_COEF = 1.0
-# 드라이버 감속비 오설정 보정 (RL_INTERFACE.md §4). 드라이버가 전 축을 7:1 로 가정해 각도를
+# 외부 기어단 비율 (RL_INTERFACE.md §4). 드라이버는 모터 내장 감속기(전 축 7:1)까지만 보고하고,
+# calf·foot 은 그 뒤에 기어단이 하나 더 있어 총 10.5 · 8.4 다. 즉 펌웨어 버그가 아니라 실물 비율이다.
+# 종전 서술 "감속비 오설정"은 2026-09-02 에 정정됐다. 드라이버가 전 축을 7:1 로 가정해 각도를
 # 주고받으므로, 드라이버가 보고/수신하는 "채널각"은 참 관절각의 gear_k = 실제감속비/7 배다
 # (실제 감속비 hip 7 · thigh 7 · calf 10.5 · foot 8.4). 파이 브리지
 # (real_runner_bipedleg.cpp:73 motor_deg_to_sim / :69 sim_to_motor_deg)가 양방향 모두 이 k 를
@@ -218,7 +221,7 @@ def convert(
             names = [JOINT_LABELS[j] for j in range(8) if clamped & (1 << j)]
             print(f"    ⚠ 명령이 soft limit 에 클램프된 구간 있음: {', '.join(names)} — 적합 전에 확인할 것")
 
-    # 감속비 오설정 소급 보정 — 채널 단위 → 관절 단위 (GEAR_K 주석 참조).
+    # 외부 기어단 소급 보정 — 채널 단위 → 관절 단위 (GEAR_K 주석 참조).
     #
     # 도장은 세 세대가 있다. **새 것부터** 읽는다:
     #   1) ``convention_version`` (2026-08-14~) — 브리지가 TELEM 으로 신고한 값을 GUI 가 그대로 기록.

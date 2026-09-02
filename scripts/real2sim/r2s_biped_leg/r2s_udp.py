@@ -518,8 +518,15 @@ def unpack_policy_act(data: bytes) -> dict | None:
 #                soft-limit 클램프·ENGAGE 램프·slew·float16 양자화가 모두 반영된 값이라,
 #                "GUI 가 발행한 값"이 아니라 "드라이버가 받은 값"을 캡처가 갖게 된다.
 #   valid_mask : bit16+p = 관절 p 목표가 클램프됨, bit24 = cmd_q 유효.
-_POLICY_TELEM_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f" + "B" + "I" + "f" * NUM_JOINTS
+#   ch_deg     : 드라이버 채널각 원값 [deg], **모터(leg-major) 순서** — 이 패킷에서 유일하게
+#                articulation 이 아닌 필드다. `zero_deg` 실측용이라 MOTOR_CALIB 순서를 그대로
+#                싣는다(재배열이 사고를 낸 지점이라 경계에서 한 번도 안 바꾼다).
+#                valid_mask bit25 = 유효.
+_POLICY_TELEM_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f" + "B" + "I" + "f" * NUM_JOINTS + "f" * NUM_JOINTS
 POLICY_TELEM_SIZE: int = struct.calcsize(_POLICY_TELEM_FMT)
+#   v4(2026-08-19, ch_deg 없음 157 B)
+_POLICY_TELEM_V4_FMT: str = "<III" + "f" * NUM_JOINTS * 3 + "3f" + "B" + "I" + "f" * NUM_JOINTS
+_POLICY_TELEM_V4_SIZE: int = struct.calcsize(_POLICY_TELEM_V4_FMT)
 # legacy 하위호환 — TELEM 은 **관측 전용**이라 구버전을 읽어도 사람이 눈으로 보고 끝이므로
 # 살려 둔다(STATE 와 다르게 가는 이유는 R2S_CONVENTION_VERSION 위 주석 참조).
 #   v3(2026-08-14, 규약버전 있음 121 B) — 규약 버전은 패킷이 신고한 값을 그대로 쓴다.
@@ -548,6 +555,7 @@ def pack_policy_telem(
     convention_version: int = R2S_CONVENTION_VERSION,
     telem_tick: int = 0,
     cmd_q=None,
+    ch_deg_lm=None,
 ) -> bytes:
     """real 엔드포인트 -> gui monitor 텔레메트리 직렬화 (articulation 순서).
 
@@ -564,6 +572,8 @@ def pack_policy_telem(
         telem_tick: 송신 틱 카운터 (5 ms 간격). 소비자의 시간축 복원용.
         cmd_q: 이 틱에 드라이버에 실린 목표각 [rad], 길이 8. ``None`` 이면 0 으로 채우고
             ``valid_mask`` bit24 도 세우지 않는다 (전송 전 상태).
+        ch_deg_lm: 드라이버 채널각 원값 [deg], 길이 8, **모터(leg-major) 순서**. 영점
+            캘리브레이션 전용이라 변환 없이 싣는다. ``None`` 이면 0 + bit25 미설정.
 
     Returns:
         POLICY_TELEM_SIZE 바이트 패킷.
@@ -572,7 +582,21 @@ def pack_policy_telem(
     vals += [float(dq[i]) for i in range(NUM_JOINTS)]
     vals += [float(tau[i]) for i in range(NUM_JOINTS)]
     vals += [float(rpy[i]) for i in range(3)]
-    cmd_vals = [0.0] * NUM_JOINTS if cmd_q is None else [float(cmd_q[i]) for i in range(NUM_JOINTS)]
+    # 유효 비트는 **값을 실제로 실었을 때만** 선다 — pack/unpack 왕복이 안 맞으면 소비자가
+    # "0 으로 채워진 값"과 "안 실은 값"을 구분 못 한다. 0 으로 조용히 채우는 것이 이 프로젝트가
+    # 반복해 당한 실패 양식이다(IMU 폴백).
+    if cmd_q is None:
+        cmd_vals = [0.0] * NUM_JOINTS
+        valid_mask &= ~(1 << 24)
+    else:
+        cmd_vals = [float(cmd_q[i]) for i in range(NUM_JOINTS)]
+        valid_mask |= 1 << 24
+    if ch_deg_lm is None:
+        ch_vals = [0.0] * NUM_JOINTS
+        valid_mask &= ~(1 << 25)
+    else:
+        ch_vals = [float(ch_deg_lm[i]) for i in range(NUM_JOINTS)]
+        valid_mask |= 1 << 25
     return struct.pack(
         _POLICY_TELEM_FMT,
         POLICY_TELEM_MAGIC,
@@ -582,6 +606,7 @@ def pack_policy_telem(
         int(convention_version) & 0xFF,
         int(telem_tick) & 0xFFFFFFFF,
         *cmd_vals,
+        *ch_vals,
     )
 
 
@@ -601,8 +626,18 @@ def unpack_policy_telem(data: bytes) -> dict | None:
     """
     tick: int | None = None
     cmd_q: list[float] | None = None
+    ch_deg: list[float] | None = None
     if len(data) == POLICY_TELEM_SIZE:
         fields = struct.unpack(_POLICY_TELEM_FMT, data)
+        mask = fields[2]
+        n_body = NUM_JOINTS * 3 + 3
+        body = fields[3 : 3 + n_body]
+        version = int(fields[3 + n_body])
+        tick = int(fields[4 + n_body])
+        cmd_q = list(fields[5 + n_body : 5 + n_body + NUM_JOINTS])
+        ch_deg = list(fields[5 + n_body + NUM_JOINTS : 5 + n_body + 2 * NUM_JOINTS])
+    elif len(data) == _POLICY_TELEM_V4_SIZE:
+        fields = struct.unpack(_POLICY_TELEM_V4_FMT, data)
         mask = fields[2]
         n_body = NUM_JOINTS * 3 + 3
         body = fields[3 : 3 + n_body]
@@ -641,6 +676,8 @@ def unpack_policy_telem(data: bytes) -> dict | None:
         "cmd_q": cmd_q if (cmd_q is not None and (mask & (1 << 24))) else None,
         # bit16+p — 관절 p 의 목표가 soft limit 으로 잘렸다. 0 이 아니면 그 캡처는 명령이 오염됐다.
         "clamp_mask": (mask >> 16) & 0xFF,
+        # ⚠ **모터(leg-major) 순서**다 — 이 dict 에서 유일하다. 영점 캘리브레이션 전용.
+        "ch_deg_lm": ch_deg if (ch_deg is not None and (mask & (1 << 25))) else None,
     }
 
 
@@ -837,7 +874,7 @@ if __name__ == "__main__":
 
     # telemetry/ping 왕복.
     pt = pack_policy_telem(7, z, z, [1.5] * NUM_JOINTS, [0.5, -0.2, 10.0], valid_mask=0x103)
-    assert len(pt) == POLICY_TELEM_SIZE == 157, (len(pt), POLICY_TELEM_SIZE)
+    assert len(pt) == POLICY_TELEM_SIZE == 189, (len(pt), POLICY_TELEM_SIZE)
     dpt = unpack_policy_telem(pt)
     assert abs(dpt["tau"][0] - 1.5) < 1e-6 and abs(dpt["rpy"][2] - 10.0) < 1e-6 and len(dpt["q"]) == NUM_JOINTS
     assert dpt["valid_mask"] == 0x103

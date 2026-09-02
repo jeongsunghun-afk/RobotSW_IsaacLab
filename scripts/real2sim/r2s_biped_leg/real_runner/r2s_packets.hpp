@@ -4,7 +4,7 @@
  * ⚠ 이 파일은 scripts/real2sim/r2s_biped_leg/r2s_udp.py 가 단일 진실이다.
  *   _POLICY_ACT_FMT  = "<II8f"        (40 B)  policy_runner → real (REAL_ACT 9887)
  *   _POLICY_STATE_FMT= "<II8f8f3fB"   (85 B)  real → policy_runner (REAL_STATE 9888, 규약버전)
- *   _POLICY_TELEM_FMT= "<III8f8f8f3fBI8f" (157 B) real → gui monitor (REAL_TELEM 9889,
+ *   _POLICY_TELEM_FMT= "<III8f8f8f3fBI8f8f" (189 B) real → gui monitor (REAL_TELEM 9889,
  *                       valid_mask + 규약버전 + **telem_tick + cmd_q**, 2026-08-19)
  *   _POLICY_PING_FMT = "<II"          (8 B)   monitor → real (REAL_ACT 9887, peer 등록만)
  *   _POLICY_GAIN_FMT = "<II8f8f"      (72 B)  policy_runner → real (REAL_ACT 9887, kp/kd 갱신)
@@ -116,6 +116,18 @@ struct PolicyTelemPacket {
      * 전송 중이 아닐 때(warmup·HOLD 전·relax 무토크)는 0 이고, `valid_mask` bit 24 로 알린다.
      */
     float cmd_q[R2S_NUM_JOINTS];
+    /** 드라이버가 보고한 **채널각 원값** [deg], **모터(leg-major) 순서**. valid_mask bit 25.
+     *
+     * ⚠ 이 패킷에서 **유일하게 모터 순서**인 필드다 (q/dq/tau/cmd_q 는 articulation).
+     *   `zero_deg` 가 MOTOR_CALIB 의 모터 순서로 정의돼 있어 그 순서를 그대로 실어야
+     *   워크스테이션이 재배열 없이 복사할 수 있다 — 재배열 한 번이 이 프로젝트에서 반복해
+     *   사고를 낸 지점이다.
+     *
+     * 왜 필요한가 — `zero_deg` 를 실측하려면 **변환 이전의 채널각**이 있어야 한다. q 는 이미
+     * `(q_ch − zero_deg)/gear` 를 거친 값이라 zero_deg 가 틀린 상태에서는 역산해도 그 오차가
+     * 그대로 남는다. 영점 캘리브레이션은 원값을 봐야 성립한다.
+     */
+    float ch_deg[R2S_NUM_JOINTS];
 };
 
 struct PolicyPingPacket {
@@ -135,10 +147,12 @@ static_assert(sizeof(PolicyActPacket) == 40, "r2s_udp.py POLICY_ACT_SIZE(40) mis
 // ⚠ 84 → 85 B (convention_version 추가, offset 0~83 은 불변). r2s_udp.py 를 같이 고쳐야 하며,
 //   그 전까지 policy_runner 는 크기 불일치로 STATE 를 **거부**한다(조용한 오독보다 낫다 — 의도).
 static_assert(sizeof(PolicyStatePacket) == 85, "r2s_udp.py POLICY_STATE_SIZE(85) mismatch");
-// ⚠ 121 → 157 B (telem_tick + cmd_q 추가, offset 0~120 은 불변). r2s_udp.py 를 같이 고쳐야 하며,
+// ⚠ 157 → 189 B (ch_deg 추가, offset 0~156 은 불변). r2s_udp.py 를 같이 고쳐야 하며,
 //   그 전까지 GUI/comm_check 는 크기 불일치로 TELEM 을 **거부**한다(조용한 오독보다 낫다 — 의도).
-//   (그 이전: 120 → 121 B convention_version 추가.)
-static_assert(sizeof(PolicyTelemPacket) == 157, "r2s_udp.py POLICY_TELEM_SIZE(157) mismatch");
+//   r2s_udp.py 는 크기로 버전을 가르므로(v4 157 · v3 121 · v2 120 · v1 116) **끝에만 붙일 것** —
+//   중간에 넣으면 구 캡처가 조용히 오독된다.
+//   (그 이전: 121 → 157 B telem_tick + cmd_q · 120 → 121 B convention_version.)
+static_assert(sizeof(PolicyTelemPacket) == 189, "r2s_udp.py POLICY_TELEM_SIZE(189) mismatch");
 static_assert(sizeof(PolicyPingPacket) == 8, "r2s_udp.py POLICY_PING_SIZE(8) mismatch");
 static_assert(sizeof(PolicyGainPacket) == 72, "r2s_udp.py POLICY_GAIN_SIZE(72) mismatch");
 

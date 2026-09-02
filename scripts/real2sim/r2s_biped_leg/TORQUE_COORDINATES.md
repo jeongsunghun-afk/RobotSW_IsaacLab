@@ -35,7 +35,7 @@ sim  관절 :  τ = kp_ch · Δq_joint
 | 층 | 기호 | 정의 | 감속비 | 커플링 |
 |---|---|---|---|---|
 | 모터축각 | $\theta_m$ | 실제 모터 샤프트 각. 직접 관측 불가 | 이전 | 미해제 |
-| **채널각** | $q_{ch}$ | 드라이버가 보고/수신 $=\theta_m/7$ — **전 축을 7:1 로 가정** | 이전 | 미해제 |
+| **채널각** | $q_{ch}$ | 드라이버가 보고/수신 $=\theta_m/7$ — **모터 출력축**(내장 7:1 뒤, 외부 기어단 앞) | 내장단만 | 미해제 |
 | raw 각 | $q_{raw}$ | 부호·감속비·영점 제거 후 | 이후 | **미해제** |
 | **모델각** | $q_{joint}$ | MJCF `qpos`. 정책·GUI 가 쓰는 유일한 단위 | 이후 | 해제됨 |
 
@@ -137,7 +137,7 @@ calf 채널 자신의 PD 법칙만 담고 전치항이 없다. 그래서 실기�
 > +1 에 가깝지만 같은 조건 HR 은 0 이다). 즉 이 설계로는 아무것도 확정할 수 없다 —
 > **게인을 0 으로 죽이는 설계라야 분리된다.**
 
-재현: `reports/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_in_applied_torque.py --headless`
+재현: `reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/logs/transpose_in_applied_torque.py --headless`
 
 ---
 

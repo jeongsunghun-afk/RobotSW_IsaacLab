@@ -146,6 +146,9 @@ _RUNS_ROOT: str = os.path.join(
 
 # --- policy obs/target 계약 (policy_runner_bipedleg.py 와 bit-parity) ---
 NUM_JOINTS: int = r2s_udp.NUM_JOINTS  # 8
+# 수치를 열 맞춰 읽어야 하는 라벨용. Xvfb 에 CJK 폰트가 없어 GUI 문자열은 영어로 두는 규약과
+# 별개로, 폰트는 등폭이어야 8 관절 값이 세로로 정렬된다.
+_MONO_FAMILY: str = "DejaVu Sans Mono"
 POLICY_DIM: int = 3 + 3 + NUM_JOINTS * 3 + 4  # gravity + cmd + (jpos,jvel,action) + clock = 34
 HISTORY_LEN: int = 10
 ACTION_SCALE: float = 0.25
@@ -1229,7 +1232,11 @@ class RealMonitorThread(QThread):
                             #   전달돼 "이 캡처엔 에코가 없다"가 드러나야 한다.
                             cq = t["cmd_q"]
                             cq_lm = [cq[a] for a in _ART_FOR_LEGMAJOR] if cq is not None else None
-                            rec.append((now, q_lm, dq_lm, tau_lm, t["telem_tick"], cq_lm, t["clamp_mask"]))
+                            # ch_deg — 영점 캘리브레이션용 채널각 원값. 구 브리지면 None 이고,
+                            # 그 None 이 npz 까지 가서 "이 캡처엔 채널각이 없다"가 드러나야 한다.
+                            rec.append(
+                                (now, q_lm, dq_lm, tau_lm, t["telem_tick"], cq_lm, t["clamp_mask"], t.get("ch_deg_lm"))
+                            )
                             # 브리지가 신고한 규약을 그대로 물고 간다 (npz 도장용).
                             self._rec_convention = t["convention_version"]
                 if rx_stamps and now - rx_stamps[0] > 1.0:
@@ -2365,6 +2372,42 @@ class MainWindow(QMainWindow):
         row.addWidget(self._rm_link_label)
         row.addStretch(1)
         v.addLayout(row)
+
+        # ── 토크 좌표 대조 (2026-09-02) ───────────────────────────────────────
+        # 실기 tau 는 **채널기준**이고 sim 은 **관절기준**이라 그냥 겹쳐 보면 calf 1.5 · foot 1.2 배
+        # 어긋난다(TORQUE_COORDINATES.md). 한 줄에 둘 다 띄워서 어느 좌표를 보고 있는지
+        # 헷갈릴 수 없게 한다 — hip·thigh 는 gear 1.0 이라 두 값이 같게 나오는 것이 정상이다.
+        # 관절토크 = 채널토크 × gear (RL_INTERFACE §4).
+        self._rm_tau_label = QLabel("tau: --")
+        self._rm_tau_label.setFont(QFont(_MONO_FAMILY, 9))
+        self._rm_tau_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self._rm_tau_label)
+
+        # ── 영점(zero) 캘리브레이션 ──────────────────────────────────────────
+        # `zero_deg` 는 "관절이 sim 중립(q=0)일 때의 채널각"이다. 그래서 **변환 이전의 채널각**을
+        # 봐야 하고, 그 값은 TELEM ch_deg(모터 순서, 2026-09-02 추가)로만 온다 — q 는 이미
+        # `(q_ch − zero_deg)/gear` 를 거친 값이라 zero_deg 가 틀린 상태에서 역산해도 오차가 남는다.
+        zrow = QHBoxLayout()
+        zrow.addWidget(QLabel("Zero:"))
+        self._rm_ch_label = QLabel("ch_deg: -- (bridge에 ch_deg 없음 — 재배포 필요)")
+        self._rm_ch_label.setFont(QFont(_MONO_FAMILY, 9))
+        self._rm_ch_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        zrow.addWidget(self._rm_ch_label, 1)
+        self._rm_zero_btn = QPushButton("Capture Zero")
+        self._rm_zero_btn.setToolTip(
+            "슬라이더로 로봇을 sim 중립자세(전 관절 q=0)에 맞춘 뒤 누르세요.\n"
+            "지금 채널각을 zero_deg 로 저장하고, calib_bipedleg.hpp 에 붙여 넣을 블록을 함께 씁니다."
+        )
+        self._rm_zero_btn.setEnabled(False)
+        self._rm_zero_btn.clicked.connect(self._on_capture_zero_clicked)
+        zrow.addWidget(self._rm_zero_btn)
+        v.addLayout(zrow)
+        self._rm_zero_status = QLabel("")
+        self._rm_zero_status.setWordWrap(True)
+        v.addWidget(self._rm_zero_status)
+
+        self._rm_last_ch: list[float] | None = None
+        self._rm_last_q_lm: list[float] | None = None
         return group
 
     def start_real_monitor(self) -> None:
@@ -2408,6 +2451,79 @@ class MainWindow(QMainWindow):
             self._rm_link_label.setText(
                 f"Connected (motors {n_valid}/8, {d['hz']:.0f} Hz, IMU {'ok' if imu_ok else 'stale'})"
             )
+
+        # 토크 — 채널기준(브리지 무변환 통과)과 관절기준(× gear)을 나란히.
+        tau_lm = [d["tau"][a] for a in _ART_FOR_LEGMAJOR]
+        parts = []
+        for j, nm in enumerate(motions.JOINT_NAMES):
+            g = motions.GEAR_K[j]
+            parts.append(f"{nm.replace('_', '')[:6]:>6} {tau_lm[j]:+6.2f}/{tau_lm[j] * g:+6.2f}")
+        self._rm_tau_label.setText(
+            "tau [N·m] 채널/관절(=채널×gear):  " + "   ".join(parts[:4]) + "\n" + " " * 34 + "   ".join(parts[4:])
+        )
+
+        # 영점용 채널각 — 구 브리지(ch_deg 없음)면 None 이고 버튼도 잠긴 채로 둔다.
+        ch = d.get("ch_deg_lm")
+        self._rm_last_ch = list(ch) if ch is not None else None
+        self._rm_last_q_lm = [d["q"][a] for a in _ART_FOR_LEGMAJOR]
+        if ch is None:
+            self._rm_ch_label.setText("ch_deg: 이 브리지는 안 보냄 — real_runner 재배포 필요")
+            self._rm_zero_btn.setEnabled(False)
+        else:
+            self._rm_ch_label.setText("ch_deg: " + " ".join(f"{v:+7.2f}" for v in ch))
+            self._rm_zero_btn.setEnabled(True)
+
+    def _on_capture_zero_clicked(self) -> None:
+        """지금 채널각을 `zero_deg` 로 저장한다 — JSON + 붙여넣기용 C++ 블록.
+
+        **전제**: 조작자가 슬라이더로 로봇을 sim 중립자세(전 관절 q=0)에 물리적으로 맞춰 둔 상태다.
+        `zero_deg` 의 정의가 "관절이 q=0 일 때의 채널각"이므로, 그 자세에서 읽은 채널각이 곧 답이다.
+
+        ⚠ 값을 여기서 **적용하지 않는다.** `zero_deg` 는 파이에서 컴파일되는 C++ 상수라
+        워크스테이션이 바꿀 수 없다. 그래서 붙여넣기용 블록까지 같이 써 두고, 반영은
+        `calib_bipedleg.hpp` 수정 → 재빌드 → probe 재확인 순으로 사람이 한다.
+        """
+        ch = self._rm_last_ch
+        if ch is None:
+            self._rm_zero_status.setText("No ch_deg in telemetry - redeploy real_runner first.")
+            return
+        import json  # 지연 임포트 — GUI 기동 경로에 불필요
+
+        names = list(motions.JOINT_NAMES)
+        out_dir = os.path.join(_REPO_ROOT, "data", "bipedleg_gui")
+        os.makedirs(out_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(out_dir, f"zero_calib_{stamp}.json")
+        payload = {
+            "captured_at": stamp,
+            "order": "leg-major (motions.JOINT_NAMES == MOTOR_CALIB motor order)",
+            "joint_names": names,
+            "zero_deg": [round(float(v), 4) for v in ch],
+            # 캡처 순간의 관절각도 같이 남긴다 — 반영 후 이 값이 0 근처로 바뀌어야 맞다는 사후 검정용.
+            "q_at_capture_rad": [round(float(v), 5) for v in (self._rm_last_q_lm or [])],
+            "note": (
+                "zero_deg = 관절이 sim 중립(q=0)일 때의 채널각 [deg]. "
+                "calib_bipedleg.hpp MOTOR_CALIB 의 세 번째 필드에 순서대로 복사한 뒤 재빌드하고, "
+                "probe 로 q_joint 가 전부 0 근처인지 확인할 것."
+            ),
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        # 붙여넣기용 블록 — 사람이 그대로 옮길 수 있게 관절명 주석까지 붙인다.
+        lines = ["// zero_deg captured " + stamp + " (leg-major, paste into MOTOR_CALIB)"]
+        lines += [f"    {v:+9.4f}f,  // {n}" for v, n in zip(ch, names)]
+        snippet = "\n".join(lines)
+        snip_path = os.path.join(out_dir, f"zero_calib_{stamp}.hpp.txt")
+        with open(snip_path, "w", encoding="utf-8") as f:
+            f.write(snippet + "\n")
+
+        rel = os.path.relpath(path, _REPO_ROOT)
+        self._rm_zero_status.setText(
+            f"Saved {rel} (+ .hpp.txt). Paste into calib_bipedleg.hpp MOTOR_CALIB, rebuild, re-probe."
+        )
+        print(f"[gui] zero 캡처 저장: {path}", flush=True)
+        print(snippet, flush=True)
 
     def _on_rm_failed(self, msg: str) -> None:
         self._rm_link_label.setText(f"error: {msg}")
@@ -2771,7 +2887,16 @@ class MainWindow(QMainWindow):
             arrays["telem_tick"] = np.asarray([r[4] for r in telem], dtype=np.uint32)
             arrays["telem_cmd_q_lm"] = np.asarray([r[5] for r in telem], dtype=np.float32)
             arrays["telem_clamp_mask"] = np.asarray([r[6] for r in telem], dtype=np.uint32)
-            arrays["telem_note"] = np.asarray("leg-major order; tau is CHANNEL coords (joint = tau * gear_k)")
+            # 채널각 원값 (영점 캘리브레이션용). 구 브리지가 안 보내면 전부 NaN 이다.
+            ch = np.full((len(telem), NUM_JOINTS), np.nan, dtype=np.float32)
+            for i, r in enumerate(telem):
+                if len(r) > 7 and r[7] is not None:
+                    ch[i] = r[7]
+            arrays["telem_ch_deg_lm"] = ch
+            # 변환 상수를 파일에 박아 둔다 — 소비자가 소스를 찾아볼 필요 없이 좌표를 옮길 수 있게.
+            # 관절토크 = telem_tau_lm_channel * telem_gear_k · 관절각 = (ch_deg − zero_deg)/gear_k
+            arrays["telem_gear_k"] = np.asarray(motions.GEAR_K, dtype=np.float32)
+            arrays["telem_note"] = np.asarray("leg-major order; tau is CHANNEL coords (joint = tau * telem_gear_k)")
         np.savez_compressed(out_path, **arrays)
         n_clamp = int(arrays["clamped_real"].any(axis=1).sum())
         self._status_label.setText(

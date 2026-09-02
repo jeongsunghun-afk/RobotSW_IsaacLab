@@ -37,6 +37,14 @@ JOINT_NAMES: list[str] = [
 DEFAULT_KP: list[float] = [100.0, 50.0, 50.0, 20.0, 100.0, 50.0, 50.0, 20.0]
 DEFAULT_KD: list[float] = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
 
+# 외부 기어단 비율 = 총감속비/7 (leg-major). RL_INTERFACE.md §4.
+# 드라이버는 모터 내장 감속기(전 축 7:1)까지만 보고하고, calf·foot 은 그 뒤에 기어단이 하나 더
+# 있어 총 10.5 · 8.4 다. **펌웨어 버그가 아니라 실물 비율**이다(2026-09-02 기전 정정).
+# ⚠ `real_runner/calib_bipedleg.hpp` MOTOR_CALIB[].gear 와 값 일치 필수 (다른 언어라 중복 정의).
+# 쓰임: ① 채널토크 → 관절토크 (`× GEAR_K`)  ② 채널각 → 관절각 (`÷ GEAR_K`)
+#       ③ 채널게인 → 관절강성 (`× GEAR_K**2`)
+GEAR_K: list[float] = [1.0, 1.0, 1.5, 1.2, 1.0, 1.0, 1.5, 1.2]
+
 # soft joint position limit [rad]. GUI 명령을 이 범위로 클램프해
 # sim의 silent 클램핑(soft_joint_pos_limit_factor)으로 인한 추종 혼란을 방지한다.
 # 2026-08-11: 신규 CAD 리비전 Hind_Leg_URDF2 USD 기준. 좌우 동일 규약(미러 아님) — HL/HR 값 동일.

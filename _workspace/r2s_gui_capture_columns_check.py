@@ -72,8 +72,12 @@ class _Self:
     _status_label = _Lbl()
 
 
+class _Motions:
+    GEAR_K = [1.0, 1.0, 1.5, 1.2, 1.0, 1.0, 1.5, 1.2]
+
+
 ns = dict(np=np, os=os, time=__import__("time"), NUM_JOINTS=NJ, ACTION_SCALE=0.25,
-          DEFAULT_JOINT_POS=[0.0] * NJ, _REPO_ROOT=out_dir)
+          DEFAULT_JOINT_POS=[0.0] * NJ, _REPO_ROOT=out_dir, motions=_Motions)
 exec(compile(textwrap.dedent(ast.get_source_segment(src, fn)), P, "exec"), ns)
 save = ns["_save_policy_recording"]
 
@@ -89,7 +93,9 @@ for i in range(120):
                  [], [], [0.0] * NJ, list(raw), list(raw),
                  None if is_stale else list(tau), None if is_stale else list(ddq)))
     exp_tau.append(tau); exp_ddq.append(ddq); stale.append(is_stale)
-telem = [(float(i) * 0.005, [0.1] * NJ, [0.2] * NJ, [0.3] * NJ, i, [0.4] * NJ, (1 << 16) | i % 7)
+# 마지막 원소 = ch_deg (구 브리지면 None). 절반은 None 으로 둬서 NaN 경로도 검정한다.
+telem = [(float(i) * 0.005, [0.1] * NJ, [0.2] * NJ, [0.3] * NJ, i, [0.4] * NJ, (1 << 16) | i % 7,
+          None if i % 2 else [float(j) + 0.5 for j in range(NJ)])
          for i in range(50)]
 save(_Self(), rows, telem)
 f = sorted(os.listdir(os.path.join(out_dir, "data", "bipedleg_gui")))[-1]
@@ -104,6 +110,10 @@ chk("행 수 보존(묵은 틱을 버리지 않는다)", len(d["t"]) == len(rows
 chk("TELEM 세 열 복구", {"telem_tick", "telem_cmd_q_lm", "telem_clamp_mask"} <= set(d.files))
 chk("telem_tick 단조", np.all(np.diff(d["telem_tick"]) == 1))
 chk("telem_clamp_mask 보존", int(d["telem_clamp_mask"][3]) == ((1 << 16) | 3))
+chk("telem_ch_deg_lm 값 일치(짝수 틱)",
+    np.allclose(d["telem_ch_deg_lm"][0], [j + 0.5 for j in range(NJ)], atol=1e-5))
+chk("ch_deg 없는 틱은 NaN(0 으로 안 채운다)", bool(np.isnan(d["telem_ch_deg_lm"][1]).all()))
+chk("telem_gear_k 기록", np.allclose(d["telem_gear_k"], [1, 1, 1.5, 1.2, 1, 1, 1.5, 1.2]))
 chk("기존 열 불변", d["target_real"].shape == (120, NJ) and d["clamped_real"].shape == (120, NJ))
 
 print("\n전 항목 통과" if ok else "\n실패 있음")

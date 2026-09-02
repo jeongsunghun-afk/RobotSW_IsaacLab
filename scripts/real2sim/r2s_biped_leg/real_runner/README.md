@@ -34,7 +34,7 @@ TELEM 페이싱이 **sysid 캡처의 시간 해상도를 정한다** — `gui_co
 이전에는 TELEM 이 STATE 와 같은 20 ms 게이트 안에 있어 50 Hz 였고, 실제 캡처는 48.1~48.7 Hz 로
 찍혔다. 그 해상도로는 chirp 을 5 Hz 로 올렸을 때 선형보간 오차가 진폭의 **5.2 %** 에 달해
 (관측 잔차 RMS 전체와 맞먹는 크기) armature 를 식별할 수 없다. 200 Hz 면 **0.31 %** 다.
-근거: `reports/_comparisons/pace_bipedleg_foot_coupling_probe/README.md` §23-j.
+근거: `reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README.md` §23-j.
 
 두 가지를 고쳤다:
 
@@ -109,7 +109,8 @@ ps -ef | grep real_runner
 HR_calf, HL_foot, HR_foot]`, 실기 모터는 leg-major `[LtR, LtP, LkP, LaP, RtR, RtP, RkP, RaP]`
 (0~7; SHM 채널 8/9=waist 미사용). 변환은 `calib_bipedleg.hpp` `POLICY_TO_MOTOR` + sign/zero_deg/**gear**.
 
-⚠ **gear** (2026-08-14 추가) — 드라이버가 전 축을 7:1 감속비로 가정해 각도를 보고/수신하므로
+⚠ **gear** (2026-08-14 추가 · 2026-09-02 기전 정정) — 드라이버는 모터 내장 감속기(전 축 7:1)까지만
+보고하고, calf·foot 은 그 뒤에 외부 기어단이 하나 더 있으므로
 채널각 = 관절각 × `gear`(실제감속비/7 = hip 1.0 · thigh 1.0 · calf **1.5** · foot **1.2**).
 `RL_INTERFACE.md` §4. **위치·속도에만** 적용했다. 게인(kp/kd)과 `tau` 는 드라이버 보고값 그대로다.
 
@@ -139,7 +140,7 @@ GUI 가 상수로 찍으면 배포와 도장이 어긋난다. 버전은 "무엇�
 | 패킷 | 크기 | 버전 필드 offset |
 |---|---|---|
 | STATE (9888) | 84 → **85 B** | 84 |
-| TELEM (9889) | 121 → **157 B** | 120(규약)·124(tick)·128~156(cmd_q) |
+| TELEM (9889) | 157 → **189 B** | 120(규약)·124(tick)·128~156(cmd_q)·**157~188(ch_deg, 모터순서)** |
 
 기존 offset 은 매번 **불변**이라 `r2s_udp.py` 는 포맷 **끝에만** 필드를 붙이면 된다
 (STATE 는 `B`, TELEM 은 `B` → `BI8f`). 반영 전까지 **policy_runner·GUI·`comm_check.py` 가 크기

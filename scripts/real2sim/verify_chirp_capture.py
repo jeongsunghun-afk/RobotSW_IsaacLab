@@ -9,7 +9,7 @@ r"""chirp 캡처가 쓸 수 있는 데이터인지 검증한다 — **적합 전
 -----------
 캡처는 GUI 가 **발행한** 목표를 기록한다. 그 뒤 `real_runner` 가 클램프하고 좌표를 변환하는데
 **그 결과는 기록되지 않는다.** 2026-08-12 캡처 18 개 중 7 개가 이 구간에서 오염됐고, 그걸
-모른 채 PACE 가 적합했다 (근거: reports/_comparisons/pace_bipedleg_foot_coupling_probe/README §15~19).
+모른 채 PACE 가 적합했다 (근거: reports/real2sim/_comparisons/pace_bipedleg_foot_coupling_probe/README §15~19).
 
 무엇을 하는가
 -------------
@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-#: 드라이버 감속비 오설정 배율 (leg-major). RL_INTERFACE.md §4.
+#: 외부 기어단 배율 = 총감속비/7 (leg-major). RL_INTERFACE.md §4. 펌웨어 버그가 아니라 실물 비율.
 GEAR_K = np.array([1.0, 1.0, 1.5, 1.2] * 2)
 #: 실기 드라이버 채널 게인 (실기팀 2026-08-12 지정). `motions.DEFAULT_KP/KD` 와 같은 값.
 KP_CH = np.array([100.0, 50.0, 50.0, 20.0] * 2)

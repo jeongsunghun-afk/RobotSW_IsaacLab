@@ -189,6 +189,6 @@ team lead 가 `get_lowstate` 를 보고 "sim 은 규약 0" 이라 판단해 sim 
 
 - 규약·변환 정본: `real_runner/calib_bipedleg.hpp`(`gear`·`COUPLED_CALF_POLICY`·`GAIN_GEAR`),
   `real_runner/r2s_packets.hpp`(`R2S_CONVENTION_VERSION`·패킷 레이아웃)
-- 실기 사양 정본: `RL_INTERFACE.md` — §1 변환 전체 · §2 커플링 · §4 감속비 오설정 · §5 한계와 래핑
+- 실기 사양 정본: `RL_INTERFACE.md` — §1 변환 전체 · §2 커플링 · §4 외부 기어단 · §5 한계와 래핑
 - 변환 지점은 브리지의 `motor_deg_to_joint` / `motor_dps_to_joint` / `joint_to_motor_deg` **셋뿐**이다.
   이 경계 밖에 raw 좌표가 존재하면 이관이 안 끝난 것이다.
