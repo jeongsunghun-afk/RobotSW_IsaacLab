@@ -98,6 +98,29 @@ def _gallop_by_speed(path: str):
     return np.array(pct), ns
 
 
+GAIT_ORDER = ["pace", "trot", "gallop", "bound", "other", "stand"]
+GAIT_COLOR = {"pace": "#2a9d8f", "trot": "#e9c46a", "gallop": "#d1495b",
+              "bound": "#9d4edd", "other": "#adb5bd", "stand": "#495057"}
+
+
+def _composition(path: str):
+    """속도 구간별 보행 구성 [%] — trot 과 pace 를 절대 묶지 않는다.
+
+    둘은 앞/뒤 위상차가 (0.5,0.5) 로 같고 대각이냐 동측이냐로만 갈린다. 묶어 버리면
+    "pace 로 붕괴" 와 "trot 으로 이동" 이 같은 그림이 된다.
+    """
+    lab, vx, keep = _labels(path)
+    rows = []
+    for lo, hi in zip(VX_BINS[:-1], VX_BINS[1:]):
+        m = keep & (vx >= lo) & (vx < hi)
+        labs = [x for x in lab[m] if x != "-"]
+        n = len(labs)
+        c = Counter(labs)
+        rows.append((f"{lo:.1f}-{hi:.1f}", n,
+                     {g: (100 * c[g] / n if n else 0.0) for g in GAIT_ORDER}))
+    return rows
+
+
 HIGH_BIN = VX_BINS.index(2.5)  # [2.5, 3.5) 칸의 인덱스 — VX_BINS 를 고쳐도 따라간다
 
 
@@ -174,9 +197,10 @@ def main() -> int:
     ap.add_argument("--selectivity", nargs="*", default=[], help="라벨=npz (왼쪽 패널)")
     ap.add_argument("--contrast", nargs="*", default=[], help="라벨=rsi_npz,stand_npz (가운데 패널)")
     ap.add_argument("--transition", nargs="*", default=[], help="라벨=npz (오른쪽 패널)")
+    ap.add_argument("--composition", nargs="*", default=[], help="라벨=npz — 속도구간별 보행 구성 누적막대")
     args = ap.parse_args()
 
-    n_panels = sum(bool(x) for x in (args.selectivity, args.contrast, args.transition))
+    n_panels = sum(bool(x) for x in (args.selectivity, args.contrast, args.transition, args.composition))
     fig, axes = plt.subplots(1, max(n_panels, 1), figsize=(5.2 * max(n_panels, 1), 4.3))
     axes = np.atleast_1d(axes)
     ax_i = 0
@@ -253,6 +277,33 @@ def main() -> int:
         ax.set_ylim(0, 100)
         ax.legend(fontsize=7)
         ax.grid(alpha=0.3, axis="y")
+
+    if args.composition:
+        ax = axes[ax_i]
+        ax_i += 1
+        xs, bottoms, ticks = [], None, []
+        blocks = []
+        for si, spec in enumerate(args.composition):
+            label, path = _spec(spec)
+            rows = _composition(path)
+            print(f"[composition] {label}")
+            for name, n, pct in rows:
+                print("    " + f"{name:>9s} n={n:5d} " + " ".join(f"{g}={pct[g]:5.1f}" for g in GAIT_ORDER))
+                ticks.append(f"{name}\n{label}" if len(args.composition) > 1 else name)
+                blocks.append(pct)
+        x = np.arange(len(blocks))
+        bottoms = np.zeros(len(blocks))
+        for g in GAIT_ORDER:
+            vals = np.array([b[g] for b in blocks])
+            ax.bar(x, vals, 0.72, bottom=bottoms, color=GAIT_COLOR[g], label=g)
+            bottoms += vals
+        ax.set_xticks(x)
+        ax.set_xticklabels(ticks, fontsize=7)
+        ax.set_ylabel("share of rollouts [%]")
+        ax.set_xlabel("commanded forward speed [m/s]")
+        ax.set_title("What gait, exactly?\n(trot and pace kept apart)", fontsize=11)
+        ax.legend(fontsize=7, ncol=2)
+        ax.set_ylim(0, 100)
 
     fig.suptitle(args.title, fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.94))

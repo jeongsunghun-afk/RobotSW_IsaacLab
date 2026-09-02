@@ -107,7 +107,10 @@ def main() -> int:
     # (실제로 cmd 0~0.5 칸에 1.06 m/s 가 찍혔다 — 직전까지 빠르게 달리던 구간이 섞인 것).
     vxa_e = np.asarray(d["vx_act"])[sl].mean(axis=0) if "vx_act" in d.files else None
     print("\n[명령 속도축 — 선회 합산]")
-    hdr2 = f"{'vx cmd':>14s}{'n':>7s}{'gallop%':>9s}{'pace%':>8s}{'trot%':>8s}{'stand%':>8s}"
+    # ★ trot 과 pace 는 앞/뒤 위상차가 (0.5,0.5) 로 같고 대각이냐 동측이냐로만 갈린다.
+    # 둘을 묶어 보고하면 "pace 로 붕괴" 와 "trot 으로 이동" 이 구별되지 않으므로 항상 따로 낸다.
+    # other 도 낸다 — trot 과 pace 사이의 어중간한 위상(대각 어긋남 0.1~0.4)이 여기로 떨어진다.
+    hdr2 = f"{'vx cmd':>14s}{'n':>7s}{'gallop%':>9s}{'pace%':>8s}{'trot%':>8s}{'stand%':>8s}{'other%':>8s}"
     if vxa_e is not None:
         hdr2 += f"{'실제 vx':>10s}"
     print(hdr2)
@@ -121,7 +124,7 @@ def main() -> int:
         c, n = Counter(labs), len(labs)
         row = (f"[{lo:.1f},{hi:.1f})".rjust(14) + f"{n:7d}"
                f"{100 * (c['gallop'] + c['bound']) / n:9.1f}{100 * c['pace'] / n:8.1f}"
-               f"{100 * c['trot'] / n:8.1f}{100 * c['stand'] / n:8.1f}")
+               f"{100 * c['trot'] / n:8.1f}{100 * c['stand'] / n:8.1f}{100 * c['other'] / n:8.1f}")
         if vxa_e is not None:
             row += f"{np.median(vxa_e[m]):10.2f}"
         print(row)
