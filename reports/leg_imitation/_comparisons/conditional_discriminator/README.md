@@ -117,3 +117,37 @@ gallop 한다. 이전 모든 팔에서 이 조건의 gallop 비율은 0.0% 였�
 셋째 줄(램프)이 pace 인 것도 예상대로다 — 램프는 명령을 0 에서 시작해 초반을 저속으로 보내므로
 gallop attractor 에 못 들어간다(앞선 문서에서 확인).
 세 클립 모두 `gait_classify.py` 로 분류해 캡션을 검증했다.
+
+## 동일 시점 추적 (2026-09-03 09:45, 2048 env · 정지/RSI 출발) — 격차가 벌어진다
+
+앞 절의 유보("baseline 도 10k~20k 에 gallop 이 생기므로 시점 효과일 수 있다")를 **더 늦은
+체크포인트**로 가른다. baseline 은 25k·30k, condmatch 는 23k(측정 시점의 최신)를 쟀다.
+
+![동일 시점 추적](figures/cond_disc_same_iter.png)
+
+| cmd 2.5~3.5 gallop | 정지 출발 | RSI 출발 | 저속 cmd 0.5~1.5 gallop (RSI) |
+|---|---|---|---|
+| baseline @20k (앞 절) | 0.0% | 0.0% | — |
+| baseline @25k | **0.0%** | 미측정 | — |
+| baseline @30k | **4.3%** | 20.9% | **40.0%** |
+| condmatch @20k (앞 절) | 28.4% | 30.3% | 0.0% |
+| condmatch @23k | **55.4%** | 44.4% | 0.0% |
+
+1. **시점 효과가 아니다.** baseline 은 30k 까지 가도 정지 출발 gallop 이 4.3% 다. condmatch 는
+   20k → 23k 사이에 28.4 → 55.4% 로 계속 오른다.
+2. **baseline @30k 의 RSI gallop 20.9% 는 선택성이 없다** — cmd 0.5~1.5 에서 40.0%, 1.5~2.5 에서
+   29.5%, 2.5~3.5 에서 20.9% 로 **속도가 오를수록 줄어든다.** 초기 프레임이 gallop 이면 명령과
+   무관하게 그 걸음을 이어가는 `../gait_attractor_pace_vs_gallop/` 의 그림이다. condmatch 는 정지
+   출발에서 0.0 → 20.4 → 55.4% 로 단조 증가하고 저속에서는 0 이다.
+3. **대가: 정지 출발 저·중속에서 `stand` 가 늘었다.** condmatch @23k 정지 출발은 cmd 0.5~1.5 에서
+   22.0%, 1.5~2.5 에서 9.5% 가 2 s 창 끝까지 서 있다(baseline @30k 0.6% / 0.0%, condmatch RSI 출발
+   2.6% / 0.8%). 정지→보행 진입 실패(08-26 저속 개시 히스테리시스 판정)가 조건부 팔에서 더
+   자주 나온다. 실제 평균 vx 는 0.82 / 1.92 로 baseline(0.93 / 2.02) 보다 약간 낮다.
+
+★ 판별자 게이트(`check_cond_disc_leak.py`, shuffled ≈ clip_mean)가 "D 는 조건을 안 본다" 고 읽은
+것과 이 결과는 여전히 상충한다. D(expert) 의 배치 평균은 조건 열의 기여를 잴 수 있는 통계가
+아닐 수 있다 — 조건이 바꾸는 것은 **정책 쪽** 보상 지형(어느 kinematics 가 어느 명령에서 점수를
+받는가)이지 expert 배치의 평균 점수가 아니다. 게이트를 정책 표본으로 다시 재야 한다.
+
+원자료: `metrics/same_iter_surveys.md`, `metrics/same_iter/*.npz`. 조사 도구는 앞 절과 같다
+(`_workspace/leg/gait_survey_multienv.py`, `--n_envs 2048 --dur_s 8`, 정지 출발은 `--all_stand`).
