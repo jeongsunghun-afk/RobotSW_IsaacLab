@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """참조 모션 클립 자체의 보행 종류를 분류한다.
 
 정책이 참조 상태에서 리셋돼 그 걸음을 이어받는 것이라면, 데이터셋에 gallop 계열이 있어야 한다.

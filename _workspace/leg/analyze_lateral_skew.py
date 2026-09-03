@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """보행의 좌우 쏠림(비대칭) 정량화.
 
 달성률 지표는 body-frame vx 하나만 보므로 "앞다리·뒷다리가 각각 한쪽으로 쏠린" 자세를
