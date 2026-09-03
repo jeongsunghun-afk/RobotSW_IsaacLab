@@ -33,6 +33,14 @@ parser.add_argument(
     "고속 attractor 를 눈으로 보려면 이 옵션으로 처음부터 고속을 줘야 한다. `--hold_s` 가 길이가 된다.",
 )
 parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="env 난수 시드. 기본은 미설정이라 **실행마다 롤아웃이 달라진다**(같은 정책·같은 플래그로 "
+    "8 회를 돌려도 결과가 다른 이유). 고정하면 두 조건을 짝지어 비교할 수 있다 — 예: 렌더 ON/OFF 가 "
+    "롤아웃 자체를 바꾸는지.",
+)
+parser.add_argument(
     "--no_video",
     action="store_true",
     help="mp4 녹화를 건너뛴다(npz 만 저장). 렌더가 램프의 지배적 비용이라 수십 배 빨라지므로 "
@@ -166,6 +174,8 @@ else:
 os.makedirs(args_cli.out_dir, exist_ok=True)
 
 env_cfg = parse_env_cfg(TASK, device="cuda:0", num_envs=1)
+if args_cli.seed is not None:
+    env_cfg.seed = args_cli.seed
 
 # ── 학습 run 설정 복원 ────────────────────────────────────────────
 # parse_env_cfg 는 **현재 소스 cfg 기본값**을 쓴다. 학습이 CLI 로 덮어쓴 값(motion_file,
@@ -482,6 +492,7 @@ np.savez(
     heading_ki=float(args_cli.heading_ki),
     heading_target=float(HEADING_TARGET),
     ramp_s=args_cli.ramp_s,
+    seed=(-1 if args_cli.seed is None else args_cli.seed),
     checkpoint=args_cli.checkpoint,
     motion_file=str(env_cfg.motion_file),
     reset_strategy=str(env_cfg.reset_strategy),
