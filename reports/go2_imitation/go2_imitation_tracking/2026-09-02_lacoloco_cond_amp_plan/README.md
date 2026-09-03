@@ -264,3 +264,20 @@ kinematics–조건 정합성의 기여는 0.935→0.753 의 0.18 뿐이고, 라
 - run B' `drail+speed+matched`: `…_condmatch_drail_cmdchg4s_ep20_velscale15_ds14_wcmd_vmax32` (GPU1)
 - 기준선과 단일변수 비교를 지키기 위해 `schedule` 은 기준선과 같은 adaptive 로 두었다. σ 가 다시 발산하면 그때 `agent.algorithm.schedule=fixed` 를 건다.
 - 게이트: 5k 에서 leak 스크립트 재실행 — `uniform ≈ matched` 이고 σ 가 0.4 대로 수렴해야 통과.
+
+---
+
+## 11. 2차 run 결과 — 조건은 중복 정보, DRAIL 은 과강 (2026-09-03 08:48)
+
+`figures/train_curves_cond_runs.png` (기준선 / run A / B / A' / B' 학습 곡선).
+
+| run | iter | σ | mean_R | amp | lin_vel | D(e) | D(pi) |
+|---|---|---|---|---|---|---|---|
+| 기준선 `{mlp, none}` | 20000 | 0.407 | 669.6 | 22.0 | 45.2 | 0.80 | 0.19 |
+| run A' `mlp+speed`, command_matched | 20000 | **0.345** | 678.1 | 24.6 | 43.5 | 0.79 | 0.21 |
+| run B' `drail+speed`, command_matched | 16000 | **3.434** | 515.8 | 8.4 | 43.7 | 0.94 | 0.06 |
+
+- **run A'**: 건강(σ 발산 소멸, 기준선과 같은 대역). 그러나 `model_20000` 게이트 — clip 0.788 / **shuffled 0.805** / uniform 0.808 / matched 0.797 / dropped 0.785 — 라벨을 뒤섞어도 D 가 안 떨어진다. 누설은 사라졌지만 **판별기가 조건을 전혀 쓰지 않는다**(무조건부로 퇴화). 구조적 이유: AMP 관측에 root 선속도가 이미 있어 정책이 속도를 추종하는 한 명령 조건은 관측 속도와 중복이다. 무조건부 D 도 "이 속도에서 이 걸음"을 이미 본다. 학습 지표가 기준선과 같은 것과 정합. 걸음 종류 변화 여부는 20k 램프(≥4회·`--all_stand`·Hilbert)로만 확정 가능 — 미실행.
+- **run B'**: 조건 누설을 고쳐도 σ 1.04→3.43 발산, style 1/3, D(e) 0.94 → **DRAIL 판별기 자체가 과강**(disc lr 2.5e-4 vs LaCoLoco 2e-5, GP·logit reg 없음). 사용자 결정으로 16.3k 에서 중단.
+- **run C (09-03 09:13, GPU1)**: `2026-09-03_09-13-46_drail_lr25e6_cmdchg4s_ep20_velscale15_ds14_wcmd_vmax32` = `drail + none` + `agent.amp.discriminator_learning_rate=2.5e-5` (이름의 `lr25e6` 은 2.5e-5). DRAIL 단독 효과 판정용. 게이트: σ 0.4 대 수렴, amp 기준선 대역.
+- go2 이식은 보류 — 조건화가 중복 정보로 드러난 이상 우선순위가 낮다. 게이트 스크립트는 MLP 체크포인트만 읽는다(DRAIL 로더 후속).
