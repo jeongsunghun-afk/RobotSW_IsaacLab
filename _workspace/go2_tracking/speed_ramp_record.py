@@ -95,6 +95,21 @@ parser.add_argument(
          "그대로 보여줄 때 쓴다. 16 env 정도가 읽기 좋다.",
 )
 parser.add_argument(
+    "--seed", type=int, default=None,
+    help="env RNG 시드. **기본은 None(시드 없음)이라 실행마다 DR 추첨이 달라진다.** "
+         "2026-09-03 실측: 같은 체크포인트를 두 번 재니 `cmd 4.0` median 이 2.429 ↔ 0.587 로 "
+         "1.84 m/s 흔들렸고, env 별 궤적은 아예 다른 개체가 됐다(env25 가 한 번은 낙상, 한 번은 "
+         "4.037 m/s 완주). ★ arm 간 비교나 `--cam_env` 로 개체를 고를 때는 **반드시 시드를 고정**할 것 "
+         "— 안 그러면 npz 로 고른 개체와 영상 속 개체가 다른 로봇이다.",
+)
+parser.add_argument(
+    "--cam_env", type=int, default=0,
+    help="추종 카메라가 따라갈 env 인덱스 (기본 0). 낙상률이 높은 정책은 env0 이 초반에 넘어져 "
+         "영상이 '누워 있는 로봇'만 보여주는 일이 잦다. **어느 개체를 골랐는지와 고른 기준을 "
+         "반드시 캡션에 적을 것** — 안 적으면 체리피킹과 구분되지 않는다. "
+         "관절 시계열(jpos 등)은 이 값과 무관하게 env0 만 저장한다.",
+)
+parser.add_argument(
     "--no_dr", action="store_true",
     help="domain randomization 을 끈다. 기본 cfg 는 `push_robot=True`(5 s 마다 최대 1.0 m/s 수평 킥) "
          "+ obs 노이즈 + 마찰 0.4~1.4 + payload −1~+2 kg 이라 램프 각 stage(4.5 s)가 거의 매번 "
@@ -204,6 +219,21 @@ os.makedirs(args_cli.out_dir, exist_ok=True)
 env_cfg = parse_env_cfg(TASK, device="cuda:0", num_envs=args_cli.num_envs)
 env_cfg.early_termination = False  # 넘어져도 시퀀스 끝까지 연속 기록
 env_cfg.episode_length_s = 1e6  # 리셋(순간이동) 없이 연속 추종
+# ★ 2026-09-03: env 의 명령 재샘플이 **살아났다**(`_get_dones` 가 `_post_physics_step` 을 부른다).
+#   램프는 매 스텝 `base._lin_vel_cmd` 에 자기 프로파일을 써넣는데, 그 뒤 `env.step()` 안에서
+#   타이머가 만료된 env 의 명령이 **랜덤 값으로 덮어써진다.** 정책은 램프가 의도한 명령이 아니라
+#   재샘플된 명령을 보고, npz 에는 램프의 의도값이 기록돼 **조용히 틀린 측정**이 된다.
+#   램프는 명령을 자기가 통제해야 하므로 재샘플 주기를 전체 시퀀스보다 길게 밀어 둔다.
+#   `--free_cmd` 는 env 가 정한 명령을 그대로 따라가는 모드라 이 처리를 하지 않는다.
+if not args_cli.free_cmd:
+    env_cfg.tar_change_time_min = 1e9
+    env_cfg.tar_change_time_max = 1e9
+    print(">>> [cmd] 명령 재샘플 OFF (tar_change_time 1e9) — 램프가 명령을 통제한다")
+if args_cli.seed is not None:
+    env_cfg.seed = args_cli.seed
+    print(f">>> [seed] env RNG 시드 {args_cli.seed} 고정 — DR 추첨이 실행 간 재현된다")
+else:
+    print(">>> [seed] 시드 없음 — 실행마다 DR 추첨이 달라진다(arm 비교/개체 선택 시 --seed 를 줄 것)")
 if args_cli.joint_vel_noise >= 0.0:
     _prev = env_cfg.dr.joint_vel_noise
     env_cfg.dr.joint_vel_noise = args_cli.joint_vel_noise
@@ -546,7 +576,7 @@ def track_camera():
         _cam_state.set_position_world(Gf.Vec3d(cx - 0.5 * span - 8.0, cy, 0.35 * span + 5.0), True)
         _cam_state.set_target_world(Gf.Vec3d(cx + 0.5 * span, cy, 0.0), True)
         return
-    bp = base._robot.data.body_pos_w[0, base.ref_body_index].cpu().numpy()
+    bp = base._robot.data.body_pos_w[args_cli.cam_env, base.ref_body_index].cpu().numpy()
     eye = Gf.Vec3d(*(float(bp[i] + CAM_EYE_OFFSET[i]) for i in range(3)))
     tgt = Gf.Vec3d(*(float(bp[i] + CAM_TGT_OFFSET[i]) for i in range(3)))
     _cam_state.set_position_world(eye, True)

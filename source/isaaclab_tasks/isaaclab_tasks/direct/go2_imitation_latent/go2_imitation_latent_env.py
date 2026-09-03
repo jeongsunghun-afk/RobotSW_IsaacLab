@@ -244,14 +244,22 @@ class Go2ImitationLatentEnv(DirectRLEnv):
             self._inv_ref = torch.cholesky_inverse(_L)
             self._logdet_ref = float(2.0 * torch.log(torch.diagonal(_L)).sum())
             self._diag_ref = torch.diag(self._var_ref)
-            self._full_shrink = (
-                float(lat.full_shrink) if lat.full_shrink is not None else float(_ref["full_shrink"])
-            )
+            self._full_shrink = float(lat.full_shrink) if lat.full_shrink is not None else float(_ref["full_shrink"])
             _c_def, _o_def = float(_ref["c_kl_full"]), float(_ref["offset_full"])
         else:
             _c_def, _o_def = float(_ref["c_kl"]), float(_ref["offset"])
         self._c_kl = float(lat.c_kl) if lat.c_kl is not None else _c_def
         self._kl_offset = float(lat.kl_offset) if lat.kl_offset is not None else _o_def
+
+        # D_e -> r_style 매핑. "exp" 는 정책이 멀 때 보상·gradient 가 함께 죽는다 (cfg 주석).
+        self._map = str(getattr(lat, "style_reward_map", "exp"))
+        if self._map not in ("exp", "power"):
+            raise ValueError(f"style_reward_map 은 'exp' 또는 'power' 여야 한다: {self._map!r}")
+        if self._map == "power":
+            _a_key = "a_kl_full" if self._stat == "full" else "a_kl"
+            if lat.style_reward_a is None and _a_key not in _ref:
+                raise KeyError(f"ref_stats 에 '{_a_key}' 가 없다 — build_go2_latent_ref_stats.py 를 다시 돌려야 한다.")
+            self._a_kl = float(lat.style_reward_a) if lat.style_reward_a is not None else float(_ref[_a_key])
         self._window_n = int(lat.window_n)
 
         # 전이 쌍 간격 [s] — 인코더 학습 설정이 정한다. policy dt 의 정수배가 아니므로 보간한다.
@@ -265,7 +273,8 @@ class Go2ImitationLatentEnv(DirectRLEnv):
             f" → x_vae 링버퍼 깊이 {_depth} (보간 가중치 {self._x_lag_frac:.4f})"
         )
         print(
-            f"[Go2ImitationLatentEnv] stat {self._stat} · window_n {self._window_n} · c_kl {self._c_kl:.5f} ·"
+            f"[Go2ImitationLatentEnv] stat {self._stat} · map {self._map} · window_n {self._window_n} ·"
+            f" c_kl {self._c_kl:.5f} ·"
             f" offset {self._kl_offset:.4f} nat · 참조 train 세션 {len(_ref['train_sessions'])}개"
         )
 
@@ -1000,7 +1009,12 @@ class Go2ImitationLatentEnv(DirectRLEnv):
 
         ready = self._z_count >= self._window_n
         self._latent_kl = torch.where(ready, d_e, torch.zeros_like(d_e))
-        r = torch.exp(-self._c_kl * (d_e - self._kl_offset))
+        if self._map == "power":
+            # r = (offset / D_e) ** a — 보정점에서 exp 판과 같고 꼬리에서만 완만하다.
+            # D_e 는 KL 이라 이론상 >= 0 이지만 수축·수치오차로 0 근처가 될 수 있어 하한을 둔다.
+            r = (self._kl_offset / d_e.clamp(min=1e-3)) ** self._a_kl
+        else:
+            r = torch.exp(-self._c_kl * (d_e - self._kl_offset))
         self._style_reward = torch.where(ready, r, torch.full_like(r, self.cfg.latent.neutral_reward))
 
     # ──────────────────────────────────────────────────────────

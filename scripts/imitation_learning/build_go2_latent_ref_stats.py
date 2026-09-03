@@ -106,10 +106,8 @@ def main() -> None:
     )
     p.add_argument("--out", default=None, help="기본값은 체크포인트 옆의 latent_ref_stats.pt")
     p.add_argument("--window_n", type=int, default=8, help="env 별 시간창 길이 (전이 쌍 수)")
-    p.add_argument("--cov_reg", type=float, default=1e-4,
-                   help="참조 전체 공분산의 대각 정칙화 (Cholesky 안정성).")
-    p.add_argument("--full_shrink", type=float, default=0.20,
-                   help="창 공분산 수축계수. N<D 라 표본 공분산이 특이하다.")
+    p.add_argument("--cov_reg", type=float, default=1e-4, help="참조 전체 공분산의 대각 정칙화 (Cholesky 안정성).")
+    p.add_argument("--full_shrink", type=float, default=0.20, help="창 공분산 수축계수. N<D 라 표본 공분산이 특이하다.")
     p.add_argument("--var_floor", type=float, default=1e-4)
     p.add_argument("--max_windows", type=int, default=200000)
     p.add_argument("--seed", type=int, default=0)
@@ -230,9 +228,25 @@ def main() -> None:
     qf = {f"p{k}": float(torch.quantile(d_f_t, k / 100.0)) for k in (1, 5, 25, 50, 75, 95, 99)}
     iqr_f = max(qf["p75"] - qf["p50"], 1e-6)
     c_kl_full = float(-np.log(0.9) / iqr_f)
-    print(f"[D_e full] expert 창 분위수 " + " · ".join(f"{k} {v:.3f}" for k, v in qf.items()))
-    print(f"[보정 full] shrink {args.full_shrink} · offset {qf['p50']:.3f} nat · "
-          f"p75-p50 {iqr_f:.3f} → c_kl {c_kl_full:.5f}")
+    print("[D_e full] expert 창 분위수 " + " · ".join(f"{k} {v:.3f}" for k, v in qf.items()))
+    print(
+        f"[보정 full] shrink {args.full_shrink} · offset {qf['p50']:.3f} nat · "
+        f"p75-p50 {iqr_f:.3f} → c_kl {c_kl_full:.5f}"
+    )
+
+    # ── 2c) power 매핑 지수 ────────────────────────────────────
+    # exp 매핑 `exp(-c(D-off))` 는 D 가 offset 에서 수십 배 멀어지면 보상과 gradient 가
+    # 수치적으로 0 이 된다 (2026-09-01 실측: D~1225 에서 r=2e-25, |dr/dD|=1e-26,
+    # env 간 std 0.10 으로 V3 게이트 0.391 미달 → 신호 소멸). KL 은 로그 스케일 양이므로
+    # 같은 보정 규칙(expert p75 -> 0.9)을 **로그축**에서 적용한다:
+    #     r = (offset / D_e) ** a,   a = -ln(0.9) / (ln p75 - ln p50)
+    # 보정점에서 exp 판과 정확히 같은 값을 주고, 꼬리에서만 완만해진다.
+    # ★ D_e 의 **단조 변환**이므로 AUROC 기반 판정(§8 통계량 선택)은 그대로 유효하다.
+    a_kl = float(-np.log(0.9) / max(np.log(q["p75"]) - np.log(q["p50"]), 1e-9))
+    a_kl_full = float(-np.log(0.9) / max(np.log(qf["p75"]) - np.log(qf["p50"]), 1e-9))
+    print(f"[보정 power] a(diag) {a_kl:.4f} · a(full) {a_kl_full:.4f} (무차원)")
+    for _n, _d in (("p50", qf["p50"]), ("p75", qf["p75"]), ("p95", qf["p95"])):
+        print(f"    full expert {_n} (D_e {_d:7.3f}) -> r_style {(qf['p50'] / _d) ** a_kl_full:.4f}")
 
     out = args.out or os.path.join(os.path.dirname(args.ckpt), "latent_ref_stats.pt")
     torch.save(
@@ -252,6 +266,8 @@ def main() -> None:
             "full_shrink": float(args.full_shrink),
             "d_e_full_quantiles": qf,
             "c_kl_full": c_kl_full,
+            "a_kl": a_kl,
+            "a_kl_full": a_kl_full,
             "offset_full": qf["p50"],
             "n_pairs": int(len(z_ref)),
             "n_windows": int(len(d_e_t)),

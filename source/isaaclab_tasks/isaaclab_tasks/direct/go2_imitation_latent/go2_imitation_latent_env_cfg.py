@@ -177,6 +177,23 @@ class LatentStyleCfg:
     #: 창 길이 N=8 < latent 18 이라 표본 공분산이 특이하므로 대각 참조 쪽으로 수축한다.
     full_shrink: float | None = None
 
+    #: ``D_e`` → ``r_style`` 매핑. ``"exp"`` 는 ``exp(-c_kl(D_e-offset))``(구 기본값),
+    #: ``"power"`` 는 ``(offset/D_e) ** a`` 다.
+    #:
+    #: ★ 2026-09-01: ``"exp"`` 는 정책이 expert 에서 멀 때 **보상과 gradient 가 함께 죽는다**.
+    #: `latentFULL_stock` 실측에서 ``D_e`` 가 1,200~1,600 에 머무는 동안 ``r_style`` 은 2e-25,
+    #: env 간 std 는 **0.10**(V3 게이트 0.391 미달)이었다. 상수나 다름없는 보상은 PPO
+    #: advantage 에서 value baseline 에 흡수되므로 스타일 항이 사실상 없는 것과 같고,
+    #: 그동안 lerp 는 보상 절반을 거기에 쓴다(같은 구간에서 task 추종이 0.886 → 0.699 로 하락).
+    #: ``"power"`` 는 보정점(expert p50/p75)에서 ``"exp"`` 와 **같은 값**을 주면서 꼬리에서만
+    #: 완만해진다 — D_e 1,225 에서 r 0.104 · |dr/dD| 3.9e-5 로 gradient 가 21자릿수 살아난다.
+    #: ★ ``D_e`` 의 단조 변환이라 AUROC 기반 통계량 선택은 그대로 유효하다.
+    style_reward_map: str = "exp"
+
+    #: ``style_reward_map="power"`` 의 지수. ``None`` 이면 참조 통계의 값
+    #: (``a = -ln(0.9) / (ln p75 - ln p50)``, exp 판과 같은 보정 규칙을 로그축에 적용).
+    style_reward_a: float | None = None
+
     #: 보상 민감도 [1/nat]. ``None`` 이면 참조 통계가 expert ``D_e`` 분포에서 정한 값을 쓴다
     #: (권장). ★ Phase 2 검증 §5 의 ``c_kl=0.01`` 은 ``d_step`` 기준값이라 여기 쓰면 안 된다.
     c_kl: float | None = None
@@ -400,7 +417,19 @@ class Go2ImitationLatentEnvCfg(DirectRLEnvCfg):
 
     # ── 조기 종료 ───────────────────────────────────────────────
     early_termination: bool = True
-    termination_height: float = 0.15  # base 높이 임계값 (m)
+    #: base 높이 종료 임계값 [m].
+    #:
+    #: 참조 모션 754 클립 · 140,130 프레임의 root z 최솟값은 **0.2522 m** 이고 p1 은 0.2636 m 다 —
+    #: 데이터는 이 아래로 절대 내려가지 않는다. 종전 값 0.15 는 그보다 10 cm 낮아
+    #: **참조 분포 밖의 넓은 영역을 합법으로 열어 두고 있었고**, 정책은 정확히 그 틈에 자리잡았다:
+    #: 12.4 Hz 저진폭 진동 포복이 `base_h` 0.166 m — 임계선 위 **1.6 cm** 에서 굴러다녔다
+    #: (제약 경계를 끌어안는 것은 reward hacking 의 서명이다).
+    #: 스타일 통계량은 이 포복을 AUROC 1.000 으로 거부하지만, 통계량만으로는 그 basin 에서
+    #: 굴러다니는 것 자체를 막지 못한다.
+    #: 0.22 는 참조 최솟값보다 13% 아래라 참조가 하는 동작은 전부 합법으로 남는다 — 튜닝값이
+    #: 아니라 데이터가 정한 값이다. 근거: `reports/go2_imitation/go2_imitation_tracking/`
+    #: `2026-09-01_pose_dropout_and_statistic/README.md` §14.
+    termination_height: float = 0.22
     contact_force_threshold: float = 500.0  # base 접촉 판정 (N)
     roll_termination_deg: float = 70.0
     pitch_termination_deg: float = 70.0

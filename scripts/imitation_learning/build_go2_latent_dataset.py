@@ -48,9 +48,18 @@ CORE_CATEGORIES = ["walk", "run", "trot"]
 
 #: 보행이 포함된 전이 동작. 논문 "Walk Like Dogs" 가 말하는 mode transition 학습용.
 TRANSITION_CATEGORIES = [
-    "stand_walk", "sit_walk", "run_walk", "walk_run", "lie_walk",
-    "sit_trot", "stand_trot", "lie_trot", "trot_sit", "trot_lie",
-    "sit_run", "run_sit",
+    "stand_walk",
+    "sit_walk",
+    "run_walk",
+    "walk_run",
+    "lie_walk",
+    "sit_trot",
+    "stand_trot",
+    "lie_trot",
+    "trot_sit",
+    "trot_lie",
+    "sit_run",
+    "run_sit",
 ]
 
 #: 제외. ``spin`` 계열은 제자리 선회가 |wz| 5~6 rad/s 라 로봇 추종 범위 밖이고,
@@ -89,9 +98,17 @@ def parse_name(path: str) -> tuple[bool, str, int, int] | None:
     return bool(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))
 
 
-def main() -> None:
+def _md5(path: str) -> str:
+    """파일 md5. 컨텍스트 매니저로 열어 핸들 누수를 막는다."""
+    with open(path, "rb") as fh:
+        return hashlib.md5(fh.read()).hexdigest()
+
+
+def main() -> None:  # noqa: C901 - 데이터셋 빌드 CLI (단계별 분기 나열, 분해 이득 없음)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--src_dir", default="/home/lgb/Dog_Motion_data_3D/mujoco_retarget_go2/smr_txt_retarget_dataset_go2_v0")
+    p.add_argument(
+        "--src_dir", default="/home/lgb/Dog_Motion_data_3D/mujoco_retarget_go2/smr_txt_retarget_dataset_go2_v0"
+    )
     p.add_argument("--dst_dir", required=True, help="PKL 출력 디렉터리")
     p.add_argument("--report_dir", default=None, help="통계 CSV/JSON 출력 디렉터리")
     p.add_argument("--vx_min", type=float, default=-0.5, help="명령 봉투 전진속도 하한 [m/s]")
@@ -100,13 +117,19 @@ def main() -> None:
     p.add_argument("--min_inside", type=float, default=0.90, help="봉투 내부 프레임 비율 하한 (클립 단위 유지 기준)")
     p.add_argument("--min_frames", type=int, default=30, help="클립 최소 프레임 수")
     p.add_argument("--val_sessions", type=int, default=6, help="검증용으로 뗄 세션 수")
-    p.add_argument("--split_mode", choices=["random", "stratified"], default="stratified",
-                   help="stratified: 각 카테고리가 val 에서 속도 간격을 갖도록 세션을 고른다. "
-                        "random 은 walk 편중이라 run/trot 게이트를 돌릴 수 없다.")
-    p.add_argument("--strat_categories", nargs="*", default=["trot", "run", "walk"],
-                   help="층화 대상 카테고리 (희소한 것부터)")
-    p.add_argument("--strat_min_gap", type=float, default=0.4,
-                   help="카테고리별로 val 안에서 확보할 최소 평균속도 차 [m/s]")
+    p.add_argument(
+        "--split_mode",
+        choices=["random", "stratified"],
+        default="stratified",
+        help="stratified: 각 카테고리가 val 에서 속도 간격을 갖도록 세션을 고른다. "
+        "random 은 walk 편중이라 run/trot 게이트를 돌릴 수 없다.",
+    )
+    p.add_argument(
+        "--strat_categories", nargs="*", default=["trot", "run", "walk"], help="층화 대상 카테고리 (희소한 것부터)"
+    )
+    p.add_argument(
+        "--strat_min_gap", type=float, default=0.4, help="카테고리별로 val 안에서 확보할 최소 평균속도 차 [m/s]"
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dry_run", action="store_true", help="PKL 을 쓰지 않고 통계만 낸다")
     args = p.parse_args()
@@ -114,8 +137,10 @@ def main() -> None:
     categories = CORE_CATEGORIES + TRANSITION_CATEGORIES
     print(f"[선별] 카테고리 {len(categories)}개: {', '.join(categories)}")
     print(f"[제외] {EXCLUDED_NOTE}")
-    print(f"[봉투] vx ∈ [{args.vx_min}, {args.vx_max}] m/s,  |wz| <= {args.wz_max} rad/s,"
-          f"  클립 유지 조건 내부비율 >= {args.min_inside:.0%}")
+    print(
+        f"[봉투] vx ∈ [{args.vx_min}, {args.vx_max}] m/s,  |wz| <= {args.wz_max} rad/s,"
+        f"  클립 유지 조건 내부비율 >= {args.min_inside:.0%}"
+    )
 
     # ── 1) 스캔 + 파싱 ──────────────────────────────────────────────
     clips, unparsed = [], []
@@ -126,7 +151,8 @@ def main() -> None:
                 unparsed.append(f)
                 continue
             try:
-                raw = json.load(open(f))
+                with open(f) as fh:
+                    raw = json.load(fh)
                 frames = np.array(raw["Frames"], dtype=np.float64)
             except Exception as exc:  # noqa: BLE001
                 unparsed.append(f"{f} ({exc})")
@@ -135,11 +161,19 @@ def main() -> None:
                 unparsed.append(f"{f} (열 {frames.shape})")
                 continue
             mirror, session, f0, f1 = info
-            clips.append({
-                "path": f, "cat": cat, "mirror": mirror, "session": session,
-                "f0": f0, "f1": f1, "raw": raw, "frames": frames,
-                "md5": hashlib.md5(open(f, "rb").read()).hexdigest(),
-            })
+            clips.append(
+                {
+                    "path": f,
+                    "cat": cat,
+                    "mirror": mirror,
+                    "session": session,
+                    "f0": f0,
+                    "f1": f1,
+                    "raw": raw,
+                    "frames": frames,
+                    "md5": _md5(f),
+                }
+            )
     print(f"\n[1] 스캔: {len(clips)} 파싱 성공, {len(unparsed)} 실패")
     for u in unparsed[:5]:
         print(f"      실패: {os.path.basename(u)}")
@@ -188,7 +222,7 @@ def main() -> None:
     union_frames = sum(len(v) for v in union.values())
     md5_frames = sum(len(c["frames"]) for c in kept)
 
-    print(f"\n[4] 규모 — 두 수치를 반드시 병기한다:")
+    print("\n[4] 규모 — 두 수치를 반드시 병기한다:")
     print(f"      md5-dedup 프레임 (미러 포함): {md5_frames:,}")
     print(f"      세션 합집합 프레임 (미러 제외): {union_frames:,}  ({union_frames / 3600:.2f}분 @60fps)")
     print(f"      원 녹화 세션: {len(sessions)}개   클립: {len(kept)} (미러 제외 {len(nonmirror)})")
@@ -212,9 +246,12 @@ def main() -> None:
     ge3 = sum(1 for a in range(nb_v) for b in range(nb_w) if len(grid[a][b]) >= 3)
     total_bins = nb_v * nb_w
     print(f"\n[5] bin × 세션 다양성 ({nb_v}×{nb_w} = {total_bins}):")
-    print(f"      채움 {filled}/{total_bins} ({100 * filled / total_bins:.1f}%),"
-          f"  세션>=3 {ge3}/{total_bins} ({100 * ge3 / total_bins:.1f}%)")
-    print(f"      {'vx \\ wz':>13s}" + "".join(f"{wz_edges[b]:+8.1f}" for b in range(nb_w)))
+    print(
+        f"      채움 {filled}/{total_bins} ({100 * filled / total_bins:.1f}%),"
+        f"  세션>=3 {ge3}/{total_bins} ({100 * ge3 / total_bins:.1f}%)"
+    )
+    _hdr = "vx \\ wz"
+    print(f"      {_hdr:>13s}" + "".join(f"{wz_edges[b]:+8.1f}" for b in range(nb_w)))
     for a in range(nb_v):
         row = "".join(f"{len(grid[a][b]):4d}({counts[a, b] // 1000:3d}k)" for b in range(nb_w))
         print(f"      [{vx_edges[a]:+4.1f},{vx_edges[a + 1]:+4.1f})" + row)
@@ -238,9 +275,11 @@ def main() -> None:
             if not d:
                 print(f"      [층화] '{cat}' 없음 — 건너뜀")
                 continue
+
             def span(sel: list[str]) -> float:
                 vs = [v for k in sel for v in d.get(k, [])]
                 return (max(vs) - min(vs)) if len(vs) >= 2 else 0.0
+
             cur = [k for k in chosen if k in d]
             # 이미 확보된 간격이 부족하면, 간격을 가장 크게 넓히는 세션을 추가한다
             while span(cur) < args.strat_min_gap and len(chosen) < args.val_sessions:
@@ -252,8 +291,10 @@ def main() -> None:
                     break
                 chosen.append(best)
                 cur.append(best)
-            print(f"      [층화] {cat:6s} val 세션 {len(cur)}개, 속도 간격 {span(cur):.2f} m/s"
-                  f"  {'OK' if span(cur) >= args.strat_min_gap else '★ 부족'}")
+            print(
+                f"      [층화] {cat:6s} val 세션 {len(cur)}개, 속도 간격 {span(cur):.2f} m/s"
+                f"  {'OK' if span(cur) >= args.strat_min_gap else '★ 부족'}"
+            )
         # 남은 자리는 무작위로 채운다 (walk 다양성)
         rest = [k for k in sessions if k not in chosen]
         rng.shuffle(rest)
@@ -296,35 +337,85 @@ def main() -> None:
         os.makedirs(args.report_dir, exist_ok=True)
         with open(os.path.join(args.report_dir, "clip_inventory.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["category", "session", "mirror", "f0", "f1", "frames", "inside_frac",
-                        "vx_min", "vx_mean", "vx_max", "wz_absmax", "kept", "drop_reason", "split"])
+            w.writerow(
+                [
+                    "category",
+                    "session",
+                    "mirror",
+                    "f0",
+                    "f1",
+                    "frames",
+                    "inside_frac",
+                    "vx_min",
+                    "vx_mean",
+                    "vx_max",
+                    "wz_absmax",
+                    "kept",
+                    "drop_reason",
+                    "split",
+                ]
+            )
             for c in kept + dropped:
                 is_kept = "drop_reason" not in c
                 split = ("val" if c["session"] in val_sessions else "train") if is_kept else ""
-                w.writerow([c["cat"], c["session"], int(c["mirror"]), c["f0"], c["f1"], len(c["frames"]),
-                            f"{c['inside']:.4f}", f"{c['vx'].min():.3f}", f"{c['vx'].mean():.3f}",
-                            f"{c['vx'].max():.3f}", f"{np.abs(c['wz']).max():.3f}",
-                            int(is_kept), c.get("drop_reason", ""), split])
+                w.writerow(
+                    [
+                        c["cat"],
+                        c["session"],
+                        int(c["mirror"]),
+                        c["f0"],
+                        c["f1"],
+                        len(c["frames"]),
+                        f"{c['inside']:.4f}",
+                        f"{c['vx'].min():.3f}",
+                        f"{c['vx'].mean():.3f}",
+                        f"{c['vx'].max():.3f}",
+                        f"{np.abs(c['wz']).max():.3f}",
+                        int(is_kept),
+                        c.get("drop_reason", ""),
+                        split,
+                    ]
+                )
         with open(os.path.join(args.report_dir, "bin_session_diversity.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["vx_lo", "vx_hi", "wz_lo", "wz_hi", "num_sessions", "num_frames"])
             for a in range(nb_v):
                 for b in range(nb_w):
-                    w.writerow([f"{vx_edges[a]:.2f}", f"{vx_edges[a + 1]:.2f}",
-                                f"{wz_edges[b]:.2f}", f"{wz_edges[b + 1]:.2f}",
-                                len(grid[a][b]), int(counts[a, b])])
+                    w.writerow(
+                        [
+                            f"{vx_edges[a]:.2f}",
+                            f"{vx_edges[a + 1]:.2f}",
+                            f"{wz_edges[b]:.2f}",
+                            f"{wz_edges[b + 1]:.2f}",
+                            len(grid[a][b]),
+                            int(counts[a, b]),
+                        ]
+                    )
         with open(os.path.join(args.report_dir, "session_split.json"), "w") as fh:
-            json.dump({
-                "seed": args.seed,
-                "envelope": {"vx_min": args.vx_min, "vx_max": args.vx_max,
-                             "wz_max": args.wz_max, "min_inside": args.min_inside},
-                "split_mode": args.split_mode,
-                "train_sessions": train_sessions, "val_sessions": val_sessions,
-                "num_clips_kept": len(kept), "num_clips_dropped": len(dropped),
-                "md5_dedup_frames": int(md5_frames), "session_union_frames": int(union_frames),
-                "num_sessions": len(sessions),
-                "bins_filled": filled, "bins_ge3_sessions": ge3, "bins_total": total_bins,
-            }, fh, indent=2)
+            json.dump(
+                {
+                    "seed": args.seed,
+                    "envelope": {
+                        "vx_min": args.vx_min,
+                        "vx_max": args.vx_max,
+                        "wz_max": args.wz_max,
+                        "min_inside": args.min_inside,
+                    },
+                    "split_mode": args.split_mode,
+                    "train_sessions": train_sessions,
+                    "val_sessions": val_sessions,
+                    "num_clips_kept": len(kept),
+                    "num_clips_dropped": len(dropped),
+                    "md5_dedup_frames": int(md5_frames),
+                    "session_union_frames": int(union_frames),
+                    "num_sessions": len(sessions),
+                    "bins_filled": filled,
+                    "bins_ge3_sessions": ge3,
+                    "bins_total": total_bins,
+                },
+                fh,
+                indent=2,
+            )
         print(f"[8] 리포트 -> {args.report_dir}")
 
 

@@ -57,26 +57,22 @@ def fit_diag_gmm(z: torch.Tensor, k: int, iters: int = 120, seed: int = 0, var_f
     for _ in range(iters):
         # E-step — log N(z; mu_j, var_j)
         lp = -0.5 * (
-            ((z[:, None, :] - mu[None]) ** 2 / var[None]).sum(-1)
-            + torch.log(var).sum(-1)[None]
-            + d * np.log(2 * np.pi)
+            ((z[:, None, :] - mu[None]) ** 2 / var[None]).sum(-1) + torch.log(var).sum(-1)[None] + d * np.log(2 * np.pi)
         )
         lp = lp + log_w[None]
         lse = torch.logsumexp(lp, dim=1, keepdim=True)
-        r = torch.exp(lp - lse)                                   # [n, k]
+        r = torch.exp(lp - lse)  # [n, k]
         nk = r.sum(0).clamp(min=1e-8)
         log_w = torch.log(nk / n)
         mu = (r.T @ z) / nk[:, None]
-        var = ((r.T @ (z ** 2)) / nk[:, None] - mu ** 2).clamp(min=var_floor)
+        var = ((r.T @ (z**2)) / nk[:, None] - mu**2).clamp(min=var_floor)
     return log_w, mu, var
 
 
 def gmm_neg_logprob(z: torch.Tensor, log_w, mu, var) -> torch.Tensor:
     d = z.shape[1]
     lp = -0.5 * (
-        ((z[:, None, :] - mu[None]) ** 2 / var[None]).sum(-1)
-        + torch.log(var).sum(-1)[None]
-        + d * np.log(2 * np.pi)
+        ((z[:, None, :] - mu[None]) ** 2 / var[None]).sum(-1) + torch.log(var).sum(-1)[None] + d * np.log(2 * np.pi)
     )
     return -torch.logsumexp(lp + log_w[None], dim=1)
 
@@ -90,7 +86,7 @@ def knn_dist(z: torch.Tensor, ref: torch.Tensor, k: int, chunk: int = 4096) -> t
 
 
 # ──────────────────────────────────────────────────────────────
-def main() -> None:
+def main() -> None:  # noqa: C901 - 통계량 배터리 CLI (변형별 분기 나열, 분해 이득 없음)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     rep = f"{REPO}/reports/go2_imitation/go2_imitation_tracking"
     root = f"{REPO}/source/isaaclab_tasks/isaaclab_tasks/direct"
@@ -105,17 +101,28 @@ def main() -> None:
     p.add_argument("--gmm_k", nargs="*", type=int, default=[4, 8, 16])
     p.add_argument("--knn_k", type=int, default=8)
     p.add_argument("--ref_max", type=int, default=20000)
-    p.add_argument("--shrink_sweep", nargs="*", type=float, default=[],
-                   help="여러 수축계수의 mkl_full 을 한 번의 인코딩으로 동시에 잰다 (민감도용).")
+    p.add_argument(
+        "--shrink_sweep",
+        nargs="*",
+        type=float,
+        default=[],
+        help="여러 수축계수의 mkl_full 을 한 번의 인코딩으로 동시에 잰다 (민감도용).",
+    )
     p.add_argument("--shrink", type=float, default=0.20, help="창 공분산 수축 계수 (N<D 특이성 방어)")
     p.add_argument(
-        "--policy_npz", nargs="*", default=[],
+        "--policy_npz",
+        nargs="*",
+        default=[],
         help="`이름=경로.npz` 형식. 정책이 실제로 만든 x_vae 시퀀스를 negative 로 추가한다. "
-             "합성 negative 와 달리 **정책의 실제 상태**라 '떠는 정지' 를 그대로 잰다.")
+        "합성 negative 와 달리 **정책의 실제 상태**라 '떠는 정지' 를 그대로 잰다.",
+    )
     p.add_argument(
-        "--pair_dt", type=float, default=None,
+        "--pair_dt",
+        type=float,
+        default=None,
         help="전이 쌍 간격 [s]. 미지정이면 ref_stats 의 값. policy npz 는 50 Hz 라 "
-             "env 와 같은 선형보간으로 이 간격을 맞춘다.")
+        "env 와 같은 선형보간으로 이 간격을 맞춘다.",
+    )
     p.add_argument("--out_json", default=f"{rep}/2026-09-01_pose_dropout_and_statistic/statistic_variants.json")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:1")
@@ -130,7 +137,9 @@ def main() -> None:
     targs = ck["args"]
     stride = targs.get("stride", 1)
     model = tr.MotionVAE(
-        targs["latent_dim"], targs["hidden"], targs["num_experts"],
+        targs["latent_dim"],
+        targs["hidden"],
+        targs["num_experts"],
         latent_dist=targs.get("latent_dist", "gauss"),
         kappa_fixed=targs.get("kappa_fixed", 0.0),
         gauss_fixed_logvar=targs.get("gauss_fixed_logvar", None),
@@ -142,7 +151,8 @@ def main() -> None:
     model.eval()
     mean, std = ck["mean"], ck["std"]
 
-    val_sessions = set(json.load(open(a.split_json))["val_sessions"])
+    with open(a.split_json) as _fh:
+        val_sessions = set(json.load(_fh)["val_sessions"])
     train_clips, val_clips = v.load_expert_clips(ml, tr, a.pkl_dir, val_sessions)
     print(f"[데이터] train 클립 {len(train_clips)} / val 클립 {len(val_clips)}")
 
@@ -194,25 +204,23 @@ def main() -> None:
             W = z[s : s + N]
             mu_w = W.mean(0)
             var_w = W.var(0, unbiased=False).clamp(min=1e-4)
-            out.setdefault("mkl_diag", []).append(float(
-                0.5 * (torch.log(var_ref / var_w) + (var_w + (mu_w - mu_ref) ** 2) / var_ref - 1.0).sum()
-            ))
+            out.setdefault("mkl_diag", []).append(
+                float(0.5 * (torch.log(var_ref / var_w) + (var_w + (mu_w - mu_ref) ** 2) / var_ref - 1.0).sum())
+            )
             Wc = W - mu_w
             cov_raw = (Wc.T @ Wc) / N
             cov_w = (1 - a.shrink) * cov_raw + a.shrink * torch.diag(var_ref)
             dmu = (mu_w - mu_ref)[:, None]
             sign, logdet_w = torch.linalg.slogdet(cov_w)
-            out.setdefault("mkl_full", []).append(float(
-                0.5 * ((inv_ref @ cov_w).trace() + (dmu.T @ inv_ref @ dmu).squeeze()
-                       - D + logdet_ref - logdet_w)
-            ))
+            out.setdefault("mkl_full", []).append(
+                float(0.5 * ((inv_ref @ cov_w).trace() + (dmu.T @ inv_ref @ dmu).squeeze() - D + logdet_ref - logdet_w))
+            )
             for _sh in a.shrink_sweep:
                 _cw = (1 - _sh) * cov_raw + _sh * torch.diag(var_ref)
                 _sg, _ld = torch.linalg.slogdet(_cw)
-                out.setdefault(f"mklfull_sh{_sh:g}", []).append(float(
-                    0.5 * ((inv_ref @ _cw).trace() + (dmu.T @ inv_ref @ dmu).squeeze()
-                           - D + logdet_ref - _ld)
-                ))
+                out.setdefault(f"mklfull_sh{_sh:g}", []).append(
+                    float(0.5 * ((inv_ref @ _cw).trace() + (dmu.T @ inv_ref @ dmu).squeeze() - D + logdet_ref - _ld))
+                )
             for k in a.gmm_k:
                 out.setdefault(f"gmm{k}", []).append(float(step_gmm[k][s : s + N].mean()))
             out.setdefault("knn", []).append(float(step_knn[s : s + N].mean()))
@@ -227,8 +235,10 @@ def main() -> None:
     lag = pair_dt / POLICY_DT
     lo = int(np.floor(lag))
     frac = float(lag - lo)
-    print(f"[정책 시퀀스] pair_dt {pair_dt*1000:.1f} ms → 50 Hz 에서 lag {lag:.3f} step "
-          f"(lo {lo}, frac {frac:.3f}) — env `_update_style_reward` 와 같은 보간")
+    print(
+        f"[정책 시퀀스] pair_dt {pair_dt * 1000:.1f} ms → 50 Hz 에서 lag {lag:.3f} step "
+        f"(lo {lo}, frac {frac:.3f}) — env `_update_style_reward` 와 같은 보간"
+    )
 
     @torch.no_grad()
     def encode_policy_seq(X: np.ndarray) -> np.ndarray:
@@ -246,12 +256,12 @@ def main() -> None:
     for spec in a.policy_npz:
         name, path = spec.split("=", 1)
         Z = np.load(path, allow_pickle=True)
-        seqs = Z["x_vae"]                                    # [N_env, T, 49]
-        eplen = Z["eplen"] if "eplen" in Z else None
+        seqs = Z["x_vae"]  # [N_env, T, 49]
+        eplen = Z.get("eplen", None)
         cut = []
         for e in range(len(seqs)):
             X = seqs[e]
-            if eplen is not None:                            # 에피소드 경계에서 자른다
+            if eplen is not None:  # 에피소드 경계에서 자른다
                 b = np.flatnonzero(np.diff(eplen[e]) < 0) + 1
                 for seg in np.split(np.arange(len(X)), b):
                     if len(seg) >= 64:
@@ -259,8 +269,10 @@ def main() -> None:
             elif len(X) >= 64:
                 cut.append(X)
         policy_sets[name] = cut
-        print(f"[정책 시퀀스] {name}: env {len(seqs)}개 → 에피소드 조각 {len(cut)}개 "
-              f"(중앙 길이 {int(np.median([len(c) for c in cut]))} 프레임)")
+        print(
+            f"[정책 시퀀스] {name}: env {len(seqs)}개 → 에피소드 조각 {len(cut)}개 "
+            f"(중앙 길이 {int(np.median([len(c) for c in cut]))} 프레임)"
+        )
 
     NEGS = ["shuffle", "reverse", "speed2x", "static", "legswap", "frontswap", "rearswap", "desync2", "desync5"]
     NEGS += list(policy_sets.keys())
@@ -322,9 +334,20 @@ def main() -> None:
     print(f"{'평균':11}" + "".join(f"{meanv[k]:>13.3f}" for k in all_stats))
 
     os.makedirs(os.path.dirname(a.out_json), exist_ok=True)
-    json.dump({"ckpt": a.ckpt, "window_n": N, "table": table, "worst": worst, "mean": meanv,
-               "n_ref": int(len(ref)), "n_val_clips": len(val_clips)},
-              open(a.out_json, "w"), indent=1)
+    with open(a.out_json, "w") as _out_fh:
+        json.dump(
+            {
+                "ckpt": a.ckpt,
+                "window_n": N,
+                "table": table,
+                "worst": worst,
+                "mean": meanv,
+                "n_ref": int(len(ref)),
+                "n_val_clips": len(val_clips),
+            },
+            _out_fh,
+            indent=1,
+        )
     print(f"\n[저장] {a.out_json}")
 
 
