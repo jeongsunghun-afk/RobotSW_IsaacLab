@@ -1,5 +1,8 @@
 # 속도 조건부 discriminator — 걸음이 처음으로 명령을 따라간다 (2026-09-02~)
 
+> 작성 일시: 2026-09-03 09:13 (소급 · 근거: 디렉터리 내 최초 산출물 mtime)
+> 비교 대상: uncond(cmdchg4s) / cond-mlp(condmatch) / cond-drail(condmatch_drail) — AMP discriminator 속도 조건화 여부·구조
+
 `amp_cond_mode: speed` — AMP obs 끝에 `[ |v_cmd| / v_max , valid ]` 를 붙여 판별자를 **명령
 속도에 조건화**한다. 나머지는 `cmdchg4s` 와 같다(20 s 에피소드 · 4 s 고정 주기).
 
@@ -151,3 +154,31 @@ gallop attractor 에 못 들어간다(앞선 문서에서 확인).
 
 원자료: `metrics/same_iter_surveys.md`, `metrics/same_iter/*.npz`. 조사 도구는 앞 절과 같다
 (`_workspace/leg/gait_survey_multienv.py`, `--n_envs 2048 --dur_s 8`, 정지 출발은 `--all_stand`).
+
+## run B'(cond+drail) resume 후 20k — gallop 12 → 39%, 상향 전환 13.6 → 20.2% (2026-09-03 16:51, 2048 env, GPU2)
+
+16.7k 에서 σ 발산만 보고 중단했던 `condmatch_drail` 을 `model_16700` 에서 resume 해
+(`2026-09-03_12-51-22_condmatch_drail_resume16k7_…`, 설정 동일) `model_20000` 을 쟀다. 학습 지표는
+σ 4.2 · amp 8.4~9.0 으로 중단 전 추세 그대로인데, 거동은 계속 좋아진다.
+
+![run B' resume 20k](figures/cond_disc_bresume20k.png)
+
+| cmd 2.5~3.5 gallop | RSI 출발 | 정지 출발 | 저속→고속 전환 | 고속→저속 전환 | 고속 `other` |
+|---|---|---|---|---|---|
+| cond+drail @16k (앞 절) | 12.2% | 12.0% | 20/147 (13.6%) | — | 32.7% |
+| **cond+drail @20k (resume)** | **39.5%** | **39.2%** | **24/119 (20.2%)** | 48/51 (94.1%) | 33.7% |
+| cond(mlp) @23k (앞 절) | 44.4% | 55.4% | — | — | 0.2% |
+| baseline @30k (앞 절) | 20.9% | 4.3% | — | — | 0.0% |
+
+1. **σ 4.2 인 채로 거동이 좋아졌다.** 정지 출발 gallop 이 3.3 배, 상향 전환이 1.5 배 늘었고, 낙상 0 ·
+   `stand` 0 이다. 중단 근거였던 σ 발산은 이 arm 에서 거동 실패를 뜻하지 않는다 — "학습 지표로
+   판정하지 말 것" 이 다시 확인됐다.
+2. **상향 전환은 세 arm 중 최고다**(20.2% vs cond-mlp 20k 6.7% · uncond 0%). 하향 전환 94.1% 는
+   저속 명령에서 gallop 을 버린다는 뜻이므로 선택성도 있다.
+3. **걸음은 여전히 정돈되지 않았다.** 고속 `other` 33.7% 는 16k 와 같고, 저속(cmd 0.5~1.5)은
+   `other` 69% 로 pace 24% 보다 많다 — 추종(실제 vx 0.98) 은 되는데 걸음 위상이 pace/trot 어느
+   쪽도 아니다. cond-mlp 23k 는 같은 구간 `other` 가 0.2~9% 다. **gallop 수치만 보면 안 되는 이유.**
+4. cond-mlp 23k(55.4%) 와의 우열은 아직 못 가린다 — iteration 이 다르고 `other` 축이 반대다.
+   25k·30k 에서 같은 표를 다시 채운다.
+
+원자료: `metrics/bresume20k_surveys.md`, `metrics/bresume20k/{rsi,stand,tr}.npz`.
