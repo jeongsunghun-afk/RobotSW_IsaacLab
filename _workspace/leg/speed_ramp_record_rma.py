@@ -188,6 +188,10 @@ _RESTORE_KEYS = (
     "tar_change_time_max",
     # 보상 스케일은 롤아웃 동역학을 바꾸지 않지만, npz 에 기록돼 사후 대조에 쓰인다.
     "vel_err_scale",
+    # 조건부 discriminator — 빠지면 disc 입력 차원이 달라 체크포인트 로드가 실패한다.
+    "amp_cond_mode",
+    "amp_cond_v_max",
+    "amp_cond_yaw_max",
     "reset_strategy",
     "rel_stand_envs",
     "rel_rest_init",

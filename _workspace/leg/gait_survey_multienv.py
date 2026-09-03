@@ -77,7 +77,11 @@ if args_cli.run_params:
               "yaw_vel_min", "yaw_vel_max", "motion_file", "motion_weight_mode",
               "vel_err_scale", "reset_strategy", "rel_stand_envs", "cmd_deadzone",
               "rsi_match_command", "rsi_match_temperature", "resample_command_in_episode",
-              "tar_change_time_min", "tar_change_time_max"):
+              "tar_change_time_min", "tar_change_time_max",
+              # ★ 조건부 discriminator. 빠지면 disc 입력 차원이 달라져 체크포인트 로드가
+              # size mismatch 로 실패한다(592 vs 590). 조용한 오측이 아니라 즉시 죽지만,
+              # 복원 목록에 없으면 그 run 을 아예 못 잰다.
+              "amp_cond_mode", "amp_cond_v_max", "amp_cond_yaw_max"):
         if k in saved and hasattr(env_cfg, k):
             setattr(env_cfg, k, saved[k])
 
@@ -86,6 +90,42 @@ if args_cli.all_stand:
     env_cfg.rel_stand_envs = 1.0
 
 agent_cfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
+
+# ★ run 의 agent.yaml 도 얹는다. 레지스트리 기본값으로 러너를 지으면 **네트워크 구조가 다른**
+# run 을 못 읽는다 — 실제로 `disc_arch: drail` 로 학습한 체크포인트가 기본 `mlp` 판별자에
+# state_dict 를 못 넣어 죽었다. env.yaml 만 복원하던 것이 원인이었다.
+_agent_yaml = None
+if args_cli.run_params:
+    _cand = os.path.join(os.path.dirname(args_cli.run_params), "agent.yaml")
+    if os.path.exists(_cand):
+        _agent_yaml = _cand
+if _agent_yaml:
+    with open(_agent_yaml) as f:
+        _saved_agent = yaml.unsafe_load(f)
+    # `amp` 도 얹어야 한다 — `disc_arch` 가 여기 있다. 다만 env 가 런타임에 계산하는 값은
+    # 건드리면 안 된다: `amp_observation_space` 는 조건부 D 에서 조건 열만큼 늘어나므로
+    # 저장된 590 을 그대로 넣으면 592 짜리 체크포인트를 못 읽는다(고치려던 것과 같은 고장).
+    _SKIP = {"amp_observation_space", "motion_files", "num_amp_observations"}
+    for _sec in ("algorithm", "policy", "amp", "estimator"):
+        _src = _saved_agent.get(_sec) if isinstance(_saved_agent, dict) else None
+        _dst = getattr(agent_cfg, _sec, None)
+        if not isinstance(_src, dict) or _dst is None:
+            continue
+        # 섹션은 configclass 객체일 수도 있고 평범한 dict 일 수도 있다(`amp` 가 dict 라서
+        # hasattr 만 보던 판본은 `disc_arch` 를 조용히 건너뛰었다).
+        _is_map = isinstance(_dst, dict)
+        for _k, _v in _src.items():
+            if _k in _SKIP:
+                continue
+            _cur = _dst.get(_k, None) if _is_map else getattr(_dst, _k, None)
+            if not _is_map and not hasattr(_dst, _k):
+                continue
+            if _cur != _v:
+                print(f">>> agent.{_sec}.{_k}: {_cur} -> {_v}")
+                if _is_map:
+                    _dst[_k] = _v
+                else:
+                    setattr(_dst, _k, _v)
 dt = 1.0 / env_cfg.policy_dt_hz
 total_steps = int(round(args_cli.dur_s / dt))
 
