@@ -52,3 +52,17 @@ Wilcoxon 짝 검정 p=0.312  (시드 미고정 Mann-Whitney 는 p=0.038)
   seed 4: 3.161e-02 rad
   seed 5: 3.789e-02 rad
 ```
+
+## 정점 3.2 (학습 상한) 짝 재측정
+```
+[정점 3.2] n=8
+  |py|  base 1.65 cumir 0.69  우세 7/8  p=0.055
+  앞hip base 0.063 cumir 0.073  p=0.742
+  붕괴  base 0/8 cumir 0/8
+  vmax  base 3.02 cumir 2.93
+[정점 4.0] n=8
+  |py|  base 1.45 cumir 0.63  우세 6/8  p=0.312
+  앞hip base 0.055 cumir 0.088  p=0.109
+  붕괴  base 4/8 cumir 0/8
+  vmax  base 3.84 cumir 4.02
+```
