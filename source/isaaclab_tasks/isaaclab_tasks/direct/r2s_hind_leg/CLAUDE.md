@@ -73,18 +73,6 @@ bash scripts/real2sim/r2s_hind_leg/run_gui_controller.sh
 
 ## 불변 규칙
 
-- 새 버퍼 추가 시 `_reset_idx`에서 초기화 필수 (CLAUDE.md 전역 DO)
-- Slew rate limiter 필수 — KP=300에서 setpoint 점프 시 토크 스파이크 방지
-- `JOINT_NAME_PATTERNS`로 `find_joints()` 사용 — USD 로드 순서 독립
+공통 불변 규칙: `.claude/rules/r2s.md`
+
 - 게인/soft limit은 `scripts/real2sim/r2s_hind_leg/motions.py`와 값 일치 필수(중복 정의)
-- `from isaaclab.utils.configclass import configclass` 사용 — `from isaaclab.utils import configclass`는
-  6.0에서 `TypeError: 'module' object is not callable`(구 코드 지뢰, 이미 수정됨)
-- 코어 파일(`source/isaaclab/`) 수정 금지
-
-## Worker 매핑
-
-| 작업 | 담당 |
-|------|------|
-| 관절 파라미터, 환경 로직 | `obs-worker` |
-| 설정값 변경 | `cfg-worker` |
-| UDP 브릿지/GUI | 직접 수정 (`scripts/real2sim/`) |

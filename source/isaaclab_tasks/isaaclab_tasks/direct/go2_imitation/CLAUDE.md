@@ -20,11 +20,7 @@ go2_imitation/
 ├── agents/
 │   ├── __init__.py
 │   └── rsl_rl_ppo_cfg.py       ← PPO/AMP 러너 config
-└── imitation/go2/               ← 참조 모션 PKL 파일 (7개)
-    ├── go2_pace.pkl
-    ├── go2_run.pkl
-    ├── go2_trot.pkl
-    └── go2_walk0~3.pkl
+└── imitation/smr_mirror_pkl/    ← 참조 모션 PKL 파일 (20개: walk/walk_turn/trot0-1/run0-2 + 각 mirror)
 ```
 
 ---
@@ -43,10 +39,12 @@ go2_imitation/
 
 ## Observation Space
 
-### Policy Observation (44-dim)
+### Policy Observation (50-dim)
 
 | 요소 | 차원 | 설명 |
 |------|------|------|
+| `root_lin_vel_b` | 3 | body frame 선속도 |
+| `root_ang_vel_b` | 3 | body frame 각속도 |
 | `projected_gravity_b` | 3 | body frame 중력 벡터 |
 | `local_tar_dir` | 2 | heading-relative 목표 방향 (단위 벡터) |
 | `tar_speed` | 1 | 목표 속도 (m/s) |
@@ -54,9 +52,11 @@ go2_imitation/
 | `joint_pos - default` | 12 | 관절 각도 오프셋 |
 | `joint_vel` | 12 | 관절 속도 |
 | `actions` | 12 | 이전 액션 |
-| **합계** | **44** | |
+| **합계** | **50** | |
 
-### AMP Discriminator Observation (43-dim × 10 history = 430-dim)
+(`go2_imitation_env.py`의 `# total = 44` 주석은 stale — 실제 cat 결과는 50)
+
+### AMP Discriminator Observation (49-dim × 10 history = 490-dim)
 
 | 요소 | 차원 | 설명 |
 |------|------|------|
@@ -66,7 +66,8 @@ go2_imitation/
 | `root_lin_vel` | 3 | body frame 선속도 |
 | `root_ang_vel` | 3 | body frame 각속도 |
 | `foot_pos_local` | 12 | 발 위치 (base-local, [FL,FR,RL,RR]×3) |
-| **합계** | **43** | per step |
+| `root_rot_tan_norm` | 6 | heading-relative root 회전의 tan-norm 6D |
+| **합계** | **49** | per step |
 
 ---
 
@@ -151,8 +152,8 @@ Policy: ActorCritic (MLP 512→256→128)
 Algo:   PPOAMPBase
 
 AMP 파라미터:
-  task_reward_lerp_start = 1.0   (Stage 1: 100% task)
-  task_reward_lerp       = 0.5   (Stage 2: 50% task + 50% AMP)
+  task_reward_lerp_start = 0.5   (Stage 1 초기값 — agents/rsl_rl_ppo_cfg.py 모듈 docstring의 1.0은 stale)
+  task_reward_lerp       = 0.5   (Stage 2 최종값: 50% task + 50% AMP)
   anneal_iters           = 5000  (= 120,000 steps)
   disc_lr                = 2.5e-4
   gradient_penalty_coef  = 5.0
@@ -166,23 +167,14 @@ AMP 파라미터:
 
 ## 학습 실행
 
-```bash
-# 학습
-./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
-  --task Go2-Imitation-v0 --num_envs 4096 --headless \
-  --logger wandb --wandb-project IsaacLab-locomotion
-
-# 플레이
-./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
-  --task Go2-Imitation-v0 --num_envs 32
-```
+학습·렌더 실행 방법은 `.claude/rules/training.md`.
 
 ---
 
 ## motion_lib.py 인터페이스
 
 ```python
-lib = Go2MotionLib(motion_files="imitation/go2", device="cuda:0")
+lib = Go2MotionLib(motion_files="imitation/smr_mirror_pkl", device="cuda:0")
 
 # 샘플링
 motion_ids = lib.sample_motions(n)          # [n] int64
@@ -199,7 +191,7 @@ root_pos, root_quat, lin_vel, ang_vel, dof_pos, dof_vel, foot_pos = \
 ```
 
 **PKL 프레임 레이아웃** (18개 값):
-- `[0:3]` root_pos, `[3:6]` root_euler (rpy), `[6:18]` dof_pos (12 joints)
+- `[0:3]` root_pos, `[3:6]` root_exp_map (exponential map, axis×angle [rad], `_exp_map_to_quat_wxyz`로 쿼터니언 변환), `[6:18]` dof_pos (12 joints)
 - 속도/발 위치: finite difference + FK 자동 계산
 
 ---
@@ -214,4 +206,4 @@ root_pos, root_quat, lin_vel, ang_vel, dof_pos, dof_vel, foot_pos = \
 | AMP anneal 일정 | `agents/rsl_rl_ppo_cfg.py` | `task_reward_lerp_anneal_iters` |
 | Disc 구조 | `agents/rsl_rl_ppo_cfg.py` | `discriminator_hidden_dims` |
 | 새 텐서 추가 | `go2_imitation_env.py` | `_reset_idx`에서 반드시 초기화 |
-| motion 데이터 | `imitation/go2/*.pkl` | 18-col frames 포맷 |
+| motion 데이터 | `imitation/smr_mirror_pkl/*.pkl` | 18-col frames 포맷 |

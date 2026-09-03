@@ -21,7 +21,7 @@ PyQt5 GUI/monitor와 통신하는 **Real2Sim** 환경. `r2s_hind_leg` 패턴 기
 
 8관절, `find_joints(JOINT_NAME_PATTERNS, preserve_order=True)`로 순서 고정. leg-major(HL→HR).
 asset=`data/Robots/Hind_Leg_URDF3_SignFix/Hind_Leg_SignFix/Hind_Leg_SignFix.usda` (rga.py `HIND_LEG_CFG`).
-τ_max/v_max는 실기값(RL_INTERFACE.md §6-c).
+τ_max/v_max는 실기값(`scripts/real2sim/r2s_biped_leg/RL_INTERFACE.md` §6-c; 이하 RL_INTERFACE.md).
 
 **SignFix (2026-08-12)**: 실기 통신 실측에서 같은 목표에 **반대로 도는 관절**이 확인돼
 (HL: hip/calf/foot, HR: hip/thigh), sim을 실기에 맞추기 위해 URDF3에서 이 5개 관절의
@@ -44,22 +44,25 @@ asset=`data/Robots/Hind_Leg_URDF3_SignFix/Hind_Leg_SignFix/Hind_Leg_SignFix.usda
 
 | idx | 실측명 | 레이블 | KP | KD | v_max | τ_max | soft limit [rad] |
 |---|---|---|----|----|-------|-------|---|
-| 0 | HL_hip_joint | HL_hip | 65.0 | 6.0 | 29.6 | 84.0 | (-0.2340, 0.2340) |
-| 1 | HL_thigh_joint | HL_thigh | 53.0 | 4.8 | 29.6 | 84.0 | (-0.9555, 2.1855) |
-| 2 | HL_calf_joint | HL_calf | 12.0 | 1.1 | 19.7 | 126.0 | (-0.9445, 0.7745) |
-| 3 | HL_foot_joint | HL_foot | 20.0 | 1.0 | 24.6 | 100.8 | (-1.3840, 0.3440) |
-| 4 | HR_hip_joint | HR_hip | 65.0 | 6.0 | 29.6 | 84.0 | (-0.2340, 0.2340) |
-| 5 | HR_thigh_joint | HR_thigh | 53.0 | 4.8 | 29.6 | 84.0 | (-0.9555, 2.1855) |
-| 6 | HR_calf_joint | HR_calf | 12.0 | 1.1 | 19.7 | 126.0 | (-0.9445, 0.7745) |
-| 7 | HR_foot_joint | HR_foot | 20.0 | 1.0 | 24.6 | 100.8 | (-1.3840, 0.3440) |
+| 0 | HL_hip_joint | HL_hip | 100.0 | 5.0 | 29.6 | 84.0 | (-0.2340, 0.2340) |
+| 1 | HL_thigh_joint | HL_thigh | 50.0 | 5.0 | 29.6 | 84.0 | (-0.9555, 2.1855) |
+| 2 | HL_calf_joint | HL_calf | 112.5 | 11.25 | 19.7 | 126.0 | (-0.9445, 0.7745) |
+| 3 | HL_foot_joint | HL_foot | 28.8 | 7.2 | 24.6 | 100.8 | (-1.3840, 0.3440) |
+| 4 | HR_hip_joint | HR_hip | 100.0 | 5.0 | 29.6 | 84.0 | (-0.2340, 0.2340) |
+| 5 | HR_thigh_joint | HR_thigh | 50.0 | 5.0 | 29.6 | 84.0 | (-0.9555, 2.1855) |
+| 6 | HR_calf_joint | HR_calf | 112.5 | 11.25 | 19.7 | 126.0 | (-0.9445, 0.7745) |
+| 7 | HR_foot_joint | HR_foot | 28.8 | 7.2 | 24.6 | 100.8 | (-1.3840, 0.3440) |
+
+(KP/KD는 2026-08-18 실기 드라이버 게인의 관절 공간 환산값으로 갱신됨 — 근거:
+`r2s_biped_leg_env_cfg.py:78-79`, `rga.py:614-627`.)
 
 - ⚠ URDF2/URDF3 공통 관절한계는 RL_INTERFACE.md §3 실측표와 **다르다**(예: hip ±14.9° vs ±35°) —
   실기팀 신규 리비전 값으로 그대로 사용. 질량은 URDF2 총 ~16.6 kg → URDF3는 base만 5.617→2.8kg으로
-  줄어 총 ~13.8 kg(다리 링크 질량은 URDF2와 사실상 동일). KP/KD(구 모델 I_eff 기반)는 재검토 대상.
+  줄어 총 ~13.8 kg(다리 링크 질량은 URDF2와 사실상 동일).
 - ⚠ 실기 런타임 보호는 τ_max보다 훨씬 낮다: 보고토크 15 N·m 50 ms → limp 래치,
   200 dps(≈3.5 rad/s) 속도 트립 (RL_INTERFACE.md §6-i). 정책이 τ_max까지 쓰면 실기에서 죽는다.
 - default_joint_pos 전부 0.0.
-- 게인이 `r2s_hind_leg`(300/5)보다 훨씬 낮다 → GUI 슬라이더 상한을 낮춰야 조작 가능.
+- 게인이 `r2s_hind_leg`(300/5)보다 낮다(100/50/112.5/28.8) → GUI 슬라이더 상한을 낮춰야 조작 가능.
 - `JOINT_NAME_PATTERNS`는 정규식이 아니라 정확한 관절명 — `.*_hip_joint`는 HL/HR 양쪽에 매칭된다.
 
 ## foot↔calf 전달기구 커플링 (2026-08-12, `cfg.foot_coupling=True` 기본)
@@ -201,18 +204,9 @@ bash scripts/real2sim/r2s_biped_leg/run_gui_controller.sh
 
 ## 불변 규칙
 
-- 새 버퍼 추가 시 `_reset_idx`에서 초기화 필수 (CLAUDE.md 전역 DO)
-- Slew rate limiter 필수 — setpoint 점프 시 토크 스파이크 방지
-- `JOINT_NAME_PATTERNS`로 `find_joints(preserve_order=True)` 사용 — USD 로드 순서 독립
-- 게인/soft limit은 `scripts/real2sim/r2s_biped_leg/motions.py`와 값 일치 필수(중복 정의)
-- `from isaaclab.utils.configclass import configclass` 사용 — `from isaaclab.utils import configclass`는
-  6.0에서 `TypeError: 'module' object is not callable`
-- `r2s_hind_leg` / `r2s_go2` 및 코어 파일(`source/isaaclab/`) 수정 금지
+공통 불변 규칙: `.claude/rules/r2s.md`
 
-## Worker 매핑
-
-| 작업 | 담당 |
-|------|------|
-| 관절 파라미터, 환경 로직 | `obs-worker` |
-| 설정값 변경 | `cfg-worker` |
-| UDP 브릿지/GUI | 직접 수정 (`scripts/real2sim/r2s_biped_leg/`) |
+- soft limit은 `scripts/real2sim/r2s_biped_leg/motions.py`와 값 일치 필수(중복 정의). KP/KD는 예외 —
+  motions.py는 실기 채널좌표, env_cfg.py는 관절좌표(calf×1.5², foot×1.2² 기어환산)라 값이 달라야
+  정상이다(env_cfg.py:70-77, 미해결 seam 기록됨).
+- `r2s_hind_leg` / `r2s_go2` 수정 금지

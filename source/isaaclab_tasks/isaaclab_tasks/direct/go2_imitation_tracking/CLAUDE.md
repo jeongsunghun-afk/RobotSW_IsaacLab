@@ -4,7 +4,10 @@
 
 `go2_imitation`에서 파생된 환경으로, command 구조를 **steering(tar_dir·tar_speed·face_dir)**에서
 **body-frame 속도추종(vx, vy=0, yaw_rate)**으로 교체한 버전이다.
-AMP/discriminator/motion/reset 로직은 go2_imitation과 byte-identical 유지.
+AMP/discriminator/reset 로직은 go2_imitation과 동일. `motion_lib.py`는 go2_imitation 것을 베이스로
+tracking 전용 메서드(`motion_names`, `motion_mean_speeds`, `motion_mean_yaw_rates`,
+`sample_motions_near_speed`, `set_motion_weights_command_uniform` 등, 340-431줄)가 추가된
+확장본(564줄, go2_imitation은 469줄)이며 byte-identical이 아니다.
 
 **Task ID**: `Go2-Imitation-Tracking-v0`
 
@@ -17,12 +20,12 @@ go2_imitation_tracking/
 ├── __init__.py                         ← task 등록 (Go2-Imitation-Tracking-v0)
 ├── go2_imitation_tracking_env.py       ← 환경 본체
 ├── go2_imitation_tracking_env_cfg.py   ← 환경 config
-├── motion_lib.py                       ← go2_imitation/motion_lib.py byte-identical 복사
+├── motion_lib.py                       ← go2_imitation 기반 + tracking 전용 메서드 추가 (564줄)
 ├── agents/
 │   ├── __init__.py
 │   └── rsl_rl_ppo_cfg.py              ← PPO/AMP 러너 config
 └── imitation/
-    └── smr_mirror_pkl -> ../../go2_imitation/imitation/smr_mirror_pkl  (심링크)
+    └── smr_mirror_pkl/                 ← go2_imitation/imitation/smr_mirror_pkl 의 실제 디렉토리 복사본 (심링크 아님)
 ```
 
 ---
@@ -33,7 +36,7 @@ go2_imitation_tracking/
 |------|---------------|------------------------|
 | command 타입 | steering (tar_dir + tar_speed + face_dir) | body-frame 속도 (vx, vy=0, yaw_rate) |
 | obs command block | `local_tar_dir(2) + tar_speed(1) + local_face_dir(2)` = 5 | `lin_vel_cmd(2) + yaw_vel_cmd(1)` = 3 |
-| obs 총 차원 | 50 | **48** |
+| obs 총 차원 (policy) | 50 | **42** |
 | command 변환 | `quat_apply` (heading relative) | 변환 없음 (이미 body-relative) |
 | reward | tar_reward + face_reward | lin_vel_reward + yaw_vel_reward |
 | AMP 경로 | 동일 | 동일 (불변) |
@@ -57,7 +60,7 @@ GO2에서 측정할 수 없으므로 policy obs에서 빠지고 estimator가 추
 | 30–41 | `actions` | 12 |
 | **합계** | | **42** |
 
-- `actions` 블록(30–41)은 학습 내내 리터럴 0인 dead channel이다. 배포 시에도 0.0 고정할 것.
+- `actions` 블록(30–41)은 학습 내내 리터럴 0인 dead channel이다. 배포 시에도 0.0 고정할 것. (2026-09-03 코드 대조 시 미확인)
 - **`joint_pos_tan_norm=True`** 면 관절 블록이 12 → **72**(관절별 회전의 tan-norm 6D)로 늘어
   policy가 **102**, history가 (10, 102)가 된다. MimicKit actor proprio(117) 중 96이 이 표현이라
   대조하려고 만든 플래그다(`_comparisons/mimickit_vs_60_actuator_limit/README.md` §16).
@@ -83,7 +86,7 @@ GO2에서 측정할 수 없으므로 policy obs에서 빠지고 estimator가 추
 | 3–5 | `root_ang_vel_b × priv_explicit_ang_vel_scale` | 설계 일관성을 위해 obs에서 제외 |
 
 - 둘 다 policy obs에 없으므로 estimator 과제는 **미관측 상태 추정**이다(denoising 아님).
-  평균예측 MSE 기준선: lin 0.381 / ang 0.0201 (`s²·Var(target)`, 2026-07-30 실측).
+  평균예측 MSE 기준선: lin 0.381 / ang 0.0201 (`s²·Var(target)`, 2026-07-30 실측). (2026-09-03 코드 대조 시 미확인)
 
 - 두 scale은 actor/critic 입력에선 normalizer를 지나므로, 실질 역할은 estimator MSE에서의
   **블록 간 상대 gradient 가중치**다. `Loss/estimator_lin` vs `Loss/estimator_ang`로 확인한다.
@@ -106,10 +109,10 @@ self._tar_timer   = torch.zeros(self.num_envs, device=self.device)     # 재샘�
 ```
 
 범위 (cfg 참조):
-- `lin_vel_x`: [-1.0, 3.0] m/s
+- `lin_vel_x`: [0.0, 4.0] m/s
 - `lin_vel_y`: [0.0, 0.0] (항상 0)
-- `yaw_vel`: [-1.5, 1.5] rad/s
-- `tar_timer`: [4.0, 7.0] s
+- `yaw_vel`: [-1.0, 1.0] rad/s
+- `tar_timer`: [4.0, 7.0] s마다 재샘플링 (2026-09-03 코드 대조 시 미확인 — `_post_physics_step`이 훅으로 자동 호출되지 않아 한때 dead 였던 경위가 있음)
 
 ---
 
@@ -135,23 +138,12 @@ reward = cfg.lin_vel_reward_w * lin_vel_reward + cfg.yaw_vel_reward_w * yaw_vel_
 ## 알고리즘 설정
 
 go2_imitation과 동일 (AMP dict / 네트워크 / 하이퍼파라미터 값 동일).
-- `experiment_name = "go2_imitation_tracking"`
-- WASABI cfg 없음
 
 ---
 
 ## 학습 실행
 
-```bash
-# 학습
-./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
-  --task Go2-Imitation-Tracking-v0 --num_envs 4096 --headless \
-  --logger wandb --wandb-project IsaacLab-locomotion
-
-# 플레이
-./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
-  --task Go2-Imitation-Tracking-v0 --num_envs 32
-```
+학습·렌더 실행 방법은 `.claude/rules/training.md`.
 
 ---
 
@@ -164,10 +156,8 @@ go2_imitation과 동일 (AMP dict / 네트워크 / 하이퍼파라미터 값 동
 | Termination 임계값 | `go2_imitation_tracking_env_cfg.py` | go2_imitation과 동일 구조 |
 | AMP anneal 일정 | `agents/rsl_rl_ppo_cfg.py` | go2_imitation과 동일 |
 | 새 텐서 추가 | `go2_imitation_tracking_env.py` | `_reset_idx`에서 반드시 초기화 |
-| motion 데이터 | `imitation/smr_mirror_pkl/*.pkl` | 심링크 통해 자동 반영 |
+| motion 데이터 | `imitation/smr_mirror_pkl/*.pkl` | go2_imitation과 별도의 실제 디렉토리 복사본 (심링크 아님) — 수정 시 두 경로 모두 갱신 필요 |
 
 ## 절대 수정 금지
 
-- `motion_lib.py` — go2_imitation byte-identical 유지
-- AMP observation 관련 코드 — 490-dim (43×10) 불변
-- `imitation/smr_mirror_pkl` 심링크 — 경로 구조 유지
+- AMP observation 관련 코드 — 490-dim (49×10) 불변

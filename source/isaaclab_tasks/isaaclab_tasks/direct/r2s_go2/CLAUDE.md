@@ -94,19 +94,4 @@ gui_controller.py  →/lowcmd(ROS2)→  sim_bridge.py  →UDP:9871→  sim_runne
 
 ## 불변 규칙
 
-- 새 버퍼 추가 시 `_reset_idx()`에서 초기화 필수 (CLAUDE.md 전역 DO)
-- Slew rate limiter는 필수 — KP=25에서도 setpoint 점프 시 토크 스파이크 방지
-- `JOINT_ORDER`로 `find_joints(preserve_order=True)` 사용 — CONTRACT §2 순서와 불일치 시 assert로 즉시 실패
-- 코어 파일(`source/isaaclab/`) 수정 금지
-- `from isaaclab.utils import configclass`가 아니라 `from isaaclab.utils.configclass import configclass`를
-  사용할 것 — 전자는 이 저장소의 6.0 마이그레이션 상태에서 서브모듈 자체를 바인딩해
-  `TypeError: 'module' object is not callable`을 낸다(`r2s_hind_leg`의 기존 참조 패턴에
-  남아있는 버그, 이식하지 말 것).
-
-## Worker 매핑
-
-| 작업 | 담당 |
-|------|------|
-| 관절 파라미터, 환경 로직 | `obs-worker` |
-| 설정값 변경 | `cfg-worker` |
-| UDP/ROS2 브릿지 | 직접 수정 (`scripts/real2sim/`) |
+공통 불변 규칙: `.claude/rules/r2s.md`
