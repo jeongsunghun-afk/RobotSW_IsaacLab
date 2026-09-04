@@ -61,6 +61,12 @@ parser.add_argument(
 )
 parser.add_argument("--stochastic", action="store_true", help="--action_mode stochastic 의 별칭")
 parser.add_argument(
+    "--save_seq",
+    action="store_true",
+    help="서브샘플 대신 **전 env·전 스텝**의 live amp 관측과 상태를 별도 `{clip}_{start}_seq.npz` 로 남긴다. "
+    "저역통과 반사실 채점처럼 시간축이 필요한 후속 분석용. 기존 npz 의 키는 건드리지 않는다.",
+)
+parser.add_argument(
     "--out_root",
     type=str,
     default="reports/leg_imitation/_comparisons/conditional_discriminator/metrics/clip_probe",
@@ -329,6 +335,9 @@ for mid in clip_ids:
     # ── 롤아웃 ──
     alive = torch.ones(N, dtype=torch.bool, device=dev)
     amp_rec, meas_rec, jp_rec, jv_rec, cmd_rec, act_clip_hits = [], [], [], [], [], []
+    # `--save_seq` 전용. 기존 기록은 생존 env 만 남기지만(`keep`), 시퀀스 덤프는 전 env 를 남기고
+    # 대신 스텝별 `done` 을 같이 남겨 소비자가 유효 구간을 직접 자르게 한다.
+    lin_rec, ang_rec, done_rec = [], [], []
     with torch.inference_mode():
         # ★ reset 도 inference_mode 안에서 불러야 한다. 롤아웃 중 만들어진 env 내부 버퍼
         # (`_proprio_history` 등)가 inference tensor 가 돼, 밖에서 in-place 로 0 을 쓰면 죽는다.
@@ -355,6 +364,10 @@ for mid in clip_ids:
                 jp_rec.append(d.joint_pos.torch.clone())
                 jv_rec.append(d.joint_vel.torch.clone())
                 cmd_rec.append([float(vx[k]), float(vy[k]), float(yaw[k])])
+                if args_cli.save_seq:
+                    lin_rec.append(d.root_link_lin_vel_b.clone())
+                    ang_rec.append(d.root_link_ang_vel_b.clone())
+                    done_rec.append(dones.view(-1).clone())
 
     keep = alive.nonzero(as_tuple=False).flatten()
     n_kept, n_dropped = int(keep.numel()), int(N - alive.sum().item())
@@ -430,6 +443,31 @@ for mid in clip_ids:
         act_clip_frac=np.float32(np.mean(act_clip_hits) if act_clip_hits else np.nan),
         other_checkpoint=str(args_cli.other_checkpoint),
     )
+    if args_cli.save_seq and done_rec:
+        # ★ `valid[n, t]` = 스텝 t 까지 그 env 가 한 번도 리셋되지 않았다. 누적 `alive` 마스크가
+        # 아니라 스텝별 done 에서 만든다 — 누적 마스크는 "언제" 끊겼는지를 잃는다.
+        _done = torch.stack(done_rec, dim=1).bool()  # [N, T]
+        _valid = torch.cumsum(_done.to(torch.int32), dim=1) == 0
+        _seq = dict(
+            policy_obs_seq=torch.stack(amp_rec, dim=1).to(torch.float16).cpu().numpy(),
+            policy_jpos_seq=torch.stack(jp_rec, dim=1).to(torch.float16).cpu().numpy(),
+            policy_jvel_seq=torch.stack(jv_rec, dim=1).to(torch.float16).cpu().numpy(),
+            policy_root_lin_vel_seq=torch.stack(lin_rec, dim=1).cpu().numpy().astype(np.float32),
+            policy_root_ang_vel_seq=torch.stack(ang_rec, dim=1).cpu().numpy().astype(np.float32),
+            valid=_valid.cpu().numpy(),
+            done_seq=_done.cpu().numpy(),
+        )
+        _seq.update(
+            layout=json.dumps(LAYOUT), dt=np.float32(dt), joint_names=np.array(JN), cmd=cmd_arr,
+            clip_name=name, clip_len=np.float32(clip_len), start_mode=args_cli.start,
+            n_envs=np.int32(N), checkpoint=args_cli.checkpoint, seed=np.int32(args_cli.seed),
+            action_mode=args_cli.action_mode, expert_obs=payload["expert_obs"],
+            expert_jpos=expert_jpos, expert_jvel=expert_jvel,
+        )
+        _seq_out = os.path.join(out_dir, f"{name}_{args_cli.start}{_SUFFIX}_seq.npz")
+        np.savez_compressed(_seq_out, **_seq)
+        print(f"    seq 저장: {_seq_out}  obs={_seq['policy_obs_seq'].shape} valid={int(_valid.sum())}/{_valid.numel()}")
+
     out = os.path.join(out_dir, f"{name}_{args_cli.start}{_SUFFIX}.npz")
     np.savez_compressed(out, **payload)
     print(f"    저장: {out}  keys={sorted(payload.keys())}" if mid == clip_ids[0] else f"    저장: {out}")
