@@ -199,6 +199,8 @@ _RESTORE_KEYS = (
     # 보상 스케일은 롤아웃 동역학을 바꾸지 않지만, npz 에 기록돼 사후 대조에 쓰인다.
     "vel_err_scale",
     # 조건부 discriminator — 빠지면 disc 입력 차원이 달라 체크포인트 로드가 실패한다.
+    # dof_vel ablation 도 같은 이유로 필요하다(590 vs 420 per-step 차이).
+    "amp_drop_dof_vel",
     "amp_cond_mode",
     "amp_cond_v_max",
     "amp_cond_yaw_max",

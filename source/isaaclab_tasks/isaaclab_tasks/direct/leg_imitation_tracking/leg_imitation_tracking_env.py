@@ -13,6 +13,7 @@ go2_imitation에서 steering (tar_dir · tar_speed · face_dir) 구조를
 body-frame 선속도/각속도 추종(vx, vy=0, yaw_rate)으로 교체한 환경.
 
   - AMP Discriminator: 59-dim obs × 10 history = 590-dim  (R4: root_rot_tan_norm 6D 추가)
+    (cfg.amp_drop_dof_vel=True 이면 per-step 42 → 420-dim; dof_vel 17 을 소비 시점에 제거)
   - Task reward: lin_vel_reward(0.7) + yaw_vel_reward(0.3)
   - Reset: 항상 RSI (Reference State Initialization)
   - 알고리즘: PPOAMPBase + OnPolicyRunnerAMPBase (rsl_rl)
@@ -29,6 +30,7 @@ Policy observation (63-dim):
   - 변환된 quat → quat_to_tan_norm: [tan(x), norm(z)] 6D feature
     (MimicKit torch_util.py:218-224 — ref_tan=[1,0,0], ref_norm=[0,0,1])
   - per-step disc feature: 53 → 59 (base_53 + root_rot_tan_norm_6)
+    (amp_drop_dof_vel=True 이면 base_53 에서 dof_vel 열 [17:34] 제거 → 36 + 6 = 42)
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
         dof_pos(17) + dof_vel(17) + root_height(1) +
         root_lin_vel(3) + root_ang_vel(3) + foot_pos_local(12) +
         root_rot_tan_norm(6)  [R4: heading-relative 6D rotation]
+        cfg.amp_drop_dof_vel=True 이면 dof_vel(17) 을 빼 42-dim 이 된다.
     """
 
     cfg: LegImitationTrackingEnvCfg
@@ -128,9 +131,13 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
         # amp_observation_space (cfg=59) = base(53) + root_rot_tan_norm(6)  [R4]
         # amp_observation_buffer 내부 저장은 base 53-dim만; tan_norm 6D는 소비 시점에 계산됨.
         _AMP_BASE_DIM = 53  # 내부 버퍼 차원 (17+17+1+3+3+12)
-        self.amp_observation_size = self.cfg.num_amp_observations * (
-            self.cfg.amp_observation_space + (2 if self.cfg.include_rel_track_obs else 0)
-        )
+        # dof_vel 은 base 53-dim 의 열 [17:34]. amp_drop_dof_vel=True 면 소비 시점에 제거한다
+        # (내부 버퍼는 53 유지 — RSI/reference 채움 경로를 건드리지 않기 위함).
+        self._amp_dof_vel_slice = (17, 34)
+        per_step_amp_dim = self.cfg.amp_observation_space + (2 if self.cfg.include_rel_track_obs else 0)
+        if self.cfg.amp_drop_dof_vel:
+            per_step_amp_dim -= self._amp_dof_vel_slice[1] - self._amp_dof_vel_slice[0]
+        self.amp_observation_size = self.cfg.num_amp_observations * per_step_amp_dim
         # 조건부 disc: 조건 열(+valid) 을 obs 끝에 붙인다 (mode="none" 이면 0).
         self.amp_observation_size += self._init_amp_condition()
         self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
@@ -286,10 +293,12 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
             local_root_pos_diff = quat_apply(heading_inv_expand, root_pos_diff.reshape(N * H, 3)).view(N, H, 3)
             root_pos_obs_xy = local_root_pos_diff[:, :, :2]  # [N, H, 2]
 
-            base_amp = torch.cat([root_pos_obs_xy, self.amp_observation_buffer], dim=-1)  # [N, H, 57]
+            base_amp = torch.cat(
+                [root_pos_obs_xy, self._drop_amp_dof_vel(self.amp_observation_buffer)], dim=-1
+            )  # [N, H, 57] (drop_dof_vel 이면 40)
         else:
             N, H = self.num_envs, self.cfg.num_amp_observations
-            base_amp = self.amp_observation_buffer  # [N, H, 53]
+            base_amp = self._drop_amp_dof_vel(self.amp_observation_buffer)  # [N, H, 53] (drop 이면 36)
 
         # [R4] heading-relative root_rot → tan_norm 6D (MimicKit compute_tar_obs 방식)
         # ref = 현재(window 첫 번째=최신) frame의 heading_inv
@@ -432,9 +441,11 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
             local_root_pos_diff_t = quat_apply(heading_inv_expand_t, root_pos_diff_t.reshape(n * H, 3)).view(n, H, 3)
             root_pos_obs_xy_t = local_root_pos_diff_t[:, :, :2]
 
-            base_terminal = torch.cat([root_pos_obs_xy_t, terminal_buf], dim=-1)  # [n, H, 57]
+            base_terminal = torch.cat(
+                [root_pos_obs_xy_t, self._drop_amp_dof_vel(terminal_buf)], dim=-1
+            )  # [n, H, 57] (drop_dof_vel 이면 40)
         else:
-            base_terminal = terminal_buf  # [n, H, 53]
+            base_terminal = self._drop_amp_dof_vel(terminal_buf)  # [n, H, 53] (drop 이면 36)
 
         # [R4] 동일한 tan_norm 변환 적용 (live path와 대칭)
         rot_tan_norm_t = _apply_root_rot_tan_norm(terminal_quat_buf, n, self.cfg.num_amp_observations)  # [n, H, 6]
@@ -691,9 +702,11 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
             )
             root_pos_obs_xy = local_root_pos_diff[:, :, :2]
 
-            base_amp = torch.cat([root_pos_obs_xy, amp_obs_buf], dim=-1)  # [N, H, 57]
+            base_amp = torch.cat(
+                [root_pos_obs_xy, self._drop_amp_dof_vel(amp_obs_buf)], dim=-1
+            )  # [N, H, 57] (drop_dof_vel 이면 40)
         else:
-            base_amp = amp_obs_buf  # [N, H, 53]
+            base_amp = self._drop_amp_dof_vel(amp_obs_buf)  # [N, H, 53] (drop 이면 36)
 
         # [R4] expert 측 동일한 tan_norm 변환 (live path와 완전 대칭)
         rot_tan_norm = _apply_root_rot_tan_norm(quat_hist, num_samples, n_hist)  # [N, H, 6]
@@ -708,6 +721,23 @@ class LegImitationTrackingEnv(AMPCommandConditionMixin, DirectRLEnv):
     # ──────────────────────────────────────────────────────────
     # 헬퍼
     # ──────────────────────────────────────────────────────────
+
+    def _drop_amp_dof_vel(self, base_amp: torch.Tensor) -> torch.Tensor:
+        """AMP base 53-dim 텐서에서 dof_vel(열 17:34) 을 제거한다 (플래그 OFF 면 그대로).
+
+        live / terminal / expert 세 경로 모두 이 헬퍼를 거쳐 차원이 일치한다.
+        ``include_rel_track_obs`` 의 2열은 이 제거 **후에** 앞에 붙여야 열 위치가 맞다.
+
+        Args:
+            base_amp: 마지막 축이 53 인 텐서. 보통 [N, H, 53].
+
+        Returns:
+            플래그가 True 면 마지막 축이 36 인 텐서, 아니면 입력 그대로.
+        """
+        if not self.cfg.amp_drop_dof_vel:
+            return base_amp
+        lo, hi = self._amp_dof_vel_slice
+        return torch.cat([base_amp[..., :lo], base_amp[..., hi:]], dim=-1)
 
     def _get_body_contact(
         self,

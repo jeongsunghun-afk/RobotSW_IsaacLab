@@ -98,7 +98,9 @@ if args_cli.run_params:
               # size mismatch 로 실패한다(592 vs 590). 조용한 오측이 아니라 즉시 죽지만,
               # 복원 목록에 없으면 그 run 을 아예 못 잰다.
               "amp_cond_mode", "amp_cond_v_max", "amp_cond_yaw_max",
-              "amp_cond_expert_sampling", "amp_cond_match_temperature"):
+              "amp_cond_expert_sampling", "amp_cond_match_temperature",
+              # dof_vel ablation. 빠지면 disc 입력이 590 vs 422 로 어긋나 체크포인트를 못 읽는다.
+              "amp_drop_dof_vel"):
         if k in saved and hasattr(env_cfg, k):
             _cur = getattr(env_cfg, k)
             if _cur != saved[k]:

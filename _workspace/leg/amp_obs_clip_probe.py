@@ -109,6 +109,8 @@ _ENV_KEYS = (
     "include_rel_track_obs", "num_amp_observations", "amp_observation_space",
     "amp_cond_mode", "amp_cond_v_max", "amp_cond_yaw_max",
     "amp_cond_expert_sampling", "amp_cond_match_temperature",
+    # dof_vel ablation. 빠지면 disc 입력 차원이 어긋나 체크포인트 로드가 실패한다.
+    "amp_drop_dof_vel",
 )
 # env 가 런타임에 계산하는 값은 agent.yaml 에서 얹으면 안 된다(590 vs 592 로 체크포인트를 못 읽는다).
 _AGENT_SKIP = {"amp_observation_space", "motion_files", "num_amp_observations"}

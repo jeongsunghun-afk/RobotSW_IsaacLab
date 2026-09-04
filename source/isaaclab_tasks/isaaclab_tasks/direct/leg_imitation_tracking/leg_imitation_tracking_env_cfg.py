@@ -52,6 +52,7 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
 
     AMP History (num_amp_observations = 10):
         amp_observation_size = 59 × 10 = 590
+        amp_drop_dof_vel=True 이면 per-step 이 42 (dof_vel 17 제거) → 42 × 10 = 420
     """
 
     # ── 에피소드 ────────────────────────────────────────────────
@@ -71,6 +72,10 @@ class LegImitationTrackingEnvCfg(DirectRLEnvCfg):
     # per-step disc obs = dof_pos + dof_vel + root_height + lin_vel + ang_vel + foot_pos + rot_tan_norm
     amp_observation_space: int = 2 * NUM_JOINTS + 1 + 3 + 3 + 3 * NUM_FEET + 6  # = 59
     include_rel_track_obs: bool = False  # 상대적 2D 궤적 포함 여부 토글
+    #: True 면 disc 관측에서 dof_vel(17) 을 뺀다 → per-step 59 - 17 = 42, history 10 → 420 (+cond).
+    #: mlp 판별기가 입력 기여의 대부분을 관절속도에 쓰는지 검정하기 위한 ablation.
+    #: 내부 버퍼(53-dim)와 :attr:`amp_observation_space` 값 자체는 그대로 두고 소비 시점에만 제거한다.
+    amp_drop_dof_vel: bool = False
 
     # ── 모션 데이터 ─────────────────────────────────────────────
     motion_file: str = MOTION_FILES_DIR
