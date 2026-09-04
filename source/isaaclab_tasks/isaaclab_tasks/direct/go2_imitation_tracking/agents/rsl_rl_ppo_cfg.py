@@ -34,7 +34,12 @@ scan 그룹 없음 (이 env는 height_scan/clearance 미사용 — ActorCriticRM
 
 from isaaclab.utils.configclass import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+    RslRlSymmetryCfg,
+)
 
 
 @configclass
@@ -145,3 +150,37 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         drail_label_dim=10,
         drail_sample_strategy="antithetic",  # "antithetic" | "uniform" | "constant"
     )
+
+    def __post_init__(self):  # noqa: D105
+        # ── 좌우 대칭 (기본 OFF) ────────────────────────────────────────────
+        # 2026-09-03 실측: `cmd 3.5` thigh ROM 좌우차가 처치군 36.5 % (대조 7.2 % · MimicKit 16.5 %).
+        # `|vy|`·`|yaw|` 는 셋이 비슷하므로 몸통 드리프트가 아니라 **다리 사용 쏠림**이다.
+        #
+        # ★ 데이터셋에는 이미 `*_mirror.pkl` 이 있고 클립 균등으로 뽑히는데도 쏠린다 — AMP 는
+        #   0.2 s 창의 **분포**만 맞추고, expert 분포는 좌/우 편향 창의 합집합이라 한쪽으로
+        #   쏠린 정책도 그 안에 들어간다. 미러 **데이터**로는 개별 롤아웃 대칭을 못 만든다.
+        #   leg 계열에서 같은 실험이 실패했다(데이터셋 대칭오차는 줄었는데 정책 비대칭은
+        #   9.4k −0.024 → 50k +0.646 단조 발산). 거기서 통한 것은 **mirror loss** 였다.
+        #
+        # 기존 run 재현을 위해 **기본은 완전 OFF**(symmetry_cfg=None → rsl_rl 이 경로 전체를 건너뜀).
+        # run 단위로 환경변수로 켠다:
+        #   GO2_SYMMETRY_AUG=1                      → data augmentation (mirror 샘플 추가)
+        #   GO2_MIRROR_LOSS=1 GO2_MIRROR_LOSS_COEFF=1.0  → mirror-consistency loss 추가
+        # ★ data-aug 단독은 "함수만 equivariant" 라 closed-loop 자발적 대칭붕괴를 못 막는다
+        #   — 대칭을 실제로 잡으려면 mirror loss 를 같이 켤 것.
+        import os
+
+        _aug = os.environ.get("GO2_SYMMETRY_AUG", "0") == "1"
+        _mirror = os.environ.get("GO2_MIRROR_LOSS", "0") == "1"
+        if not (_aug or _mirror):
+            self.algorithm.symmetry_cfg = None
+            return
+
+        from isaaclab_tasks.direct.go2_imitation_tracking.mdp.symmetry import compute_go2_symmetric_states
+
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=_aug,
+            use_mirror_loss=_mirror,
+            mirror_loss_coeff=float(os.environ.get("GO2_MIRROR_LOSS_COEFF", "1.0")),
+            data_augmentation_func=compute_go2_symmetric_states,
+        )
