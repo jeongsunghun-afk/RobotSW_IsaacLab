@@ -230,3 +230,85 @@ gallop attractor 에 못 들어간다(앞선 문서에서 확인).
 
 `speed_ramp_record_rma.py` 는 run 의 `agent.yaml` 을 복원하지 않아 DRAIL 체크포인트를 못 읽었다
 (`disc_arch` 미반영 → state_dict mismatch). `gait_survey_multienv.py` 와 같은 overlay 를 넣어 고쳤다.
+
+## 심층 비교 — cond-mlp vs cond+drail (2026-09-04 10:34~10:45)
+
+두 조건부 arm 을 (a) 긴 속도 램프에서 추종·토크·관절속도·걸음으로, (b) 학습 로그에서 판별기·손실·보상
+곡선으로 다시 봤다. 원자료와 표는 `metrics/long_ramp_surveys.md`, `metrics/train_curves.md`.
+
+### (a) 긴 램프 0→3.5→0 (hold 6 s / ramp 2 s, 정지 출발, seed 0/1/2, `--no_video`, GPU1/2)
+
+`speed_ramp_record_rma.py --vx_max 3.5 --hold_s 6 --ramp_s 2 --force_stand`, 15 단계 120 s. 명령은 0.5 씩
+2 s 선형 상승 — gait survey(명령 도약) 와 **명령 형태가 다르다**. 6 롤아웃 전부 낙상 없음(`ramp_fall_probe`
+는 heading_hold 없이 재서 yaw 드리프트를 낙상으로 오판하므로 관절 접힘 판정으로 대체).
+
+| 항목 (시드 평균) | cond-mlp `model_49999` | cond+drail `model_45000` |
+|---|---|---|
+| 달성률 vx/cmd, 상승 1.5/2.0/2.5/3.0/**3.5** | 0.83/0.94/0.92/0.92/**0.90** | 0.98/0.97/0.98/1.02/**0.96** |
+| 저속 개시(cmd 0.5~1.0) | 시드 1/3 이 vx≈0 (진입 실패, 1.5 부터 회복) | 3/3 개시 (0.83~0.94) |
+| 걸음, 상승 2.0~2.5 / 3.0 / 3.5 (1.5 는 mlp other 2/3) | pace / **pace** / pace (3/3) | pace / **gallop** / gallop (3/3) |
+| 걸음, 하강 3.0 / 2.5 / 2.0 / 1.5 | pace 전부 | gallop 3/3 / 3/3 / 2/3 / pace — 히스테리시스 |
+| 토크 포화율(전 관절, \|τ\|>0.95 limit) | ≤1.0% (속도 따라 증가) | **2.7~3.8%, cmd 0 부터** |
+| 관절속도 peak, cmd 0 / 3.0 (limit 30 rad/s) | 0.6 / 12.3 | **15.6 / 30.4** (HL 시드 최대 31.7, 초과) |
+| 3.5(OOD) 에서 3.0 대비 | 토크 peak +23~43% (여력 사용) | 토크·속도 거의 평평 (3.0 에서 이미 천장) |
+
+1. **cond-mlp 은 점진 램프에서 gallop 이 한 번도 안 열린다**(2.0~3.5 상승·하강 3/3 pace, 1.5 상승은 other 2/3). 조사에서
+   정지 출발 cmd 2.5~3.5 gallop 72.3%·상향 전환 43.8% 였던 것과 어긋나는데, 조건이 다르다 — 조사는
+   명령이 도약(RSI 프레임, 4 s 재샘플 점프)하고 램프는 0.5 씩 2 s 에 걸쳐 오른다. 영상 절의 "3.0 고정
+   → gallop / 0.5 계단 → pace" 도 같은 방향이다. 즉 cond-mlp 의 전환은 **명령 점프 크기에 의존**한다는
+   정황(n=3 시드, 확정 아님). cond+drail 은 램프에서도 3.0 에서 3/3 gallop 으로 바뀌고 하강 시
+   2.0~2.5 까지 유지한다.
+2. **추종은 cond+drail 이 전 구간 더 정확**(달성률 0.94~1.04 vs 0.83~0.94) 하고 저속 개시도 안정적이다.
+   두 정책 다 3.5 에서 실속하지 않는다.
+3. **그 대가는 액추에이터 부하다.** cond+drail 은 정지 명령에서도 다리 관절속도 RMS 2.85 rad/s(시드 2.6~3.0; cond-mlp 0.08)·peak 15.6,
+   토크 포화 3%대로 다리를 계속 흔들고, 3.0 이상에서 관절속도가 `velocity_limit_sim` 30 rad/s 에 닿거나
+   넘는다. 램프는 `act_inference_priv`(결정론적 mean 액션) 경로라 σ 표본 잡음이 아니라 정책 mean 자체의 거동이다. cond-mlp 은 같은 구간
+   peak 12~13 으로 절반 이하. `torque_penalty_w=0` 이라 이를 누르는 항이 학습에 없다.
+
+그림: `figures/long_ramp_tracking.png`, `long_ramp_torque.png`, `long_ramp_jointvel.png`, `long_ramp_gait.png`.
+플롯 스크립트 `_workspace/leg/plot_long_ramp_compare.py`.
+
+### (b) 학습 곡선 — 판별기·손실·보상 (tfevents, baseline / A' 50k 완료, B' 원본+resume 48,475 시점)
+
+세 run 공통 `bce` 손실·보상, `reward_coef 2.0`, `task_reward_lerp 0.5`, disc lr 2.5e-4. drail 만 grad
+penalty·logit reg 가 코드 경로상 **미적용**(`ppo_amp.py` `use_regularizers`). `disc_*_output` 은
+sigmoid 배치 평균(expert→1, policy→0 이 D 의 목표), 보상은 `-log(1-D)·2.0` 을 초당 합산.
+
+| 500-iter 후행 평균 | baseline (uncond) | A' cond-mlp | B' cond+drail |
+|---|---|---|---|
+| margin D(e)−D(p): 정점 → 최종 | 0.76 @1.1k → 0.51 | 0.80 @0.8k → 0.50 | 0.90 @0.6k → **0.88** |
+| D(policy) 5k → 최종 | 0.190 → 0.244 | 0.186 → 0.249 | 0.061 → **0.060** |
+| amp_reward 5k → 최종 [/s] | 21.5 → 28.3 | 20.9 → **29.0** | 8.9 → 8.8 |
+| lin_vel_reward 최종 [/s] | **45.0** | 43.7 (−3.0%) | 44.9 |
+| 수렴 iter (margin / amp_reward / σ) | 39.8k / 40.5k / 43.8k | 36.2k / 38.0k / 38.1k | 퇴화(32) / 17.2k / 발산 |
+| σ 5k / 16k / 최종 | 0.39 / 0.41 / 0.31 | 0.38 / 0.37 / 0.28 | **1.50 / 3.41 / 14.4** |
+| grad penalty 최종 | 0.12 | 0.12 | 0 (미적용) |
+
+1. **mlp 계열(baseline, A')은 정상적인 적대 게임이다.** D 는 수십 iter 에 학습돼 1k 부근 margin 정점을
+   찍고, 이후 정책이 서서히 속여 50k 까지 단조 하강(0.76→0.51). D(policy) 0.19→0.25, amp_reward
+   21→28~29 로 style 이 계속 개선되며 **36k~44k 에 가서야** ±5% 밴드에 든다 — 50k 예산의 2/3 가 실제
+   개선 구간이다. A' 는 baseline 보다 style 이 근소하게 낫고(29.0 vs 28.3, 3.7k~5.7k 이른 수렴) task 는
+   3% 낮다. 조건화가 D 를 망가뜨리지 않았다.
+2. **B' 의 적대 게임은 5k 이후 정지해 있다.** D(expert) 0.94 / D(policy) 0.060 / margin 0.88 이 43k
+   동안 ±0.001 로 고정, amp_reward 8.8 평평. drail logit(`L_pi−L_M`)의 sigmoid 는 mlp 와 척도가 달라
+   절대값(0.06 vs 0.25)으로 모션 품질을 비교할 수는 없지만, "정책이 D 를 밀어내는 흔적이 없다" 는
+   사실이다. 총 보상에서 style 이 차지하는 몫도 A' 의 1/3 이하(8.8 vs 44.9 의 lerp).
+3. **B' σ 발산은 resume 과 무관하다.** 원본 run 500 iter 부근부터 단조 상승 — 5k 에 1.50(A' 의 3.9배),
+   16k 3.41, seam 앞뒤 3.582→3.604 연속. resume 재워밍은 amp_reward 한 점(16,700~16,750, 5.3)뿐이다.
+   σ 가 4배 커지는 동안 margin 은 0.2% 만 변하고 B' 의 1차 차분 상관은 전부 |r|<0.03(A' 는 최대 0.05) — "D 가 강해서 σ 가
+   터졌다" 는 서술은 이 로그로 뒷받침되지 않는다. 다만 drail 만 GP/logit reg 가 꺼져 있고 drail 만
+   발산한 것은 사실(n=1 정황). **실무 함의: DRAIL 계열 재시도는 5k 시점 σ(≈1.5 vs 0.38)만으로 판정 가능.**
+4. task 보상은 세 run 이 같다(43.7~45.0, ep_len 995+). B' 의 mean_reward 532 가 낮은 것은 style 항 때문.
+
+그림: `figures/train_disc_outputs.png`, `train_disc_losses.png`, `train_policy_stats.png`,
+`train_reward_balance.png`. 추출·플롯 `_workspace/leg/tb_extract_cond_disc.py`,
+`plot_train_curves_cond_disc.py`, 캐시 `metrics/train_curves/*.npz`.
+
+### 판정 갱신
+
+- **cond-mlp 우선 후보는 유지**하되 단서 둘: 점진 램프에서는 gallop 전환이 안 열림(명령 점프 의존 정황),
+  저속 개시 실패 1/3 시드. 학습 곡선은 건강하다(정상 적대 게임, 수렴 38k).
+- **cond+drail 은 배포 후보가 아니다.** 추종·전환·개시는 우위지만 관절속도 한계 도달·정지 시 떨림·σ 발산·
+  D 정지가 한 묶음이다. DRAIL 을 살리려면 GP/entropy 상한(σ clamp) 같은 정규화 실험이 먼저다.
+- 다음: cond-mlp 명령 점프 크기 스윕(0.5→3.0 직접 vs 0.5 단계, 헤드리스 n≥8) 으로 1 을 확정;
+  `torque_penalty_w`/관절속도 페널티 도입 검토; run C 는 5k σ 기준으로 조기 판정.
