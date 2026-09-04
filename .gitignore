@@ -35,6 +35,12 @@ docker/.container.cfg
 !.vscode
 
 # Outputs
+# Ignore report payloads but keep the markdown conventions/manifests committable.
+# Archived logs stay ignored via the **/*.log* rule above.
+/reports/**
+!/reports/**/
+!/reports/**/README.md
+!/reports/**/*.md
 **/output/*
 **/outputs/*
 **/videos/*
@@ -91,3 +97,6 @@ docs/superpowers/
 
 # PACE sim2real identification data (chirp captures, plots)
 /data/
+
+# real Mid-360 rosbag (770 MB) kept next to the task for analysis, never committed
+source/isaaclab_tasks/isaaclab_tasks/direct/parkour_imitation/real_lidar/*.db3

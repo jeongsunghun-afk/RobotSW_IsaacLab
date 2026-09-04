@@ -342,6 +342,25 @@ gym.register(
     },
 )
 
+# Real-sensor arm: same objective and same runner as the Sym arm above, with the Mid-360
+# modelled from the deployed sensor's rosbag (non-repetitive rolling scan, 20k rays at 38%
+# no-return, 23 deg mount pitch, 0.8 m blind range, rear 120 deg cropped, body-occlusion grid
+# off).  obs["lidar"] is unchanged at 7371, so the two are directly comparable.
+gym.register(
+    id="Go2-ParkourImitation-Lidar-SL-Grid-Crawl-Sym-RealSensor-EasyEntry-v0",
+    entry_point=f"{__name__}.parkour_imitation_random_goal_lidar_env:Go2ParkourImitationRandomGoalLidarEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.parkour_imitation_random_goal_lidar_env_cfg:"
+            "ParkourImitationRandomGoalLidarSLGridCrawlRealSensorEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_amp_cfg:Go2ParkourImitationLidarSLGridCrawlSymPPOAMPRunnerCfg"
+        ),
+    },
+)
+
 gym.register(
     id="Go2-ParkourImitation-Lidar-SL-Grid-EasyEntry-v0",
     entry_point=f"{__name__}.parkour_imitation_random_goal_lidar_env:Go2ParkourImitationRandomGoalLidarEnv",

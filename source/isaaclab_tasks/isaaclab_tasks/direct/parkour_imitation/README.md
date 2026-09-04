@@ -50,6 +50,49 @@ Go2 로봇의 다중 지형 파쿠르 주행에 **AMP(Adversarial Motion Prior)*
 | `TerrainStyle` | AMP obs에서 지형 의존 차원 제거 (root_height, lin_vel_z, foot_z, rot_tan_norm 삭제 → 37-dim) |
 | `Demo/Playground` | num_envs=1, 팔로우 카메라 추가, **`play_parkour_demo.py`로만 실행 가능** |
 
+### 실센서 Mid-360 arm (`...-RealSensor-EasyEntry-v0`)
+
+`Go2-ParkourImitation-Lidar-SL-Grid-Crawl-Sym-RealSensor-EasyEntry-v0`은 실제 배포 Mid-360의
+rosbag(2026-09-03) 계측에 맞춰 센서 모델을 교체한 arm이다. 환경 클래스와 러너 설정
+(`Go2ParkourImitationLidarSLGridCrawlSymPPOAMPRunnerCfg`)은 `...-Crawl-Sym-EasyEntry-v0`과 동일하고
+`obs["lidar"]`도 7371차원 점유 격자 그대로라, 두 arm은 직접 비교할 수 있다.
+
+바뀌는 것은 다섯 가지이며 각각 `ParkourImitationRandomGoalLidarEnvCfg`의 독립 필드라 ablation 시
+하나씩 되돌릴 수 있다.
+
+| 필드 | 기본값 | RealSensor arm | 근거 |
+|------|--------|----------------|------|
+| `lidar_mount_pitch_deg` | `None` (30°) | `30.0` | 제공자 배포 extrinsic (0, 0.9659258, 0, 0.2588190) = 설계값. rosbag 중력 기준 실측은 22~25°로 미해결 |
+| `lidar_mount_pitch_range_deg` | `None` | `(22.0, 30.0)` | 위 미해결 구간을 env별로 균등 추첨, 에피소드마다 재추첨 |
+| `lidar_use_body_occ_mask` | `True` | `False` | 실제 파이프라인은 몸체 마스크를 쓰지 않음 |
+| `lidar_blind_range` [m] | `0.0` | `0.8` | 0.8 m 미만 반사는 발행되지 않음 |
+| `lidar_rear_crop_deg` [deg] | `0.0` | `120.0` | 후방 120° 크롭 (base 방위각 120~240°) |
+| `lidar_mount_pos` [m] | `None` | 미사용 | 붐 위치 override용 |
+
+이 arm의 센서 cfg는 `update_period=0.1`도 함께 준다. 다른 arm은 `SensorBaseCfg` 기본값 0.0을
+상속해 제어 스텝마다(50 Hz) 다시 캐스트하지만, 여기서는 실제 측정 주기인 10 Hz로만 캐스트한다.
+그 결과 센서 갱신 스텝과 env의 누적기 push 스텝(`push_every=5`)이 env별로 정확히 일치하고,
+push 한 번이 새 스캔 창 하나를 소비한다. 리셋된 env는 타이머가 다시 시작되므로 이후 갱신이
+나머지와 어긋나고, 센서는 부분 마스크로 갱신된다.
+
+붐 pitch는 하나로 고정하지 않는다. 제공자 extrinsic(30°)과 rosbag 실측(22~25°)이 ~7° 어긋난 채
+남아 있어서, `lidar_mount_pitch_range_deg = (22.0, 30.0)`으로 두 값을 모두 덮는 구간에서 env마다
+균등 추첨하고 리셋마다 다시 뽑는다. 어느 쪽이 맞는지 확정되기 전에도 정책이 한쪽 extrinsic에
+의존하지 않게 하려는 것이다. 실제로 뽑힌 값은 `sensor.mount_pitch_deg` (N,)로 읽고 init 때
+min/mean/max가 출력된다. `None`이면 `lidar_mount_pitch_deg` 하나로 회전하는 기존 경로와 비트
+단위로 같다. 이 필드는 rolling 센서 cfg에서만 의미가 있고, 정적 `LidarSensorCfg`에 설정하면
+`resolve_lidar_mount`가 `TypeError`를 낸다.
+
+센서 자체는 `mid360_rolling_lidar.Mid360RollingLidarSensor`(cfg는 `mid360_rolling_lidar_cfg.py`)로 교체된다. 코어 `LidarSensor`가 스캔
+패턴에서 잘라낸 창 하나를 영원히 재사용하는 것과 달리, 이 서브클래스는 매 업데이트마다
+`mid360.npy`(80만 행, 시간순)의 다음 `samples`행 창을 환경별로 ray 방향 버퍼에 덮어써서 실제
+비반복 스캔을 재현한다. 환경마다 스캔 위상이 다르고 리셋 때마다 다시 추첨된다
+(`rolling_scan`, `random_scan_phase`). 광선 수는 20000, 무반사율은 0.38로 실측 반환 수에 맞췄다.
+
+`lidar_mount_pitch_deg` / `lidar_mount_pos`는 cfg의 `__post_init__`과 환경의 `_setup_scene` 양쪽에서
+적용된다. hydra `env.*` override는 cfg 생성 이후에 반영되므로 `_setup_scene` 쪽이 없으면
+`env.lidar_mount_pitch_deg=25` 같은 명령행 override가 센서에 도달하지 못한다.
+
 ## Observation 그룹 (AMP 학습 task 공통)
 
 | 그룹 | 차원 | 내용 |

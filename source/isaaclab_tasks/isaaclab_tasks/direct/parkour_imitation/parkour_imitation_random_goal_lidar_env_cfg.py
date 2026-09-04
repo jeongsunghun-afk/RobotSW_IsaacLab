@@ -26,15 +26,81 @@ Sim 6.0 migration notes
 
 from __future__ import annotations
 
+import math
+
 from isaaclab.sensors import RayCasterCfg
 from isaaclab.sensors.lidar_sensor_cfg import LidarSensorCfg
 from isaaclab.sensors.ray_caster.patterns.patterns_cfg import LivoxPatternCfg
 from isaaclab.utils.configclass import configclass
 
+from .mid360_rolling_lidar_cfg import Mid360RollingLidarSensorCfg
 from .parkour_imitation_random_goal_env_cfg import (
     ParkourImitationRandomGoalEnvCfg,
     apply_easy_entry_terrain_lowering,
 )
+
+
+def mid360_mount_quat(pitch_deg: float) -> tuple[float, float, float, float]:
+    """Mount quaternion for the Mid-360 boom: dome-down flip composed with a pitch.
+
+    The boom holds the sensor dome-down, so the mount is a 180 deg flip about x followed by a
+    pitch about y.  In ``(w, x, y, z)`` that product collapses to a closed form::
+
+        quat_mul(Rx(180 deg), Ry(p)) = (0, cos(p / 2), 0, sin(p / 2))
+
+    which reproduces the historical hard-coded ``(0.0, 0.96593, 0.0, 0.25882)`` at ``p = 30``
+    exactly (verified to 1e-6).
+
+    Args:
+        pitch_deg: Mount pitch about the sensor's y axis [deg].
+
+    Returns:
+        The mount quaternion as ``(w, x, y, z)``, the convention
+        :class:`~isaaclab.sensors.ray_caster.ray_caster_cfg.RayCasterCfg.OffsetCfg` documents.
+    """
+    half = math.radians(pitch_deg) * 0.5
+    return (0.0, math.cos(half), 0.0, math.sin(half))
+
+
+def resolve_lidar_mount(cfg: ParkourImitationRandomGoalLidarEnvCfg) -> None:
+    """Write ``lidar_mount_pitch_deg`` / ``lidar_mount_pos`` into ``cfg.mid360_lidar.offset``.
+
+    Idempotent: the offset is derived from the two override fields, never from its own current
+    value, so this can run in ``__post_init__`` and again in the env's ``_setup_scene`` (which is
+    what makes hydra command-line overrides take effect — hydra applies them after the cfg is
+    constructed).  Both fields default to ``None``, which leaves the historical mount untouched.
+
+    Args:
+        cfg: The LiDAR env cfg to mutate in place.
+    """
+    pitch = getattr(cfg, "lidar_mount_pitch_deg", None)
+    if pitch is not None:
+        cfg.mid360_lidar.offset.rot = mid360_mount_quat(float(pitch))
+    pos = getattr(cfg, "lidar_mount_pos", None)
+    if pos is not None:
+        cfg.mid360_lidar.offset.pos = tuple(float(v) for v in pos)
+
+    # Per-env pitch randomisation is a property of the rolling sensor, so it is copied onto the
+    # sensor cfg rather than read from the env cfg at runtime. Guarding here rather than in the
+    # env covers both call sites, and it must precede any write: ``resolve_lidar_mount`` is the
+    # first statement in ``_setup_scene``, so a later check would fire after the damage.
+    pitch_range = getattr(cfg, "lidar_mount_pitch_range_deg", None)
+    if pitch_range is not None:
+        if not hasattr(cfg.mid360_lidar, "mount_pitch_range_deg"):
+            raise TypeError(
+                "lidar_mount_pitch_range_deg requires mid360_lidar to be a"
+                " Mid360RollingLidarSensorCfg, got"
+                f" {type(cfg.mid360_lidar).__name__}. Per-env mount pitch is applied while the"
+                " rolling scan window is written, which the static LidarSensor never does."
+            )
+        cfg.mid360_lidar.mount_pitch_range_deg = (float(pitch_range[0]), float(pitch_range[1]))
+    elif hasattr(cfg.mid360_lidar, "mount_pitch_range_deg"):
+        # The env field is authoritative in both directions.  Writing only on the non-None
+        # branch would make ``env.lidar_mount_pitch_range_deg=null`` a no-op, because
+        # ``__post_init__`` has already copied the class default onto the sensor cfg by the time
+        # hydra applies the override.  Set the range on ``mid360_lidar`` directly if you want it
+        # independent of the env field.
+        cfg.mid360_lidar.mount_pitch_range_deg = None
 
 
 @configclass
@@ -140,10 +206,56 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
     # shifted relative to the teacher's voxel grid and the two stop being comparable.
     lidar_grid_origin_z: float = 0.05
 
+    # Path to the body self-occlusion az/el grid (.npy, [el_bin, az_bin] bool, 1 deg/bin).  ``None``
+    # keeps the historical hard-coded file (``_workspace/.../body_occ_azel_grid.npy``, v1 — cast from
+    # the base origin, see reports/presentation/05_parkour_learning §8.5 ①).  Set to an absolute path
+    # to train with a different mask, e.g. the origin-corrected v2 grid.  Recorded in params/env.yaml.
+    body_occ_grid_path: str | None = None
+
     # Envs processed per chunk while scattering.  The intermediate is ``(chunk, R, 3)`` with
     # R ~= 24k rays, so a full 1024-env batch would allocate ~295 MB before counting the
     # rotation's own temporaries.
     lidar_grid_chunk_size: int = 256
+
+    # ------------------------------------------------------------------
+    # Real-deployment sensor model — every field defaults to the historical behaviour
+    # ------------------------------------------------------------------
+    # Apply the precomputed body self-occlusion az/el grid.  ``False`` skips loading it
+    # entirely (``_body_occ_grid`` stays None), which is what the real pipeline does: it never
+    # masks by body geometry, it just drops returns inside the blind range.  The grid is also
+    # baked at the nominal upright pose, so it is wrong whenever the robot is pitched.
+    lidar_use_body_occ_mask: bool = True
+
+    # Minimum publishable range [m].  A return closer than this is discarded (hit_valid=False)
+    # rather than reported, matching the Mid-360's blind zone and the deployment driver.
+    # 0.0 disables the gate.  Note this is independent of ``mid360_lidar.min_range``, which only
+    # clamps the noisy distance and never invalidates a ray.
+    lidar_blind_range: float = 0.0
+
+    # Total angular width [deg] of the rear wedge that the deployment pipeline crops, centred on
+    # base-frame azimuth 180 deg (straight backward).  A ray is invalidated when its body-local
+    # azimuth satisfies ``|az| >= 180 - crop / 2``.  0.0 disables the crop.
+    lidar_rear_crop_deg: float = 0.0
+
+    # Mount pitch [deg] about the sensor y axis, composed with the dome-down flip (see
+    # :func:`mid360_mount_quat`).  ``None`` keeps the hard-coded 30 deg quaternion below.
+    # The deployment code's extrinsic (provider, 2026-09-03) is (0, 0.9659258, 0, 0.2588190) wxyz =
+    # exactly the 30 deg design value.  The rosbag disagrees: the Mid-360's own IMU put gravity
+    # 21.7 deg off the dome axis and per-frame floor fits gave 22-25 deg, so during that capture
+    # the sensor sat ~7 deg shallower to gravity than the design (base pitched, or the boom is
+    # not at its nominal angle).  Unresolved without a photo; set this field once it is.
+    lidar_mount_pitch_deg: float | None = None
+
+    # Mount position [m] in the base frame.  ``None`` keeps the hard-coded boom position below.
+    lidar_mount_pos: tuple[float, float, float] | None = None
+
+    # Per-env mount-pitch domain randomisation ``(lo, hi)`` [deg].  ``None`` (default) gives every
+    # env the single ``lidar_mount_pitch_deg`` rotation.  When set, each env draws its own boom
+    # pitch at init and again on every reset, so the policy cannot assume one exact extrinsic.
+    # Copied onto ``mid360_lidar.mount_pitch_range_deg`` by :func:`resolve_lidar_mount`, so hydra
+    # overrides (``env.lidar_mount_pitch_range_deg=[25,30]``) reach the sensor.  Only meaningful
+    # with the rolling sensor cfg; anything else raises.
+    lidar_mount_pitch_range_deg: tuple[float, float] | None = None
 
     # ------------------------------------------------------------------
     # Pose-registered accumulation over the metric grid (rung A1-1)
@@ -198,6 +310,12 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
         random_angle_noise=0.0,
         pixel_std_dev_multiplier=0.0,
     )
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Apply the mount overrides declared above.  The env re-applies this in ``_setup_scene``
+        # so hydra command-line overrides, which land after construction, also take effect.
+        resolve_lidar_mount(self)
 
 
 @configclass
@@ -547,3 +665,107 @@ class ParkourImitationRandomGoalLidarSLGridCrawlEasyEntryEnvCfg(
             self.terrain.terrain_generator.sub_terrains[key].proportion = 0.16
         # Idempotent after the proportion rewrite: the lowering only touches range bounds.
         apply_easy_entry_terrain_lowering(self)
+
+
+@configclass
+class ParkourImitationRandomGoalLidarSLGridCrawlRealSensorEnvCfg(
+    ParkourImitationRandomGoalLidarSLGridCrawlEasyEntryEnvCfg
+):
+    """SL-Grid + crawl with the Mid-360 modelled the way the real one behaves.
+
+    Every change here comes from a rosbag capture of the deployed sensor (2026-09-03) rather
+    than from the datasheet or the simulator's convenience.  Five knobs move at once, which
+    breaks the ladder's usual one-change-per-rung rule, so each is a separate cfg field and can
+    be reverted on its own for an ablation.
+
+    What the rosbag showed, and what each field does about it:
+
+    * **20,000 slots per 10 Hz frame, ~38% of them empty.** The sim was casting 24,000 rays at
+      10% dropout, i.e. ~21.6k returns where the real sensor delivers ~12.4k.  ``samples`` drops
+      to 20000 and ``pixel_dropout_prob`` rises to 0.38 to match the real return count.
+    * **The scan is non-repetitive.** Each frame is a different contiguous window of the
+      time-ordered pattern file; the sim re-cast one frozen window forever.
+      :class:`~isaaclab_tasks.direct.parkour_imitation.mid360_rolling_lidar_cfg.Mid360RollingLidarSensorCfg`
+      rolls the window per env per update, with a random phase per env and per reset.
+    * **Boom pitch stays at the 30 deg design value** (``lidar_mount_pitch_deg = 30.0``, i.e.
+      the provider's deployment extrinsic (0, 0.9659258, 0, 0.2588190)).  The rosbag capture
+      measured the sensor 22-25 deg from gravity (IMU 21.7 deg, floor fits), a ~7 deg
+      discrepancy that is either base pitch during the capture or a boom that is not at its
+      nominal angle.  Kept explicit here so the value is recorded in params/env.yaml and can
+      be swapped without touching the class once a photo settles it.  Rather than pick a side,
+      ``lidar_mount_pitch_range_deg = (22.0, 30.0)`` randomises the boom pitch per env and
+      resamples it every episode: 30 deg is the provider's nominal extrinsic and the upper
+      bound, 22 deg is the lower end of the rosbag measurements (IMU gravity 21.7 deg, floor
+      fits 22-25 deg).  A policy trained across the band does not depend on which is right, and
+      the single-value ``lidar_mount_pitch_deg`` still sets ``offset.rot`` for anything that
+      reads the nominal mount.
+    * **Returns closer than 0.8 m are never published.** ``lidar_blind_range = 0.8`` — and with
+      that in place the body self-occlusion grid is redundant, so
+      ``lidar_use_body_occ_mask = False`` removes it.  That grid was baked at the nominal
+      upright pose and is wrong at any pitch, which the blind range is not.
+    * **The pipeline crops the rear 120 deg** (base azimuth 120..240 deg).
+      ``lidar_rear_crop_deg = 120.0``.
+
+    ``lidar_grid_accumulate`` is inherited from rung A1-1's finding rather than from the rosbag:
+    the real sensor's sparser, rolling scan makes any single frame thinner than before, and the
+    pose-registered accumulator is what turns a sequence of thin frames back into a usable map.
+    ``lidar_grid_ema_alpha`` (0.94) and ``lidar_grid_accumulate_at_sensor_rate`` (True) keep the
+    A1-1 defaults.  The terrain mix and EasyEntry lowering are inherited untouched.
+
+    ``obs["lidar"]`` stays the 27x21x13 = 7371 occupancy grid, so the paired runner cfg and the
+    student encoder need no change and this arm is directly comparable to the parent.
+    """
+
+    lidar_mount_pitch_deg: float | None = 30.0
+    lidar_mount_pitch_range_deg: tuple[float, float] | None = (22.0, 30.0)
+    lidar_use_body_occ_mask: bool = False
+    lidar_blind_range: float = 0.8
+    lidar_rear_crop_deg: float = 120.0
+    lidar_grid_accumulate: bool = True
+
+    # Identical to the base ``mid360_lidar`` except: the rolling sensor class, 20000 rays per
+    # frame, and 38% no-return.  ``offset.rot`` is overwritten by ``resolve_lidar_mount`` from
+    # ``lidar_mount_pitch_deg`` above; the 30 deg value here is only the inherited default.
+    mid360_lidar: Mid360RollingLidarSensorCfg = Mid360RollingLidarSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/base",
+        offset=RayCasterCfg.OffsetCfg(
+            pos=(0.333644, -0.000485, 0.050079),
+            rot=(0.0, 0.96593, 0.0, 0.25882),
+        ),
+        pattern_cfg=LivoxPatternCfg(
+            sensor_type="mid360",
+            samples=20000,
+            use_simple_grid=False,
+            downsample=1,
+        ),
+        ray_alignment="base",
+        mesh_prim_paths=["/World/ground"],
+        max_distance=40.0,
+        min_range=0.2,
+        debug_vis=False,
+        return_pointcloud=False,
+        pointcloud_in_world_frame=False,
+        update_frequency=10.0,
+        # Cast at a true 10 Hz.  ``SensorBaseCfg.update_period`` defaults to 0.0, which makes
+        # the outdated gate fire on every control step — so every other arm re-casts the sensor
+        # 5x per measurement it is supposed to produce.  Setting it to the measurement period
+        # puts the cast on the same 0.1 s grid the env's own ``_lidar_push_ctr`` already uses
+        # (``push_every = round(1 / (10 Hz * 0.02 s)) = 5`` control steps), so each accumulator
+        # push consumes exactly one new scan window instead of the fifth of five.
+        # It also matters for the rolling scan specifically: at 0.0 the window advanced 20k rows
+        # every control step and wrapped the 800k pattern in 0.8 s rather than the real 4 s.
+        # Why 0.09 and not 0.1: the sensor timestamp accumulates in float32 at physics dt
+        # (4 x 0.005 s per control step on the PhysX path) and the outdated kernel's epsilon is
+        # a fixed 1e-6, smaller than the float32 ULP once t > ~8 s.  At exactly 0.1 the gate
+        # then misses about one tick in 30 from t ~= 16 s (every 6th control step instead of the
+        # 5th) and drifts off ``_lidar_push_ctr``.  0.09 still fires only at the 5th step
+        # (4 x 0.02 = 0.08 < 0.09 <= 0.10) with a margin far above any float error.
+        update_period=0.09,
+        enable_sensor_noise=True,
+        random_distance_noise=0.02,
+        pixel_dropout_prob=0.38,
+        random_angle_noise=0.0,
+        pixel_std_dev_multiplier=0.0,
+        rolling_scan=True,
+        random_scan_phase=True,
+    )
