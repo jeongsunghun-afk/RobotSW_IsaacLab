@@ -213,3 +213,20 @@ gallop attractor 에 못 들어간다(앞선 문서에서 확인).
    전환율은 7 배 차이다.
 
 원자료: `metrics/final50k_surveys.md`, `metrics/final50k/{cmdchg4s50k,condmatch50k,bresume45k}_{rsi,stand,tr}.npz`.
+
+### 영상 (2026-09-04 09:32~09:42, 추적 카메라, seed 0, 정지 출발, 각 1 롤아웃)
+
+영상은 측정이 아니다(카메라 ON 이 낙상률을 바꾼다는 09-01 판정). 아래 캡션은 `gait_classify.py` 로
+같은 롤아웃의 npz 를 분류한 결과이며, 조사 표의 비율과 다를 수 있는 **개체 하나**다. 6 편 모두 완주.
+
+| 파일 | 명령 | 실제 보행 | 비고 |
+|---|---|---|---|
+| `videos/uncond50k_const30_stand/speed_ramp-step-0.mp4` | 3.0 고정 8 s | **pace** 2.30 Hz | vx 2.86 |
+| `videos/condmlp50k_const30_stand/speed_ramp-step-0.mp4` | 3.0 고정 8 s | **gallop** 2.26 Hz | vx 3.02 |
+| `videos/conddrail45k_const30_stand/speed_ramp-step-0.mp4` | 3.0 고정 8 s | pace 2.40 Hz | 조사는 74.7% gallop 인데 이 개체는 pace |
+| `videos/uncond50k_steps_stand/speed_ramp-step-0.mp4` | 0.5→3.0 계단(0.5 씩, 3 s) | 전 구간 pace | 1.79→2.26 Hz |
+| `videos/condmlp50k_steps_stand/speed_ramp-step-0.mp4` | 0.5→3.0 계단 | 2.0 이상 pace, 1.5 이하 3 사이클 미만 | 이 개체는 전환 안 함(조사 43.8%) |
+| `videos/conddrail45k_steps_stand/speed_ramp-step-0.mp4` | 0.5→3.0 계단 | 2.5 까지 pace → **3.0 에서 gallop** | 저속→고속 전환의 실례 |
+
+`speed_ramp_record_rma.py` 는 run 의 `agent.yaml` 을 복원하지 않아 DRAIL 체크포인트를 못 읽었다
+(`disc_arch` 미반영 → state_dict mismatch). `gait_survey_multienv.py` 와 같은 overlay 를 넣어 고쳤다.

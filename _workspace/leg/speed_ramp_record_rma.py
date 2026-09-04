@@ -269,6 +269,36 @@ CAM_EYE_OFFSET, CAM_TGT_OFFSET = CAM_VIEWS[args_cli.cam_view]
 
 agent_cfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
 
+# ★ run 의 agent.yaml 도 얹는다 — `disc_arch: drail` 로 학습한 체크포인트는 레지스트리 기본 mlp
+# 판별기에 state_dict 를 못 넣어 죽는다(gait_survey_multienv.py 와 같은 수정). env 가 런타임에
+# 계산하는 값(amp_observation_space 등)은 제외한다.
+if args_cli.run_params:
+    import os as _os
+
+    _agent_yaml = _os.path.join(_os.path.dirname(args_cli.run_params), "agent.yaml")
+    if _os.path.exists(_agent_yaml):
+        with open(_agent_yaml) as _f:
+            _saved_agent = yaml.load(_f, Loader=_LooseLoader)
+        _SKIP = {"amp_observation_space", "motion_files", "num_amp_observations"}
+        for _sec in ("algorithm", "policy", "amp", "estimator"):
+            _src = _saved_agent.get(_sec) if isinstance(_saved_agent, dict) else None
+            _dst = getattr(agent_cfg, _sec, None)
+            if not isinstance(_src, dict) or _dst is None:
+                continue
+            _is_map = isinstance(_dst, dict)
+            for _k, _v in _src.items():
+                if _k in _SKIP or _v is None:
+                    continue
+                _cur = _dst.get(_k, None) if _is_map else getattr(_dst, _k, None)
+                if not _is_map and not hasattr(_dst, _k):
+                    continue
+                if _cur != _v:
+                    print(f">>> agent.{_sec}.{_k}: {_cur} -> {_v}")
+                    if _is_map:
+                        _dst[_k] = _v
+                    else:
+                        setattr(_dst, _k, _v)
+
 dt = 1.0 / env_cfg.policy_dt_hz  # policy step 주기 [s]
 hold_steps = int(round(args_cli.hold_s / dt))
 ramp_steps = int(round(args_cli.ramp_s / dt))
