@@ -488,3 +488,47 @@ expert 라벨을 클립 평균 속도로 되돌리되 누설 없이(라벨 잡�
 도구: `_workspace/leg/gait_reward_by_class.py`, `disc_offline.py`, `disc_saliency.py`,
 `lowpass_rescore.py`, `disc_cond_swap.py`; `gait_survey_multienv.py --other_checkpoint`,
 `amp_obs_clip_probe.py --save_seq`. 그림 `figures/{gait_reward_by_class,disc_saliency,disc_occlusion,lowpass_rescore,disc_cond_swap}.png`.
+
+## 후속 run — σ 고정·관절속도 제거로 DRAIL 을 속일 수 있는가 (2026-09-04 18:00 착수, 09-06 12:45 판정)
+
+목표 ①("DRAIL 에서 정책이 판별기를 속이게") 의 재료 제거 계열 두 처방을 50k 까지 돌렸다. run C(disc lr 1/10)는
+41.8k 에서 중단(σ 게이트 실패 확정). 원자료 `metrics/followup50k_surveys.md`, 플롯 `figures/followup50k.png`.
+
+| run | 변경 | σ 최종 | D(policy) 5k→50k | amp | lin_vel | 총 R |
+|---|---|---|---|---|---|---|
+| (a) `condmatch_drail_fixstd03` | `noise_std_type=fixed 0.3` | 0.30 | 0.052→0.055 | 8.8 | **46.2** | **549** |
+| (b) `condmatch_drail_nodofvel` | `amp_drop_dof_vel=true`(disc 입력 590→422) | **38.1** | 0.067→0.071 | 9.3 | 43.8 | 524 |
+| (c) B' resume 66.7k | — | 23.7 | 0.056→0.054 | 8.4 | 45.1 | 532 |
+
+**학습 곡선: 둘 다 실패.** 잡음을 없애도(a), 가장 쉬운 채널을 빼도(b) DRAIL 은 D(policy) 0.04~0.07 로 결정론 mean
+정책을 그대로 갈라낸다. 포화의 원인은 행동 잡음도 관절속도 채널도 아니고 **판별기 자체**(BCE 로 학습되는 손실 차이에
+묶는 항이 없음)다. (b) 는 σ 가 B' 보다 더 빨리 발산했다(판별기가 dof_vel 을 안 보니 떨림에 벌점이 없음).
+
+**거동 (정지 출발 4096 env, 클립 속도-명령 프로브, 결정론 mean 경로, 무시드)**
+
+| run | 고속 gallop% | 상향 전환 | 하향 전환 | 관절속도 8~25 Hz (run1/trot0/walk1) | dof_pos W1 | dof_vel W1 | foot_pos W1 |
+|---|---|---|---|---|---|---|---|
+| A' cond-mlp 50k | 72.3 | 43.8 | 64.4 | 0.11 / 0.04 / 0.03 | 0.130 | 0.46 | 0.028 |
+| B' drail 45k | 74.7 | 33.2 | 88.3 | 0.42 / 0.47 / 0.67 | 0.054 | 1.26 | 0.018 |
+| (a) fixstd 0.3 | **52.7** | **11.2** | 86.1 | **0.25 / 0.19 / 0.25** | **0.047** | 0.68 | **0.017** |
+| (b) nodofvel | 63.7 | 29.2 | 91.8 | **0.90 / 0.94 / 0.96** | 0.076 | — | 0.019 |
+| (c) B' 67k | 71.3 | 34.1 | 93.1 | 0.45 / 0.50 / 0.69 | 0.052 | 1.27 | 0.018 |
+| 참조 | | | | 0.20 / 0.04 / 0.08 | | | |
+
+1. **σ 고정은 떨림을 절반만 줄인다.** (a) 의 고주파 비율은 B' 의 0.42~0.67 에서 0.19~0.25 로 내려왔지만 A'(0.03~0.11)
+   위에 남고, `leg_trot0` 에서는 참조의 4.5배다. 떨림의 절반은 σ 발산이 만든 것이고 나머지 절반은 DRAIL 게임 자체에서
+   온다는 정황이다. B' 의 장점(자세·발 근접)은 유지돼 다섯 run 중 가장 가깝다.
+2. **대가는 걸음 선택성이다.** (a) 는 고속 gallop 52.7%, 상향 전환 11.2% 로 다섯 run 중 최하위. σ 를 묶자 gallop
+   attractor 로 가는 탐색이 줄었다는 정황(확정 아님).
+3. **(b) 는 σ 38 에도 결정론 경로로는 살아 있으나**(낙상 0, gallop 63.7%) 떨림이 최악(고주파 0.90~0.96, 절대 파워
+   B' 의 12~21배). 판별기가 관절속도를 안 보면 떨림을 막을 항이 아무것도 없다.
+4. **(c) 67k 는 45k 와 같다.** σ 만 12.98→23.74 로 올랐고 거동 지표는 정체. 22k 를 더 돌려 얻은 것은 없다.
+5. 낙상 0 은 결정론 mean 경로·GT base 속도 추정 조건이라 강건성 증거가 아니다. 저속 gallop% 열은 표본 1~9 개라 비교 불가.
+
+**판정.** 방향 ① 의 재료 제거 계열(잡음·채널)은 기각. 남은 카드는 판별기 직접 제한 — (c) logit 온도/clamp 또는 GP,
+(d) 용량·epoch·replay 축소 — 이며, "DRAIL 을 속이는 정책" 이 이 환경에서 가능한지 자체가 아직 열려 있다.
+방향 ②(적당히 따라하기) 의 표에는 (a) 가 "DRAIL + σ 고정" 열로 들어가며, 자세 근접은 최고이나 걸음 선택은 최하라
+단순 우열이 아니다. 대조군 (b') mlp + `dof_vel` 제거(`_workspace/leg/launch_nodofvel_mlp.sh`), (e) mlp `task_reward_lerp`
+0.8, (f) AMP-off 가 아직 없다.
+
+도구 수정: `amp_obs_clip_probe.py` 의 `layout.step_dim` 이 `amp_drop_dof_vel` 에서 59 로 잘못 적히던 것을 필드 합으로 고침.

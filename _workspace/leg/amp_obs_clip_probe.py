@@ -301,14 +301,18 @@ YAW_MIN, YAW_MAX = float(env_cfg.yaw_vel_min), float(env_cfg.yaw_vel_max)
 JN = list(base._robot.data.joint_names)
 LAYOUT = {
     "n_hist": int(n_hist),
-    "step_dim": int(env_cfg.amp_observation_space),
+    # ★ `amp_observation_space` 는 dof_vel 제거 전 값(59)이라 amp_drop_dof_vel run 에서 실제와 다르다.
+    #   아래 `fields` 합으로 채운다.
+    "step_dim": None,  # fields 합으로 아래에서 채운다
     "fields": ([["root_pos_xy", 2]] if env_cfg.include_rel_track_obs else [])
-    + [["dof_pos", 17], ["dof_vel", 17], ["root_h", 1], ["lin_vel", 3], ["ang_vel", 3],
-       ["foot_pos", 12], ["rot_tan_norm", 6]],
+    + [["dof_pos", 17]]
+    + ([] if getattr(env_cfg, "amp_drop_dof_vel", False) else [["dof_vel", 17]])
+    + [["root_h", 1], ["lin_vel", 3], ["ang_vel", 3], ["foot_pos", 12], ["rot_tan_norm", 6]],
     "cond_dim": int(COND_DIM),
     "cond_values_dim": int(base._amp_cond_values_dim),
     "hist_order": "index0=newest",
 }
+LAYOUT["step_dim"] = int(sum(sz for _, sz in LAYOUT["fields"]))
 out_dir = os.path.join(args_cli.out_root, args_cli.tag)
 os.makedirs(out_dir, exist_ok=True)
 N = args_cli.n_envs
