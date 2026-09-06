@@ -100,3 +100,4 @@ docs/superpowers/
 
 # real Mid-360 rosbag (770 MB) kept next to the task for analysis, never committed
 source/isaaclab_tasks/isaaclab_tasks/direct/parkour_imitation/real_lidar/*.db3
+source/isaaclab_tasks/isaaclab_tasks/direct/parkour_imitation/real_lidar/metadata.yaml

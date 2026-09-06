@@ -361,6 +361,42 @@ gym.register(
     },
 )
 
+# Rolling-accumulator revision of the RealSensor arm: the occupancy map lives in a yaw-fixed,
+# world-anchored store transported by whole cells (no interpolation, no dilution, no yaw
+# quantisation) and valid returns carve the free space they passed through.  Same runner cfg and
+# same 7371-wide obs["lidar"] as the RealSensor arm, so the two are directly comparable.
+gym.register(
+    id="Go2-ParkourImitation-Lidar-SL-Grid-Crawl-Sym-RealSensor-Roll-EasyEntry-v0",
+    entry_point=f"{__name__}.parkour_imitation_random_goal_lidar_env:Go2ParkourImitationRandomGoalLidarEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.parkour_imitation_random_goal_lidar_env_cfg:"
+            "ParkourImitationRandomGoalLidarSLGridCrawlRealSensorRollEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_amp_cfg:Go2ParkourImitationLidarSLGridCrawlSymPPOAMPRunnerCfg"
+        ),
+    },
+)
+
+# Ablation of the arm above: rolling store, free-space carving OFF.  Separates the transport fix
+# from the carving fix.
+gym.register(
+    id="Go2-ParkourImitation-Lidar-SL-Grid-Crawl-Sym-RealSensor-RollNoFree-EasyEntry-v0",
+    entry_point=f"{__name__}.parkour_imitation_random_goal_lidar_env:Go2ParkourImitationRandomGoalLidarEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.parkour_imitation_random_goal_lidar_env_cfg:"
+            "ParkourImitationRandomGoalLidarSLGridCrawlRealSensorRollNoFreeEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_amp_cfg:Go2ParkourImitationLidarSLGridCrawlSymPPOAMPRunnerCfg"
+        ),
+    },
+)
+
 gym.register(
     id="Go2-ParkourImitation-Lidar-SL-Grid-EasyEntry-v0",
     entry_point=f"{__name__}.parkour_imitation_random_goal_lidar_env:Go2ParkourImitationRandomGoalLidarEnv",

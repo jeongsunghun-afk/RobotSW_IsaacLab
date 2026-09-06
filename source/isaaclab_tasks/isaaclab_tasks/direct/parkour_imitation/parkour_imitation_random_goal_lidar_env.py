@@ -242,6 +242,15 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         # Index of the next milestone in _LIDAR_GRID_DIAG_STEPS the diagnostic has yet to report.
         self._lidar_grid_diag_next: int = 0
 
+        # ------------------------------------------------------------------
+        # Rolling world-anchored store (cfg.lidar_grid_accumulate_mode == "rolling")
+        # ------------------------------------------------------------------
+        # Allocated only in rolling mode: at 1280 envs the store is 47*47*15 = 33,135 cells,
+        # i.e. 170 MB float32, which is worth paying for only when it is read.
+        self._lidar_store_shape: tuple[int, int, int] | None = None
+        if getattr(cfg, "lidar_grid_accumulate_mode", "warp") == "rolling":
+            self._setup_rolling_store(cfg)
+
         # Per-env "the stack has not been filled since the last reset" flag, consumed by the
         # first push after a reset when cfg.lidar_fill_stack_on_reset is set.  Initialised True
         # so the very first push of an episode fills every slot instead of leaving K-1 of them
@@ -275,6 +284,66 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
                 device=self.device,
             )
 
+    def _setup_rolling_store(self, cfg: ParkourImitationRandomGoalLidarEnvCfg) -> None:
+        """Allocate the rolling store and derive its geometry from ``cfg``.
+
+        Split out of ``__init__`` so a diagnostic can build a second, independently configured
+        store on the same env — the shadow comparison that scores several carving rules against
+        the live accumulator on identical frames needs one store per variant.
+
+        Args:
+            cfg: Config to read the store geometry and free-space settings from.  Not necessarily
+                ``self.cfg``: a shadow passes a shim with the variant's overrides.
+        """
+        res = self._lidar_grid_cfg.resolution
+        nx, ny, nz = self._lidar_grid_shape
+        radius = float(cfg.lidar_grid_store_radius)
+        sxy = int(round(radius / res)) * 2 + 1
+        zm = int(cfg.lidar_grid_store_z_margin_cells)
+        sz = nz + 2 * zm
+        self._lidar_store_shape = (sxy, sxy, sz)
+        self._lidar_store_lo: torch.Tensor = torch.tensor(
+            [-(sxy // 2) * res, -(sxy // 2) * res, self._lidar_grid_cfg.z_range[0] - zm * res],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._lidar_grid_store: torch.Tensor = torch.zeros(
+            self.num_envs, sxy, sxy, sz, device=self.device, dtype=torch.float32
+        )
+        # World position the store's lattice is anchored to: the grid origin rounded to the cell
+        # lattice.  The sub-cell residual ``origin - snap`` is never accumulated here; it is
+        # applied once, at readout.
+        self._lidar_store_snap: torch.Tensor = torch.zeros(self.num_envs, 3, device=self.device)
+        # Scroll destination, grown on demand to the largest ticking subset seen.  Declared here
+        # rather than created lazily on first use so that an object which delegates unknown
+        # attributes to another env (the shadow accumulators the diagnostics build) gets its own
+        # buffer instead of silently scribbling in the env's.
+        self._lidar_store_scratch: torch.Tensor | None = None
+        # Readout held between sensor ticks, so a non-ticking control step returns the same
+        # observation the warp path would hold rather than re-sampling a map that has not changed.
+        self._lidar_store_readout: torch.Tensor = torch.zeros(
+            self.num_envs, nx * ny * nz, device=self.device, dtype=torch.float32
+        )
+        # Samples per ray for free-space carving.  Bounded by the READOUT box, not by the store:
+        # the store is 2.3 m in radius but only the 27x21x13 readout box is ever handed to the
+        # policy, so a sample beyond the box's far corner cannot affect any observation this tick
+        # and the ones it would affect later get carved on the tick they enter the box.  The
+        # bound is the distance from the Mid-360 mount to the box's far corner, plus one cell.
+        cg = self._lidar_grid_cfg
+        m_off = self._lidar_grid_origin_shift  # grid origin -> mount, base frame
+        d_box = [
+            max(abs(rng[0] - float(m_off[i])), abs(rng[1] - float(m_off[i])))
+            for i, rng in enumerate((cg.x_range, cg.y_range, cg.z_range))
+        ]
+        reach = math.sqrt(sum(v * v for v in d_box)) + res
+        step_fs = float(cfg.lidar_grid_free_space_step)
+        self._lidar_free_max_samples: int = max(1, int(math.ceil(reach / step_fs)))
+        if self._lidar_free_max_samples > 50:
+            raise ValueError(
+                f"free-space carving would need {self._lidar_free_max_samples} samples per ray "
+                f"(readout box reach {reach:.2f} m, step {step_fs} m); raise the step."
+            )
+
     # ------------------------------------------------------------------
     # R2 reset — zero frame buffer for reset envs
     # ------------------------------------------------------------------
@@ -306,6 +375,24 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
                 self._lidar_grid_acc[env_ids] = 0.0
                 self._lidar_grid_prev_pos[env_ids] = origin[env_ids]
                 self._lidar_grid_prev_yaw[env_ids] = yaw[env_ids]
+
+        # Rolling store: drop the map, re-snap its lattice to the freshly placed robot and clear
+        # the held readout.  Leaving a stale snap would make the first scroll after a reset shift
+        # a map that no longer corresponds to anything.
+        if getattr(self, "_lidar_store_shape", None) is not None:
+            # Own call to ``_grid_frame_pose`` rather than the ``origin`` the warp block above
+            # binds: that block is guarded by ``hasattr(self, "_lidar_grid_acc")``, so gating the
+            # warp allocation later would silently leave this reading a stale or unbound name.
+            r_origin, _ = self._grid_frame_pose()
+            snap = self._snap_origin(r_origin)
+            if env_ids is None:
+                self._lidar_grid_store.zero_()
+                self._lidar_store_snap.copy_(snap)
+                self._lidar_store_readout.zero_()
+            else:
+                self._lidar_grid_store[env_ids] = 0.0
+                self._lidar_store_snap[env_ids] = snap[env_ids]
+                self._lidar_store_readout[env_ids] = 0.0
 
         # Reset push counter for sensor-rate cadence (only allocated when flag=True).
         # Re-initialise to push_every (not 0) so reset envs push on their very first step,
@@ -512,6 +599,9 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         Returns:
             ``(N, nx * ny * nz)`` float32 accumulated occupancy in [0, 1].
         """
+        if getattr(self.cfg, "lidar_grid_accumulate_mode", "warp") == "rolling":
+            return self._update_occupancy_accumulator_rolling(distances, hit_valid)
+
         alpha = float(self.cfg.lidar_grid_ema_alpha)
         origin, yaw = self._grid_frame_pose()
 
@@ -606,6 +696,439 @@ class Go2ParkourImitationRandomGoalLidarEnv(Go2ParkourImitationRandomGoalEnv):
         return torch.nn.functional.grid_sample(
             acc.unsqueeze(1), samp, mode="bilinear", padding_mode="zeros", align_corners=True
         ).squeeze(1)
+
+    # ------------------------------------------------------------------
+    # Rolling world-anchored store
+    # ------------------------------------------------------------------
+
+    def _snap_origin(self, origin: torch.Tensor) -> torch.Tensor:
+        """Round a world position onto the store's cell lattice.
+
+        Args:
+            origin: ``(N, 3)`` world position [m].
+
+        Returns:
+            ``(N, 3)`` the same position rounded to the nearest multiple of the cell size [m].
+        """
+        res = self._lidar_grid_cfg.resolution
+        return torch.round(origin / res) * res
+
+    def _update_occupancy_accumulator_rolling(self, distances: torch.Tensor, hit_valid: torch.Tensor) -> torch.Tensor:
+        """Accumulate in a yaw-fixed, world-anchored store and read the policy grid out of it.
+
+        Alternative to :meth:`_update_occupancy_accumulator`'s warp path, selected by
+        ``cfg.lidar_grid_accumulate_mode = "rolling"``.  Four things change and nothing else:
+
+        1. **Frame.** The map is gravity-aligned and does not rotate with the robot.  A pure yaw
+           change therefore moves nothing in the map; it only changes where the readout samples.
+        2. **Transport.** The map's origin is the grid origin snapped to the world cell lattice,
+           so between ticks the map moves by an *integer* number of cells and is transported by an
+           index gather with zero fill.  There is no interpolation, hence no dilution: a value
+           follows ``alpha ** n`` exactly, and the one-cell-thick ground sheet the
+           ``acc_diag`` report shows being split across neighbours survives intact.
+        3. **Residual.** ``origin - snap`` is never folded into the map.  It is applied once, at
+           readout, so it cannot accumulate into a position drift the way per-tick rounding does
+           (``render_acc_fix``'s variant N drifts 1.5 cells in 10 ticks).
+        4. **Free-space carving** (optional, ``cfg.lidar_grid_free_space``), which gives the
+           accumulator its first operation that can *clear* a cell.
+
+        The observation is unchanged in shape and meaning: the same ``27 x 21 x 13`` yaw-aligned
+        occupancy grid, held between sensor ticks exactly as the warp path holds its accumulator.
+
+        Args:
+            distances: ``(N, R)`` sensor distances [m]; miss and dropout stored as
+                ``max_distance``.
+            hit_valid: ``(N, R)`` bool, True = genuine hit.
+
+        Returns:
+            ``(N, nx * ny * nz)`` float32 accumulated occupancy in [0, 1].
+        """
+        alpha = float(self.cfg.lidar_grid_ema_alpha)
+        res = self._lidar_grid_cfg.resolution
+        origin, yaw = self._grid_frame_pose()
+
+        if getattr(self.cfg, "lidar_grid_accumulate_at_sensor_rate", True) and hasattr(self, "_lidar_push_ctr"):
+            self._lidar_push_ctr += 1
+            tick = self._lidar_push_ctr >= self._lidar_push_every
+            if not bool(tick.any()):
+                return self._lidar_store_readout
+            self._lidar_push_ctr[tick] = 0
+        else:
+            tick = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # Work only on the envs that actually ticked.  Masking the results instead would make the
+        # cost per CONTROL step rather than per sensor tick, and the two differ by up to 5x: envs
+        # re-phase their counter on reset (``_reset_idx`` sets it to ``push_every``), so at 1024+
+        # envs some subset ticks on essentially every step even though each individual env only
+        # ticks once per 0.1 s.  ``nonzero`` costs one sync per step, which is far less than
+        # scrolling and carving four fifths of the batch for nothing.
+        ti: torch.Tensor | None = tick.nonzero(as_tuple=False).flatten()
+        if int(ti.numel()) == self.num_envs:
+            ti = None  # every env ticked; skip the gather/scatter entirely
+
+        def sel(x: torch.Tensor) -> torch.Tensor:
+            """Rows of ``x`` for the ticking envs (the whole tensor when all of them ticked)."""
+            return x if ti is None else x.index_select(0, ti)
+
+        origin_t, yaw_t = sel(origin), sel(yaw)
+        # ``_scroll_store`` returns a fresh tensor, so no copy is needed here even when ti is None.
+        store_t = sel(self._lidar_grid_store)
+
+        # Integer-cell transport.  ``shift`` is exact by construction: both snaps are multiples of
+        # the cell size, so the quotient is an integer up to float round-off.
+        snap_new = self._snap_origin(origin_t)
+        shift = torch.round((snap_new - sel(self._lidar_store_snap)) / res).long()
+        store_t = self._scroll_store(store_t, shift)
+
+        # Sub-cell residual of the CURRENT tick, used to place both the fresh scan and the readout
+        # inside the store.  It is a placement offset, never a stored quantity.
+        off_new = origin_t - snap_new
+        q_wb = sel(self._robot.data.root_quat_w.torch)
+        dirs = self._mid360.ray_directions.torch
+        dirs = sel(dirs) if dirs.dim() == 3 else dirs
+        dist_t, valid_t = sel(distances), sel(hit_valid)
+
+        # Carve before the decayed-max blend, so a cell that a ray passed through *and* another
+        # ray ended in still reads 1.0: the scatter below overwrites it.
+        if getattr(self.cfg, "lidar_grid_free_space", False):
+            self._carve_free_space(store_t, dist_t, valid_t, off_new, q_wb, dirs)
+        # Decayed max, written as decay-then-overwrite.  The fresh frame is binary, so
+        # ``max(alpha * acc, frame)`` is exactly "scale everything, then set the hit cells to 1".
+        store_t.mul_(alpha)
+        self._scatter_hits_into_store(store_t, dist_t, valid_t, off_new, q_wb, dirs)
+
+        readout_t = self._readout_store(origin_t, yaw_t, store_t, snap_new)
+        # The warp path's pose reference is kept current in this mode too, so a shadow warp
+        # accumulator running alongside (the REF_A comparison the reports use) stays valid and so
+        # that switching modes does not start from a stale reference.
+        if ti is None:
+            self._lidar_grid_store.copy_(store_t)
+            self._lidar_store_snap.copy_(snap_new)
+            self._lidar_grid_prev_pos.copy_(origin_t)
+            self._lidar_grid_prev_yaw.copy_(yaw_t)
+            self._lidar_store_readout.copy_(readout_t)
+        else:
+            self._lidar_grid_store.index_copy_(0, ti, store_t)
+            self._lidar_store_snap.index_copy_(0, ti, snap_new)
+            self._lidar_grid_prev_pos.index_copy_(0, ti, origin_t)
+            self._lidar_grid_prev_yaw.index_copy_(0, ti, yaw_t)
+            self._lidar_store_readout.index_copy_(0, ti, readout_t)
+
+        if bool(tick[0]):
+            nxt = self._lidar_grid_diag_next
+            pending = nxt < len(_LIDAR_GRID_DIAG_STEPS) and int(self.common_step_counter) >= _LIDAR_GRID_DIAG_STEPS[nxt]
+            # The single frame is only needed by the diagnostic, and computing it costs a full
+            # scatter, so it is built at the handful of milestone steps and nowhere else.
+            if pending:
+                frame = self._compute_lidar_occupancy_grid(distances, hit_valid)
+                self._log_lidar_grid_diagnostics(self._lidar_store_readout, single_frame=frame)
+        return self._lidar_store_readout
+
+    def _scroll_store(self, store: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+        """Translate the store by an integer number of cells, with zero fill.
+
+        Cell ``i`` of the new store holds the world position that cell ``i + shift`` of the old
+        store held, because both lattices are anchored to the same world grid and the anchor moved
+        by ``shift`` cells.  Implemented as three ``gather`` calls (one per axis) rather than one
+        flat gather so the index tensors stay ``(m, n)`` instead of ``(m, nx, ny, nz)``.
+
+        Args:
+            store: ``(N, sx, sy, sz)`` store in the previous anchor's lattice.
+            shift: ``(N, 3)`` integer cell displacement of the anchor.
+
+        Returns:
+            ``(N, sx, sy, sz)`` store in the new anchor's lattice; cells whose source lies outside
+            the old store read 0.
+        """
+        n_env = store.shape[0]
+        sx, sy, sz = store.shape[1], store.shape[2], store.shape[3]
+        # Destination comes from a cached scratch buffer that grows to the largest batch seen, so
+        # a tick does not hand the allocator a fresh 100+ MB tensor every step.  It is only ever
+        # the ticking subset, which is ~20% of the envs.
+        scratch = getattr(self, "_lidar_store_scratch", None)
+        if scratch is None or scratch.shape[0] < n_env:
+            scratch = torch.empty(n_env, sx, sy, sz, device=store.device, dtype=store.dtype)
+            self._lidar_store_scratch = scratch
+        out = scratch[:n_env]
+        ar = (
+            torch.arange(sx, device=store.device),
+            torch.arange(sy, device=store.device),
+            torch.arange(sz, device=store.device),
+        )
+        chunk = max(1, int(getattr(self.cfg, "lidar_grid_chunk_size", 256)))
+        for beg in range(0, n_env, chunk):
+            end = min(beg + chunk, n_env)
+            m = end - beg
+            s = store[beg:end]
+            for axis, n_ax in enumerate((sx, sy, sz)):
+                idx = ar[axis].view(1, n_ax) + shift[beg:end, axis].view(m, 1)  # (m, n_ax)
+                ok = (idx >= 0) & (idx < n_ax)
+                idx = idx.clamp(0, n_ax - 1)
+                view = [m, 1, 1, 1]
+                view[axis + 1] = n_ax
+                exp = [m, sx, sy, sz]
+                exp[axis + 1] = n_ax
+                # ``gather`` always returns a fresh tensor, so the zero fill can be applied in
+                # place on it rather than allocating a second copy per axis.
+                s = torch.gather(s, axis + 1, idx.view(view).expand(exp))
+                s.mul_(ok.view(view).to(s.dtype))
+            out[beg:end] = s
+        return out
+
+    def _scatter_hits_into_store(
+        self,
+        store: torch.Tensor,
+        distances: torch.Tensor,
+        hit_valid: torch.Tensor,
+        off: torch.Tensor,
+        q_wb: torch.Tensor,
+        dirs: torch.Tensor,
+    ) -> None:
+        """Write the fresh scan's hit cells into the store as 1.0, in place.
+
+        The hit points are the same ones :meth:`_compute_lidar_occupancy_grid` builds — grid
+        origin to Mid-360 mount, plus ``d * direction`` — but rotated all the way into the world
+        frame instead of only into the yaw-aligned body frame.  Rotating by ``R_z(yaw)`` after
+        ``q_yb = conj(yaw(q_wb)) * q_wb`` composes to ``q_wb``, so the two-step rotation the design
+        describes is applied here as the single full-orientation rotation it is equal to.
+
+        Args:
+            store: ``(B, sx, sy, sz)`` store, modified in place.
+            distances: ``(B, R)`` sensor distances [m].
+            hit_valid: ``(B, R)`` bool, True = genuine hit.
+            off: ``(B, 3)`` sub-cell residual ``origin - snap`` [m].
+            q_wb: ``(B, 4)`` base -> world orientation, xyzw.
+            dirs: ``(B, R, 3)`` or ``(R, 3)`` body-frame ray directions for the same rows.
+
+        Note:
+            Every argument is indexed by the *batch* the caller passed, which is the ticking subset
+            rather than all envs, so nothing here may use ``self.num_envs``.
+        """
+        n_env = store.shape[0]
+        sx, sy, sz = self._lidar_store_shape
+        n_cells = sx * sy * sz
+        res = self._lidar_grid_cfg.resolution
+        lo = self._lidar_store_lo
+        flat_store = store.view(n_env, n_cells)
+        n_rays = dirs.shape[-2]
+        chunk = max(1, int(getattr(self.cfg, "lidar_grid_chunk_size", 256)))
+        for beg in range(0, n_env, chunk):
+            end = min(beg + chunk, n_env)
+            m = end - beg
+            d_chunk = dirs[beg:end] if dirs.dim() == 3 else dirs
+            v_b = self._lidar_grid_origin_shift + distances[beg:end].unsqueeze(-1) * d_chunk  # (m, R, 3)
+            p = quat_apply(q_wb[beg:end].unsqueeze(1).expand(m, n_rays, 4), v_b) + off[beg:end].unsqueeze(1)
+            idx = ((p - lo) / res).round().long()
+            keep = (
+                (idx[..., 0] >= 0)
+                & (idx[..., 0] < sx)
+                & (idx[..., 1] >= 0)
+                & (idx[..., 1] < sy)
+                & (idx[..., 2] >= 0)
+                & (idx[..., 2] < sz)
+                & hit_valid[beg:end]
+            )
+            flat = idx[..., 0] * (sy * sz) + idx[..., 1] * sz + idx[..., 2]
+            flat = torch.where(keep, flat, torch.full_like(flat, n_cells))
+            # +1 spare column absorbs out-of-bounds and invalid rays without a nonzero()/sync.
+            frame = torch.zeros(m, n_cells + 1, device=store.device, dtype=store.dtype)
+            frame.scatter_(1, flat, 1.0)
+            flat_store[beg:end] = torch.maximum(flat_store[beg:end], frame[:, :n_cells])
+
+    def _carve_free_space(
+        self,
+        store: torch.Tensor,
+        distances: torch.Tensor,
+        hit_valid: torch.Tensor,
+        off: torch.Tensor,
+        q_wb: torch.Tensor,
+        dirs: torch.Tensor,
+    ) -> None:
+        """Multiply cells that a valid ray passed through by ``beta``, in place.
+
+        This is the operation ``decayed-max`` lacks.  Without it a cell written as ground stays
+        occupied until it decays, and inside the 0.8 m blind range it can never be re-observed —
+        which is why every accumulator variant measured in ``render_acc_fix`` reports a gap trench
+        as occupied at ground level (0.485 for the current warp path, 0.705 for nearest transport,
+        threshold 0.5).
+
+        Only rays with a **valid** hit carve.  A miss, a dropout or a return discarded by the
+        blind-range / rear-crop gates carries no free-space information, because the deployment
+        driver does not publish it either.
+
+        Which samples along a carrying ray are actually cleared is set by
+        ``cfg.lidar_grid_free_space_rule``:
+
+        ``"above_hit"`` (default)
+            Clear a sample only when it lies more than
+            ``lidar_grid_free_space_above_hit_cells`` cells **above** its own hit, in the
+            gravity-aligned store frame.  This is the geometry the naive rule gets wrong: a ray
+            that ends on the ground 0.9-1.2 m ahead descends at roughly -25 deg, so its last
+            0.2-0.3 m runs within one cell of the ground plane and rounds into the ground voxel,
+            erasing real terrain the robot can no longer re-observe.  Under this rule that stretch
+            sits at ``z ~= hit_z`` and is protected, while the same ray's earlier, higher samples
+            still clear the air above.  A ray that plunges into a trench **deeper than the guard**
+            leaves ``hit_z`` far enough below that the ground-level cells bridging the trench are
+            above it and do get cleared — the case the fix exists for.  The converse is a real
+            limit rather than an oversight: a dip shallower than ``guard * res`` (0.25 m at the
+            default 2.5 cells) never has its bridging cells cleared, because the rule cannot tell
+            it from the grazing ground ray it exists to protect.  A ray into a wall clears the air
+            in front of it; a ray onto an overhang clears nothing, which is conservative.
+
+        ``"margin"``
+            Clear every sample up to ``lidar_grid_free_space_hit_margin_cells`` cells before the
+            hit.  Kept for ablation; measured to trade trench clearing against real-ground loss.
+
+        Independently of the rule, ``cfg.lidar_grid_free_space_min_rays`` sets how many rays must
+        cross a cell in one tick before it is cleared at all.
+
+        Args:
+            store: ``(B, sx, sy, sz)`` store, modified in place.
+            distances: ``(B, R)`` sensor distances [m].
+            hit_valid: ``(B, R)`` bool, True = genuine hit.
+            off: ``(B, 3)`` sub-cell residual ``origin - snap`` [m].
+            q_wb: ``(B, 4)`` base -> world orientation, xyzw.
+            dirs: ``(B, R, 3)`` or ``(R, 3)`` body-frame ray directions for the same rows.
+
+        Note:
+            Every argument is indexed by the *batch* the caller passed, which is the ticking subset
+            rather than all envs, so nothing here may use ``self.num_envs``.
+        """
+        n_env = store.shape[0]
+        beta = float(self.cfg.lidar_grid_free_space_beta)
+        if beta >= 1.0:
+            return
+        rule = str(getattr(self.cfg, "lidar_grid_free_space_rule", "above_hit"))
+        step = float(self.cfg.lidar_grid_free_space_step)
+        n_s = self._lidar_free_max_samples
+        res = self._lidar_grid_cfg.resolution
+        # Both rules protect the hit's own cell; only "margin" widens that guard.
+        margin = res
+        if rule == "margin":
+            margin = float(getattr(self.cfg, "lidar_grid_free_space_hit_margin_cells", 1)) * res
+        guard = float(getattr(self.cfg, "lidar_grid_free_space_above_hit_cells", 2.5)) * res
+        sx, sy, sz = self._lidar_store_shape
+        n_cells = sx * sy * sz
+        lo = self._lidar_store_lo
+        flat_store = store.view(n_env, n_cells)
+        min_rays = max(1, int(getattr(self.cfg, "lidar_grid_free_space_min_rays", 1)))
+        debug_count = bool(getattr(self.cfg, "lidar_grid_free_space_debug_count", False))
+        stride = max(1, int(getattr(self.cfg, "lidar_grid_free_space_ray_stride", 1)))
+        if stride > 1:
+            dirs = dirs[..., ::stride, :]
+        d_all = distances[:, ::stride]  # (B, R)
+
+        # Compact to the rays that can carry anything, ONCE for the whole batch.  Only ~26% of the
+        # 20k slots survive the blind-range and rear-crop gates, and expanding all of them to
+        # (B, R, S, 3) before masking is where the dense version spent most of its time.  Doing it
+        # per chunk cost one device sync per chunk; doing it once costs exactly one per carve.
+        sel = (hit_valid[:, ::stride] & (d_all > margin)).nonzero(as_tuple=False)  # (V, 2)
+        n_v = int(sel.shape[0])
+        if n_v == 0:
+            return
+
+        # ``carved`` is a flat (B * n_cells) mask, or a count when the atomic path is needed.
+        # One spare slot at the end absorbs every masked sample, so the per-chunk scatter needs no
+        # further sync.
+        counting = min_rays > 1 or debug_count
+        acc = torch.zeros(n_env * n_cells + 1, device=store.device, dtype=torch.float32 if counting else torch.bool)
+        t = (torch.arange(n_s, device=store.device, dtype=torch.float32) + 1.0) * step  # (S,)
+        s0 = quat_apply(q_wb, self._lidar_grid_origin_shift.expand(n_env, 3)) + off  # (B, 3)
+        chunk = max(1, int(getattr(self.cfg, "lidar_grid_free_space_chunk_size", 350_000)))
+        for beg in range(0, n_v, chunk):
+            er = sel[beg : beg + chunk, 0]
+            rr = sel[beg : beg + chunk, 1]
+            d_sel = dirs[er, rr] if dirs.dim() == 3 else dirs[rr]  # (v, 3)
+            dir_w = quat_apply(q_wb[er], d_sel)  # (v, 3)
+            s0v = s0[er]  # (v, 3)
+            d_hit = d_all[er, rr]  # (v,)
+            pts = s0v.unsqueeze(1) + dir_w.unsqueeze(1) * t.view(1, n_s, 1)  # (v, S, 3)
+            keep = t.view(1, n_s) <= (d_hit - margin).unsqueeze(1)
+            if rule == "above_hit":
+                hit_z = s0v[:, 2] + d_hit * dir_w[:, 2]  # (v,) store-frame z of the hit point
+                keep = keep & (pts[..., 2] > (hit_z + guard).unsqueeze(1))
+            idx = ((pts - lo) / res).round()
+            ix, iy, iz = idx[..., 0], idx[..., 1], idx[..., 2]
+            keep = keep & (ix >= 0) & (ix < sx) & (iy >= 0) & (iy < sy) & (iz >= 0) & (iz < sz)
+            # Cell index in float (all terms are integers well under 2^24, so exact), then the
+            # per-env stride added in int64 — the flat range exceeds float32's exact range.
+            flat = (ix * (sy * sz) + iy * sz + iz).long() + er.unsqueeze(1) * n_cells
+            flat = torch.where(keep, flat, torch.full_like(flat, n_env * n_cells)).view(-1)
+            if counting:
+                acc.scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.float32))
+            else:
+                # min_rays == 1 only asks "did any ray cross this cell", so an unordered boolean
+                # write is enough and no atomics are needed.  Measured ~2x faster than the count.
+                acc[flat] = True
+        if counting:
+            cnt = acc[: n_env * n_cells].view(n_env, n_cells)
+            if debug_count:
+                self._lidar_free_last_count = cnt.view(n_env, sx, sy, sz).clone()
+            carved = cnt >= min_rays
+        else:
+            carved = acc[: n_env * n_cells].view(n_env, n_cells)
+        # One temporary, applied in place: ``carved`` becomes beta where set and 1.0 elsewhere.
+        scale = carved.to(flat_store.dtype)
+        scale.mul_(beta - 1.0).add_(1.0)
+        flat_store.mul_(scale)
+
+    def _readout_store(
+        self,
+        origin: torch.Tensor,
+        yaw: torch.Tensor,
+        store: torch.Tensor | None = None,
+        snap: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Sample the store at the readout grid's cell centres.
+
+        A readout cell whose coordinates in the yaw-aligned body frame are ``c`` sits at world
+        position ``origin + R_z(yaw) c``, i.e. at ``R_z(yaw) c + (origin - snap)`` in the store's
+        own frame.  This is the only interpolation in the rolling path, and unlike the warp path's
+        it does not compound: the store is never resampled, so the same map is interpolated once
+        per tick rather than once per tick *on top of the previous interpolation*.
+
+        Args:
+            origin: ``(B, 3)`` world position of the grid origin [m].
+            yaw: ``(B,)`` yaw of the grid frame [rad].
+            store: ``(B, sx, sy, sz)`` store to sample; defaults to the env's own full-batch store.
+            snap: ``(B, 3)`` lattice anchor of that store; defaults to the env's own.
+
+        Returns:
+            ``(B, nx * ny * nz)`` float32 occupancy; cells outside the store read 0.
+        """
+        if store is None:
+            store = self._lidar_grid_store
+        if snap is None:
+            snap = self._lidar_store_snap
+        sx, sy, sz = self._lidar_store_shape
+        res = self._lidar_grid_cfg.resolution
+        c = self._lidar_grid_centres  # (nx, ny, nz, 3) in the yaw-aligned body frame
+        off = origin - snap  # (B, 3)
+
+        cos = torch.cos(yaw).view(-1, 1, 1, 1)
+        sin = torch.sin(yaw).view(-1, 1, 1, 1)
+        cx, cy, cz = c[..., 0], c[..., 1], c[..., 2]
+        x = cos * cx - sin * cy + off[:, 0].view(-1, 1, 1, 1)
+        y = sin * cx + cos * cy + off[:, 1].view(-1, 1, 1, 1)
+        z = cz.expand_as(x) + off[:, 2].view(-1, 1, 1, 1)
+
+        lo = self._lidar_store_lo
+
+        def norm(v: torch.Tensor, lo_a: torch.Tensor, n: int) -> torch.Tensor:
+            """Metric coordinate -> grid_sample coordinate in [-1, 1] with align_corners=True."""
+            return 2.0 * ((v - lo_a) / res) / max(n - 1, 1) - 1.0
+
+        # Same axis reversal as the warp path: grid_sample reads the last axis of ``grid`` as
+        # (W, H, D), which for a (N, 1, sx, sy, sz) input is (sz, sy, sx).
+        samp = torch.stack([norm(z, lo[2], sz), norm(y, lo[1], sy), norm(x, lo[0], sx)], dim=-1)
+        out = torch.nn.functional.grid_sample(
+            store.unsqueeze(1),
+            samp,
+            mode=str(getattr(self.cfg, "lidar_grid_readout_mode", "bilinear")),
+            padding_mode="zeros",
+            align_corners=True,
+        ).squeeze(1)
+        return out.reshape(store.shape[0], -1)
 
     def _log_lidar_grid_diagnostics(self, grid: torch.Tensor, single_frame: torch.Tensor | None = None) -> None:
         """Print occupancy statistics for the scattered grid at a few fixed steps.

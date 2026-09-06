@@ -27,6 +27,7 @@ Sim 6.0 migration notes
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 from isaaclab.sensors import RayCasterCfg
 from isaaclab.sensors.lidar_sensor_cfg import LidarSensorCfg
@@ -277,6 +278,143 @@ class ParkourImitationRandomGoalLidarEnvCfg(ParkourImitationRandomGoalEnvCfg):
     # data at ``update_frequency``, so warping every control step would add five resampling
     # passes per new measurement — blur without information.
     lidar_grid_accumulate_at_sensor_rate: bool = True
+
+    # ------------------------------------------------------------------
+    # Rolling world-anchored store (revision of the A1-1 accumulator)
+    # ------------------------------------------------------------------
+    # Transport mode for the accumulator.
+    #
+    # ``"warp"`` (default, byte-identical to A1-1): the map lives in the yaw-aligned body frame
+    # and is resampled with a trilinear ``grid_sample`` every sensor tick.  Measured cost, from
+    # ``reports/go2_parkour/_comparisons/real_lidar_vs_sim/acc_diag/README.md``: sub-cell motion on
+    # *every* axis splits the one-cell-thick ground sheet across neighbours and the alpha decay
+    # then pushes both halves under 0.5, so the 0.8 m blind zone reads empty (near-zone lit
+    # fraction 0.16-0.27 against 0.52-0.86 with the decay removed).
+    #
+    # ``"rolling"``: the map lives in a gravity-aligned, **yaw-fixed** store whose origin is the
+    # grid origin snapped to the world cell lattice.  Between ticks the store is scrolled by an
+    # integer number of cells (a pure index gather, zero interpolation, zero dilution) and the
+    # sub-cell residual is applied once, at readout.  The observation shape is unchanged.
+    # ``reports/presentation/05_parkour_learning/assets/render_acc_fix/README.md`` measures the
+    # nearest-neighbour transport this generalises: near-zone lit fraction 0.56-0.89 (|y| <= 0.3).
+    lidar_grid_accumulate_mode: Literal["warp", "rolling"] = "warp"
+
+    # Half-width [m] of the rolling store in x and y.  Must cover the readout box
+    # (x in [-0.6, 2.0], y in [-1.0, 1.0]) under **any** yaw plus a half-cell snap residual:
+    # the far corner is at sqrt(2.0^2 + 1.0^2) = 2.236 m, so 2.3 m (47 cells) is the smallest
+    # lattice-aligned radius that still leaves a bilinear neighbour inside the store.
+    lidar_grid_store_radius: float = 2.3
+
+    # Extra store cells above and below the readout's z range.  The store is snapped in world z
+    # while the readout box is z in [-0.6, 0.6] about the *current* grid origin, so a half-cell
+    # snap residual can push the topmost readout cell past a flush store.  One cell of margin
+    # each side removes that edge case; 0 accepts zeros at the z extremes.
+    lidar_grid_store_z_margin_cells: int = 1
+
+    # Interpolation used to sample the store at the readout cell centres.  ``"bilinear"`` is the
+    # default and is safe here in a way the warp path's trilinear is not: the store itself is
+    # never resampled, so this interpolation is applied exactly once to the current map and
+    # cannot compound over ticks.  ``"nearest"`` exists only to isolate readout blur in an
+    # ablation — it makes the rotation-invariance metric *worse*, not better, because a pure yaw
+    # change then snaps every readout cell to a different store cell.
+    lidar_grid_readout_mode: Literal["bilinear", "nearest"] = "bilinear"
+
+    # Free-space carving.  ``decayed-max`` has no operation that clears a cell, so a cell once
+    # written as ground stays occupied until it decays — and inside the 0.8 m blind range it can
+    # never be re-observed.  Measured consequence (same render_acc_fix README, gap terrain,
+    # ground z-slice): false occupancy in scanner-confirmed hole columns 0.485 for the current
+    # accumulator and 0.705 for nearest transport, at threshold 0.5.  When True, every ray with a
+    # **valid** hit multiplies the cells it passed through by ``lidar_grid_free_space_beta``
+    # before the fresh scan is blended in, so a hit always wins over the carve.  Rays that
+    # returned nothing carry no free-space information (the real driver does not publish them)
+    # and carve nothing.
+    lidar_grid_free_space: bool = False
+
+    # Which samples along a carrying ray are cleared.
+    #
+    # ``"above_hit"`` (default): clear a sample only when it lies more than
+    # ``lidar_grid_free_space_above_hit_cells`` cells above its own hit, in the gravity-aligned
+    # store frame.  A ray ending on the ground 0.9-1.2 m ahead descends at roughly -25 deg, so its
+    # last stretch runs within a cell of the ground plane and rounds into the ground voxel; the
+    # naive rule erases real terrain there, inside the 0.8 m blind range where nothing can restore
+    # it.  Under this rule that stretch is protected while the ray still clears the air above, and
+    # a ray that plunges into a trench deeper than the guard still clears the ground-level cells
+    # bridging it — the case carving exists for.  A ray onto an overhang clears nothing, which is
+    # conservative.
+    #
+    # ``"margin"``: clear everything up to ``lidar_grid_free_space_hit_margin_cells`` before the
+    # hit.  Kept for ablation.
+    lidar_grid_free_space_rule: Literal["margin", "above_hit"] = "above_hit"
+
+    # Height guard for ``"above_hit"``, in cells.  0.5 is the minimum that protects the hit's own
+    # voxel; larger values protect a longer stretch of the ray, because the protected along-ray
+    # distance is ``guard * res / |dir_z|`` — at 0.5 a ray descending 25 deg keeps only its last
+    # 0.12 m, which measurement showed is not enough to stop it eroding blind-zone ground.
+    #
+    # 2.5 is measured, not assumed.  On **gap level 3 only**, with the env in warp mode and every
+    # rolling variant run as a shadow on the same frames (11 envs, 200 steps, 2199 env-frames, the
+    # RealSensor 20k checkpoint), against the live warp accumulator's near-zone mean 0.391 /
+    # trench false occupancy 0.298 / true-ground retention 0.430, the sweep reads
+    # 0.5 -> 0.346 / 0.141 / 0.272,  1.5 -> 0.407 / 0.190 / 0.425,
+    # 2.5 -> 0.435 / 0.213 / 0.478,  3.5 -> 0.444 / 0.216 / 0.496.
+    # 2.5 is the smallest guard that beats the shipped accumulator on all three at once, and the
+    # curve flattens past it.  Other gap depths, other terrains and other levels are UNMEASURED.
+    #
+    # The guard is also a hard limit on what carving can clear: the rule is
+    # ``sample_z > hit_z + guard * res``, so a dip shallower than ``guard * res`` (0.25 m at 2.5)
+    # never has its bridging cells cleared at all.  That is the same property that stops a grazing
+    # ground ray eroding the blind zone, and the rule cannot tell the two apart.  A shallow
+    # step-down would therefore keep reading as solid ground; only gap level 3, whose rays go well
+    # below the guard, was measured.  ``real_lidar/test_rolling_accumulator.py --test carving``
+    # asserts both halves (a 4-cell trench is cleared, a 2-cell dip is not).
+    lidar_grid_free_space_above_hit_cells: float = 2.5
+
+    # Cells before the hit that ``"margin"`` leaves uncarved.  1 protects only the hit's own cell.
+    # Larger values buy robustness against grazing incidence and range noise at the cost of
+    # clearing less.  Ignored by ``"above_hit"``, which protects the hit cell unconditionally and
+    # uses the height guard above instead.
+    lidar_grid_free_space_hit_margin_cells: int = 1
+
+    # Multiplier applied to a cell a ray passed through.  1.0 disables carving; 0.0 clears
+    # instantly.  0.5 halves a cell per tick, so a stale cell at 1.0 drops under 0.5 after one
+    # traversal and under 0.1 after four — fast enough to open a trench within the ~1 s the robot
+    # spends approaching it, slow enough that one spurious ray does not erase real ground.
+    # UNMEASURED: this value has never been swept, and it interacts with the height guard.
+    lidar_grid_free_space_beta: float = 0.5
+
+    # Spacing [m] of the samples taken along each ray between the sensor and its hit.  Equal to
+    # the cell size, so consecutive samples cannot skip a cell along the ray's dominant axis.
+    lidar_grid_free_space_step: float = 0.1
+
+    # Minimum number of rays that must traverse a cell in one tick before it is cleared.
+    #
+    # 1 (the default) clears on a single traversal, and is also the fast path: "did any ray cross
+    # this cell" needs only an unordered boolean write, while counting needs an atomic add.
+    # Raising it was measured and does not separate the two cases it was meant to: rays crossing a
+    # cell per tick came out at 7.1 for trench columns against 2.5 for true ground, a 2.9x gap
+    # that only slides the same accuracy curve rather than splitting it.
+    lidar_grid_free_space_min_rays: int = 1
+
+    # Carve with every ``stride``-th ray.  1 (the default) uses all of them.
+    #
+    # Left at 1 because carving every ray is affordable once the accumulator only touches the envs
+    # that actually ticked: measured per CONTROL step at 1024 envs, the warp accumulator this
+    # replaces costs 19.9 ms, rolling alone 5.1 ms, and rolling with full-ray carving 17.1 ms.
+    # Stride 4 costs 8.5 ms but carves less, which slides it along the height-guard curve rather
+    # than off it — on gap it reads 0.444 near / 0.232 trench / 0.497 ground against stride 1's
+    # 0.435 / 0.213 / 0.478, i.e. nearer guard 3.5 than guard 2.5.  Raising the guard *and* the
+    # stride therefore double-counts.  Use a stride only if the step budget demands it.
+    lidar_grid_free_space_ray_stride: int = 1
+
+    # Carrying rays processed per chunk.  The rays are compacted once per carve (a single sync)
+    # and then chunked over that flat list, so this bounds the ``(chunk, samples, 3)`` intermediate
+    # directly: 350k rays x 22 samples x 3 floats is ~92 MB.
+    lidar_grid_free_space_chunk_size: int = 350_000
+
+    # Keep the per-cell traversal count of the last carve in ``_lidar_free_last_count``
+    # ``(B, sx, sy, sz)``.  Diagnostic only — it forces the atomic counting path and allocates a
+    # float grid per env; nothing in the training path reads it.
+    lidar_grid_free_space_debug_count: bool = False
 
     # Mid-360 LiDAR — range-image side-channel only, NEVER concatenated into policy obs.
     # Exposed as: obs["lidar"] (N, K*2*H*W).
@@ -769,3 +907,59 @@ class ParkourImitationRandomGoalLidarSLGridCrawlRealSensorEnvCfg(
         rolling_scan=True,
         random_scan_phase=True,
     )
+
+
+@configclass
+class ParkourImitationRandomGoalLidarSLGridCrawlRealSensorRollEnvCfg(
+    ParkourImitationRandomGoalLidarSLGridCrawlRealSensorEnvCfg
+):
+    """RealSensor arm with the rolling world-anchored accumulator and free-space carving.
+
+    Relative to :class:`ParkourImitationRandomGoalLidarSLGridCrawlRealSensorEnvCfg` exactly two
+    fields move, and they address the two defects the accumulator reports measured on that arm:
+
+    * ``lidar_grid_accumulate_mode = "rolling"``. The map moves in whole cells inside a
+      gravity-aligned, yaw-fixed store and the sub-cell residual is applied only at readout, so
+      transport neither dilutes a value nor drifts its position.
+      ``reports/go2_parkour/_comparisons/real_lidar_vs_sim/acc_diag/README.md`` attributes the
+      empty 0.8 m blind zone to trilinear warping (near-zone lit fraction 0.16-0.27 measured,
+      0.99 predicted from decay alone at >0.6 m/s) and
+      ``reports/presentation/05_parkour_learning/assets/render_acc_fix/README.md`` measures
+      nearest transport recovering it to 0.56-0.89 on the same rollouts (|y| <= 0.3 m window).
+      The store also removes that report's residual failure: its variant F closes a 3-cell hole
+      once per-tick yaw jitter reaches ~4 deg, and the observed heading change is 3.2 deg at the
+      90th percentile on gap and 10.2 deg on stair. A yaw-fixed store never rotates the map at
+      all, so yaw quantisation does not exist in this path.
+    * ``lidar_grid_free_space = True``. Every valid return halves the cells its ray passed
+      through before the fresh scan is blended in. The same report shows *every* variant,
+      including the one in production, marking gap trenches as occupied at ground level (0.485
+      for the current warp path, 0.705 for nearest transport, threshold 0.5) and identifies the
+      cause as decayed-max having no operation that clears a cell, with the sensor unable to
+      re-observe inside 0.8 m. Carving is that operation.
+
+    Everything else — terrain mix, EasyEntry lowering, the rosbag-derived sensor model, alpha
+    0.94, the sensor-rate cadence, and the ``27 x 21 x 13 = 7371`` observation — is inherited
+    untouched, so this arm shares the runner cfg and the student encoder with its parent.
+
+    The policy input is still buildable on hardware: it uses LiDAR returns plus the odometry
+    (position, yaw, height) and IMU any deployment already has, and no privileged simulator state.
+    """
+
+    lidar_grid_accumulate_mode: Literal["warp", "rolling"] = "rolling"
+    lidar_grid_free_space: bool = True
+    lidar_grid_free_space_rule: Literal["margin", "above_hit"] = "above_hit"
+
+
+@configclass
+class ParkourImitationRandomGoalLidarSLGridCrawlRealSensorRollNoFreeEnvCfg(
+    ParkourImitationRandomGoalLidarSLGridCrawlRealSensorRollEnvCfg
+):
+    """Ablation of the arm above with free-space carving switched off.
+
+    Isolates the two changes the Roll arm makes at once. This one keeps the rolling store, so it
+    measures the transport fix alone: blind-zone memory should recover to the
+    ``render_acc_fix`` nearest-transport level while gap-trench false occupancy should stay at or
+    above the current warp path's, since nothing here can clear a cell.
+    """
+
+    lidar_grid_free_space: bool = False
