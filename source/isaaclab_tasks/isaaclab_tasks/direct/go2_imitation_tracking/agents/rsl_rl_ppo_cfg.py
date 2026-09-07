@@ -166,8 +166,18 @@ class Go2ImitationTrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         # run 단위로 환경변수로 켠다:
         #   GO2_SYMMETRY_AUG=1                      → data augmentation (mirror 샘플 추가)
         #   GO2_MIRROR_LOSS=1 GO2_MIRROR_LOSS_COEFF=1.0  → mirror-consistency loss 추가
-        # ★ data-aug 단독은 "함수만 equivariant" 라 closed-loop 자발적 대칭붕괴를 못 막는다
-        #   — 대칭을 실제로 잡으려면 mirror loss 를 같이 켤 것.
+        #
+        # ★★★ 2026-09-06 정정 — 아래 예측은 **틀렸다.** 원래 여기에는 "data-aug 단독은 함수만
+        #   equivariant 라 closed-loop 자발적 대칭붕괴를 못 막으니 mirror loss 를 같이 켜라" 고
+        #   적혀 있었다. go2 에서 40k A/B 로 재 보니 **data-aug 단독으로 잡힌다**:
+        #     · `cmd 3.5` thigh ROM 좌우차 33.0 % → 6.2 % (5.3 배). 대조군 7.2 % · MimicKit 16.5 %
+        #       보다도 낮다. 시드 0·1 구간이 겹치지 않는다(부모 최저 19.2 > symaug 최고 9.4).
+        #     · `Loss/symmetry` 는 6k 정점 0.0021 후 39k 0.0003 까지 **단조 감소**(7 배).
+        #     · 대가는 총보상 동률(+0.1 %) · 낙상 2 % → 0~1 % · 최고속만 −0.09 m/s.
+        #   leg 에서 미러 **데이터셋**이 실패한 것과 혼동하지 말 것 — 그건 expert 분포를 바꾼
+        #   것이고, 이건 **정책 업데이트**를 대칭쌍으로 증강한 것이라 기전이 다르다.
+        #   ⇒ go2 권장은 `GO2_SYMMETRY_AUG=1` 단독이고 **mirror loss 는 끈 채로 둔다.**
+        #   (보고서 `_comparisons/mimickit_vs_60_actuator_limit/README.md` §34)
         import os
 
         _aug = os.environ.get("GO2_SYMMETRY_AUG", "0") == "1"

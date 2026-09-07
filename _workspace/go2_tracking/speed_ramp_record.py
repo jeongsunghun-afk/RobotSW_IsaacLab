@@ -95,6 +95,18 @@ parser.add_argument(
          "그대로 보여줄 때 쓴다. 16 env 정도가 읽기 좋다.",
 )
 parser.add_argument(
+    "--yaw_profile", type=str, default="",
+    help="쉼표 구분 yaw rate [rad/s] 목록을 주면 **선회 추종 램프**로 바뀐다. vx 는 `--yaw_at_vx` 로 "
+         "고정하고 yaw 만 계단식으로 훑는다(각 레벨 `--hold_s` 유지, 사이 `--ramp_s` 선형 전이). "
+         "학습 범위는 `yaw_vel_min/max` = ∓1.0 rad/s 이므로 그 밖은 외삽이다. "
+         "npz 에 `yaw_profile`·`yaw_cmd` 가 추가로 저장된다.",
+)
+parser.add_argument(
+    "--yaw_at_vx", type=float, default=1.5,
+    help="`--yaw_profile` 사용 시 유지할 전진 속도 [m/s]. 선회는 속도에 크게 의존하므로 어떤 값에서 "
+         "쟀는지 반드시 보고서에 적을 것.",
+)
+parser.add_argument(
     "--seed", type=int, default=None,
     help="env RNG 시드. **기본은 None(시드 없음)이라 실행마다 DR 추첨이 달라진다.** "
          "2026-09-03 실측: 같은 체크포인트를 두 번 재니 `cmd 4.0` median 이 2.429 ↔ 0.587 로 "
@@ -350,6 +362,29 @@ for _lvl in VX_PROFILE:
     _cmd_traj.extend([_lvl] * hold_steps)
     _prev = _lvl
 VX_CMD_TRAJ = np.asarray(_cmd_traj, dtype=np.float32)
+
+# ── 선회 램프 ────────────────────────────────────────────────────────────────
+# `--yaw_profile` 이 있으면 vx 는 `--yaw_at_vx` 상수로 두고 yaw 를 같은 사다리꼴로 훑는다.
+# ★ 이때 `vx_profile` 은 상수 배열이 되므로 **기존 분석의 `peak = argmax(vx_profile)` 관용구가
+#   전 구간을 잘라낸다.** 선회 데이터는 `yaw_profile` 을 기준으로 별도 분석해야 한다.
+YAW_PROFILE = [float(x) for x in args_cli.yaw_profile.split(",")] if args_cli.yaw_profile else []
+if YAW_PROFILE:
+    VX_PROFILE = [float(args_cli.yaw_at_vx)] * len(YAW_PROFILE)
+    _yaw_traj, _yprev = [0.0] * warmup_steps, 0.0
+    for _lvl in YAW_PROFILE:
+        if ramp_steps > 0:
+            _yaw_traj.extend(list(np.linspace(_yprev, _lvl, ramp_steps, endpoint=False)))
+        _yaw_traj.extend([_lvl] * hold_steps)
+        _yprev = _lvl
+    YAW_CMD_TRAJ = np.asarray(_yaw_traj, dtype=np.float32)
+    VX_CMD_TRAJ = np.concatenate([
+        np.asarray(_warm, dtype=np.float32),
+        np.full(len(YAW_CMD_TRAJ) - warmup_steps, float(args_cli.yaw_at_vx), dtype=np.float32),
+    ])
+    print(f">>> [yaw] 선회 램프: vx {args_cli.yaw_at_vx:.2f} m/s 고정, yaw {YAW_PROFILE} rad/s "
+          f"(학습 범위 ∓1.0 밖은 외삽)")
+else:
+    YAW_CMD_TRAJ = np.zeros_like(VX_CMD_TRAJ)
 total_steps = len(VX_CMD_TRAJ)
 # 각 스텝이 속한 레벨 인덱스. warmup 구간은 -1 로 두어 집계에서 빠진다.
 STAGE = np.concatenate([
@@ -591,7 +626,8 @@ with torch.inference_mode():
             vx_cmd = float(VX_CMD_TRAJ[step])
             base._lin_vel_cmd[:, 0] = vx_cmd
             base._lin_vel_cmd[:, 1] = 0.0
-            base._yaw_vel_cmd[:] = 0.0
+            yaw_cmd = float(YAW_CMD_TRAJ[step])
+            base._yaw_vel_cmd[:] = yaw_cmd
 
         track_camera()
         if step % 250 == 0:
@@ -730,6 +766,9 @@ np.savez(
     saturation_effort=sat_effort,
     velocity_limit=vel_limit,
     vx_profile=np.array(VX_PROFILE),
+    yaw_profile=np.array(YAW_PROFILE),          # 선회 램프가 아니면 빈 배열
+    yaw_cmd=YAW_CMD_TRAJ[:total_steps],         # 스텝별 명령 yaw rate (실측 `yaw` 와 짝)
+    yaw_at_vx=float(args_cli.yaw_at_vx),
     hold_s=args_cli.hold_s,
     ramp_s=args_cli.ramp_s,
     warmup_s=args_cli.warmup_s,
