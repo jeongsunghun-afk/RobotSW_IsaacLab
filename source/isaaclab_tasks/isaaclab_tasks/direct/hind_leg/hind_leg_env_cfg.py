@@ -548,7 +548,7 @@ class HindLegHistoryEnvCfg(DirectRLEnvCfg):
     yaw_rate_reward_scale = 0.5
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.01
-    joint_torque_reward_scale = -0.0002
+    joint_torque_reward_scale = -0.0004  # 2026-09-07: 2배 (실기 thigh 가 채널 15 N·m 트립 임계를 6.9% 초과)
     joint_accel_reward_scale = -2.5e-7
     action_rate_reward_scale = -0.001
     feet_air_time_reward_scale = 0.5
