@@ -532,3 +532,21 @@ expert 라벨을 클립 평균 속도로 되돌리되 누설 없이(라벨 잡�
 0.8, (f) AMP-off 가 아직 없다.
 
 도구 수정: `amp_obs_clip_probe.py` 의 `layout.step_dim` 이 `amp_drop_dof_vel` 에서 59 로 잘못 적히던 것을 필드 합으로 고침.
+
+### 영상 — 후속 run 3편 추가 (2026-09-07 09:18~09:25, 추적 카메라, seed 0, 정지 출발, GPU1)
+
+09-04 영상 절과 같은 조건(`speed_ramp_record_rma.py --cam_view chase --seed 0 --force_stand`, 3.0 고정
+8 s / 0.5→3.0 계단 3 s). 영상은 측정이 아니며 캡션은 같은 롤아웃 npz 의 `gait_classify.py` 분류(개체 하나).
+6 편 모두 완주(마지막 1 s 속도가 명령 추종), 3.0 구간 실측 vx 2.82~2.94.
+
+| 파일 | 명령 | 실제 보행 | 비고 |
+|---|---|---|---|
+| `videos/fixstd03_50k_const30_stand/speed_ramp-step-0.mp4` | 3.0 고정 8 s | pace 2.24 Hz | 떨림 최소(`jvel` max 22.1), 조사 gallop 52.7% |
+| `videos/nodofvel_50k_const30_stand/speed_ramp-step-0.mp4` | 3.0 고정 8 s | **other** 2.40 Hz | 위상 규칙 밖, `jvel` max 33.2 |
+| `videos/bresume_67k_const30_stand/speed_ramp-step-0.mp4` | 3.0 고정 8 s | **gallop** 2.23 Hz | 45k 개체는 pace 였음 |
+| `videos/fixstd03_50k_steps_stand/speed_ramp-step-0.mp4` | 0.5→3.0 계단 | 2.0 이상 pace(1.91→2.20 Hz) | 전환 없음 |
+| `videos/nodofvel_50k_steps_stand/speed_ramp-step-0.mp4` | 0.5→3.0 계단 | 1.5 이상 pace(1.71→2.25 Hz) | 전환 없음, `jvel` max 41.5 |
+| `videos/bresume_67k_steps_stand/speed_ramp-step-0.mp4` | 0.5→3.0 계단 | 2.0~2.5 pace → **3.0 gallop** 1.95 Hz | 45k 와 같은 전환 |
+
+계단 롤아웃은 heading hold 없이 39 s 를 달려 측방 표류가 크다(|py| 최대 12.5~24.6 m) — 화면의 방향
+변화는 표류이지 낙상이 아니다. 09-06 Notion 페이지에 A'·B' 45k 영상 4편과 함께 10편 게재.
