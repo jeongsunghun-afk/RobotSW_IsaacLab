@@ -2352,3 +2352,23 @@ symmetry 로 건드려지지 않는다. 예상대로다.
 
 ⚠️ `metrics/symaug_20k.md` 의 `parent @40k (ref)` 행은 이제 시드 0·1 평균이다(전에는 seed0 뿐).
 §33 본문의 10.6/28.4/36.5/28.8 은 seed0 값이며 그대로 둔다.
+
+---
+
+## 35. (2026-09-07) `vel_err_scale` 1.0 arm 착수 + symaug 램프 영상
+
+**변수 하나:** `env.vel_err_scale` 0.5 → 1.0. 부모 = `symaug_uniformw_stock`(§34, 현 처방).
+겨냥 = §32-b 의 중속 저추종(`cmd 1.5` 0.85~0.88 m/s, 57~59 %). 판정 40k · 시드 0·1 ·
+램프 `--no_pace --no_push --num_envs 64`(§34 와 동일).
+
+- run: `logs/rsl_rl/go2_imitation_tracking/2026-09-07_10-53-49_velscale1_symaug_uniformw_stock/`
+  (GPU 1, `GO2_SYMMETRY_AUG=1`, `env.use_pace_params=false env.motion_uniform_weights=true
+  env.dr.push_robot=false env.vel_err_scale=1.0`, `--max_iterations 40000`)
+- `params/` diff 로 부모와 다른 키가 `vel_err_scale`·`run_name`·`device`·`log_dir` 뿐임을 확인.
+- iter 103: reward 324.5 · ep_len 741 · σ 0.36 (부팅 정상, 판정 아님).
+- 기대(§32-c 구세대 A/B): 달성률 전 속도 +9~31 pp, 낙상 2 → 0 %. k=1.0 에서도 task 이득
+  11.6 % vs style 50 % 라 기전은 남는다 — `cmd 1.5` 가 오르되 100 % 에 못 미치면 예상대로.
+
+**symaug 39999 램프 영상**(§34 판정 램프와 같은 조건, 시드 0, env 0 추종):
+`videos/rampvid_symaug_40k_nopush_chase/speed_ramp-step-0.mp4` (+ `ramp_data.npz`).
+세대별 계단식 램프 영상 6편을 모은 페이지: claude.ai artifact `5f1dce9c`(비공개).
