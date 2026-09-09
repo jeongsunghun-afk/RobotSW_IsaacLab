@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from copy import deepcopy
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
@@ -748,3 +750,42 @@ LEG_CFG = ArticulationCfg(
     },
 )
 """17-DOF 4족 로봇(Leg_URDF2) 설정 — 다리 4개 × (hip, thigh, calf, foot) + 허리 1개."""
+
+
+##
+# LEG_DTC — DTC/이산지형 트랙용 R.pet 17-DOF (LEG_CFG 파생)
+##
+
+# USD·관절 순서는 AMP 데이터셋(`leg_imitation_tracking`)과 정합을 유지하려고 LEG_CFG 를 그대로
+# 물려받고, **액추에이터 한계만** 실기 실측으로 되돌린다. 두 항목 모두 USD 가 아니라 CFG 값이라
+# 데이터셋 정합을 깨지 않는다.
+#
+# 1) foot(발목) effort 142.8 -> 100.8
+#    LEG_CFG 는 Leg_URDF2 의 `<limit effort>` 168 에 85% 를 곱한 142.8 을 쓰는데, 168 은 stale 이다.
+#    실값은 발목 8.4:1 재기어 실측인 **100.8** 이고, 회사 자신의 최신 8-DOF URDF
+#    (`data/Robots/Hind_Leg_URDF3_SignFix/urdf/Hind_Leg.urdf`, 2026-08-12)도 `effort="100.8"` 을 쓴다.
+#    142.8 은 실기의 1.42 배라 sim 에서 되는 것이 실기에서 안 된다.
+#
+# 2) velocity_limit_sim 30.0(전 관절 균일) -> URDF 실값 (hip/thigh 29.6, calf 19.7, foot 14.8)
+#    LEG_CFG 는 전 관절 30.0 으로 평탄화했는데, URDF 는 관절마다 다르다. calf 는 1.5 배,
+#    foot 은 2.0 배 과대 설정이다. 이산지형은 스윙 각속도가 평지보다 크므로 이 한계가 실제로 걸린다.
+#
+# 게인(calf Kp 134 / foot Kp 59 등)은 LEG_CFG 를 그대로 쓴다 — I_eff 실측 기반이라 근거가 있다.
+# 다만 평지 AMP 기준으로 뽑힌 값이므로 지형 학습 후 재확인 대상이다.
+
+LEG_DTC_FOOT_TORQUE = 100.8
+"""발목 실효 토크 [N·m] — 8.4:1 재기어 실측. Leg_URDF2 의 168(=stale)이 아니다."""
+
+LEG_DTC_LEG_VELOCITY_LIMIT = {".*_hip_joint": 29.6, ".*_thigh_joint": 29.6, ".*_calf_joint": 19.7}
+LEG_DTC_FOOT_VELOCITY_LIMIT = 14.8
+LEG_DTC_WAIST_VELOCITY_LIMIT = 29.6
+"""URDF `<limit velocity>` 실값 [rad/s] — 액추에이터 그룹(legs / feet / waist)별로 나눠 둔다."""
+
+# 명시적 deepcopy — configclass 에 copy() 가 없고, 얕은 복사면 actuators dict 를 공유해
+# LEG_CFG(회사 AMP 태스크)의 액추에이터까지 같이 바뀐다.
+LEG_DTC_CFG = deepcopy(LEG_CFG)
+LEG_DTC_CFG.actuators["legs"].velocity_limit_sim = LEG_DTC_LEG_VELOCITY_LIMIT
+LEG_DTC_CFG.actuators["feet"].effort_limit_sim = LEG_DTC_FOOT_TORQUE
+LEG_DTC_CFG.actuators["feet"].velocity_limit_sim = LEG_DTC_FOOT_VELOCITY_LIMIT
+LEG_DTC_CFG.actuators["waist"].velocity_limit_sim = LEG_DTC_WAIST_VELOCITY_LIMIT
+"""DTC/이산지형용 17-DOF 설정 — LEG_CFG 파생, 발목 토크·관절별 속도한계만 실측값으로 교체."""
