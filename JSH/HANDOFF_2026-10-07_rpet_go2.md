@@ -40,7 +40,7 @@ ssh -i ~/.ssh/id_rga jsh@192.168.1.205   # 키 없으면 JSH/서버접속_가이
 |---|---|---|
 | `/home/jsh/문서/jsh` | 로컬 작업 루트. `simulation/docs/` 에 개발리포트 | **없음**(푸시 불가) |
 | `/home/jsh/문서/jsh/RobotSW_IsaacLab` | 브랜치 `feat/quad17-dtc-gaptest`. **이 문서가 있는 곳** | origin = `github.com/jeongsunghun-afk/RobotSW_IsaacLab.git` |
-| `/home/jsh/문서/jsh/RobotSW_IsaacLab_isaac6` | 브랜치 `isaac-6.0`(회사 Gangbok2 라인) 워크트리 | 같은 저장소 |
+| `/home/jsh/문서/jsh/RobotSW_IsaacLab_isaac6` | 워크트리. **실측 브랜치 = `jsh/quad17-dtc`**(a2f547d09) — 이름은 isaac6 지만 내용은 그게 아니다. **이 브랜치가 미푸시 parkour 커밋 2개를 들고 있다 — 지우지 말 것** | 같은 저장소 |
 | 서버 `/mnt/ssd1/jsh/RobotSW_IsaacLab` | Go2 작업 트리(2.3.2) | — |
 | 서버 `/mnt/ssd1/jsh/RobotSW_IsaacLab_isaac6` | R.pet 작업 트리(3.0.0) | — |
 | 서버 `/mnt/ssd1/jsh/rpet_handoff/leg_locomotion_handoff_20260922` | R.pet 인계 패키지 | — |
@@ -54,6 +54,54 @@ ssh -i ~/.ssh/id_rga jsh@192.168.1.205   # 키 없으면 JSH/서버접속_가이
 > **Go2 작업트리는 커밋되지 않은 변경이 5046줄 있다**(`go2/WORKTREE_diffstat.txt`).
 > 이 중 `go2_wtw_env.py` 4246줄은 DTC 프로젝트 전체 누적분이지 이 세션 분이 아니다.
 > **서버 트리를 reset/clean 하지 말 것 — 되돌릴 수 없다.**
+
+### ★원격에 **없는** 것 — 새 머신에서 clone 하면 빠지는 것
+
+`git clone origin` 으로는 아래가 **오지 않는다**(실측, 2026-10-07).
+
+| 항목 | 기제 | 크기 | 작업 차단? |
+|---|---|---|---|
+| **`JSH/Hind_Leg*/` USD 10개** | `.gitignore:12 **/*.usd` | **130 MB** | **★예.** `rga.py:440/504` 가 이 경로를 참조 → `HindLeg-Direct-v0`·`HindLeg-Flat-Direct-v0` 로봇 생성 불가. **`Hind_Leg_Flat` 은 평발 2점 보행(RL 성공 결과)의 자산이고 충돌구 수편집으로 만든 것이라 재생성 불가** |
+| **`jsh/quad17-dtc` 브랜치 커밋 2개** | 원격 추적 없음 | **고유 내용은 ~110줄**(7,800줄은 측정 착오 — 대부분 origin 에 이미 있는 트리의 재배치) | **★예.** `feat/quad17-dtc-gaptest` 푸시로 **커버되지 않는다**. origin 전 ref 에 없는 blob 5개: `rga.py`(37,514 B, **`LEG_DTC_CFG`=발목 토크 142.8→100.8 실측복원**) · `quad17_env.py` · `quad17_env_cfg.py` · `quad17_parkour/{__init__,parkour_env_cfg}.py` |
+| **이 인계 커밋 2개** | 미푸시 | 57파일 | 예 — 푸시 전엔 번들 전체가 로컬에만 |
+| `JSH/*.mp4` 4개 | `*.mp4` | 3.7 MB | 아니오 — 같은 이름 `.gif` 가 커밋돼 있음 |
+| `__pycache__/*.pyc` 7개 · `__MACOSX/` · `pace_hindleg/gt.pt` | 각 규칙 | 85 KB | 아니오 — 재생성됨 |
+| `JSH/서버접속_가이드.md` | 의도적 제외(비밀번호) | 3 KB | **git 밖에 따로 백업할 것** — 서버 접속정보의 유일한 사본 |
+
+**★`upstream/isaac-6.0` 브랜치는 서버에서 사라졌다.** `git ls-remote --heads upstream` 실측 결과
+`isaac_5.1 · lgb/{imitation,parkour-pure-rl,real2sim,stage1-skill-tokenizer} · main` 뿐이다.
+로컬 `refs/remotes/upstream/isaac-6.0` 은 **낡은 캐시**이고 `git fetch upstream` 으로는 다시 못 가져온다.
+명시 SHA 로는 아직 fetch 된다 — **이 값을 이 디스크 밖에 적어 둘 것:**
+
+```
+isaac-6.0 = bea85978dd4f59c8f260217bdfcff49cb1629a32
+git fetch upstream bea85978dd4f59c8f260217bdfcff49cb1629a32   # SHA 로는 성공 확인(2026-10-07)
+```
+
+**★origin/main 은 HEAD 의 선형 조상이다**(`merge-base --is-ancestor` = yes, `0 6`).
+따라서 `git clone` 후 `git checkout feat/quad17-dtc-gaptest` 하면 **푸시된 quad17/DTC 커밋 4개는 전부 온다.**
+빠지는 건 미푸시 2개뿐이다("clone 하면 main 이라 DTC 작업이 없다"는 설명은 틀렸다).
+
+**★git-lfs 함정**: 추적된 **55개 파일(.mp4 39 + .obj 16)이 LFS 포인터**인데 이 머신엔 **git-lfs 가 없다**
+→ Go2 메쉬(`source/isaaclab_assets/data/Robots/go2/meshes/*.obj`)가 **132바이트 stub** 이다.
+**그리고 origin 의 LFS 저장소에 객체가 없다** — batch API 직접 조회 결과 `{"code":404,"message":"Object does
+not exist on the server"}`(3개 표본). 즉 **git-lfs 를 깔아도 origin 에서는 복구 불가**다. upstream 은 401(비공개)
+이라 RGA-Robotics 쪽엔 남아 있을 수 있다. 푸시로 해결되지 않는다.
+
+**★`Isaaclab_Parkour`** = `.gitmodules` 없는 gitlink(mode 160000 → d6766d88). 로컬도 **빈 디렉터리**라
+잃을 건 없지만 `git submodule update --init` 은 영구히 실패한다(URL 이 어디에도 없음).
+
+### ★이 저장소 밖의 로컬 전용 자산
+
+| 항목 | 상태 |
+|---|---|
+| `/home/jsh/문서/jsh/simulation/` | **자체 git repo** — origin=`jeongsunghun-afk/simulation`, 브랜치 8개 전부 푸시됨(안전). **단 미커밋 변경 872줄/14파일**이 로컬에만 — 특히 `docs/DTC_개발리포트.md` +104줄(P4 Go2 gradient-TO). **원격 사본은 구버전인데 완전해 보인다** |
+| `/home/jsh/문서/jsh` (외곽 repo) | **remote 없음.** HEAD 에 추적파일 0개 · 커밋 14개(내용은 `simulation/docs/RUN.md` 로 이전돼 중복) |
+| `RobotTestGait/` | 로컬 전용 **1,303줄** 임베디드 모터/게이트 bring-up C++. `defineConfigMotor.h` = 축별 채널·기어·sign/offset |
+| `HANDOFF_claudeA_RL.md` · `면접준비_RL파이프라인.md` | 로컬 전용 작업문서 |
+| `~/.claude/projects/-home-jsh----jsh/memory/` | **40파일 1 MB.** 프로젝트 문서가 `[[wikilink]]` 로 참조하는데 git 밖에 있다 |
+| `02_Leg_UFDF_*` 4개 · `robot_viewer/_mymodels/` | 206M + 41M 원본 CAD/STL. 가공 메쉬(`quad/meshes_sim_17dof`)는 커밋돼 있어 MJCF 로드는 작동 |
+| 서버 `/mnt/ssd1/jsh/RobotSW_IsaacLab` | 미커밋 ~34파일(walk 게이트·stepping 지형). **로컬 체크아웃만 보면 "walk 게이트 없음"으로 오진한다**(실제로 한 번 발생) |
 
 관련 기존 문서(반드시 읽을 것):
 - `JSH/isaac6_결론문서_정리.md` — **2026-09-09 사용자 직접 조사 242줄.** isaac-6.0 라인 전체 정리,

@@ -10,7 +10,8 @@ RobotSW_IsaacLab에서 **내가 만든 새 산출물**을 이 폴더에 저장�
 ## 내용물
 | 항목 | 설명 | git |
 |---|---|---|
-| `Hind_Leg/` | hind_leg.usd + configuration 레이어(66M). RL 로봇 자산. rga.py L438이 참조 | 커밋(자산) |
+| `Hind_Leg/` | hind_leg.usd + configuration 레이어(66M). RL 로봇 자산. rga.py L438이 참조 | **제외**(`.gitignore:12 **/*.usd`) — 2026-10-07 실측: 추적 USD 0/10개. 새 머신에선 `HindLeg-Direct-v0` 생성 불가 |
+| `Hind_Leg_Flat/` | 평발 2점 변형(65M). 충돌구 수편집 산물이라 **재생성 불가** | **제외**(동일 규칙) — 서버/별도 백업 필수 |
 | `서버접속_가이드.md` | GPU 서버 SSH/학습 실행 가이드 | **제외**(비밀번호 포함, .gitignore) |
 | `HANDOFF_2026-10-07_rpet_go2.md` | **★인수인계** — R.pet 정상화·험지 zero-shot·걸음분류 결과 + Go2 TAMOLS 검증 종결 + 다음 할 일. **§6 철회목록·§7 측정함정 먼저 읽기** | 커밋 |
 | `handoff_2026-10-07/` | 위 문서의 실행 스크립트·패치·결과 원자료 사본(300K) | 커밋 |
