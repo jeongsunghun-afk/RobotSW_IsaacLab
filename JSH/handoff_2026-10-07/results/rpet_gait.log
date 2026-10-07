@@ -1,0 +1,6 @@
+GCELL flat L- vx1.0
+[gait] thigh 관절 인덱스 {'FL': 9, 'FR': 10, 'HL': 3, 'HR': 4}
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 73.4, "trot": 26.6}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.513, "pair_score_med": 0.246, "died_env_frac": 0.0}
+GCELL flat L- vx3.0
+[gait] thigh 관절 인덱스 {'FL': 9, 'FR': 10, 'HL': 3, 'HR': 4}
+GAIT_JSON {"vx": 3.0, "num_envs": 64, "win_s": 2.0, "gait": {"trot": 89.1, "pace": 10.9}, "gait_freq_hz": 2.0, "thigh_amp_rad": 0.514, "pair_score_med": 0.39, "died_env_frac": 0.016}

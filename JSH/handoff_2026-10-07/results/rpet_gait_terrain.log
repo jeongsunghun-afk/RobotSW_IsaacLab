@@ -1,0 +1,21 @@
+GCELL flat L-
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 85.9, "trot": 14.1}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.508, "pair_score_med": 0.246, "died_env_frac": 0.0}
+GCELL rough L2
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 87.5, "trot": 12.5}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.504, "pair_score_med": 0.244, "died_env_frac": 0.0}
+GCELL rough L5
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 79.7, "trot": 20.3}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.504, "pair_score_med": 0.238, "died_env_frac": 0.047}
+GCELL rough L8
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 71.9, "trot": 15.6, "bound/gallop": 12.5}, "gait_freq_hz": 1.25, "thigh_amp_rad": 0.54, "pair_score_med": 0.259, "died_env_frac": 0.656}
+GCELL gap L2
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 73.4, "trot": 25.0, "bound/gallop": 1.6}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.522, "pair_score_med": 0.248, "died_env_frac": 0.188}
+GCELL gap L5
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 81.2, "trot": 15.6, "bound/gallop": 3.1}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.516, "pair_score_med": 0.248, "died_env_frac": 0.312}
+GCELL gap L8
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 75.0, "trot": 18.8, "bound/gallop": 6.2}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.524, "pair_score_med": 0.245, "died_env_frac": 0.391}
+GCELL stepping L2
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 81.2, "trot": 18.8}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.51, "pair_score_med": 0.248, "died_env_frac": 0.0}
+GCELL stepping L5
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 54.7, "trot": 26.6, "bound/gallop": 18.8}, "gait_freq_hz": 1.0, "thigh_amp_rad": 0.568, "pair_score_med": 0.255, "died_env_frac": 0.625}
+GCELL stepping L8
+GAIT_JSON {"vx": 1.0, "num_envs": 64, "win_s": 2.0, "gait": {"pace": 64.1, "trot": 23.4, "bound/gallop": 12.5}, "gait_freq_hz": 1.5, "thigh_amp_rad": 0.541, "pair_score_med": 0.25, "died_env_frac": 0.609}
+GAIT_TERRAIN_DONE 2026-10-07 11:13:23

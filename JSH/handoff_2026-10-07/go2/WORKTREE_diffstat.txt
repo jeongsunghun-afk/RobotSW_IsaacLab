@@ -1,0 +1,12 @@
+ scripts/reinforcement_learning/rsl_rl/play.py      |  124 +-
+ .../isaaclab_assets/isaaclab_assets/robots/rga.py  |  124 +-
+ .../direct/go2/agents/rsl_rl_ppo_cfg.py            |   38 +-
+ .../isaaclab_tasks/direct/go2/go2_env_cfg.py       |  102 +-
+ .../isaaclab_tasks/direct/go2/go2_wtw_env.py       | 4246 +++++++++++++++++++-
+ .../isaaclab_tasks/direct/hind_leg/__init__.py     |   12 +
+ .../direct/hind_leg/agents/rsl_rl_ppo_cfg.py       |    5 +
+ .../isaaclab_tasks/direct/hind_leg/hind_leg_env.py |   89 +-
+ .../direct/hind_leg/hind_leg_env_cfg.py            |   67 +-
+ .../isaaclab_tasks/direct/parkour/parkour_env.py   |  253 ++
+ .../direct/parkour/parkour_env_cfg.py              |   15 +
+ 11 files changed, 5046 insertions(+), 29 deletions(-)

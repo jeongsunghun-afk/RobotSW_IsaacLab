@@ -1,0 +1,90 @@
+--- /mnt/ssd1/jsh/rpet_handoff/leg_locomotion_handoff_20260922/env/isaaclab_tasks/direct/leg_imitation_tracking/leg_imitation_tracking_env_cfg.py	2026-09-21 11:47:05.000000000 +0900
++++ /mnt/ssd1/jsh/RobotSW_IsaacLab_isaac6/source/isaaclab_tasks/isaaclab_tasks/direct/leg_imitation_tracking/leg_imitation_tracking_env_cfg.py	2026-10-06 10:27:41.398056060 +0900
+@@ -28,7 +28,13 @@
+ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+ # smr_leg_pkl(기존 9클립: run/trot/walk/turn) + rpet_leg_pkl(신규 16클립: graded trot/walk/ramp)
+ # 을 병합한 디렉토리. rpet 은 USD→DOF_NAMES 재정렬 + dof_names 주입 완료본이라 그대로 로드된다.
+-MOTION_FILES_DIR = os.path.join(_THIS_DIR, "imitation", "merged_leg_pkl")
++# [JSH 2026-10-02] 기본값이 가리키던 merged_leg_pkl 은 이 repo 에 없다(송신자 머신 자산).
++# 인계 패키지가 동봉한 new_smr_leg_pkl(14 클립)로 기본값을 바꾼다.
++#   play 경로는 run 의 env.yaml 로 motion_file 을 덮어쓰므로 영향 없고,
++#   레지스트리 기본 cfg 로 env 를 만드는 경로(test_parity --with_env)만 이 값을 쓴다.
++_MOTION_DEFAULT = os.path.join(_THIS_DIR, "imitation", "merged_leg_pkl")
++_MOTION_FALLBACK = os.path.join(_THIS_DIR, "imitation", "new_smr_leg_pkl")
++MOTION_FILES_DIR = _MOTION_DEFAULT if os.path.exists(_MOTION_DEFAULT) else _MOTION_FALLBACK
+ 
+ NUM_JOINTS: int = 17
+ """다리 4개 × (hip, thigh, calf, foot) + 허리 1개."""
+--- /mnt/ssd1/jsh/rpet_handoff/leg_locomotion_handoff_20260922/env/isaaclab_tasks/direct/leg_imitation_tracking/leg_imitation_tracking_env.py	2026-09-21 11:47:22.000000000 +0900
++++ /mnt/ssd1/jsh/RobotSW_IsaacLab_isaac6/source/isaaclab_tasks/isaaclab_tasks/direct/leg_imitation_tracking/leg_imitation_tracking_env.py	2026-10-06 10:29:14.069584002 +0900
+@@ -190,16 +190,62 @@
+         self._robot = Articulation(self.cfg.robot)
+         self.contact_sensor = ContactSensor(self.cfg.contact_sensor)
+ 
+-        spawn_ground_plane(
+-            prim_path="/World/ground",
+-            cfg=GroundPlaneCfg(
++        # [JSH 2026-10-06] RPET_TERRAIN 게이트로 험지를 투입한다. 미설정 시 아래 평지 경로가
++        # 그대로 돌아 **동작이 바이트 동일**하다(zero-shot 기준선 보존).
++        #   왜 cfg 스위치가 아닌가: cfg 의 `terrain: TerrainImporterCfg` 필드는 **아무도 쓰지 않는
++        #   죽은 설정**이고(이 함수가 spawn_ground_plane 을 직접 부른다) terrain_generator=None 이다.
++        #   값: rough(완만 범프) | gap(희소 갭) | stepping(징검돌).  RPET_TERRAIN_LEVEL=0..9 로 난도.
++        _rpet_terrain = os.environ.get("RPET_TERRAIN", "").strip().lower()
++        if _rpet_terrain:
++            import isaaclab.terrains as terrain_gen
++            from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
++            from isaaclab.terrains import TerrainImporter
++
++            _lvl = int(os.environ.get("RPET_TERRAIN_LEVEL", "5"))
++            _f = max(0.0, min(1.0, _lvl / 9.0))   # 0=쉬움 … 1=어려움
++            if _rpet_terrain == "rough":
++                _sub = {"r": terrain_gen.HfRandomUniformTerrainCfg(
++                    proportion=1.0, noise_range=(0.0, 0.02 + 0.08 * _f), noise_step=0.02,
++                    border_width=0.25)}
++            elif _rpet_terrain == "gap":
++                _sub = {"g": terrain_gen.MeshGapTerrainCfg(
++                    proportion=1.0, gap_width_range=(0.1 + 0.3 * _f, 0.15 + 0.35 * _f),
++                    platform_width=2.0)}
++            elif _rpet_terrain == "stepping":
++                _sub = {"s": terrain_gen.HfSteppingStonesTerrainCfg(
++                    proportion=1.0,
++                    stone_height_max=0.0 + 0.05 * _f,
++                    stone_width_range=(0.40 - 0.28 * _f, 0.45 - 0.30 * _f),
++                    stone_distance_range=(0.02 + 0.16 * _f, 0.05 + 0.18 * _f),
++                    holes_depth=-0.5, platform_width=1.5)}
++            else:
++                raise ValueError(f"RPET_TERRAIN={_rpet_terrain!r} 는 rough|gap|stepping 중 하나여야 한다")
++
++            _gen = TerrainGeneratorCfg(
++                size=(8.0, 8.0), border_width=20.0, num_rows=4, num_cols=4,
++                horizontal_scale=0.1, vertical_scale=0.005, slope_threshold=0.75,
++                use_cache=False, sub_terrains=_sub,
++            )
++            self._terrain = TerrainImporter(TerrainImporterCfg(
++                prim_path="/World/ground", terrain_type="generator", terrain_generator=_gen,
++                max_init_terrain_level=None, collision_group=-1,
+                 physics_material=sim_utils.RigidBodyMaterialCfg(
+-                    static_friction=1.0,
+-                    dynamic_friction=1.0,
+-                    restitution=0.0,
++                    static_friction=1.0, dynamic_friction=1.0, restitution=0.0),
++                debug_vis=False,
++            ))
++            print(f"[RPET-TERRAIN] kind={_rpet_terrain} level={_lvl} (f={_f:.2f}) — "
++                  f"평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).")
++        else:
++            spawn_ground_plane(
++                prim_path="/World/ground",
++                cfg=GroundPlaneCfg(
++                    physics_material=sim_utils.RigidBodyMaterialCfg(
++                        static_friction=1.0,
++                        dynamic_friction=1.0,
++                        restitution=0.0,
++                    ),
+                 ),
+-            ),
+-        )
++            )
+ 
+         self.scene.clone_environments(copy_from_source=False)
+         # Env isolation: filter cross-env collisions unconditionally (GPU too). In IsaacLab 3.0

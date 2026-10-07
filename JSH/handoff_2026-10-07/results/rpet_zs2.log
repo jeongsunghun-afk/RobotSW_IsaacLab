@@ -1,0 +1,30 @@
+CELL flat L- vx1.0
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9881970527844551, "far_mean": 7.9306745529174805, "far_max": 8.755475044250488, "left_platform_frac": 1.0, "terminations": 0, "died_env_frac": 0.0, "num_envs": 16, "steps": 400}
+CELL rough L2 vx1.0
+[RPET-TERRAIN] kind=rough level=2 (f=0.22) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9519816080729167, "far_mean": 7.6770782470703125, "far_max": 8.227331161499023, "left_platform_frac": 1.0, "terminations": 0, "died_env_frac": 0.0, "num_envs": 16, "steps": 400}
+CELL rough L5 vx1.0
+[RPET-TERRAIN] kind=rough level=5 (f=0.56) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9207088372646234, "far_mean": 7.364745140075684, "far_max": 8.144596099853516, "left_platform_frac": 1.0, "terminations": 0, "died_env_frac": 0.0, "num_envs": 16, "steps": 400}
+CELL rough L8 vx1.0
+[RPET-TERRAIN] kind=rough level=8 (f=0.89) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.733233642578125, "far_mean": 3.115905523300171, "far_max": 8.286730766296387, "left_platform_frac": 0.8125, "terminations": 32, "died_env_frac": 0.8125, "num_envs": 16, "steps": 400}
+CELL gap L2 vx1.0
+[RPET-TERRAIN] kind=gap level=2 (f=0.22) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9811171311598558, "far_mean": 6.652141571044922, "far_max": 8.041088104248047, "left_platform_frac": 0.9375, "terminations": 4, "died_env_frac": 0.25, "num_envs": 16, "steps": 400}
+CELL gap L5 vx1.0
+[RPET-TERRAIN] kind=gap level=5 (f=0.56) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.979365735176282, "far_mean": 6.284695625305176, "far_max": 7.982929706573486, "left_platform_frac": 0.9375, "terminations": 5, "died_env_frac": 0.3125, "num_envs": 16, "steps": 400}
+CELL gap L8 vx1.0
+[RPET-TERRAIN] kind=gap level=8 (f=0.89) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9905228052383814, "far_mean": 5.229246139526367, "far_max": 8.173014640808105, "left_platform_frac": 0.875, "terminations": 16, "died_env_frac": 0.5625, "num_envs": 16, "steps": 400}
+CELL stepping L2 vx1.0
+[RPET-TERRAIN] kind=stepping level=2 (f=0.22) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9783391707982773, "far_mean": 7.895893096923828, "far_max": 8.471122741699219, "left_platform_frac": 1.0, "terminations": 0, "died_env_frac": 0.0, "num_envs": 16, "steps": 400}
+CELL stepping L5 vx1.0
+[RPET-TERRAIN] kind=stepping level=5 (f=0.56) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9491636618589744, "far_mean": 0.49656912684440613, "far_max": 3.681764841079712, "left_platform_frac": 0.125, "terminations": 415, "died_env_frac": 1.0, "num_envs": 16, "steps": 400}
+CELL stepping L8 vx1.0
+[RPET-TERRAIN] kind=stepping level=8 (f=0.89) — 평지 대신 생성지형 투입. 종료/스폰 z 는 지형상대 보정 필요(별도 게이트).
+RESULT_JSON {"vx_cmd": 1.0, "vx_gt": 0.9431497427133414, "far_mean": 0.08546863496303558, "far_max": 0.3838297724723816, "left_platform_frac": 0.0, "terminations": 577, "died_env_frac": 1.0, "num_envs": 16, "steps": 400}
+ZS2_DONE 2026-10-06 17:19:01
